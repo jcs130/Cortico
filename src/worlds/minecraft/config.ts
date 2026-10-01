@@ -16,6 +16,10 @@ export const MINECRAFT_DEFAULTS = {
   version: '1.20.6',
   /** prismarine-viewer 网页端口(OBS 浏览器源 + 画面源之一);0=不开 */
   viewerPort: 7792,
+  /** 现代画面的版本资源目录；空值保留内建 viewer。 */
+  viewerAssetsDir: '',
+  /** 网页演出气泡使用的称呼；空值使用游戏账号。 */
+  viewerSpeakerName: '',
   /** 挂载面板启停的本地服务器(空 = 未配置,按钮会提示去配置) */
   local: {
     /** World 启动时拉起本地服务器并连接;运行中由挂载面板启停。 */
@@ -164,6 +168,8 @@ export interface MinecraftConfigSection {
   username: string;
   version: string;
   viewerPort: number;
+  viewerAssetsDir: string;
+  viewerSpeakerName: string;
   local: {
     startWithWorld: boolean;
     serverDir: string;
@@ -230,6 +236,15 @@ export const MINECRAFT_CONFIG_GROUP: ConfigGroup = {
       'worlds.minecraft.viewerPort': {
         type: 'integer', title: 'viewer 端口', minimum: 0, maximum: 65535, 'x-hot': false,
         description: '0=不开。prismarine-viewer 的网页:OBS 浏览器源与"viewer"帧源都吃它。',
+      },
+      'worlds.minecraft.viewerAssetsDir': {
+        type: 'string', title: '现代画面资源目录', 'x-hot': false,
+        description: '空=内建 viewer；填写对应游戏版本的本地资源目录。',
+        'x-path': { kind: 'directory' },
+      },
+      'worlds.minecraft.viewerSpeakerName': {
+        type: 'string', title: '网页语音气泡称呼', 'x-hot': false,
+        description: '空=游戏内用户名。',
       },
       'worlds.minecraft.local.serverDir': {
         type: 'string', title: '本地服务器目录', 'x-hot': false,

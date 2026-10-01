@@ -117,6 +117,23 @@ console/         控制台面板两侧:服务器、存档、权限、客户端�
 | 画质 | 没有光影/材质包/模组的画面 | 与观众同一幅画面，含 SpectatorPlus 补回的 HUD 与手臂 |
 | 代价 | 轻，无人值守 | 一份客户端进程 + 一块显卡 |
 
+`viewerAssetsDir` 为空时使用自带网页画面。指定与 `worlds.minecraft.version` 一致的
+资源目录后，同一端口提供现代画面：`/` 第一人称、`/third/` 第三人称、
+`/dungeon/` 2.5D。它读取现有 Mineflayer 连接，不另开游戏账号。
+现代画面的浏览器资源不入仓；用本机合法取得的 1.20.6 客户端 JAR 导出：
+
+```powershell
+python -m pip install Pillow
+python scripts/export-minecraft-viewer-assets.py <1.20.6-client.jar> <output-dir>
+node scripts/build-minecraft-viewer-client.mjs <modern-viewer-source-dir> <output-dir>
+node scripts/verify-minecraft-viewer-assets.mjs <1.20.6-client.jar> <output-dir>
+```
+
+渲染器源码目录需要提供 `src/modern-viewer/`、`public/` 与对应 npm 依赖。
+构建脚本按 JAR 校验方块、物品、画作和纹理版本，产物记录 SHA-256。
+将 `worlds.minecraft.viewerAssetsDir` 设为 `<output-dir>` 并重启 World 后启用。
+`viewerSpeakerName` 可设置语音气泡称呼；留空时用游戏账号。
+
 客户端窗口出现后，World 将其标题设置为该客户端的账号名，供 OBS 按标题区分。直连进服后再次更新标题。
 
 `client-launch.ts` 读取 `versions/<id>/<id>.json` 生成 Java 命令行，支持 `inheritsFrom`。

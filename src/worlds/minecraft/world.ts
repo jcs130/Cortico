@@ -3670,6 +3670,8 @@ export class MinecraftWorld implements World {
       username: this.cfg.username || this.botName,
       version: this.cfg.version,
       viewerPort: this.cfg.viewerPort,
+      viewerAssetsDir: this.cfg.viewerAssetsDir,
+      viewerSpeakerName: this.cfg.viewerSpeakerName,
       log,
       diag: this.diag,
       shuttingDown: () => this.shuttingDown,

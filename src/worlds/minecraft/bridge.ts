@@ -29,6 +29,8 @@ interface BridgeOptions {
   version: string;
   /** prismarine-viewer 网页端口;0=不开 viewer */
   viewerPort: number;
+  viewerAssetsDir?: string;
+  viewerSpeakerName?: string;
   log: Logger;
   /** World 日志;不给就不记(合成与放置的包流走它) */
   diag?: MinecraftLog;
@@ -716,29 +718,38 @@ export class Bridge {
           );
           return;
         }
-        const mod = await this.loadViewer();
-        if (this.stopped || this._bot !== bot || this.generation !== gen || this.bagFor(gen).disposed) return;
-        mod.mineflayer(bot, { port, firstPerson: true });
-        // 取得句柄后必须同步注册到资源袋，中间不能 await，以免 stop 时漏收。
-        const close = (bot as unknown as { viewer?: { close?: () => void } }).viewer?.close;
-        this.bagFor(gen).register('prismarine-viewer', () => this.releaseViewer(gen, port, close));
+        if (this.opts.viewerAssetsDir) {
+          const { startModernViewer } = await import('./modern-viewer.ts');
+          if (this.stopped || this._bot !== bot || this.generation !== gen || this.bagFor(gen).disposed) return;
+          const handle = await startModernViewer(bot, {
+            port, assetsDir: this.opts.viewerAssetsDir, speakerName: this.opts.viewerSpeakerName,
+          });
+          this.bagFor(gen).register('modern-viewer', () => this.releaseViewer(gen, port, handle.close));
+        } else {
+          const mod = await this.loadViewer();
+          if (this.stopped || this._bot !== bot || this.generation !== gen || this.bagFor(gen).disposed) return;
+          mod.mineflayer(bot, { port, firstPerson: true });
+          // 取得句柄后必须同步注册到资源袋，中间不能 await，以免 stop 时漏收。
+          const close = (bot as unknown as { viewer?: { close?: () => void } }).viewer?.close;
+          this.bagFor(gen).register('prismarine-viewer', () => this.releaseViewer(gen, port, close));
+        }
         if (this.stopped || this.generation !== gen) return; // 旧代不得改新代状态
         this.viewer = { gen, url: `http://127.0.0.1:${port}` };
-        this.opts.log.info(`prismarine-viewer 已启动 http://127.0.0.1:${port}`);
+        this.opts.log.info(`minecraft viewer 已启动 http://127.0.0.1:${port}`);
       } catch (err) {
-        this.opts.log.warn(`prismarine-viewer 启动失败(不影响游玩): ${(err as Error).message}`);
+        this.opts.log.warn(`minecraft viewer 启动失败(不影响游玩): ${(err as Error).message}`);
       }
     })();
   }
 
   /** viewer.close() 不返回 Promise，关闭后通过端口绑定探测确认释放。 */
-  private async releaseViewer(gen: number, port: number, close?: () => void): Promise<void> {
+  private async releaseViewer(gen: number, port: number, close?: () => Promise<void> | void): Promise<void> {
     if (this.viewer?.gen === gen) this.viewer = null;
     if (!close) {
       this.opts.log.warn(`viewer 没有暴露 close,端口 ${port} 无法主动释放`);
       return;
     }
-    close();
+    await close();
     const deadline = Date.now() + VIEWER_RELEASE_MS;
     for (;;) {
       if (await probePort(port)) return;
