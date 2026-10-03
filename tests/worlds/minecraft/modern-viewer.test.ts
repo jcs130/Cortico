@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ownEntity, viewerItem, viewerMessageKind } from '../../../src/worlds/minecraft/modern-viewer.ts';
+import { ownEntity, recordFishingBobberOwner, viewerEntity, viewerItem, viewerMessageKind } from '../../../src/worlds/minecraft/modern-viewer.ts';
 
 describe('modern viewer item state', () => {
   it('sends the selected weapon, offhand and armour with the world avatar', () => {
@@ -45,5 +45,25 @@ describe('modern viewer message feed', () => {
     expect(viewerMessageKind({ toString: () => '试炼场休息中' }, 'system')).toBe('system');
     expect(viewerMessageKind({ translate: 'commands.message.display.incoming',
       toString: () => 'Goddess 悄悄告诉你' }, 'system')).toBe('whisper');
+  });
+});
+
+describe('modern viewer fishing bobber ownership', () => {
+  it('serializes each spawn owner and clears an ID reused by another entity', () => {
+    const owners = new Map<number, number>();
+    const bobberTypeId = 129;
+    recordFishingBobberOwner(owners, { entityId: 90, type: bobberTypeId, objectData: 2 }, bobberTypeId);
+    recordFishingBobberOwner(owners, { entityId: 91, type: bobberTypeId, objectData: 1 }, bobberTypeId);
+    const bot = { registry: { entitiesByName: { fishing_bobber: { width: .25, height: .25 } } } } as never;
+    const bobber = (id: number) => ({ id, name: 'fishing_bobber', type: 'projectile',
+      position: { x: 4, y: 63, z: 4 }, width: .25, height: .25, yaw: 0, pitch: 0 });
+    expect(viewerEntity(bot, bobber(90) as never, owners).ownerEntityId).toBe(2);
+    expect(viewerEntity(bot, bobber(91) as never, owners).ownerEntityId).toBe(1);
+    expect(viewerEntity(bot, { ...bobber(90), name: 'arrow' } as never, owners))
+      .not.toHaveProperty('ownerEntityId');
+    recordFishingBobberOwner(owners, { entityId: 90, type: 7, objectData: 3 }, bobberTypeId);
+    expect(viewerEntity(bot, bobber(90) as never, owners)).not.toHaveProperty('ownerEntityId');
+    recordFishingBobberOwner(owners, { entityId: 90, type: bobberTypeId, objectData: 0 }, bobberTypeId);
+    expect(owners.has(90)).toBe(false);
   });
 });

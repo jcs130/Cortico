@@ -240,7 +240,21 @@ function villagerAppearance(value: unknown): Record<string, unknown> | null {
     professionKey: VILLAGER_PROFESSIONS[professionId], levelId, levelKey: VILLAGER_LEVELS[levelId] };
 }
 
-function viewerEntity(bot: mineflayer.Bot, entity: ViewerEntity): Record<string, unknown> {
+export function recordFishingBobberOwner(owners: Map<number, number>,
+  packet: { entityId?: unknown; type?: unknown; objectData?: unknown }, bobberTypeId: number | undefined): void {
+  const id = packet.entityId;
+  if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0) return;
+  // A reused entity ID must not inherit an earlier bobber's line owner.
+  owners.delete(id);
+  // In Java 1.20.6 spawn_entity, a fishing bobber's objectData is its owner entity ID.
+  const owner = packet.objectData;
+  if (typeof bobberTypeId === 'number' && Number.isSafeInteger(bobberTypeId) &&
+      packet.type === bobberTypeId && typeof owner === 'number' &&
+      Number.isSafeInteger(owner) && owner > 0 && owner !== id) owners.set(id, owner);
+}
+
+export function viewerEntity(bot: mineflayer.Bot, entity: ViewerEntity,
+  fishingBobberOwners?: ReadonlyMap<number, number>): Record<string, unknown> {
   const record = entity as unknown as Record<string, unknown>;
   const registry = bot.registry?.entitiesByName as Record<string,
     { name?: string; width?: number; height?: number; metadataKeys?: string[] }> | undefined;
@@ -249,6 +263,7 @@ function viewerEntity(bot: mineflayer.Bot, entity: ViewerEntity): Record<string,
   const name = rawName && rawName !== 'unknown' ? rawName : appearance ? 'villager' :
     typeof record.type === 'string' && record.type !== 'mob' ? record.type.toLowerCase() : 'unknown';
   const dimensions = registry?.[name];
+  const ownerEntityId = name === 'fishing_bobber' ? fishingBobberOwners?.get(entity.id) : undefined;
   return { id: entity.id, name, type: record.type, pos: entity.position, position: entity.position,
     width: entity.width || dimensions?.width || 0.6, height: entity.height || dimensions?.height || 1.8,
     yaw: entity.yaw, pitch: entity.pitch, headYaw: record.headYaw,
@@ -256,6 +271,7 @@ function viewerEntity(bot: mineflayer.Bot, entity: ViewerEntity): Record<string,
     username: entity.username, uuid: entity.uuid, age: record.age,
     metadata: viewerRenderableMetadata(record.metadata),
     equipment: Array.isArray(record.equipment) ? record.equipment.slice(0, 6).map(viewerItem) : undefined,
+    ...(ownerEntityId !== undefined ? { ownerEntityId } : {}),
     ...(name === 'villager' && appearance ? { villagerAppearance: appearance } : {}),
     ...(name === 'sheep' ? { sheepAppearance: viewerSheepAppearance(record.metadata,
       registry?.sheep?.metadataKeys) } : {}) };
@@ -454,6 +470,16 @@ export async function startModernViewer(bot: mineflayer.Bot, options: ModernView
     on(event: string, listener: (...args: any[]) => void): void;
     off(event: string, listener: (...args: any[]) => void): void;
     write(name: string, params?: Record<string, unknown>): void;
+  };
+  const fishingBobberOwners = new Map<number, number>();
+  const onSpawnEntity = (packet: { entityId?: unknown; type?: unknown; objectData?: unknown }) => {
+    const bobberTypeId = (bot.registry?.entitiesByName as Record<string,
+      { internalId?: number }> | undefined)?.fishing_bobber?.internalId;
+    // Mineflayer may queue entitySpawn first; flushEntities serializes on its later 100 ms tick.
+    recordFishingBobberOwner(fishingBobberOwners, packet, bobberTypeId);
+  };
+  const forgetFishingBobberOwner = (entity: ViewerEntity) => {
+    if (Number.isSafeInteger(entity?.id)) fishingBobberOwners.delete(entity.id);
   };
   const advancements = new ViewerAdvancementTracker();
   const observedPackets = new Map<string, number>();
@@ -791,7 +817,7 @@ export async function startModernViewer(bot: mineflayer.Bot, options: ModernView
         const id = String(entity.id);
         if (!knownEntities.has(id) && knownEntities.size >= 128) continue;
         const complete = full || !knownEntities.has(id);
-        socket.emit(complete ? 'entity' : 'entityMoved', complete ? viewerEntity(bot, entity) :
+        socket.emit(complete ? 'entity' : 'entityMoved', complete ? viewerEntity(bot, entity, fishingBobberOwners) :
           { id: entity.id, pos: entity.position, yaw: entity.yaw, pitch: entity.pitch,
             headYaw: (entity as unknown as { headYaw?: number }).headYaw });
         knownEntities.add(id);
@@ -972,6 +998,8 @@ export async function startModernViewer(bot: mineflayer.Bot, options: ModernView
       mana: initialMana, source: 'plugin', observedAt: Date.now() };
   }
   protocol.on('packet', onPacketObserved);
+  protocol.on('spawn_entity', onSpawnEntity);
+  bot.on('entityGone', forgetFishingBobberOwner);
   protocol.on('world_particles', onParticle);
   protocol.on('explosion', onExplosion);
   protocol.on('world_event', onWorldEvent);
@@ -1009,6 +1037,8 @@ export async function startModernViewer(bot: mineflayer.Bot, options: ModernView
       closed = true;
       protocol.off('custom_payload', onSkillPacket);
       protocol.off('packet', onPacketObserved);
+      protocol.off('spawn_entity', onSpawnEntity);
+      bot.off('entityGone', forgetFishingBobberOwner);
       protocol.off('world_particles', onParticle);
       protocol.off('explosion', onExplosion);
       protocol.off('world_event', onWorldEvent);

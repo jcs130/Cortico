@@ -141,7 +141,6 @@ const changedClient = clientSource
   .replace('  const key = item ? `${item.name || ""}:${item.type ?? item.itemId ?? ""}:${item.metadata ?? ""}` : "empty";',
     '  const key = item ? `${item.name || ""}:${item.type ?? item.itemId ?? ""}:${item.metadata ?? ""}:${item.enchanted === true}` : "empty";')
   .replace('socket.on("entityAnimation", (event) => applyEntityAnimation(event));',
-    'socket.on("viewerReset", () => setTimeout(() => window.location.reload(), 250));\n' +
     'socket.on("digProgress", (event) => cortiApplyDigProgress(event));\n' +
     'socket.on("entityAnimation", (event) => applyEntityAnimation(event));')
   .replace('socket.on("entity", (update) => handleEntity(update, false));',
@@ -187,6 +186,7 @@ if (changedClient === clientSource || changedClient.includes('String(version || 
     || !clientSource.includes('  applyAvatarState();\n  renderInventoryHud();\n  renderMotionHud();')
     || !changedClient.includes('const cameraPose = cortiCameraPose(latestPosition, instant);')
     || !changedClient.includes('teleport: data?.teleport === true,')
+    || !clientSource.includes('socket.on("viewerReset"')
     || !changedClient.includes('socket.on("viewerReset"')
     || !changedClient.includes('socket.on("digProgress"')
     || !changedClient.includes('socket.on("biome"')
