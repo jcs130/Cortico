@@ -52,6 +52,8 @@ export const MINECRAFT_DEFAULTS = {
   precheck: true,
   /** 受理回执附上相同任务的上次终态。 */
   priorOutcome: true,
+  /** 可选的重复成功任务兜底；默认关闭，空名单不暂缓任何技能。 */
+  repeatSuccessFallback: { enabled: false, skillsCsv: '', maxSuccesses: 3, windowMinutes: 15 },
   reflex: {
     /** 受击反击 */
     fightBack: true,
@@ -178,6 +180,10 @@ export interface MinecraftConfigSection {
   precheck: boolean;
   /** 受理回执附相同任务的上次终态；默认开启。 */
   priorOutcome: boolean;
+  /** 达到窗口内成功次数后，暂缓同目标技能的新 mc_do；默认关闭。 */
+  repeatSuccessFallback: {
+    enabled: boolean; skillsCsv: string; maxSuccesses: number; windowMinutes: number;
+  };
   reflex: {
     fightBack: boolean; fleeHealth: number;
     reactCooldownSec: number; antiDrown: boolean; antiLava: boolean;
@@ -288,6 +294,22 @@ export const MINECRAFT_RHYTHM_CONFIG_GROUP: ConfigGroup = {
       'worlds.minecraft.priorOutcome': {
         type: 'boolean', title: '受理回执带上次下场', 'x-hot': true,
         description: '下同一件事(技能+目标相同,不看坐标数量)时,受理回执捎一句 15 分钟内上次是什么下场;上次成了就不出声。补的是已经被上下文交接压掉的那一段。关掉则受理回执只说这一单。',
+      },
+      'worlds.minecraft.repeatSuccessFallback.enabled': {
+        type: 'boolean', title: '同类成功任务暂缓', 'x-hot': true,
+        description: '模型失效时的可选 fallback。窗口内同一目标技能成功达到次数后，只暂缓该类新 mc_do；不撤当前任务或队列，其他技能与聊天照常可用。默认关闭。',
+      },
+      'worlds.minecraft.repeatSuccessFallback.skillsCsv': {
+        type: 'string', title: '暂缓目标技能', 'x-hot': true,
+        description: '英文技能名用逗号分隔，例如 fish,collect。任务任一步包含名单内技能都会检查；赶路或装备步骤不能绕过额度。留空时不暂缓任何任务。',
+      },
+      'worlds.minecraft.repeatSuccessFallback.maxSuccesses': {
+        type: 'integer', title: '窗口内允许成功次数', minimum: 2, maximum: 20, 'x-hot': true,
+        description: '同一目标技能在窗口内成功达到此数后，后续同类新单暂缓到最早一次成功过期。',
+      },
+      'worlds.minecraft.repeatSuccessFallback.windowMinutes': {
+        type: 'integer', title: '成功计数窗口', minimum: 1, maximum: 60,
+        'x-suffix': '分钟', 'x-hot': true,
       },
       'worlds.minecraft.reflex.fightBack': {
         type: 'boolean', title: '受击反击', 'x-hot': true,

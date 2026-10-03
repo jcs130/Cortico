@@ -3540,6 +3540,7 @@ export class MinecraftWorld implements World {
         abort: () => this.ranged?.abort(),
       },
       precheck: () => this.cfg.precheck,
+      repeatSuccessFallback: () => this.cfg.repeatSuccessFallback ?? MINECRAFT_DEFAULTS.repeatSuccessFallback,
       diag: this.diag,
       // 技能只读规矩;改它的唯一入口是 mc_policy(工具面,不进队列)
       policy: {
@@ -4938,7 +4939,7 @@ export class MinecraftWorld implements World {
     name: 'mc_do' | 'mc_scout',
     args: Record<string, unknown>,
     parse: (raw: unknown) => { steps: SkillCall[]; notes?: ParseNote[] } | { error: string },
-  ): string {
+  ): string | ToolOutcome {
     const mode = parseQueueMode(args.queue);
     if ('error' in mode) return this.toolLog(name, args, `[${name} 失败] ${mode.error}`);
     const parsed = parse(args.steps);
@@ -4948,6 +4949,12 @@ export class MinecraftWorld implements World {
     if (!this.executor) return this.toolLog(name, args, `[${name} 失败] World 未启动`);
     // 解析结果与她写的不一致就明说:被静默吃掉的参数是这条链上最贵的一类失败
     const notes = parsed.notes?.map(parseNoteText) ?? [];
+    const repeatedSuccess = name === 'mc_do'
+      ? this.executor.repeatSuccessHold(parsed.steps,
+        this.cfg.repeatSuccessFallback ?? MINECRAFT_DEFAULTS.repeatSuccessFallback) : null;
+    if (repeatedSuccess) return {
+      text: this.toolLog(name, args, repeatedSuccess), failed: true,
+    };
     // 原文一并交过去:受理回执只回念解析+冻结之后与她所写不同的那几个字段
     const accepted = this.executor.submit(parsed.steps, mode.mode, args.steps);
     // 受理回执附当前队列状态，与结局回执和世界快照共用渲染。

@@ -512,6 +512,7 @@ const PROGRESS_EVERY_MS = 30_000;
 
 /** 「同一件事上次什么下场」的有效期:再往前的账她多半已经换了打法 */
 const PRIOR_OUTCOME_WINDOW_MS = 15 * 60_000;
+const MAX_REPEAT_SUCCESS_WINDOW_MS = 60 * 60_000;
 
 /** 受阻头名的统计窗口与起报门槛(见 Executor.blockedHeadline) */
 const BLOCKED_HEADLINE_WINDOW_MS = 60 * 60_000;
@@ -1378,6 +1379,10 @@ interface ExecutorOptions {
    * 早被交接压掉了。关掉退回旧行为(受理单只说这一单)。
    */
   priorOutcome?: () => boolean;
+  /** 可选的同类成功任务兜底；每步开跑前现读，排队任务也遵守热配置。 */
+  repeatSuccessFallback?: () => {
+    enabled: boolean; skillsCsv: string; maxSuccesses: number; windowMinutes: number;
+  };
   /** World 日志;不给就不记 */
   diag?: MinecraftLog;
   /** 运行中步骤的进度快照(30s 周期 + 计数过半) */
@@ -1474,6 +1479,8 @@ export class Executor {
   private readonly priorOutcomes = new Map<string, PriorOutcome>();
   /** 同类签名在 15 分钟内的提交时刻及开跑首步次数；与 priorOutcomes 共用键和窗口。 */
   private readonly roundabout = new Map<string, { submits: number[]; ran: number }>();
+  /** 实际成功的步骤按目标技能归并；启用 fallback 前也保留窗口内事实。 */
+  private readonly successfulIntents = new Map<string, number[]>();
   /** 受阻理由的滚动账:归并键 → 发生时刻(见 blockedHeadline;头条只报次数,不留原文) */
   private readonly blockedReasons = new Map<string, { at: number[] }>();
   /**
@@ -1538,6 +1545,42 @@ export class Executor {
   /** 挂钟时刻 HH:MM:SS。一场就是一天,不带日期 */
   private clock(ms: number): string {
     return nowIso(this.opts.timezone ?? 'Asia/Shanghai', new Date(ms)).slice(11, 19);
+  }
+
+  /** 仅供 mc_do 受理前或步骤执行前使用；不改队列，不设置全局退避。 */
+  repeatSuccessHold(steps: readonly SkillCall[], config: {
+    enabled: boolean; skillsCsv: string; maxSuccesses: number; windowMinutes: number;
+  }, now = Date.now()): string | null {
+    if (!config.enabled || typeof config.skillsCsv !== 'string'
+      || !Number.isFinite(config.windowMinutes) || config.windowMinutes <= 0
+      || !Number.isFinite(config.maxSuccesses) || config.maxSuccesses < 1) return null;
+    const allowed = new Set(config.skillsCsv.split(',').map((skill) => skill.trim()));
+    const windowMs = config.windowMinutes * 60_000;
+    for (const target of steps) {
+      if (!allowed.has(target.skill)
+        || ['attack', 'flee', 'surface', 'eat', 'chat'].includes(target.skill)
+        || ('dryRun' in target && target.dryRun === true)) continue;
+      const recent = (this.successfulIntents.get(taskSignature([target])) ?? [])
+        .filter((at) => now - at < windowMs);
+      if (recent.length < config.maxSuccesses) continue;
+      const until = recent[recent.length - config.maxSuccesses] + windowMs;
+      const localUntil = nowIso(this.opts.timezone ?? 'Asia/Shanghai', new Date(until))
+        .replace('T', ' ').slice(0, 19);
+      return `[mc_do 暂缓] ${config.windowMinutes} 分钟内目标技能「${describeSkill(target)}」成功 ${recent.length} 次，`
+        + `同类新任务到 ${localUntil} 可再受理。当前任务和队列保留，其他目标技能照常可用`;
+    }
+    return null;
+  }
+
+  private noteSuccessfulIntent(step: SkillCall, at: number): void {
+    for (const [key, times] of this.successfulIntents) {
+      const recent = times.filter((time) => at - time < MAX_REPEAT_SUCCESS_WINDOW_MS);
+      if (recent.length > 0) this.successfulIntents.set(key, recent);
+      else this.successfulIntents.delete(key);
+    }
+    if ('dryRun' in step && step.dryRun === true) return;
+    const key = taskSignature([step]);
+    this.successfulIntents.set(key, [...(this.successfulIntents.get(key) ?? []), at]);
   }
 
   /**
@@ -2703,6 +2746,7 @@ export class Executor {
       task.stepLog.push({
         step: i + 1, what: describeSkill(steps[i]), outcome, why: shortWhy(why), line,
       });
+      if (outcome === 'ok') this.noteSuccessfulIntent(steps[i], Date.now());
     };
     /**
      * 本任务有意放置的落点，跨步骤保留。
@@ -2841,6 +2885,19 @@ export class Executor {
         : causal !== null && i > 0 && outcomes[i - 1] !== 'ok' && outcomes[i - 1] !== 'partial'
           ? `(第 ${i} 步没做成;这一步不用它的产出,照做了)`
           : '';
+      // 旧队列也在真正执行前重读额度；只跳过当前步骤，后续独立步骤继续。
+      const repeatedSuccess = this.opts.repeatSuccessFallback
+        ? this.repeatSuccessHold([call], this.opts.repeatSuccessFallback()) : null;
+      if (repeatedSuccess) {
+        const line = `${stepLabel(i)} 没执行(${repeatedSuccess})`;
+        land(i, 'fail', repeatedSuccess, line);
+        firstWhy ??= repeatedSuccess;
+        blockedSteps.push(line);
+        this.opts.diag?.write({ lane: 'skill', event: 'blocked', taskId: id,
+          msg: `第 ${i + 1} 步「${describeSkill(call)}」暂缓:${repeatedSuccess}`,
+          data: { call, reason: 'repeat-success-fallback' } });
+        continue;
+      }
       // 断点续做的 collect:只挖打断前没挖到的那些;打断前就已挖够的不再进技能
       const carried = resumedCollect(task, i);
       if (carried && carried.remaining <= 0) {

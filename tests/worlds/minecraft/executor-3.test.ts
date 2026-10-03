@@ -2923,6 +2923,84 @@ describe('fish:走到水边钓一竿,收获按物品栏差分照实报', () => {
     expect(reports[0].text).toContain('钓上来生鲑鱼×1');
   });
 
+  it('成功目标技能按步骤计数，过期后放行且不影响其他技能', async () => {
+    const bot = fishBot({ water: [[2, 63, 0]], biteAfterMs: 50,
+      loot: { name: 'salmon', type: 21 } });
+    const { exec, reports } = makeExecutorOn(bot);
+    const config = { enabled: true, skillsCsv: 'fish,chat,attack',
+      maxSuccesses: 3, windowMinutes: 1 };
+    const fish: SkillCall = { skill: 'fish' };
+    for (let i = 1; i <= 3; i++) {
+      expect(exec.repeatSuccessHold([fish], config)).toBeNull();
+      exec.submit([fish]);
+      await waitUntil(() => reports.length === i, 8000);
+      expect(reports.at(-1)?.kind).toBe('done');
+    }
+    const queueBefore = exec.status();
+    const hold = exec.repeatSuccessHold([
+      { skill: 'goto', at: [4, 64, 0] }, fish,
+    ], config);
+    expect(hold).toContain('成功 3 次');
+    expect(hold).toContain('可再受理');
+    expect(exec.repeatSuccessHold([{ skill: 'equip', item: 'fishing_rod' }, fish], config)).toBe(hold);
+    expect(exec.repeatSuccessHold([fish, { skill: 'chat', text: '收竿了' }], config)).toBe(hold);
+    expect(exec.repeatSuccessHold([{ skill: 'collect', block: 'stone', count: 1 }], config)).toBeNull();
+    expect(exec.repeatSuccessHold([{ skill: 'chat', text: '你好' }], config)).toBeNull();
+    expect(exec.repeatSuccessHold([{ skill: 'attack', target: 'zombie' }], config)).toBeNull();
+    expect(exec.status()).toEqual(queueBefore);
+    expect(exec.repeatSuccessHold([fish], { ...config, enabled: false })).toBeNull();
+    vi.setSystemTime(Date.now() + 60_001);
+    expect(exec.repeatSuccessHold([fish], config)).toBeNull();
+    exec.clear();
+  });
+
+  it('未成功的钓鱼不计入成功窗口', async () => {
+    const { exec, reports } = makeExecutorOn(fishBot({}));
+    exec.submit([{ skill: 'fish' }]);
+    await waitUntil(() => reports.length === 1);
+    expect(reports[0].kind).toBe('blocked');
+    expect(exec.repeatSuccessHold([{ skill: 'fish' }], {
+      enabled: true, skillsCsv: 'fish', maxSuccesses: 2, windowMinutes: 15,
+    })).toBeNull();
+  });
+
+  it('同一整单逐步计数，超额钓鱼不下竿，后续聊天仍执行', async () => {
+    const bot = fishBot({ water: [[2, 63, 0]], biteAfterMs: 50,
+      loot: { name: 'salmon', type: 21 } });
+    const casts = vi.spyOn(bot, 'fish');
+    const said: string[] = [];
+    Object.assign(bot, { chat: (text: string) => { said.push(text); } });
+    const reports: TaskReport[] = [];
+    const config = { enabled: true, skillsCsv: 'fish', maxSuccesses: 2, windowMinutes: 15 };
+    const exec = new Executor({ getBot: () => bot as never, report: (r) => reports.push(r),
+      log, nextId: nextTaskId(), repeatSuccessFallback: () => config });
+    exec.submit([{ skill: 'fish' }, { skill: 'fish' }, { skill: 'fish' },
+      { skill: 'chat', text: '收竿了' }]);
+    await waitUntil(() => reports.length === 1, 8000);
+    expect(casts).toHaveBeenCalledTimes(2);
+    expect(reports[0].kind).toBe('blocked');
+    expect(reports[0].text).toContain('第 3 步');
+    expect(reports[0].text).toContain('成功 2 次');
+    expect(said).toEqual(['收竿了']);
+    exec.clear();
+  });
+
+  it('旧队列到执行刻重读额度，只数真正成功的步骤', async () => {
+    const bot = fishBot({ water: [[2, 63, 0], [2, 63, 1], [2, 63, 2]], biteAfterMs: 50,
+      loot: { name: 'salmon', type: 21 } });
+    const casts = vi.spyOn(bot, 'fish');
+    const reports: TaskReport[] = [];
+    const config = { enabled: true, skillsCsv: 'fish', maxSuccesses: 2, windowMinutes: 15 };
+    const exec = new Executor({ getBot: () => bot as never, report: (r) => reports.push(r),
+      log, nextId: nextTaskId(), repeatSuccessFallback: () => config });
+    for (let i = 0; i < 3; i++) exec.submit([{ skill: 'fish', at: [2, 63, i] }], 'append');
+    await waitUntil(() => reports.length === 3, 8000);
+    expect(reports.map((r) => r.kind)).toEqual(['done', 'done', 'blocked']);
+    expect(casts).toHaveBeenCalledTimes(2);
+    expect(exec.status().waiting).toEqual([]);
+    exec.clear();
+  });
+
   it('弹道瞄准:远处的水直瞄会抛短,选出来的仰角比直瞄平', () => {
     // 岸在 x<6,水从 x=6 起;直瞄 6 格外的水面按弹道只飞得到 5 格出头
     const bot = {

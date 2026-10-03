@@ -9,10 +9,11 @@ import { MINECRAFT_DEFAULTS, type MinecraftConfigSection } from '../../../src/wo
 import { acceptBlueprint } from '../../../src/worlds/minecraft/blueprint-plan.ts';
 import { parseGoalPlan, recordGoalJudgment } from '../../../src/worlds/minecraft/goal-plan.ts';
 import { SET_SPAWN_TRANSLATE } from '../../../src/worlds/minecraft/escape.ts';
-import { renderQueue } from '../../../src/worlds/minecraft/executor.ts';
+import { parseScoutSteps, parseSteps, renderQueue } from '../../../src/worlds/minecraft/executor.ts';
 import { Bridge } from '../../../src/worlds/minecraft/bridge.ts';
 import { MinecraftServerManager, type MinecraftServerState } from '../../../src/worlds/minecraft/server.ts';
 import { FakeHost } from '../../helpers/fake-host.ts';
+import { combatBot, makeExecutorOn } from './executor-harness.ts';
 
 function cfg(over: Partial<MinecraftConfigSection> = {}): MinecraftConfigSection {
   return structuredClone({ ...MINECRAFT_DEFAULTS, enabled: true, ...over }) as MinecraftConfigSection;
@@ -54,6 +55,53 @@ function idleBot(): unknown {
 function stub(m: MinecraftWorld, parts: Record<string, unknown>): void {
   Object.assign(m, parts);
 }
+
+describe('同类成功任务 fallback 的 World 受理边界', () => {
+  it('只暂缓名单内 mc_do，不改变队列或影响聊天和 mc_scout', async () => {
+    const config = cfg({ repeatSuccessFallback: {
+      enabled: true, skillsCsv: 'goto', maxSuccesses: 3, windowMinutes: 15,
+    } });
+    const world = new MinecraftWorld({ cfg: config });
+    const { exec, reports } = makeExecutorOn(combatBot({}));
+    stub(world, { host: new FakeHost(), executor: exec });
+    for (let i = 1; i <= 3; i++) {
+      exec.submit([{ skill: 'goto', at: [i * 2, 64, 0] }]);
+      await vi.waitFor(() => expect(reports).toHaveLength(i));
+      expect(reports.at(-1)?.kind).toBe('done');
+    }
+    const goto = [{ skill: 'goto', at: [8, 64, 0] }];
+    const queueBefore = exec.status();
+    const blocked = (world as any).enqueueTool('mc_do', { steps: goto }, parseSteps);
+    expect(blocked).toMatchObject({ failed: true,
+      text: expect.stringContaining('成功 3 次') });
+    expect(exec.status()).toEqual(queueBefore);
+    expect(exec.repeatSuccessHold([{ skill: 'goto', at: [8, 64, 0], dryRun: true }],
+      config.repeatSuccessFallback)).toBeNull();
+    expect((world as any).enqueueTool('mc_do', {
+      steps: [{ skill: 'chat', text: '你好' }],
+    }, parseSteps)).toContain('任务#');
+    expect((world as any).enqueueTool('mc_scout', { steps: goto }, parseScoutSteps))
+      .toContain('任务#');
+    exec.clear();
+  });
+
+  it('旧配置缺少 fallback 字段时仍默认关闭', async () => {
+    const config = cfg();
+    delete (config as Partial<typeof config>).repeatSuccessFallback;
+    const world = new MinecraftWorld({ cfg: config });
+    const { exec, reports } = makeExecutorOn(combatBot({}));
+    stub(world, { host: new FakeHost(), executor: exec });
+    for (let i = 1; i <= 3; i++) {
+      exec.submit([{ skill: 'goto', at: [i * 2, 64, 0] }]);
+      await vi.waitFor(() => expect(reports).toHaveLength(i));
+    }
+    const accepted = (world as any).enqueueTool('mc_do', {
+      steps: [{ skill: 'goto', at: [8, 64, 0] }],
+    }, parseSteps);
+    expect(accepted).toContain('任务#');
+    exec.clear();
+  });
+});
 
 
 describe('实体接近滞回(常规 16/24，持弓可见敌对 32/40)', () => {
