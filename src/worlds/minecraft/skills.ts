@@ -241,6 +241,7 @@ function gridOf(raw: unknown): string[][] | null {
     for (const cell of row) {
       if (cell === null || cell === undefined || cell === '') { cells.push(''); continue; }
       if (typeof cell !== 'string') return null;
+      if (cell.trim().toLowerCase() === 'null') return null;
       cells.push(cell.trim());
     }
     out.push(cells);
@@ -921,6 +922,10 @@ function parseEnchant(c: Record<string, unknown>, at: string, marks?: MarkLookup
 function parseCraft(c: Record<string, unknown>, at: string): ParseResult {
   const count = intIn(c.count, 1, 64, 1);
   if (count === null) return { error: `${at} craft 的 count 要在 1-64 之间` };
+  const item = str(c.item);
+  if (item && c.grid !== undefined) {
+    return { error: `${at} craft 的 item 和 grid 只能选一个；做${item}只写 item 走配方表，自摆配方只写 grid` };
+  }
   if (c.grid !== undefined) {
     const grid = gridOf(c.grid);
     if (!grid) {
@@ -928,16 +933,8 @@ function parseCraft(c: Record<string, unknown>, at: string): ParseResult {
         error: `${at} craft 的 grid 要是按行写的名字二维数组(空位写 null),最多 3 行 3 列`,
       };
     }
-    // 格子摆好了就按格子做,产出槽出什么算什么;同时写的 item 没有用武之地
-    const spare = str(c.item);
-    return {
-      step: { skill: 'craft', grid, count },
-      ...(spare
-        ? { notes: [{ field: 'item', given: c.item, kind: 'dropped' as const, why: 'grid 在场,按格子做' }] }
-        : {}),
-    };
+    return { step: { skill: 'craft', grid, count } };
   }
-  const item = str(c.item);
   if (!item) return { error: `${at} craft 要 item(物品英文 id)或 grid(自己摆的格子)` };
   return { step: { skill: 'craft', item, count } };
 }
