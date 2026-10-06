@@ -724,7 +724,8 @@ ID，表示中文词表未覆盖。覆盖率可用 `scratch/` 下的探针脚本
 
 | 事件 | urgent | 内容 |
 |---|---|---|
-| `minecraft.event` | 多为 true | 连入/断线、掉血、濒死、死亡、夜幕/黎明、玩家进出 |
+| `minecraft.event` | 多为 true | 连入/断线、掉血、濒死、死亡、夜幕/黎明 |
+| `minecraft.enter` / `minecraft.leave` | 进服 true，离服 false | 玩家进出；`senderKey` 与 `meta.uname` 携带玩家名，不含自己和摄像机 |
 | `minecraft.sleep` | false，`debounce` | Mineflayer 确认自身躺下；保留床的个人重生点更新 |
 | `minecraft.wake` | false，`piggyback` | Mineflayer 确认自身醒来 |
 | `minecraft.task` | 反射急报 true | 队列里一件事的完成/受阻/被抢占（后面跟一行当下的队列）；反射的事后汇报 |

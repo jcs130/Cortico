@@ -6547,12 +6547,14 @@ export class MinecraftWorld implements World {
       if (this.cfg.player.teleportToBot && player.username === this.cfg.player.username.trim()) {
         setTimeout(() => this.teleportPlayer('玩家进服'), 2_000);
       }
-      this.emit('minecraft.event', `[Minecraft] 玩家 ${player.username} 进入了服务器。`, true);
+      this.emit('minecraft.enter', `[Minecraft] 玩家 ${player.username} 进入了服务器。`, true,
+        { meta: { uname: player.username } }, player.username);
     });
     bot.on('playerLeft', (player: { username: string }) => {
       if (player.username === this.chatName() || this.isCamera(player.username)) return;
       if (!this.bridge?.bot || this.bridge.bot === bot) this.playerObservations.forgetPlayer(player.username);
-      this.emit('minecraft.event', `[Minecraft] 玩家 ${player.username} 离开了服务器。`, false);
+      this.emit('minecraft.leave', `[Minecraft] 玩家 ${player.username} 离开了服务器。`, false,
+        { meta: { uname: player.username } }, player.username);
     });
     bot.on('entitySwingArm', (entity: unknown) => this.notePlayerGesture(bot, entity, 'wave'));
     bot.on('entityCrouch', (entity: unknown) => this.notePlayerGesture(bot, entity, 'crouch'));

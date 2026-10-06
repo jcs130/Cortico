@@ -127,9 +127,9 @@ describe('Persona viewer memory retrieval', () => {
     expect(text).not.toContain('OLD_MESSAGE_904');
   });
 
-  it('does not count arrivals as interaction or enrollment evidence, including qualified arrivals', () => {
+  it.each(['enter', 'leave'])('does not count %s as interaction or enrollment evidence, including qualified arrivals', type => {
     const { persona, injected } = rig();
-    for (let cursor = 1; cursor <= 5; cursor++) persona.onDelivery({ events: [{ ...arrival(cursor),
+    for (let cursor = 1; cursor <= 5; cursor++) persona.onDelivery({ events: [{ ...arrival(cursor, '901', type),
       meta: { uname: '同名观众', audienceAdmission: { limitingActive: true, lane: 'important',
         importantParticipants: [{ senderKey: '901', uname: '同名观众', count: 10, reasons: ['guard'] }] } } }] });
     persona.onDelivery({ events: [event(6, '第一次真实发言')] });
@@ -149,6 +149,23 @@ describe('Persona viewer memory retrieval', () => {
     expect(text).toContain('platform/901「改过的昵称」');
     expect(text).toContain('新的档案首行');
     expect(text).not.toContain('未展开的完整档案');
+  });
+
+  it('recalls player-name account keys on arrival and resolves the same source in explicit lookup', async () => {
+    const { memoryDir, persona } = rig();
+    profile(memoryDir, 'gameworld', 'Alex', 'Alex：村庄的熟人。\n确认过的交往记录。');
+    profile(memoryDir, 'otherworld', 'Alex', '同名的另一位玩家。');
+    persona.onDelivery({ events: [{ ...arrival(1, 'Alex'), source: 'gameworld',
+      type: 'gameworld.enter', meta: { uname: 'Alex' } }] });
+    const text = recalledText(persona);
+    expect(text).toContain('Alex：村庄的熟人');
+    expect(text).not.toContain('同名的另一位玩家');
+    const tool = persona.declareSessions().find(session => session.id === 'main')!.tools()
+      .find(tool => tool.name === 'recall_viewer')!;
+    const reply = await tool.handler({ source: 'gameworld', id: 'Alex' }, { role: 'main', log: nullLogger() });
+    expect(reply).toContain('viewers/gameworld/Alex.md');
+    expect(reply).toContain('确认过的交往记录');
+    expect(reply).not.toContain('同名的另一位玩家');
   });
 
   it('does not recall from archived or anonymous arrivals even when their names match history', () => {

@@ -56,6 +56,41 @@ function stub(m: MinecraftWorld, parts: Record<string, unknown>): void {
   Object.assign(m, parts);
 }
 
+describe('Minecraft player presence identity', () => {
+  it('carries each player identity across arrival and departure without treating chat as arrival', () => {
+    const world = new MinecraftWorld({ cfg: cfg({ username: 'Self' }) });
+    const host = new FakeHost();
+    const bot = Object.assign(new EventEmitter(), idleBot());
+    stub(world, { host, bridge: { bot, connected: true } });
+    (world as unknown as { hookBotEvents(bot: unknown): void }).hookBotEvents(bot);
+    bot.emit('playerJoined', { username: 'Alex' });
+    bot.emit('playerJoined', { username: 'Blair' });
+    bot.emit('whisper', 'Alex', 'Hello');
+    bot.emit('playerLeft', { username: 'Alex' });
+    expect(host.events.filter(event => ['minecraft.enter', 'minecraft.leave', 'minecraft.chat'].includes(event.type)))
+      .toMatchObject([
+        { type: 'minecraft.enter', source: 'minecraft', senderKey: 'Alex', meta: { uname: 'Alex' } },
+        { type: 'minecraft.enter', source: 'minecraft', senderKey: 'Blair', meta: { uname: 'Blair' } },
+        { type: 'minecraft.chat', source: 'minecraft', senderKey: 'Alex' },
+        { type: 'minecraft.leave', source: 'minecraft', senderKey: 'Alex', meta: { uname: 'Alex' } },
+      ]);
+  });
+
+  it('keeps self and camera connections out of player presence events', () => {
+    const world = new MinecraftWorld({ cfg: cfg({ username: 'Self',
+      client: { ...MINECRAFT_DEFAULTS.client, username: 'Camera' } }) });
+    const host = new FakeHost();
+    const bot = Object.assign(new EventEmitter(), idleBot());
+    stub(world, { host, bridge: { bot, connected: true } });
+    (world as unknown as { hookBotEvents(bot: unknown): void }).hookBotEvents(bot);
+    for (const username of ['Self', 'Camera']) {
+      bot.emit('playerJoined', { username });
+      bot.emit('playerLeft', { username });
+    }
+    expect(host.events).toEqual([]);
+  });
+});
+
 describe('同类成功任务 fallback 的 World 受理边界', () => {
   it('仅暂缓名单内的 mc_do，不隐藏整个工具或影响聊天和 mc_scout', async () => {
     const config = cfg({ repeatSuccessFallback: {

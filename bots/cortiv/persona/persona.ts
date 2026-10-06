@@ -7,7 +7,7 @@ import { hasRole, textOf } from 'cortico/protocol/open-responses/context-helpers
  *
  * 继承 Cormini(可缇mini)的最小骨架(平铺工作区/文件三件套/四时机钩子),
  * 把直播场景的 memory 系统**内建为类行为**(不走构造开关):
- *  - 观众档案 `viewers/<来源>/<数字ID>.md`:首行=一句话摘要,senderKey 在当前
+ *  - 人物档案 `viewers/<来源>/<账号键>.md`:首行=一句话摘要,senderKey 在当前
  *    上下文窗口首次出现时在投递刻机械唤起(注入收编同批,原子到达);同一句摘要
  *    一个窗口只说一次,交接清空上文后再出现重念,热重启不重念;脱敏期(无 senderKey)
  *    整条静默降级。没档案且互动过门槛的,每个交接窗口报一次 id(至多三个窗口)
@@ -407,7 +407,7 @@ export class CortiV extends Cormini {
   private readonly recalledSummary = new Map<string, string>();
   /** `<来源>/<键>` → 本场最近一次见到的昵称;recall_viewer 按名字找人用。新 session 清空。 */
   private readonly viewerNames = new Map<string, string>();
-  /** `<来源>/<键>` → 本场累计交流事件数，跨交接保留。进场不增加交流次数。 */
+  /** `<来源>/<键>` → 本场累计交流事件数，跨交接保留。进场与离场不增加交流次数。 */
   private readonly viewerHits = new Map<string, number>();
   /** 本交接窗口已报过 id 的无档案观众(每窗口至多一条) */
   private readonly enrollNudged = new Set<string>();
@@ -1108,7 +1108,7 @@ export class CortiV extends Cormini {
     return {
       name: 'recall_viewer',
       description:
-        'Look someone up in your viewer files by numeric id or by name. '
+        'Look someone up in your viewer files by event senderKey or by name. '
         + 'The [memory] line you get when a person first shows up is only the first line of their file; '
         + 'this returns the whole file when the id is given or the name matches exactly one file. '
         + 'A name search also covers people seen this session who have no file yet and gives their id. '
@@ -1119,7 +1119,7 @@ export class CortiV extends Cormini {
       parameters: {
         type: 'object',
         properties: {
-          id: { type: 'string', description: 'Numeric id, the one shown in a [memory] line.' },
+          id: { type: 'string', description: 'Account key from the event senderKey or [memory] line; may be a numeric id or a player name.' },
           source: { type: 'string', description: 'World source from the viewer event; disambiguates identical ids across platforms.' },
           query: { type: 'string', maxLength: VIEWER_CONVERSATION_RECALL_LIMITS.queryChars,
             description: 'Words to look for in this person\'s past messages. A local lexical search returns at most three dated excerpts.' },
@@ -1557,8 +1557,9 @@ export class CortiV extends Cormini {
     if (!key || !e.source) return false;
     const seenKey = `${e.source}/${key}`;
     const arrival = [`${e.source}.enter`, `${e.source}.enter-guard`].includes(e.type);
-    const hits = (this.viewerHits.get(seenKey) ?? 0) + (arrival ? 0 : hitBy);
-    if (!arrival) this.viewerHits.set(seenKey, hits);
+    const presence = arrival || e.type === `${e.source}.leave`;
+    const hits = (this.viewerHits.get(seenKey) ?? 0) + (presence ? 0 : hitBy);
+    if (!presence) this.viewerHits.set(seenKey, hits);
     // 先把键解成路径:逃逸键整条不认(既不唤起,也不该拿它去劝梦建文件)
     let file: string;
     try {
@@ -1601,7 +1602,7 @@ export class CortiV extends Cormini {
       }
     }
     if (content === null) {
-      if (!arrival) this.nudgeEnroll(e, seenKey, key, hits, budget, qualified);
+      if (!presence) this.nudgeEnroll(e, seenKey, key, hits, budget, qualified);
       return false;
     }
     if (!summary) return false;
