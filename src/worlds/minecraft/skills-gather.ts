@@ -34,6 +34,7 @@ import {
 import { compositionText, zhErrorText, zhThing } from './receipt.ts';
 import { UNTIL_TRAVEL_RADIUS, type UntilHit, untilBlockIds, untilHit, untilUnknownNote } from './until.ts';
 import { PLAYER_SLOTS } from './precheck.ts';
+import { ownedFishingBobber } from './fishing.ts';
 import { minecraftTextComponent } from './text-component.ts';
 import { beginTemporaryScaffold, closeTemporaryScaffold, reclaimTemporaryScaffold,
   type TemporaryScaffoldScope } from './temporary-scaffold.ts';
@@ -1074,18 +1075,9 @@ export function planFishingCasts(bot: Bot, target: Cell): AimPlan[] {
   return plans;
 }
 
-/** 我这一竿的浮标:附近唯一一个 fishing_bobber 实体 */
+/** 当前抛竿收到服务端归属确认的浮标。 */
 export function findBobber(bot: Bot): NonNullable<Bot['entities'][string]> | null {
-  const me = bot.entity.position;
-  let best: NonNullable<Bot['entities'][string]> | null = null;
-  let bestD = Infinity;
-  for (const id of Object.keys(bot.entities)) {
-    const e = bot.entities[id];
-    if (!e?.position || e.name !== 'fishing_bobber') continue;
-    const d = e.position.distanceTo(me);
-    if (d <= BOBBER_MAX_DIST + 4 && d < bestD) { bestD = d; best = e; }
-  }
-  return best;
+  return ownedFishingBobber(bot);
 }
 
 /** 浮标此刻所在的那一格 */
@@ -1186,7 +1178,11 @@ export async function skillFish(bot: Bot, call: Extract<SkillCall, { skill: 'fis
     water = resolveAt(bot, call.at);
     const b = blockAtCell(bot, water);
     if (!b) throw new SkillBlocked(`${cellText(water)} 那里区块没加载`);
-    if (b.name !== 'water') throw new SkillBlocked(`${cellText(water)} 不是水,是${zhName(b.name)}`);
+    if (b.name !== 'water') {
+      const spot = findFishingSpot(bot, FISH_SCAN_R);
+      const hint = spot ? `;当前已观察到水面 ${cellText(spot.cell)}` : `;${FISH_SCAN_R} 格内未观察到可下竿水面`;
+      throw new SkillBlocked(`${cellText(water)} 不是水,是${zhName(b.name)}${hint};at 指水面方块，不是站位或河底。省略 at 可按当前水面选择；本次没有抛竿或改换目标`);
+    }
     if (!isOpenFishingWater(bot, water)) {
       openNote = `;${cellText(water)} 不是开阔水域(周围 5×5 不够 2 格深或岸在 2 格内),只出鱼不出宝藏`;
     }
@@ -1289,11 +1285,9 @@ export async function skillFish(bot: Bot, call: Extract<SkillCall, { skill: 'fis
     await sleep(FISH_LOOT_SETTLE_MS);
     const gains = invGains(before, bot);
     if (gains.length > 0) return `钓上来${gains.join('、')}${notes}`;
-    // 战利品从浮标飞回；背包无空位时可能落在脚边。
     const used = bot.inventory.items().length;
-    return used >= PLAYER_SLOTS
-      ? `咬钩了也收了线,包满了(${PLAYER_SLOTS} 格全占着),战利品掉在脚边${notes}`
-      : `咬钩了也收了线,东西没进包(包里还有 ${PLAYER_SLOTS - used} 格空位)${notes}`;
+    const space = used >= PLAYER_SLOTS ? `包满了(${PLAYER_SLOTS} 格全占着)` : `包里还有 ${PLAYER_SLOTS - used} 格空位`;
+    throw new SkillBlocked(`已收到咬钩信号并收线，但未观察到物品入包(${space});本次未确认收获，掉落去向未确认${notes}`, [], 'server');
   }
   if (outcome === 'timeout') {
     throw new SkillBlocked(`在 ${cellText(water)} 抛竿等了 ${Math.round(waitMs / 1000)} 秒没鱼咬钩,收竿了${notes}`);

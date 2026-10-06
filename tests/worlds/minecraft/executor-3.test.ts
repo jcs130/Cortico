@@ -14,6 +14,8 @@ import { defaultPolicy } from '../../../src/worlds/minecraft/policy.ts';
 import { ChestBook } from '../../../src/worlds/minecraft/chests.ts';
 import { MinecraftLog } from '../../../src/worlds/minecraft/log.ts';
 import { BowController, type BowEvent } from '../../../src/worlds/minecraft/ranged.ts';
+import { installOwnedFishing, ownedFishingBobber } from '../../../src/worlds/minecraft/fishing.ts';
+import { findBobber } from '../../../src/worlds/minecraft/skills-gather.ts';
 import {
   log,
   nextTaskId,
@@ -3064,18 +3066,22 @@ describe('fish:走到水边钓一竿,收获按物品栏差分照实报', () => {
     /** 抛出去的浮标停在哪(不给就当浮标实体没同步过来) */
     bobberAt?: [number, number, number];
   }) {
+    const protocol = new EventEmitter();
+    const lifecycle = new EventEmitter();
     const inv: Array<{ name: string; count: number; type: number }> = [];
     if (opts.rod !== false) inv.push({ name: 'fishing_rod', count: 1, type: 30 });
     const water = new Set((opts.water ?? []).map(([x, y, z]) => `${x},${y},${z}`));
     let reeled = 0;
     const bot = {
+      _client: protocol, once: lifecycle.once.bind(lifecycle), removeListener: lifecycle.removeListener.bind(lifecycle),
       reeledCount: () => reeled,
       entity: { id: 9, position: new V(0.5, 64, 0.5), onGround: true },
       entities: opts.bobberAt
         ? { 7: { id: 7, name: 'fishing_bobber', position: new V(...opts.bobberAt) } }
         : {},
       inventory: { items: () => inv },
-      registry: { blocksByName: { water: { id: 1, name: 'water' } }, itemsByName: {} },
+      registry: { blocksByName: { water: { id: 1, name: 'water' } }, itemsByName: {},
+        entitiesByName: { fishing_bobber: { id: 129 } }, particlesByName: {} },
       findBlocks: () => (opts.water ?? []).map(([x, y, z]) => new V(x, y, z)),
       canSeeBlock: () => true,
       blockAt: (p: V) => {
@@ -3089,7 +3095,11 @@ describe('fish:走到水边钓一竿,收获按物品栏差分照实报', () => {
       equip: async () => {},
       lookAt: async () => {},
       look: async () => {},
-      activateItem: () => { reeled++; },
+      activateItem: () => {
+        if (ownedFishingBobber(bot as never)) {
+          reeled++; protocol.emit('entity_destroy', { entityIds: [7] });
+        }
+      },
       fish: () => new Promise<void>((resolve) => {
         if (opts.biteAfterMs === undefined) return; // 永不咬钩,等收竿
         setTimeout(() => {
@@ -3098,6 +3108,20 @@ describe('fish:走到水边钓一竿,收获按物品栏差分照实报', () => {
         }, opts.biteAfterMs);
       }),
       pathfinder: { stop() {}, setGoal() {}, goto: async () => {} },
+    };
+    const simulatedCast = bot.fish;
+    installOwnedFishing(bot as never);
+    const ownedCast = bot.fish;
+    bot.fish = () => {
+      const cast = ownedCast();
+      const at = opts.bobberAt ?? opts.water?.[0] ?? [2, 63, 0];
+      const position = new V(...at);
+      (bot.entities as Record<number, unknown>)[7] = { id: 7, name: 'fishing_bobber', position };
+      protocol.emit('spawn_entity', { entityId: 7, type: 129, objectData: 9 });
+      void simulatedCast().then(() => protocol.emit('world_particles', {
+        particle: { type: 'fishing' }, amount: 6, ...position,
+      }));
+      return cast;
     };
     return bot;
   }
@@ -3120,13 +3144,19 @@ describe('fish:走到水边钓一竿,收获按物品栏差分照实报', () => {
     expect(reports[0].text).toContain('没看见能下竿的水面');
   });
 
-  it('at 指定的那格不是水:受阻并说它是什么', async () => {
-    const bot = fishBot({ water: [[2, 63, 0]] });
+  it('错误 at 报实测方块和当前可选水面，未抛竿；修正目标可继续收获', async () => {
+    const bot = fishBot({ water: [[2, 63, 0]], biteAfterMs: 50, loot: { name: 'salmon', type: 21 } });
     const { exec, reports } = makeExecutorOn(bot);
     exec.submit([{ skill: 'fish', at: [5, 63, 5] }]);
     await waitUntil(() => reports.length === 1);
     expect(reports[0].kind).toBe('blocked');
     expect(reports[0].text).toContain('不是水');
+    expect(reports[0].text).toContain('当前已观察到水面 (2, 63, 0)');
+    expect(findBobber(bot as never)).toBeNull();
+    exec.submit([{ skill: 'fish', at: [2, 63, 0] }]);
+    await waitUntil(() => reports.length === 2, 8000);
+    expect(reports[1].kind).toBe('done');
+    expect(reports[1].text).toContain('生鲑鱼×1');
   });
 
   it('咬钩收线:收获按差分照实报', async () => {
@@ -3992,6 +4022,8 @@ describe('fish:开阔水域优先、视线放宽、包满与遮蔽的回执', ()
     gotoMoves?: boolean;
     boat?: boolean;
   }) {
+    const protocol = new EventEmitter();
+    const lifecycle = new EventEmitter();
     const { lake } = opts;
     const inLake = (x: number, y: number, z: number): boolean =>
       x >= lake.x0 && x <= lake.x1 && z >= lake.z0 && z <= lake.z1 && y <= 63 && y > 63 - lake.depth;
@@ -4000,6 +4032,7 @@ describe('fish:开阔水域优先、视线放宽、包满与遮蔽的回执', ()
     const gotoGoals: string[] = [];
     const casts: Array<{ x: number; y: number; z: number }> = [];
     const bot = {
+      _client: protocol, once: lifecycle.once.bind(lifecycle), removeListener: lifecycle.removeListener.bind(lifecycle),
       gotoGoals,
       casts,
       vehicle: opts.boat ? { name: 'oak_boat' } : null,
@@ -4009,7 +4042,8 @@ describe('fish:开阔水域优先、视线放宽、包满与遮蔽的回执', ()
         : {},
       game: { minY: -64, height: 384 },
       inventory: { items: () => inv },
-      registry: { blocksByName: { water: { id: 1, name: 'water' } }, itemsByName: {} },
+      registry: { blocksByName: { water: { id: 1, name: 'water' } }, itemsByName: {},
+        entitiesByName: { fishing_bobber: { id: 129 } }, particlesByName: {} },
       world: { raycast: () => null },
       findBlocks: (o: { maxDistance: number }) => {
         const out: V[] = [];
@@ -4037,7 +4071,9 @@ describe('fish:开阔水域优先、视线放宽、包满与遮蔽的回执', ()
       equip: async () => {},
       lookAt: async () => {},
       look: async () => {},
-      activateItem: () => {},
+      activateItem: () => {
+        if (ownedFishingBobber(bot as never)) protocol.emit('entity_destroy', { entityIds: [7] });
+      },
       fish: () => new Promise<void>((resolve) => {
         casts.push({ x: me.x, y: me.y, z: me.z });
         if (opts.biteAfterMs === undefined) return;
@@ -4057,6 +4093,19 @@ describe('fish:开阔水域优先、视线放宽、包满与遮蔽的回执', ()
           }
         },
       },
+    };
+    const simulatedCast = bot.fish;
+    installOwnedFishing(bot as never);
+    const ownedCast = bot.fish;
+    bot.fish = () => {
+      const cast = ownedCast();
+      const position = new V(...(opts.bobberAt ?? [lake.x0 + .5, 63.5, lake.z0 + .5]));
+      (bot.entities as Record<number, unknown>)[7] = { id: 7, name: 'fishing_bobber', position };
+      protocol.emit('spawn_entity', { entityId: 7, type: 129, objectData: 9 });
+      void simulatedCast().then(() => protocol.emit('world_particles', {
+        particle: { type: 'fishing' }, amount: 6, ...position,
+      }));
+      return cast;
     };
     return bot;
   }
@@ -4165,24 +4214,35 @@ describe('fish:开阔水域优先、视线放宽、包满与遮蔽的回执', ()
     expect(reports[0].text).toContain('原地船上站位');
   });
 
-  it('包满时咬钩没进包:回执说包满了、战利品掉在脚边,不说掉进水里', async () => {
+  it('包满时收线没有净收获，受阻且不猜掉落去向', async () => {
     const bag = [{ name: 'fishing_rod', count: 1, type: 30 }];
     while (bag.length < 36) bag.push({ name: 'cobblestone', count: 64, type: 1 });
     const bot = lakeBot({ lake: SHALLOW, bag, biteAfterMs: 50 });
     const { exec, reports } = makeExecutorOn(bot);
     exec.submit([{ skill: 'fish' }]);
     await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('done');
-    expect(reports[0].text).toContain('包满了(36 格全占着),战利品掉在脚边');
+    expect(reports[0].kind).toBe('blocked');
+    expect(reports[0].text).toContain('包满了(36 格全占着)');
+    expect(reports[0].text).toContain('掉落去向未确认');
+    expect(reports[0].text).not.toContain('掉在脚边');
     expect(reports[0].text).not.toContain('水里');
   });
 
-  it('包没满时咬钩没进包:报剩几格空位,不猜去向', async () => {
+  it('未入包的收线不记成功；依赖收获的后续步骤跳过，独立聊天继续', async () => {
     const bot = lakeBot({ lake: SHALLOW, biteAfterMs: 50 });
     const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'fish' }]);
+    const said: string[] = [];
+    Object.assign(bot, { chat: (text: string) => { said.push(text); } });
+    exec.submit([{ skill: 'fish' }, { skill: 'equip', item: 'cod', needs: [1] },
+      { skill: 'chat', text: '这竿没收到东西', needs: [] }]);
     await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].text).toContain('东西没进包(包里还有 35 格空位)');
+    expect(reports[0].kind).toBe('blocked');
+    expect(reports[0].text).toContain('未观察到物品入包(包里还有 35 格空位)');
+    expect(reports[0].text).toContain('跳过');
+    expect(said).toEqual(['这竿没收到东西']);
+    expect(exec.repeatSuccessHold([{ skill: 'fish' }], {
+      enabled: true, skillsCsv: 'fish', maxSuccesses: 1, windowMinutes: 15,
+    })).toBeNull();
   });
 
   it('浮标头顶有遮盖:等待上限放宽到 60 秒,回执带「看不到天」', async () => {

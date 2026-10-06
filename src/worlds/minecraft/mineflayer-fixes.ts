@@ -24,6 +24,7 @@ import { dropOwnedGoal } from './executor.ts';
 import { SkillBlocked } from './skill-context.ts';
 import { installInventoryWindowSyncGuard } from './inventory-window-sync.ts';
 import { installDamageEvidence } from './damage-evidence.ts';
+import { installOwnedFishing } from './fishing.ts';
 import { armTemporaryScaffoldPlacement, assertTemporaryScaffoldDigSafe, closeTemporaryScaffoldPlacement,
   hasPreparedTemporaryScaffoldPlacement, prepareTemporaryScaffoldPlacement, recordTemporaryScaffold } from './temporary-scaffold.ts';
 import { assertInventoryClicksReady, clickInventoryConfirmed, installInventoryClickSync,
@@ -125,6 +126,7 @@ export function installMineflayerFixes(
   showTempo?: () => ShowTempo | null,
 ): void {
   installDamageEvidence(bot);
+  if (typeof bot.fish === 'function') installOwnedFishing(bot);
   if (typeof bot.craft !== 'function' || typeof bot.placeBlock !== 'function') {
     log.error(
       'mineflayer 修补装得太早:bot.craft/placeBlock 还不存在,说明内建插件尚未注入,' +
