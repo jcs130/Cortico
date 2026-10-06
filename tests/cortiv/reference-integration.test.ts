@@ -47,6 +47,54 @@ function rig() {
 const requireRead = (root: string, path: string): string => readFileSync(join(root, path), 'utf8');
 
 describe('Persona progressive reference integration', () => {
+  it('keeps asynchronous result evidence when later snapshots and a long accepted plan share a batch', async () => {
+    const r = rig(); const requests: RequestInit[] = [];
+    const notices: string[] = [];
+    const router = new ReferenceRouting(r.library, () => r.fast, async (_url, init) => {
+      requests.push(init!); return r.answer();
+    }, () => NOW);
+    const outcome = event({ cursor: 20, type: 'scene.result', text: 'Target: process the gathered material. '
+      + 'Recorded plan with several preparatory steps. '.repeat(30)
+      + 'Execution rejected: the selected material is not usable here. Consult the operation reference.' });
+    await router.observe([outcome, event({ cursor: 21, tags: ['snapshot'], text: 'Unrelated current position.' }),
+      event({ cursor: 22, tags: ['snapshot'], text: 'The queue is idle.' })], [],
+    makeFakeHarnessApi({ injectInternal: text => notices.push(text) }), {
+      tool: 'scene_do', arguments: JSON.stringify({ steps: ['prepare'.repeat(200)] }),
+      receipt: 'Accepted into the queue. ' + 'Planning details. '.repeat(30) + 'Execution has not been verified.',
+    });
+    const state = JSON.parse(String(requests[0].body)).state;
+    expect(state.observations).toHaveLength(1);
+    expect(state.observations[0].cursor).toBe(outcome.cursor);
+    expect(state.observations[0].text).toContain('Target: process');
+    expect(state.observations[0].text).toContain('Execution rejected');
+    expect(state.observations[0].text).toContain('[中间未展开]');
+    expect(state.recentIntent.receipt).toContain('Execution has not been verified');
+    expect(JSON.stringify(state).length).toBeLessThanOrEqual(2400);
+    expect(r.library.selected()?.topicKey).toBe(r.topics[0].key);
+    expect(notices[0]).toContain('不是新目标或行动指令');
+  });
+
+  it('allows background topic advice after manual catalog browsing or an invalid manual detail', async () => {
+    const r = rig(); const requests: RequestInit[] = [];
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (_url, init) => { requests.push(init!); return r.answer(); }));
+    const persona = new CortiV({ memoryDir: r.root, references: () => r.config, fastReference: () => r.fast });
+    const api = makeFakeHarnessApi(); persona.attach(api);
+    const tool = persona.declareSessions().find(session => session.id === 'main')!.tools().find(tool => tool.name === 'reference_guide')!;
+    const ctx = { role: 'main', log: nullLogger() };
+    await tool.handler({ operation: 'catalog' }, ctx);
+    await persona.onDelivery({ events: [event({ ts: new Date().toISOString() })] });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(requests).toHaveLength(1);
+    await tool.handler({ operation: 'detail', activity_id: 'shelter' }, ctx);
+    await persona.onDelivery({ events: [event({ cursor: 10, ts: new Date().toISOString() })] });
+    expect(requests).toHaveLength(1);
+    const rejected = await tool.handler({ operation: 'detail', activity_id: 'missing' }, ctx);
+    expect(rejected).toContain('没有活动 id');
+    await persona.onDelivery({ events: [event({ cursor: 11, ts: new Date().toISOString() })] });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(requests).toHaveLength(2);
+  });
+
   it('loads only topic cards from a validated fast judgment and reports evidence separately from actions', async () => {
     const r = rig(); const notices: string[] = [];
     const fetchImpl = vi.fn<typeof fetch>(async () => r.answer());

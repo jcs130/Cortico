@@ -1039,7 +1039,6 @@ export class CortiV extends Cormini {
       handler: async (args, ctx) => {
         let text: string;
         const library = ctx.role === MAIN ? this.referenceLibrary : this.createReferenceLibrary();
-        if (ctx.role === MAIN) this.referenceRouting.onManualRead(args.operation !== 'clear');
         switch (args.operation) {
           case 'catalog': text = library.topics(Number(args.offset ?? 0), Number(args.limit ?? 8)); break;
           case 'guides': text = library.guides(String(args.topic_key ?? ''), Number(args.offset ?? 0), Number(args.limit ?? 3)); break;
@@ -1047,7 +1046,10 @@ export class CortiV extends Cormini {
           case 'clear': library.clear(); text = '[资料] 已关闭当前阅读分支，主题目录仍可查询。'; break;
           default: return '[资料] 未知读取操作。';
         }
-        if (ctx.role === MAIN) this.deliverMemoryChanges();
+        if (ctx.role === MAIN) {
+          this.referenceRouting.onManualRead(library.selected() !== null);
+          this.deliverMemoryChanges();
+        }
         return text;
       },
     };

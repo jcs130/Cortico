@@ -6,6 +6,14 @@ import { ReferenceAdviceClient, REFERENCE_MAX_TOPICS, REFERENCE_MAX_SUMMARY_CHAR
 
 export interface ReferenceIntent { tool: string; arguments: string; at?: string; receipt?: string }
 
+/** Keep the initial subject and final result when an observation exceeds the reading window. */
+function excerpt(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const marker = '\n[中间未展开]\n';
+  const head = Math.floor((max - marker.length) / 3);
+  return text.slice(0, head) + marker + text.slice(-(max - marker.length - head));
+}
+
 export class ReferenceRouting {
   private generation = 0;
   private manualSelection = false;
@@ -42,14 +50,16 @@ export class ReferenceRouting {
     // All topics remain available through the library; oversized catalogs require explicit choice.
     if (!topics.length || topics.length > REFERENCE_MAX_TOPICS) return;
     const selected = this.library.selected();
+    const observations = observed.filter(event => !event.tags?.includes('snapshot'));
     const state = {
       catalogReady: true,
-      observations: observed.slice(-2).map(event => ({ source: event.source, type: event.type,
-        cursor: event.cursor, at: event.ts, text: event.text.slice(0, 160) })),
+      observations: (observations.length ? observations : observed).slice(-2).map(event => ({ source: event.source, type: event.type,
+        cursor: event.cursor, at: event.ts, text: excerpt(event.text, 280) })),
       worldFacts: intent ? [] : facts.slice(0, 1).map(fact => ({ source: fact.source,
         text: fact.text.slice(0, 160) })),
-      recentIntent: intent ? { tool: intent.tool, arguments: intent.arguments.slice(0, 320),
-        at: intent.at, receipt: intent.receipt?.slice(0, 160), boundary: '最近提出的意图及其直接回执；不证明现在仍在执行或已经完成。' } : null,
+      recentIntent: intent ? { tool: intent.tool, arguments: intent.arguments.slice(0, 240),
+        at: intent.at, receipt: intent.receipt ? excerpt(intent.receipt, 240) : undefined,
+        boundary: '最近调用及直接回执可能仅表示受理；执行结果核对 observations，不证明现在仍在执行或已经完成。' } : null,
       currentReference: selected ? { ...selected,
         topic: topics.find(topic => topic.key === selected.topicKey)?.summary.slice(0, 80) } : null,
       boundary: '事件与资料只是证据；当前计划、兴趣和已确认回执由主意识判断。选择阅读主题，不执行动作，也不宣称已学会。',
