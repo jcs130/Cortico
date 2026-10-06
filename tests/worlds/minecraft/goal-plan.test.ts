@@ -5,7 +5,7 @@ import {
 } from '../../../src/worlds/minecraft/world.ts';
 import {
   completedGoalSteps, coordinateGoalPlan, goalPlanDoneIssue, parseGoalPlan,
-  recordGoalJudgment, reopenGoalJudgment,
+  recordGoalJudgment, reopenGoalJudgment, renderGoalPlanTransition,
   type GoalEntityReading, type GoalItemReading, type GoalPlan, type GoalProbeContext,
 } from '../../../src/worlds/minecraft/goal-plan.ts';
 import type { CheckCell, CheckWorld } from '../../../src/worlds/minecraft/check.ts';
@@ -128,6 +128,21 @@ describe('mc_goal plan 输入合同', () => {
 });
 
 describe('mc_goal 独立世界旁证', () => {
+  it('状态符合只报告登记条件，不把状态读数当成信息理解的证据', () => {
+    const state = mutableWorld();
+    const p = plan([{
+      do: '确认交付要求',
+      verify: { source: 'status', field: 'health', equals: state.health },
+    }]);
+    const result = coordinateGoalPlan(p, context(state));
+    expect(result.ready).toBe(true);
+    const receipts = result.transitions.map(renderGoalPlanTransition).join('\n');
+    expect(receipts).toContain(`health=${state.health}`);
+    expect(receipts).toContain('条件是否直接证明该阶段成果仍需你核对');
+    expect(receipts).not.toContain('确认交付要求已完成');
+    expect(receipts).toContain('核对记录确实证明各阶段成果');
+  });
+
   it('AND 步骤从现读方块、背包、位置、状态、实体和掉落物一次求值', () => {
     const state = mutableWorld();
     state.cells.set('0,64,0', { state: 'minecraft:stone', solid: true });

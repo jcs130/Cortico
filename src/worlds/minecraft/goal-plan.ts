@@ -116,7 +116,7 @@ const COMPARE_SCHEMA = {
 /** Flat fields stay visible to tool decoders that discard fields nested under oneOf. */
 const GOAL_PROBE_SCHEMA = {
   type: 'object',
-  description: '机械旁证。source 决定字段：block(at,is)；inventory(item,count)；blueprint(key,loaded?/matched?)；position(region,dimension)；entity(type,region,dimension,count)；item(item,region,dimension,count)；status(field,equals)。',
+  description: '现读你指定的条件。它必须直接证明本步成果；读数符合不核验条件与步骤的语义关系。source 决定字段：block(at,is)；inventory(item,count)；blueprint(key,loaded?/matched?)；position(region,dimension)；entity(type,region,dimension,count)；item(item,region,dimension,count)；status(field,equals)。',
   properties: {
     source: {
       type: 'string',
@@ -145,14 +145,14 @@ export const GOAL_PLAN_SCHEMA = {
   type: 'array',
   minItems: 1,
   maxItems: GOAL_PLAN_MAX_STEPS,
-  description: '按执行顺序列里程碑。每步恰好给 verify 或 judgment；verify 数组按 AND 求值。',
+  description: '按执行顺序列里程碑。每步恰好给 verify 或 judgment；verify 数组按 AND 求值。只在读数能直接证明本步成果时用 verify；信息理解、对话和服务端命令回执用 judgment 登记实际依据。',
   items: {
     type: 'object',
     properties: {
       do: { type: 'string', description: '这一步要实施什么。' },
       verify: {
         type: ['object', 'array'],
-        description: '一个机械旁证，或最多 8 个旁证组成的 AND 数组。',
+        description: '直接证明本步成果的读数，或最多 8 个读数组成的 AND 数组。无关状态不能代替成果；健康、饱食或位置符合不能证明已经读懂信息、交付物品或完成对话。没有对应读数时用 judgment。',
         properties: GOAL_PROBE_SCHEMA.properties,
         required: ['source'],
         items: GOAL_PROBE_SCHEMA,
@@ -161,7 +161,7 @@ export const GOAL_PLAN_SCHEMA = {
       },
       judgment: {
         type: 'string',
-        description: '说明为什么这一步只能由你现场判断；完成时再用 milestone 提交判断说明。',
+        description: '说明需要核对的成果与证据来源；完成时用 milestone 引用实际观察、对方回复或服务端回执。缺少机械字段时可以用它，不必填一个无关的 verify。',
       },
     },
     required: ['do'],
@@ -638,10 +638,10 @@ export function renderGoalPlanTransition(transition: GoalPlanTransition): string
   if (transition.kind === 'advance') {
     const evidence = transition.evidence.length > 0 ? `：${transition.evidence.join('；')}` : '';
     const next = transition.next ? `；下一步 ${transition.next}` : '';
-    return `机械旁证推进到 ${transition.to}/${transition.total}${evidence}${next}`;
+    return `登记条件符合，进度 ${transition.to}/${transition.total}${evidence}${next}；条件是否直接证明该阶段成果仍需你核对`;
   }
   if (transition.kind === 'regress') {
     return `第 ${transition.step}/${transition.total} 项旁证已失效：${transition.evidence.join('；')}；进度退回 ${transition.to}/${transition.total}`;
   }
-  return `${transition.total} 项里程碑都有旁证，可以用 mc_goal done 明确结案`;
+  return `${transition.total} 项里程碑的登记条件均有记录；核对记录确实证明各阶段成果后，用 mc_goal done 明确结案`;
 }

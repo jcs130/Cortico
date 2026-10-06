@@ -2239,6 +2239,9 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
       'Register and track what you are working towards in this world: up to five slots (#1..#5). '
       + 'Targets can be builds, gathered items, entity kills or captures, exploration, transport, farming, '
       + 'redstone work, survival time, or any other project. '
+      + 'A verify condition must directly establish its milestone result. The evaluator only tests '
+      + 'the supplied predicate; it does not check its semantic relevance. Use judgment with actual '
+      + 'evidence for understood information, conversation and server command results. '
       + 'Call with no fields to read them all back. Tied to the current world and empty after a restart '
       + 'or a world change, so the lasting copy belongs in your own notes.',
     parameters: {
