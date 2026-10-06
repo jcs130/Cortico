@@ -18,6 +18,7 @@ vi.mock('../../../src/worlds/minecraft/travel.ts', async (importOriginal) => ({
 
 const AT: [number, number, number] = [1, 64, 0];
 const packet = { location: new Vec3(...AT), direction: 1, hand: 0 };
+type TestItem = Pick<NonNullable<Bot['heldItem']>, 'name' | 'type' | 'metadata' | 'count'>;
 
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(1_000); navigation.mockReset(); navigation.mockResolvedValue(undefined); });
 afterEach(() => vi.useRealTimers());
@@ -25,7 +26,7 @@ afterEach(() => vi.useRealTimers());
 function rig(target = 'white_bed') {
   const packets: string[] = [];
   const protocol = Object.assign(new EventEmitter(), { write: (name: string, _params?: Record<string, unknown>): unknown => { packets.push(name); return undefined; } });
-  const inventory = Object.assign(new EventEmitter(), { slots: Array(46).fill(null), items: () => [] });
+  const inventory = Object.assign(new EventEmitter(), { slots: Array(46).fill(null), items: (): TestItem[] => [] });
   let stateId = 10;
   const bot = Object.assign(new EventEmitter(), {
     _client: protocol, inventory, heldItem: null, currentWindow: null,
@@ -92,6 +93,32 @@ describe('interaction cooldown follows actual block use', () => {
     const r = rig(); r.protocol.write('block_place', packet);
     (r.world as any).serverActionWait.noteFeedback('还需 30 秒');
     expect(r.submit()).toMatchObject({ failed: true, text: expect.stringContaining('还需 30 秒') });
+  });
+
+  it('allows a different item after a sent block use while throttling aliases of the same item', async () => {
+    const r = rig('farmland');
+    const hoe = { name: 'wooden_hoe', type: 10, metadata: 0, count: 1 };
+    const seeds = { name: 'wheat_seeds', type: 11, metadata: 0, count: 4 };
+    r.bot.inventory.items = () => [hoe, seeds];
+    r.bot.inventory.slots[36] = hoe;
+    r.bot.inventory.slots[37] = seeds;
+    (r.bot as any).heldItem = hoe;
+    r.protocol.write('block_place', packet);
+    expect(r.submit('hoe')).toMatchObject({ failed: true, text: expect.stringContaining('同一格刚右键过') });
+    expect(r.submit('wooden_hoe')).toMatchObject({ failed: true, text: expect.stringContaining('同一格刚右键过') });
+    expect(r.submit('wheat_seeds')).toContain('已排进队列');
+    await r.execution();
+    expect(r.submissions).toHaveLength(1);
+  });
+
+  it('does not bypass an explicit server countdown by switching the item', async () => {
+    const r = rig('farmland');
+    const seeds = { name: 'wheat_seeds', type: 11, metadata: 0, count: 4 };
+    r.bot.inventory.items = () => [seeds];
+    r.protocol.write('block_place', packet);
+    (r.world as any).serverActionWait.noteFeedback('还需 30 秒');
+    expect(r.submit('wheat_seeds')).toMatchObject({ failed: true, text: expect.stringContaining('还需 30 秒') });
+    expect(r.submissions).toHaveLength(0);
   });
 
   it('only the current connection records packets, duplicate hookup is idempotent and end restores its wrapper', () => {

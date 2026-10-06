@@ -105,6 +105,7 @@ import {
 import { ChestBook } from './chests.ts';
 import { DirectionalSweepBook } from './directional-sweeps.ts';
 import { containerStacks } from './containers.ts';
+import { invItemNamed } from './inventory.ts';
 import { selectionMenuTitle } from './window-semantics.ts';
 import { readEnchants } from './item-facts.ts';
 import { ItemBreakDecoder, type ItemBreakFact } from './item-break.ts';
@@ -5754,8 +5755,8 @@ export class MinecraftWorld implements World {
     return { scaffold: [...this.cfg.scaffoldBlocks], light: ['torch'] };
   }
 
-  /** 同格交互前后只比较客户端可见的方块、窗口和随身状态。 */
-  private useObservation(at: readonly number[]): string | undefined {
+  /** 同格交互比较实际或拟用物品、客户端可见的方块、窗口和随身状态。 */
+  private useObservation(at: readonly number[], requestedItem?: string | null): string | undefined {
     const bot = this.bridge?.bot;
     if (!bot) return undefined;
     let target: { type: number; stateId: number } | null = null;
@@ -5763,10 +5764,14 @@ export class MinecraftWorld implements World {
       const block = bot.blockAt(new Vec3(at[0], at[1], at[2]));
       if (block) target = { type: block.type, stateId: block.stateId };
     } catch { /* 未加载的目标没有可比较的方块读数。 */ }
+    const usedItem = requestedItem === undefined ? bot.heldItem
+      : requestedItem === null ? null : invItemNamed(bot, requestedItem);
     return JSON.stringify({
       generation: this.connectionGeneration,
       dimension: bot.game?.dimension,
       target,
+      usedItem: usedItem ? [usedItem.type, usedItem.metadata]
+        : requestedItem ? ['missing', requestedItem] : null,
       window: bot.currentWindow ? [bot.currentWindow.id, bot.currentWindow.type] : null,
       inventory: bot.inventory?.slots?.map((item, slot) => item
         ? [slot, item.type, item.count, item.metadata, item.durabilityUsed] : null),
@@ -5824,7 +5829,8 @@ export class MinecraftWorld implements World {
     const directChat = name === 'mc_do' && parsed.steps.length === 1 && parsed.steps[0].skill === 'chat'
       ? parsed.steps[0].text : null;
     if (directUse) {
-      const wait = this.serverActionWait.blockReason(directUse, Date.now(), this.useObservation(directUse));
+      const wait = this.serverActionWait.blockReason(directUse, Date.now(),
+        this.useObservation(directUse, only?.skill === 'use' ? only.item ?? null : null));
       if (wait) return { text: this.toolLog(name, args, `[${name} 暂缓] ${wait}`), failed: true, endsTurn: true };
     }
     if (directChat) {
