@@ -288,10 +288,10 @@ export interface SkillContext {
   /** 禁止本步补光，供蓝图清场使用，避免在要求空置的格重新放火把。 */
   noLight?: boolean;
   /**
-   * 个人重生点那一格(床/重生锚);没设过为 null。 World 持有唯一写入口(setPersonalSpawn)。
-   * 技能只读它,用来把「这一下动的是你的重生锚」当场说出来。
+   * 个人重生点(床/重生锚)。undefined 表示尚未核实，null 表示已确认失效。
+   * World 持有唯一写入口(setPersonalSpawn)，技能只读已观察到的状态。
    */
-  spawnAnchor?: () => { x: number; y: number; z: number; dimension?: string } | null;
+  spawnAnchor?: () => { x: number; y: number; z: number; dimension?: string } | null | undefined;
   /**
    * 蓝图施工面(World 持有);没接 = 这个部署没有蓝图能力,build 的 blueprint 形态
    * 会如实说"这边没装载"。采集搭车也读它。

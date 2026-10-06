@@ -3782,11 +3782,25 @@ describe('find 的行军代价上受理刻', () => {
     exec.shutdown();
   });
 
-  it('没有重生点就照实说,不编一个距离出来', () => {
+  it('尚未读取重生点时报告未知,不推断它不存在', () => {
     const { exec } = makeExecutorOn(combatBot({}));
     const r = exec.submit([{ skill: 'find', target: 'spider', direction: 'south', distance: 48 }]);
-    expect(r).toContain('走满时你现在没有重生点');
+    expect(r).toContain('你的个人重生点尚未核实');
+    expect(r).not.toContain('你现在没有重生点');
     expect(r).not.toContain('离重生点 (');
+    exec.shutdown();
+  });
+
+  it('服务端确认失效后报告没有重生点,仍然受理行军', () => {
+    const bot = combatBot({});
+    const exec = new Executor({
+      getBot: () => bot as never, report: () => {}, log, nextId: nextTaskId(),
+      spawnAnchor: () => null,
+    });
+    const r = exec.submit([{ skill: 'find', target: 'spider', direction: 'south', distance: 48 }]);
+    expect(r).toContain('你现在没有重生点');
+    expect(r).not.toContain('尚未核实');
+    expect(exec.status().running).not.toBeNull();
     exec.shutdown();
   });
 

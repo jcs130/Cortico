@@ -5948,7 +5948,7 @@ export class MinecraftWorld implements World {
     this.syncRealm();
     // 重连后的世界可能整个换了(重生点、另一台服务器):快照基线作废
     this.snapshotAnchorPending = true;
-    this.setPersonalSpawn(null, '重连,基线作废');
+    this.setPersonalSpawn(undefined, '重连,等待核实', { announce: false });
     this.hydratePersonalSpawn();
     this.hookBotEvents(bot);
     // 每次连接都向当前服务端核对技能。低血自愈只在服务端清单明确列出后启用。
@@ -6842,15 +6842,16 @@ export class MinecraftWorld implements World {
       this.diag.write({
         lane: 'world', event: 'death',
         msg: `死了${at ? `,死亡点 [${zhDimension(deathDimension)}] (${Math.round(at.x)}, ${Math.round(at.y)}, ${Math.round(at.z)})` : ''}`
-          + `;当前重生点 ${this.personalSpawn ? `[${zhDimension(this.personalSpawn.dimension)}] (${Math.round(this.personalSpawn.x)}, ${Math.round(this.personalSpawn.y)}, ${Math.round(this.personalSpawn.z)}) [${this.personalSpawn.source}]` : '无(回世界出生点)'}`,
-        data: { position: at ? { x: at.x, y: at.y, z: at.z, dimension: deathDimension } : null, spawn: this.personalSpawn },
+          + `;当前重生点 ${this.personalSpawn ? `[${zhDimension(this.personalSpawn.dimension)}] (${Math.round(this.personalSpawn.x)}, ${Math.round(this.personalSpawn.y)}, ${Math.round(this.personalSpawn.z)}) [${this.personalSpawn.source}]` : this.personalSpawn === null ? '无(回世界出生点)' : '尚未核实'}`,
+        data: { position: at ? { x: at.x, y: at.y, z: at.z, dimension: deathDimension } : null,
+          spawn: this.personalSpawn ?? null, spawnKnown: this.personalSpawn !== undefined },
       });
       const dropAt: DimensionPoint | null = at
         ? { x: at.x, y: at.y, z: at.z, dimension: deathDimension }
         : null;
       // 床毁坏后的 spawnReset 可能迟到；预告重生点须在三秒后以实测坐标复核。
       const predicted: SpawnTarget | null = this.personalSpawn
-        ?? (bot.spawnPoint ? spawnAt(bot.spawnPoint, 'minecraft:overworld', 'world') : null);
+        ?? (this.personalSpawn === null && bot.spawnPoint ? spawnAt(bot.spawnPoint, 'minecraft:overworld', 'world') : null);
       // 死亡广播通常先到；pendingDeathCause 仅在 15 秒内归入此次死亡。
       // 同格死亡次数只作事实计数。
       const cause = this.pendingDeathCause !== null && Date.now() - this.pendingDeathCause.at <= 15_000
@@ -7188,8 +7189,8 @@ export class MinecraftWorld implements World {
   private lastSetSpawnAt = 0;
   private lastServerFeedback: { text: string; at: number } | null = null;
   private readonly serverActionWait = new ServerActionWait();
-  /** 个人重生点(床/重生锚)。spawnReset 清掉;没设过则 escape 走世界出生点。 */
-  private personalSpawn: SpawnTarget | null = null;
+  /** 个人重生点(床/重生锚)。重连后未核实为 undefined，spawnReset 确认失效为 null。 */
+  private personalSpawn: SpawnTarget | null | undefined = undefined;
   /** 自己发起的传送:这段时间里 forcedMove 不急报,反射也不抢寻路。 */
   private escapeHoldUntil = 0;
   private lastDimension: string | null = null;
@@ -7412,7 +7413,7 @@ export class MinecraftWorld implements World {
     return runEscape({
       getBot: () => this.bridge?.bot ?? null,
       playerName: this.chatName(),
-      personalSpawn: this.personalSpawn,
+      personalSpawn: this.personalSpawn ?? null,
       // 她自己圈的落脚处也是安全锚。词表里能当"去处"的只有这两类:「家」与「床」;
       // 「箱」「资源点」这些是干活的地方,不是躲的地方,不替她扩这个口径。
       safeMarks: marks
@@ -7496,11 +7497,12 @@ export class MinecraftWorld implements World {
    * 躺床、set_spawn、启动读 player.dat 和 spawnReset 共用的重生点写入口。
    * 仅变更时记录时刻与新旧值。
    */
-  private setPersonalSpawn(next: SpawnTarget | null, from: string, opts?: { announce?: boolean }): void {
+  private setPersonalSpawn(next: SpawnTarget | null | undefined, from: string, opts?: { announce?: boolean }): void {
     const prev = this.personalSpawn;
     this.personalSpawn = next;
-    const where = (s: SpawnTarget | null): string =>
-      s ? `(${Math.round(s.x)}, ${Math.round(s.y)}, ${Math.round(s.z)}) ${s.dimension} [${s.source}]` : '无';
+    const where = (s: SpawnTarget | null | undefined): string =>
+      s ? `(${Math.round(s.x)}, ${Math.round(s.y)}, ${Math.round(s.z)}) ${s.dimension} [${s.source}]`
+        : s === null ? '无' : '尚未核实';
     if (where(prev) === where(next)) return;
     this.diag.write({
       lane: 'world', event: 'spawn-point',
@@ -7509,16 +7511,16 @@ export class MinecraftWorld implements World {
     });
     if (opts?.announce === false || !next) return;
     // 原版白天右键床会先设置重生点，再拒绝睡眠；重生点迁移仍须报告。
-    const sameDim = prev !== null && normalizeDimension(prev.dimension) === normalizeDimension(next.dimension);
+    const sameDim = !!prev && normalizeDimension(prev.dimension) === normalizeDimension(next.dimension);
     const moved = sameDim && prev ? Math.hypot(next.x - prev.x, next.y - prev.y, next.z - prev.z) : null;
     const at = `[${zhDimension(next.dimension)}] (${Math.round(next.x)}, ${Math.round(next.y)}, ${Math.round(next.z)})`;
     const text = moved === null
-      ? (prev === null
-        ? `[Minecraft] 重生点设在 ${at} 了(以前没有,死了只能回世界出生点)。`
+      ? (!prev
+        ? `[Minecraft] 重生点设在 ${at} 了${prev === null ? '(此前已确认没有个人重生点)' : ''}。`
         : `[Minecraft] 重生点换到 ${at} 了,跟原来那个不在同一个维度。`)
       : `[Minecraft] 重生点搬到 ${at} 了,离原来那个 ${Math.round(moved)} 格。`;
     // 搬远了/换维度才唤醒:这才是会让她"回家"这类计划整个作废的量
-    this.emit('minecraft.event', text, moved === null ? prev !== null : moved > SPAWN_FAR_BLOCKS);
+    this.emit('minecraft.event', text, moved === null ? !!prev : moved > SPAWN_FAR_BLOCKS);
   }
 
   /**
@@ -7537,6 +7539,9 @@ export class MinecraftWorld implements World {
     const spawn = this.personalSpawn;
     let back: string;
     if (spawn) back = `会回重生点 ${at(spawn, spawn.dimension)} 重生${far(spawn, spawn.dimension)}。`;
+    else if (spawn === undefined) {
+      back = '个人重生点尚未核实，重生落点以服务端实际结果为准。';
+    }
     else if (bot.spawnPoint) {
       back = `没有重生点了,会回世界出生点 ${at(bot.spawnPoint, 'minecraft:overworld')} `
         + `重生${far(bot.spawnPoint, 'minecraft:overworld')}。`;
@@ -7974,7 +7979,7 @@ export class MinecraftWorld implements World {
     // 下一次真变了照样按段差分)。全量锚那一拍不受这道闸管,漂移由它兜住。
     // 队列状态一起进比对键 —— 手上在做什么变了就是实质变化。
     const quietKey = `${snapshotFingerprint(snap)}|${queue}` +
-      `|spawn:${this.personalSpawn ? `${this.personalSpawn.x},${this.personalSpawn.y},${this.personalSpawn.z}` : 'none'}` +
+      `|spawn:${this.personalSpawn ? `${this.personalSpawn.x},${this.personalSpawn.y},${this.personalSpawn.z}` : this.personalSpawn === null ? 'none' : 'unknown'}` +
       // 两张暂态表也进比对键:表变了就是实质变化,那一拍该发
       `|goals:${goals}|marks:${marks}|foodReserve:${foodReserve}`;
     const prev = this.snapshotQuiet;

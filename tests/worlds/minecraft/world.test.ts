@@ -2075,7 +2075,7 @@ describe('world 泳道:官方死因与重生点变更', () => {
       bot.emit('spawnReset');
       const changes = lane('spawn-point');
       expect(changes).toHaveLength(2);
-      expect(changes[0].msg).toContain('重生点 无 → (10, 64, -3) minecraft:overworld [bed]');
+      expect(changes[0].msg).toContain('重生点 尚未核实 → (10, 64, -3) minecraft:overworld [bed]');
       expect(changes[0].data).toMatchObject({ from: `${SET_SPAWN_TRANSLATE} 系统消息` });
       expect(changes[1].msg).toContain('→ 无(来源:spawnReset 事件)');
     } finally {
@@ -2324,7 +2324,7 @@ describe('重生点与死亡:说清会落在哪儿、离多远、还剩多久', 
     const { m, bot, find, trigger } = await hooked();
     try {
       bot.emit('message', { translate: SET_SPAWN_TRANSLATE, toString: () => 'set' }, 'game_info');
-      expect(find('重生点设在 [主世界] (10, 64, -3) 了')).toContain('以前没有');
+      expect(find('重生点设在 [主世界] (10, 64, -3) 了')).not.toContain('以前没有');
       // 2300 格外的那一张床:这一条不叫醒她,她就还按「家在原处」行事
       bot.entity.position = pos(2310, 64, -3);
       bot.emit('message', { translate: SET_SPAWN_TRANSLATE, toString: () => 'set' }, 'game_info');
@@ -2402,6 +2402,7 @@ describe('重生点与死亡:说清会落在哪儿、离多远、还剩多久', 
   it('没有重生点时点名世界出生点,不再含糊地说「在出生点重生」', async () => {
     const { m, bot, find } = await hooked(pos(2000, 64, 0));
     try {
+      bot.emit('spawnReset');
       bot.emit('death');
       const line = find('你死了');
       expect(line).toContain('没有重生点了,会回世界出生点 [主世界] (-1, 64, -7) 重生');
@@ -2409,6 +2410,18 @@ describe('重生点与死亡:说清会落在哪儿、离多远、还剩多久', 
     } finally {
       await m.stop();
     }
+  });
+
+  it('未核实个人重生点时死亡不预测回到世界出生点', async () => {
+    const { m, bot, find, lane } = await hooked(pos(2000, 64, 0));
+    try {
+      bot.emit('death');
+      const line = find('你死了');
+      expect(line).toContain('个人重生点尚未核实');
+      expect(line).not.toContain('没有重生点');
+      expect(line).not.toContain('会回世界出生点');
+      expect(lane('death').at(-1)?.data).toMatchObject({ spawn: null, spawnKnown: false });
+    } finally { await m.stop(); }
   });
 
   it('死亡回执不猜服务端的物品保留规则', async () => {
@@ -2459,6 +2472,7 @@ describe('重生点与死亡:说清会落在哪儿、离多远、还剩多久', 
     const { m, bot, find } = await hooked();
     vi.useFakeTimers();
     try {
+      bot.emit('spawnReset');
       bot.entity.position = pos(2900, 64, -3);
       bot.emit('death');
       bot.entity.position = pos(-1, 64, -7);   // 正好落在预告的世界出生点
@@ -2495,6 +2509,7 @@ describe('重生点与死亡:说清会落在哪儿、离多远、还剩多久', 
   it('人在下界时世界出生点仍标为主世界,不计算两边坐标距离', async () => {
     const { m, bot, find } = await hooked(pos(-1, 64, -7));
     try {
+      bot.emit('spawnReset');
       bot.game.dimension = 'the_nether';
       bot.emit('death');
       const line = find('你死了');
@@ -4017,6 +4032,28 @@ describe('暂态现状一行(告知 + 指路,不是开机仪式)', () => {
       },
     };
   }
+
+  it('重连作废旧床读数,直到服务端再次确认才报告已设置或已失效', async () => {
+    const { m, bot, host, spawn } = rig();
+    const readSpawn = () => (m as unknown as { personalSpawn: unknown }).personalSpawn;
+    try {
+      spawn();
+      expect(readSpawn()).toBeUndefined();
+      bot.emit('message', { translate: SET_SPAWN_TRANSLATE, toString: () => 'set' }, 'game_info');
+      expect(readSpawn()).toMatchObject({ x: 0.5, y: 64, z: 0.5, source: 'bed' });
+      const beforeReconnect = host.events.length;
+      spawn();
+      expect(readSpawn()).toBeUndefined();
+      expect(host.events.slice(beforeReconnect).map(e => e.text).join('\n')).not.toContain('重生点失效');
+      expect(m.logConsole().entries().filter(e => e.event === 'spawn-point').at(-1)?.msg)
+        .toContain('→ 尚未核实(来源:重连,等待核实)');
+      bot.emit('message', { translate: SET_SPAWN_TRANSLATE, toString: () => 'set' }, 'game_info');
+      expect(readSpawn()).toMatchObject({ source: 'bed' });
+      bot.emit('spawnReset');
+      expect(readSpawn()).toBeNull();
+      expect(host.events.at(-1)?.text).toContain('重生点失效');
+    } finally { await m.stop(); }
+  });
 
   it('搭连接回执走:一次连接只说一次,不阻塞任何东西', () => {
     const { m, host, spawn } = rig();

@@ -3714,7 +3714,7 @@ describe('教学句情境化:夜里/空手/无重生点改口', () => {
     exec.shutdown();
   });
 
-  it('夜里 + 空手 + 没重生点:改口成「这一趟要想清楚」,但不拦动作', async () => {
+  it('夜里 + 空手 + 未读重生点:报告已知风险与未知状态,但不拦动作', async () => {
     const bot = hintBot({ night: true });
     const { exec, reports } = makeExecutorOn(bot);
     exec.submit([{ skill: 'find', target: 'acacia_log', distance: 16 }]);
@@ -3723,7 +3723,8 @@ describe('教学句情境化:夜里/空手/无重生点改口', () => {
     expect(t).toContain('要走过去找就加 direction');
     expect(t).toContain('现在是夜里');
     expect(t).toContain('你空着手');
-    expect(t).toContain('你现在没有重生点');
+    expect(t).toContain('你的个人重生点尚未核实');
+    expect(t).not.toContain('你现在没有重生点');
     expect(t).toContain('这一趟要想清楚');
     // 只改说法:这一步照旧是「做完了」,没有被判成受阻
     expect(reports[0].kind).toBe('done');

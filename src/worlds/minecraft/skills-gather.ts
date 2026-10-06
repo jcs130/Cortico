@@ -472,7 +472,8 @@ export function travelRisks(bot: Bot, ctx: SkillContext): string[] {
   const out: string[] = [];
   if (isNight(bot.time?.timeOfDay ?? 0)) out.push('现在是夜里');
   if (!bestWeapon(bot)) out.push('你空着手(包里没有趁手的家伙)');
-  if (!(ctx.spawnAnchor?.() ?? null)) out.push('你现在没有重生点');
+  const spawn = ctx.spawnAnchor?.();
+  if (!spawn) out.push(spawn === null ? '你现在没有重生点' : '你的个人重生点尚未核实');
   return out;
 }
 

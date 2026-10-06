@@ -3800,7 +3800,8 @@ export class Executor {
       (c): c is Extract<SkillCall, { skill: 'find' }> => c.skill === 'find' && c.direction !== undefined,
     );
     if (legs.length === 0) return null;
-    const anchor = this.opts.spawnAnchor?.() ?? null;
+    const anchor = this.opts.spawnAnchor?.();
+    const spawnNote = anchor === null ? '你现在没有重生点' : '你的个人重生点尚未核实';
     const bot = this.opts.getBot();
     const feet = bot?.entity ? feetOf(bot) : null;
     /** 成对报告行军前后距出发点最近路标的距离。 */
@@ -3814,13 +3815,13 @@ export class Executor {
     const one = (c: Extract<SkillCall, { skill: 'find' }>): string => {
       const head = `这一步会朝${DIRECTION_ZH[c.direction!]}走最多 ${c.distance} 格`;
       if (!feet) {
-        return anchor ? `${head}(离重生点多远算不出来:还没连上服务器)` : `${head},走满时你现在没有重生点`;
+        return anchor ? `${head}(离重生点多远算不出来:还没连上服务器)` : `${head},${spawnNote}`;
       }
       const end = marchEnd(feet, c.direction!, c.distance);
       // 上界估算:是估算这件事必须写在字面上(「约」)
       const near = drift(feet, end) ?? this.opts.marks?.().near(end, true) ?? null;
       if (!anchor) {
-        return near ? `${head},走满时${near}(你现在没有重生点)` : `${head},走满时你现在没有重生点`;
+        return near ? `${head},走满时${near}(${spawnNote})` : `${head},${spawnNote}`;
       }
       if (anchor.dimension
         && normalizeDimension(anchor.dimension) !== normalizeDimension(dimensionOf(bot!))) {
