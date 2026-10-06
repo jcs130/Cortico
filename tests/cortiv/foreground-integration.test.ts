@@ -123,6 +123,38 @@ describe('CortiV foreground request context', () => {
     expect(withoutCache).toContainEqual(old);
   });
 
+  it('appends changed fact parts without replaying stable inventory, then rebuilds with the full current set', () => {
+    const bag = '已核验物品与存放位置。'.repeat(400);
+    let parts = [{ key: 'sample', text: '采样 00:00:01' }, { key: 'inventory', text: bag },
+      { key: 'health', text: '生命 10/20' }, { key: 'nearby', text: '附近有一个敌人' }];
+    const world: World = { id: 'game', envPromptVars: () => ({}), tools: () => [],
+      start: async () => {}, stop: async () => {}, requestFacts: () => ({
+        text: parts.map(part => part.text).join('\n'), parts, snapshotTypes: ['game.state'],
+      }) };
+    const { persona, config, messages } = rig([world]);
+    const archive = structuredClone(messages);
+    const first = persona.prepareRequest({ sessionId: 'main', round: 1, messages })!;
+    parts = [parts[0], parts[1], { key: 'health', text: '生命 8/20' }, { key: 'nearby', text: '' }];
+    parts[0] = { key: 'sample', text: '采样 00:00:02' };
+    const next = persona.prepareRequest({ sessionId: 'main', round: 2, messages })!;
+    expect(next.slice(0, first.length)).toEqual(first);
+    const appended = next.slice(first.length).map(record => itemText(record.item)).join('\n');
+    expect(appended).toContain('生命 8/20');
+    expect(appended).toContain('采样 00:00:02');
+    expect(appended).toContain('nearby]\n本项当前无内容');
+    expect(appended).not.toContain(bag);
+    expect(estimateMessagesTokens(next.slice(first.length))).toBeLessThan(estimateTokens(bag) / 10);
+    expect(persona.prepareRequest({ sessionId: 'main', round: 3, messages })).toEqual(next);
+    config.maxHistoryTokens = 1;
+    const rebuilt = persona.prepareRequest({ sessionId: 'main', round: 4, messages })!;
+    const current = rebuilt.map(record => itemText(record.item)).join('\n');
+    expect(current).toContain(bag);
+    expect(current).toContain('生命 8/20');
+    expect(current).not.toContain('生命 10/20');
+    expect(current).toContain('nearby]\n本项当前无内容');
+    expect(messages).toEqual(archive);
+  });
+
   it('keeps the projection notice identity stable and explicitly reports empty active work', () => {
     const { persona, messages } = rig();
     const first = persona.prepareRequest({ sessionId: 'main', round: 1, messages })!;

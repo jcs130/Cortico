@@ -776,7 +776,9 @@ export class CortiV extends Cormini {
       try {
         const facts = world.requestFacts();
         if (!facts?.text.trim()) continue;
-        pins.push(message('user', `[${world.id} 当前已观察事实]\n${facts.text}`));
+        pins.push(...(facts.parts?.length
+          ? facts.parts.map(part => message('user', `[${world.id} 当前已观察事实 · ${part.key}]\n${part.text || '本项当前无内容。'}`))
+          : [message('user', `[${world.id} 当前已观察事实]\n${facts.text}`)]));
         coveredSnapshots.push(...facts.snapshotTypes.map((type) => ({ source: world.id, type })));
       } catch (error) {
         this.core?.log.warn('本轮 World 事实不可用，保留原始状态链', { world: world.id, error: String(error) });
