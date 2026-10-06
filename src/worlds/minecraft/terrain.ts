@@ -367,7 +367,7 @@ export function narrateWorldSegments(
 
   const night = isNight(s.timeOfDay);
   const rain = s.raining ? '，在下雨' : '';
-  const clock = `现在是${timePhrase(s.timeOfDay)}${night ? '，天黑着' : ''}${rain}。`;
+  const clock = `游戏里现在是${timePhrase(s.timeOfDay)}${night ? '，天黑着' : ''}${rain}。`;
   // 时辰、天候、明暗是同一类环境读数;明暗只有"黑/不黑"两态,那句话本身就是比对键
   const lit = lightPhrase(s.light);
   segs.push({

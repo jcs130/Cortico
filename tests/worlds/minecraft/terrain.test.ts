@@ -938,8 +938,8 @@ describe('narrateWorldSegments(分段去重的数据源)', () => {
     for (const t of ['火把', '刷怪', '能压掉']) expect(dark.text).not.toContain(t);
     expect(clockOf({ light: 1 }).text).toContain('什么都看不见');
     // 微光以上、以及采不到样,都不加字
-    expect(clockOf({ light: 2 }).text).toBe('现在是正午前后。');
-    expect(clockOf({ light: null }).text).toBe('现在是正午前后。');
+    expect(clockOf({ light: 2 }).text).toBe('游戏里现在是正午前后。');
+    expect(clockOf({ light: null }).text).toBe('游戏里现在是正午前后。');
   });
 
   it('现实时钟自成一段:报到分,与游戏内时辰互不牵连', () => {
@@ -955,6 +955,14 @@ describe('narrateWorldSegments(分段去重的数据源)', () => {
     expect(segOf({ realTime: '2026-08-19T21:30:00+08:00' }, 'clock').cmp)
       .toBe(segOf({}, 'clock').cmp);
     expect(segOf({ timeOfDay: 18000 }, 'realclock').cmp).toBe(segOf({}, 'realclock').cmp);
+  });
+
+  it('游戏夜晚与现实白天同时标明各自的时间来源', () => {
+    const night = snap({ timeOfDay: 18000, realTime: '2026-08-19T10:15:00+08:00' });
+    const text = narrateWorld(night);
+    expect(text).toContain('游戏里现在是');
+    expect(text).toContain('天黑着');
+    expect(text).toContain('现实世界现在是 8 月 19 日 10:15。');
   });
 
   it('明暗只有黑与不黑两态:亮度数字变动不再牵动 clock 段', () => {
