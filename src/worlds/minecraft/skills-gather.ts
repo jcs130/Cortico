@@ -6,7 +6,7 @@
 import type { Bot } from 'mineflayer';
 import { Vec3 } from 'vec3';
 import {
-  CROP_MAX_AGE, DIRECTIONS, DIRECTION_ZH, bearing, biomeAt, canSeeBlockAt, canSeeEntity, cropAgeAt,
+  CROP_MAX_AGE, DIRECTIONS, DIRECTION_ZH, bearing, biomeAt, canSeeBlockAt, canSeeEntity, cropAgeAt, farmlandMoistureAt,
   droppedStackOf, entityObservationNote, headInWater, isNight, type Direction, villagerNote,
 } from './terrain.ts';
 import { Aborted, SkillBlocked, checkAbort, sleep, type SkillContext } from './skill-context.ts';
@@ -1477,10 +1477,12 @@ export async function skillTrade(
 
 /* ========== 锚点几何技能族:probe / build / excavate / tunnel ========== */
 
-/** 那一格是作物就带上原版 age 原值;不是作物给空串(与快照的括注同一形式) */
-export function probeAgeText(bot: Bot, c: Cell): string {
+/** 作物与耕地附各自的服务端属性，属性未读到时不推断。 */
+export function probeStateText(bot: Bot, c: Cell): string {
   const age = cropAgeOfCell(bot, c);
-  return age ? `(age ${age.value}/${age.max})` : '';
+  if (age) return `(age ${age.value}/${age.max})`;
+  const moisture = farmlandMoistureAt(bot, c);
+  return moisture ? `(moisture ${moisture.value}/${moisture.max})` : '';
 }
 
 /** probe.where 直接检查指定区域的区块数据，不经过视线闸；零匹配也明确回报。 */
@@ -1536,10 +1538,10 @@ export async function skillProbe(bot: Bot, call: Extract<SkillCall, { skill: 'pr
   const unloaded = pre.filter((e) => e.name === null).length;
   const memo = ctx.probeMemo;
   const geoKey = fnv32(`${locating ? `where:${call.where!.join('|')}` : 'all'}|${call.shape}|${cells.map((c) => `${c.x},${c.y},${c.z}`).join(';')}`);
-  // 作物的 age 进指纹:名字没变、龄期跳档也是新读数,不然「熟了没」永远回「与上次相同」
+  // 同材质的龄期与水分变化也构成新读数。
   const readHash = fnv32(pre.map((e) => {
     if (e.name === null) return '?';
-    return e.name in CROP_MAX_AGE ? `${e.name}@${cropAgeOfCell(bot, e.c)?.value ?? '?'}` : e.name;
+    return `${e.name}${e.name in CROP_MAX_AGE || e.name === 'farmland' ? probeStateText(bot, e.c) : ''}`;
   }).join(','));
   const previous = memo?.entries?.get(geoKey) ?? memo?.last;
   if (previous && previous.key === geoKey && previous.hash === readHash) {
@@ -1571,7 +1573,7 @@ export async function skillProbe(bot: Bot, call: Extract<SkillCall, { skill: 'pr
       lines.push(`${head}: 全是空气。`);
     } else {
       const airTail = airCells.length > 0 ? `;其余 ${airCells.length} 格是空气` : '';
-      lines.push(`${head},逐格: ${listed.map((e) => `(${e.c.x},${e.c.y},${e.c.z}):${zhName(e.name!)}${probeAgeText(bot, e.c)}`).join('、')}${airTail}。`);
+      lines.push(`${head},逐格: ${listed.map((e) => `(${e.c.x},${e.c.y},${e.c.z}):${zhName(e.name!)}${probeStateText(bot, e.c)}`).join('、')}${airTail}。`);
     }
     pushPocketLine(bot, lines, cells, airCells);
   } else {

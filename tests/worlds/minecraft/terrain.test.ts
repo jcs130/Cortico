@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { Vec3 } from 'vec3';
 import {
   bearing, bodyInWater, canSeeBlockAt, classifyEntity, cropAgeAt, dayNightTransition, droppedStackOf, facingDegrees,
-  facingOf, findBankCell, isNight, isBackground, isRaining, narrateWorld, narrateWorldSegments,
+  facingOf, farmlandMoistureAt, findBankCell, isNight, isBackground, isRaining, narrateWorld, narrateWorldSegments,
   pitchPhrase, pocketScan, scanMatureCrops, snapshotFingerprint, snapshotFromBot, standCellsAround,
   timePhrase, villagerNote, worldDelta,
   type BlockReader, type ItemStack, type WorldSnapshot,
@@ -819,6 +819,7 @@ describe('作物与耕地感知', () => {
     };
     const s = snapshotFromBot(bot);
     expect(s.nearbyBlocks.find((b) => b.name === 'wheat')?.age).toEqual({ value: 5, max: 7 });
+    expect(s.nearbyBlocks.find((b) => b.name === 'wheat')?.soil).toEqual({ name: 'farmland', x: 3, y: 63, z: 0, moisture: { value: 4, max: 7 } });
     expect(s.nearbyBlocks.find((b) => b.name === 'farmland')?.moisture).toEqual({ value: 4, max: 7 });
     expect(s.nearbyBlocks.filter((b) => b.name === 'spruce_door')).toMatchObject([
       { x: 1, y: 64, z: 0, open: false },
@@ -827,8 +828,28 @@ describe('作物与耕地感知', () => {
     const text = narrateWorld(s);
     expect(text).toContain('小麦（age 5/7）');
     expect(text).toContain('耕地（moisture 4/7）');
+    expect(text).toContain('该株正下方 3, 63, 0：耕地，moisture 4/7');
     expect(text).toContain('云杉门（关着，坐标 1, 64, 0）');
     expect(text).toContain('云杉门（开着，坐标 2, 64, 0）');
+    const changed = { ...bot, blockAt: (p: Pos) => p.x === 3 && p.y === 63
+      ? { name: 'farmland', position: p, getProperties: () => ({ moisture: 0 }) } : bot.blockAt(p) };
+    const dry = snapshotFromBot(changed);
+    expect(dry.nearbyBlocks.find(b => b.name === 'farmland')?.moisture?.value).toBe(4);
+    expect(narrateWorld(dry)).toContain('该株正下方 3, 63, 0：耕地，moisture 0/7');
+    expect(narrateWorldSegments(dry).find(segment => segment.key === 'structure')?.cmp)
+      .not.toBe(narrateWorldSegments(s).find(segment => segment.key === 'structure')?.cmp);
+    const unknown = snapshotFromBot({ ...bot, blockAt: (p: Pos) => p.x === 3 && p.y === 63 ? null : bot.blockAt(p) });
+    expect(narrateWorld(unknown)).toContain('该株正下方土壤未读到');
+  });
+
+  it('single-cell moisture requires an actual farmland property and accepts protocol strings', () => {
+    for (const [block, expected] of [
+      [null, null], [{ name: 'water', getProperties: () => ({ level: 0 }) }, null],
+      [{ name: 'farmland' }, null], [{ name: 'farmland', getProperties: () => ({ moisture: '0' }) }, { value: 0, max: 7 }],
+      [{ name: 'farmland', getProperties: () => ({ moisture: '7' }) }, { value: 7, max: 7 }],
+    ] as const) {
+      expect(farmlandMoistureAt({ blockAt: () => block }, { x: 2, y: 63, z: 0 })).toEqual(expected);
+    }
   });
 });
 

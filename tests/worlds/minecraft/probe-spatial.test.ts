@@ -7,7 +7,7 @@ import { compositionText } from '../../../src/worlds/minecraft/receipt.ts';
 import type { SkillContext } from '../../../src/worlds/minecraft/skill-context.ts';
 import { skillProbe } from '../../../src/worlds/minecraft/skills-gather.ts';
 
-interface CellFixture { x: number; y: number; z: number; name: string; age?: number }
+interface CellFixture { x: number; y: number; z: number; name: string; age?: number; moisture?: number }
 
 function terrainBot(cells: CellFixture[], position = new Vec3(6, 67, 3)): Bot {
   const blocks = new Map(cells.map((cell) => [`${cell.x},${cell.y},${cell.z}`, cell]));
@@ -21,7 +21,8 @@ function terrainBot(cells: CellFixture[], position = new Vec3(6, 67, 3)): Bot {
         name: cell.name,
         position: p,
         boundingBox: cell.name === 'wheat' ? 'empty' : 'block',
-        getProperties: () => cell.age === undefined ? {} : { age: cell.age },
+        getProperties: () => ({ ...(cell.age === undefined ? {} : { age: cell.age }),
+          ...(cell.moisture === undefined ? {} : { moisture: cell.moisture }) }),
       };
     },
   } as unknown as Bot;
@@ -121,5 +122,20 @@ describe('probe spatial material samples', () => {
     expect(first).toContain(`${zhName('dirt')}×28(最近的在 (6, 66, 3))`);
     expect(repeated).toContain('与上次探查相同');
     expect(repeated).toContain(`上次: ${first}`);
+  });
+
+  it('irrigation updates the same crop-soil probe even before the crop grows', async () => {
+    const soil = { x: 1, y: 66, z: 1, name: 'farmland', moisture: 0 };
+    const cells = [soil, { x: 1, y: 67, z: 1, name: 'wheat', age: 3 }];
+    const bot = terrainBot(cells), ctx = probeContext();
+    const call = { skill: 'probe', shape: 'line', anchors: [[1, 66, 1], [1, 67, 1]] } as const;
+    const first = await skillProbe(bot, { ...call, anchors: [[1, 66, 1], [1, 67, 1]] }, ctx);
+    expect(first).toContain(`(1,66,1):${zhName('farmland')}(moisture 0/7)`);
+    soil.moisture = 7;
+    const irrigated = await skillProbe(bot, { ...call, anchors: [[1, 66, 1], [1, 67, 1]] }, ctx);
+    expect(irrigated).not.toContain('与上次探查相同');
+    expect(irrigated).toContain(`(1,66,1):${zhName('farmland')}(moisture 7/7)`);
+    expect(irrigated).toContain(`(1,67,1):${zhName('wheat')}(age 3/7)`);
+    expect(await skillProbe(bot, { ...call, anchors: [[1, 66, 1], [1, 67, 1]] }, ctx)).toContain('与上次探查相同');
   });
 });

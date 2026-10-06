@@ -1247,7 +1247,7 @@ const SKILLS: readonly SkillSpec[] = [
     name: 'probe',
     doc: `{"skill":"probe","shape":"line","anchors":[["~","~2","~"],["~","~80","~"]]}
                                                  只看不动:读出你圈的这片形状里的材质构成与液体;27 格以内
-                                                 逐格报「(x,y,z):方块」,作物带 age。圈哪片由你定
+                                                 逐格报「(x,y,z):方块」,作物带 age，耕地带 moisture。圈哪片由你定
 {"skill":"probe","shape":"box","anchors":[[-40,40,-120],[-8,60,-88]],"where":["spawner","#chests"]}
                                                  加 "where" = 只报这几样在这片里的坐标(按远近,每样最多 ${PROBE_WHERE_SHOWN} 处)。
                                                  这一档直接读区块,不看视线也不管挡没挡着 —— 封在结构里的刷怪笼、

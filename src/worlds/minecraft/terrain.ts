@@ -167,6 +167,8 @@ export interface WorldSnapshot {
     age?: { value: number; max: number };
     /** 耕地水分:原版 moisture 方块状态的原值与满值(0–7),不折成布尔;仅耕地填 */
     moisture?: { value: number; max: number };
+    /** 作物正下方一格的实际读数；null 表示该格未加载。 */
+    soil?: { name: string; x: number; y: number; z: number; moisture?: { value: number; max: number } } | null;
     /** 门/栅栏门的原版 open 状态；读取不到时不猜。 */
     open?: boolean;
   }>;
@@ -568,7 +570,14 @@ function blockSuffix(b: WorldSnapshot['nearbyBlocks'][number]): string {
     const state = b.open === undefined ? '开合状态未读到' : b.open ? '开着' : '关着';
     return `（${state}，坐标 ${b.x}, ${b.y}, ${b.z}）`;
   }
-  if (b.age) return `（age ${b.age.value}/${b.age.max}）`;
+  if (b.age) {
+    const age = `（age ${b.age.value}/${b.age.max}）`;
+    if (b.soil === undefined) return age;
+    if (b.soil === null) return age + '（该株正下方土壤未读到）';
+    const soil = b.soil;
+    return age + `（该株正下方 ${soil.x}, ${soil.y}, ${soil.z}：${zhName(soil.name)}`
+      + (soil.moisture ? `，moisture ${soil.moisture.value}/${soil.moisture.max}` : soil.name === 'farmland' ? '，moisture 未读到' : '') + '）';
+  }
   if (b.moisture) return `（moisture ${b.moisture.value}/${b.moisture.max}）`;
   return containerSuffix(b.contents);
 }
@@ -580,7 +589,8 @@ function blockSuffix(b: WorldSnapshot['nearbyBlocks'][number]): string {
  */
 function stateCmpOf(b: WorldSnapshot['nearbyBlocks'][number]): string {
   if (isDoorOrGate(b.name)) return b.open === undefined ? '?' : b.open ? 'open' : 'closed';
-  if (b.age) return blockSuffix(b);
+  if (b.age) return `age:${b.age.value}/${b.age.max}|soil:` + (b.soil === undefined ? '' : b.soil === null ? '?'
+    : `${b.soil.name}@${b.soil.x},${b.soil.y},${b.soil.z}:${b.soil.moisture ? b.soil.moisture.value > 0 ? '湿' : '干' : '?'}`);
   if (b.moisture) return b.moisture.value > 0 ? '湿' : '干';
   return '';
 }
@@ -1500,7 +1510,7 @@ function blockState(
   bot: any,
   name: string,
   p: { x: number; y: number; z: number },
-): { age?: { value: number; max: number }; moisture?: { value: number; max: number }; open?: boolean } {
+): Pick<WorldSnapshot['nearbyBlocks'][number], 'age' | 'moisture' | 'open' | 'soil'> {
   const max = CROP_MAX_AGE[name];
   if (max === undefined && name !== 'farmland' && !isDoorOrGate(name)) return {};
   const b = bot.blockAt(p as never);
@@ -1515,7 +1525,20 @@ function blockState(
     return Number.isFinite(moisture) ? { moisture: { value: moisture, max: FARMLAND_MAX_MOISTURE } } : {};
   }
   const age = Number(props?.age);
-  return Number.isFinite(age) ? { age: { value: age, max } } : {};
+  const underAt = new Vec3(p.x, p.y - 1, p.z);
+  const under = bot.blockAt(underAt);
+  const moisture = farmlandMoistureAt(bot, underAt);
+  const soil = under ? { name: under.name, x: underAt.x, y: underAt.y, z: underAt.z,
+    ...(moisture ? { moisture } : {}) } : null;
+  return { ...(Number.isFinite(age) ? { age: { value: age, max } } : {}), soil };
+}
+
+/** 单格耕地的服务端 moisture 原值；未加载、非耕地或属性未读到时返回 null。 */
+export function farmlandMoistureAt(bot: any, p: { x: number; y: number; z: number }): { value: number; max: number } | null {
+  const block = bot.blockAt(new Vec3(p.x, p.y, p.z));
+  if (block?.name !== 'farmland') return null;
+  const value = Number(typeof block.getProperties === 'function' ? block.getProperties()?.moisture : undefined);
+  return Number.isFinite(value) ? { value, max: FARMLAND_MAX_MOISTURE } : null;
 }
 
 /**
