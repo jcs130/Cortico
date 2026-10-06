@@ -29,6 +29,25 @@ const refText = (record: ContextRecord, index: number): string => {
 };
 
 describe('请求副本的旧交接笔记节选', () => {
+  it('replaces a historical Persona checkpoint inside a mixed frame while keeping outside speech, media and source ranges', () => {
+    const original = mixed();
+    original.context.frame!.events[0].type = 'activity_plan';
+    original.context.blobs = [{ handle: 'mem:scene.png', mime: 'image/png', fallbackText: '现场图片' }];
+    const before = structuredClone(original);
+    const result = excerptHandoffRecords([original, later()], selected, { coveredCheckpoints: ['activity_plan'] })[0];
+    expect(refText(result, 0)).toContain('已由本轮最新状态替代');
+    expect(refText(result, 0)).not.toContain(longNote);
+    expect(refText(result, 1)).toBe(refText(original, 1));
+    expect(refText(result, 3)).toBe(refText(original, 3));
+    expect(result.context.blobs).toBe(original.context.blobs);
+    expect(original).toEqual(before);
+    const refs = result.context.frame!.events;
+    for (const ref of refs) expect(itemText(result.item).slice(ref.start, ref.start + ref.chars).length).toBe(ref.chars);
+    expect(excerptHandoffRecords([original], selected, { coveredCheckpoints: ['activity_plan'] })[0]).toBe(original);
+    expect(excerptHandoffRecords([original, later()], selected, {
+      coveredCheckpoints: ['activity_plan'], protectedRecords: [original],
+    })[0]).toBe(original);
+  });
   it('同一混合frame的两段旧笔记分别节选，内部行、聊天和拒绝原文不变', () => {
     const original = mixed();
     const result = excerptHandoffRecords([original, later()], selected);

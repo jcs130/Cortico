@@ -76,6 +76,20 @@ describe('Persona长期复盘', () => {
     expect(r.review.review().accepted).toBe(true);
     await vi.advanceTimersByTimeAsync(0);
   });
+  it('新规划读取当前阶段证据，旧背景说明仍在账本中但不作为当前事实重复投递', async () => {
+    const r = rig({ agendaEnabled: true });
+    const oldSummary = '背包全满，必须先一直整理箱子才能探索';
+    r.agenda.propose(JSON.stringify({ ...JSON.parse(candidate), summary: oldSummary }), 0, stamp());
+    r.agenda.operate({ operation: 'adopt' });
+    r.agenda.operate({ operation: 'update', id: 'create', status: 'done', note: '已验收作品；背包还有空位' });
+    r.reply(async () => candidate); r.review.review(); await vi.advanceTimersByTimeAsync(0);
+    const material = r.forks[0].messages.map(record => itemText(record.item)).join('\n');
+    expect(material).toContain('已完成 1 项');
+    expect(material).toContain('已验收作品；背包还有空位');
+    expect(material).not.toContain(oldSummary);
+    expect(JSON.parse(r.agenda.operate({ operation: 'read' })).summary).toBe(oldSummary);
+    expect(r.agenda.state().items[0].status).toBe('done');
+  });
   it('日程生成期间前台的新证据使候选不能覆盖；格式开关热更也丢弃旧输出', async () => {
     const r = rig({ agendaEnabled: true });
     r.agenda.propose(candidate, 0, stamp()); r.agenda.operate({ operation: 'adopt' });

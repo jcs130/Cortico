@@ -7,6 +7,8 @@ interface Edit { start: number; end: number; text: string; }
 
 interface HandoffExcerptOptions {
   protectedRecords?: readonly ContextRecord[];
+  /** Fresh Persona state pins supersede these historical checkpoint spans. */
+  coveredCheckpoints?: readonly string[];
   /** Only these unchanged automatic spans may be excerpted inside protected/latest input. */
   currentHandoffs?: readonly FrameEventRef[];
 }
@@ -48,10 +50,10 @@ function editedText(text: string, start: number, edits: readonly Edit[]): string
 }
 
 function excerptRecord(
-  record: ContextRecord, excerpt: (text: string) => string, allowed?: ReadonlySet<FrameEventRef>,
+  record: ContextRecord, excerpt: (text: string) => string, covered: ReadonlySet<string>, allowed?: ReadonlySet<FrameEventRef>,
 ): ContextRecord {
   const refs = record.context.frame?.events;
-  if (!refs?.some((ref) => ref.source === 'persona' && ref.type === HANDOFF_NOTE_TYPE)) return record;
+  if (!refs?.some((ref) => ref.source === 'persona' && (ref.type === HANDOFF_NOTE_TYPE || covered.has(ref.type)))) return record;
   const item = record.item;
   if (item.type !== 'message' && item.type !== 'function_call_output') return record;
   if (item.type === 'message' && (item.role === 'system' || item.role === 'developer')) return record;
@@ -60,6 +62,11 @@ function excerptRecord(
   const edits: Edit[] = [];
   try {
     for (const ref of refs) {
+      if (ref.source === 'persona' && covered.has(ref.type) && ref.chars > 0 && !allowed) {
+        edits.push({ start: ref.start, end: ref.start + ref.chars,
+          text: `[历史 ${ref.type} 状态；已由本轮最新状态替代，原文可用 expand_context 查看。]` });
+        continue;
+      }
       if (ref.source !== 'persona' || ref.type !== HANDOFF_NOTE_TYPE || ref.chars === 0
         || (allowed && !allowed.has(ref))) continue;
       const original = source.slice(ref.start, ref.start + ref.chars);
@@ -110,6 +117,7 @@ export function excerptHandoffRecords(
   const boundary = inputBoundary(records);
   const protectedRecords = new Set(options.protectedRecords);
   const current = new Set(options.currentHandoffs);
+  const covered = new Set(options.coveredCheckpoints);
   return records.map((record, index) => record.context.head ? record
-    : excerptRecord(record, excerpt, index >= boundary || protectedRecords.has(record) ? current : undefined));
+    : excerptRecord(record, excerpt, covered, index >= boundary || protectedRecords.has(record) ? current : undefined));
 }

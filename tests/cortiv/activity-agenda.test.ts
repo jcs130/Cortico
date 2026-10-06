@@ -57,6 +57,69 @@ describe('persistent Persona activity agenda', () => {
     expect(agenda.operate({ operation: 'adopt' })).toContain('不能覆盖');
     expect(agenda.state().items[0]).toMatchObject({ status: 'done', note: '实际通行验收已通过' });
   });
+  it('explicitly adopts a new candidate after concurrent progress without replacing any existing evidence', () => {
+    const { dir, agenda } = rig(); adopt(agenda);
+    const captured = agenda.revision();
+    agenda.operate({ operation: 'focus', id: 'river' });
+    agenda.operate({ operation: 'update', id: 'finish-home', status: 'done', note: '现场验收通过' });
+    const before = agenda.state();
+    const candidate = { ...plan(), items: [
+      { ...plan().items[1], id: 'meet-neighbor', title: '与附近同伴交流', doneWhen: '得到实际回应或留下可回访条件' },
+      { ...plan().items[1], id: 'new-place', title: '侦查一个新地点' },
+    ] };
+    agenda.propose(JSON.stringify(candidate), captured, stamp);
+    agenda.operate({ operation: 'adopt', id: 'meet-neighbor' });
+    expect(agenda.state().items.slice(0, 2)).toEqual(before.items);
+    expect(agenda.state().items[2]).toMatchObject({ id: 'meet-neighbor', status: 'queued', note: '' });
+    expect(agenda.state().items.filter(item => item.status === 'active')).toHaveLength(1);
+    expect(agenda.state().proposal?.items.map(item => item.id)).toEqual(['new-place']);
+    expect(new ActivityAgenda(dir, now).state()).toEqual(agenda.state());
+    agenda.operate({ operation: 'adopt', id: 'new-place' });
+    expect(agenda.state().proposal).toBeNull();
+  });
+  it('an unknown selected id cannot silently adopt the whole proposal', () => {
+    const { dir, agenda } = rig();
+    agenda.propose(JSON.stringify(plan()), 0, stamp);
+    const before = readFileSync(join(dir, AGENDA_FILE), 'utf8');
+    expect(agenda.operate({ operation: 'adopt', id: 'not-in-proposal' })).toContain('输入错误');
+    expect(readFileSync(join(dir, AGENDA_FILE), 'utf8')).toBe(before);
+    expect(agenda.state().items).toEqual([]);
+  });
+  it('selected adoption cannot reset existing progress or reuse a completed id with a different objective', () => {
+    const { agenda } = rig(); adopt(agenda);
+    agenda.operate({ operation: 'update', id: 'finish-home', status: 'done', note: '验收通过' });
+    agenda.operate({ operation: 'focus', id: 'river' });
+    const candidate = plan(); candidate.items[0].title = '重新建设入口';
+    agenda.propose(JSON.stringify(candidate), 0, stamp);
+    const before = agenda.state();
+    expect(agenda.operate({ operation: 'adopt', id: 'finish-home' })).toContain('已完成');
+    expect(agenda.operate({ operation: 'adopt', id: 'river' })).toContain('进展保留');
+    expect(agenda.state()).toEqual(before);
+  });
+  it('selected adoption at capacity leaves the ledger and proposal unchanged', () => {
+    const { agenda } = rig();
+    adopt(agenda, { ...plan(), items: Array.from({ length: 8 }, (_, index) => ({ ...plan().items[0], id: String(index) })) });
+    agenda.propose(JSON.stringify(plan()), agenda.revision(), stamp);
+    const before = agenda.state();
+    expect(agenda.operate({ operation: 'adopt', id: 'river' })).toContain('上限');
+    expect(agenda.state()).toEqual(before);
+  });
+  it('compact context shows actual agenda status and candidate identities while historical background is available on read', () => {
+    const { agenda } = rig();
+    const value = { ...plan(), summary: '之前背包已满，需要继续整理。' };
+    adopt(agenda, value);
+    agenda.operate({ operation: 'update', id: 'finish-home', status: 'done', note: '验收通过' });
+    agenda.operate({ operation: 'update', id: 'river', status: 'deferred', note: '等同伴确认时间，其余活动照常' });
+    agenda.propose(JSON.stringify({ ...plan(), summary: '生成时还未返回旧地点。' }), 0, stamp);
+    const summary = agenda.summary();
+    expect(summary).toContain('已完成 1 项，排队 0 项，挂起 1 项');
+    expect(summary).toContain(stamp);
+    expect(summary).toContain('整份已落后');
+    expect(summary).toContain('"river"');
+    expect(summary).not.toContain(value.summary);
+    expect(summary).not.toContain('生成时还未返回旧地点');
+    expect(JSON.parse(agenda.operate({ operation: 'read' })).summary).toBe(value.summary);
+  });
   it('fresh candidate preserves stable objective evidence; focus never reopens a completed phase', () => {
     const { agenda } = rig(); adopt(agenda);
     agenda.operate({ operation: 'update', id: 'finish-home', status: 'done', note: '通行验收通过' });

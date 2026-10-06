@@ -29,6 +29,25 @@ function rig(worlds: World[] = []) {
 }
 
 describe('CortiV foreground request context', () => {
+  it('current agenda state supersedes old agenda prose embedded alongside a protected handoff', () => {
+    const { persona, config } = rig(); persona.attach(makeFakeHarnessApi());
+    config.maxHistoryTokens = 1;
+    const stale = '之前背包已满，需要继续整理箱子。'.repeat(30);
+    const handoff = '长期建筑目标仍未验收。';
+    const old = message('user', stale + '\n' + handoff, { frame: { events: [
+      { cursor: 1, source: 'persona', type: 'activity_plan', ts: '2026-01-01T00:00:01Z', start: 0, chars: stale.length },
+      { cursor: 2, source: 'persona', type: 'handoff-note', ts: '2026-01-01T00:00:01Z', start: stale.length + 1, chars: handoff.length },
+    ] } });
+    const records = [message('system', '契约'), old, message('user', '同伴邀请一起探索。')];
+    const before = structuredClone(records);
+    const view = persona.prepareRequest({ sessionId: 'main', round: 1, messages: records })!;
+    const note = view.find(record => record.item.id === old.item.id)!;
+    expect(itemText(note.item)).toContain(handoff);
+    expect(itemText(note.item)).not.toContain(stale);
+    expect(itemText(note.item)).toContain('已由本轮最新状态替代');
+    expect(view.map(record => itemText(record.item)).join('\n')).toContain('排队 0 项');
+    expect(records).toEqual(before);
+  });
   it('pins action requests and their receipts when older spoken plans leave the short history', () => {
     const { persona, messages } = rig();
     persona.attach(makeFakeHarnessApi({ toolsTagged: tag => new Set(

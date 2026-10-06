@@ -94,6 +94,37 @@ describe('前台请求的局部历史', () => {
     expect(result.historyTokens).toEqual(estimateMessagesTokens([records.at(-1)!]));
     expect(result.protectedTokens).toEqual(result.historyTokens);
   });
+  it('current Persona checkpoints allow obsolete plan and agenda notes to leave the short request without altering the ledger', () => {
+    const planning = frame('persona', 'planning', '旧候选仍要整理箱子。'.repeat(150), 1);
+    const agenda = frame('persona', 'activity_plan', '旧日程整理尚未完成。'.repeat(100), 2);
+    const handoff = frame('persona', 'handoff-note', '未验收的长期目标仍保留。', 3);
+    const input = frame('game', 'chat', '同伴邀请探索新的地方。', 4);
+    const records = [message('system', '契约'), planning, agenda, handoff, input, ...action('reply')];
+    const before = structuredClone(records);
+    const current = message('user', '当前日程：整理已完成，探索是待选候选。');
+    const projected = projectForeground(records, { maxHistoryTokens: 1, minRecentRounds: 1,
+      coveredCheckpoints: ['planning', 'activity_plan'] }, [current]);
+    expect(projected.messages).not.toContain(planning);
+    expect(projected.messages).not.toContain(agenda);
+    expect(projected.messages).toContain(handoff);
+    expect(projected.messages).toContain(input);
+    expect(projected.messages).toContain(current);
+    expect(allCallsPaired(projected.messages)).toBe(true);
+    expect(records).toEqual(before);
+    const expanded = projectForeground(records, { maxHistoryTokens: 100000, minRecentRounds: 1,
+      coveredCheckpoints: ['planning', 'activity_plan'] }, [current]);
+    expect(expanded.messages).toContain(planning);
+    expect(expanded.messages).toContain(agenda);
+  });
+  it('a newly delivered covered checkpoint still remains until its current input batch is processed', () => {
+    const input = frame('game', 'chat', '新的同伴消息。', 1);
+    const planning = frame('persona', 'planning', '这次刚交回的候选。', 2);
+    const records = [...response('old', '旧记录'.repeat(100)), input, planning, ...action('reply')];
+    const projected = projectForeground(records, { maxHistoryTokens: 1, minRecentRounds: 1,
+      coveredCheckpoints: ['planning'] }, [message('user', '当前候选仍待核验。')]);
+    expect(projected.messages).toContain(input);
+    expect(projected.messages).toContain(planning);
+  });
 
   it('按完整组保留近期历史，不能跳过较新的大组再选较小的旧记录', () => {
     const old = response('old', '小的旧记录');

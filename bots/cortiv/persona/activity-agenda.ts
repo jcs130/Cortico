@@ -97,6 +97,7 @@ export class ActivityAgenda {
     if (args.operation === 'adopt') {
       const draft = this.ledger.proposal;
       if (!draft) return '[日程] 没有候选日程；可请求后台重新规划。';
+      if (args.id !== undefined) return this.adoptItem(args.id, draft);
       if (draft.baseRevision !== this.ledger.revision) return '[日程] 候选生成期间已有新进展，不能覆盖；先请求重新规划。';
       const items = draft.items.map(item => {
         const old = this.ledger.items.find(previous => previous.id === item.id
@@ -132,16 +133,33 @@ export class ActivityAgenda {
   summary(): string {
     const active = this.ledger.items.find(item => item.status === 'active');
     const next = this.ledger.items.filter(item => item.status === 'queued');
+    const deferred = this.ledger.items.filter(item => item.status === 'deferred');
+    const done = this.ledger.items.filter(item => item.status === 'done').length;
     const draft = this.ledger.proposal;
     const lines = ['[活动日程；意图与执行结果分别记录]',
-      ...(this.ledger.summary ? [clip(this.ledger.summary, 160)] : []),
+      `已完成 ${done} 项，排队 ${next.length} 项，挂起 ${deferred.length} 项；规划时的背景说明仅在 read 中保留，现场以当前观察为准。`,
       active ? `当前 id=${JSON.stringify(active.id)} ${clip(active.title, 80)}；够了就收尾：${clip(active.doneWhen, 160)}；条件：${clip(active.when, 100)}；受阻：${clip(active.ifBlocked, 100)}${active.note ? '；最近证据：' + clip(active.note, 160) : ''}` : '当前阶段尚未选择；结合现场自行选下一项。',
       ...next.map(item => `候选 id=${JSON.stringify(item.id)} ${clip(item.title, 80)}`),
-      ...(this.ledger.items.some(item => item.status === 'deferred') ? ['受阻阶段留在日程中，read 可查恢复条件。'] : []),
-      ...(draft ? [`后台候选${draft.baseRevision === this.ledger.revision ? '待核验采用' : '已落后于当前进展，需重规划'}：${clip(draft.summary, 180)}；用 activity_plan read 查看。`] : []),
+      ...(deferred.length ? ['挂起阶段仅在新条件出现后复核，read 可查恢复条件；其他可行活动可以继续。'] : []),
+      ...(draft ? [`后台候选采样于 ${draft.capturedAt}，${draft.baseRevision === this.ledger.revision ? '待核验采用' : '整份已落后于当前进展'}：${draft.items.map(item => `${JSON.stringify(item.id)} ${clip(item.title, 60)}`).join('；')}。read 核验后可 adopt 指定一项，不改现有进展；整份过期则 review。`] : []),
       '阶段变化用 activity_plan update 留证据；详情和资料按需 read；日程不阻止交流、应急和新的选择。'];
     const result = lines.join('\n');
     return result.length <= AGENDA_SUMMARY_MAX_CHARS ? result : result.slice(0, AGENDA_SUMMARY_MAX_CHARS - 1) + '…';
+  }
+  /** Accept one explicitly selected new objective without replacing concurrent progress. */
+  private adoptItem(id: unknown, draft: Proposal): string {
+    const item = draft.items.find(entry => entry.id === id);
+    if (!item) return '[日程输入错误] adopt 的 id 必须来自当前候选；用 read 核验候选与现场前提。';
+    const current = this.ledger.items.find(entry => entry.id === id);
+    if (current) return current.status === 'done'
+      ? '[日程] 此 id 已完成，完成证据保留；新的目的需要单独规划。'
+      : '[日程] 此 id 已在现有日程中，进展保留；用 focus/update 选择或记录，不覆盖。';
+    if (this.ledger.items.length >= AGENDA_MAX_ITEMS) return '[日程] 已达到阶段上限；read 对账后 review 生成精简候选，再核验整份采用。';
+    const remaining = draft.items.filter(entry => entry.id !== id);
+    this.save({ ...this.ledger, revision: this.ledger.revision + 1,
+      items: [...this.ledger.items, { ...cleanItem(item), status: 'queued', note: '', updatedAt: this.stamp() }],
+      proposal: remaining.length ? { ...draft, items: remaining } : null });
+    return this.summary();
   }
   private stamp(): string { return new Date(this.now()).toISOString(); }
   private save(next: Ledger): void {

@@ -25,6 +25,19 @@ function source(): ContextRecord[] {
 function text(records: readonly ContextRecord[]): string { return records.map(({ item }) => itemText(item)).join('\n'); }
 
 describe('前台上下文缓存epoch', () => {
+  it('checkpoint coverage changes rebuild the request so replaced historical plans are no longer protected', () => {
+    const epoch = new ForegroundEpoch();
+    const planning = frame('persona', 'planning', '旧的计划说明。'.repeat(300), 1);
+    const records = [message('system', '契约'), planning, frame('game', 'chat', '当前同伴发言。', 2), ...action('reply')];
+    const pins = [message('user', '最新日程状态，旧阶段已完成。')];
+    const first = epoch.prepare(records, options, pins);
+    expect(first.messages).toContainEqual(planning);
+    const next = epoch.prepare(records, { ...options, coveredCheckpoints: ['planning'] }, pins);
+    expect(next.rebuildReason).toBe('options_changed');
+    expect(next.messages).not.toContainEqual(planning);
+    expect(next.messages).toContainEqual(pins[0]);
+    expect(records[1]).toBe(planning);
+  });
   it('完整实际投影视图作为下一次native wire输入前缀，包括事实、待办、notice、多调用及真实失败', () => {
     const epoch = new ForegroundEpoch();
     const initial = source();

@@ -466,6 +466,7 @@ export class CortiV extends Cormini {
   private readonly foregroundEpoch = new ForegroundEpoch((records, options, pins) => {
     const reading = excerptHandoffRecords(records, excerptRecent, {
       protectedRecords: pins, currentHandoffs: this.foregroundCurrentHandoffs,
+      coveredCheckpoints: options.coveredCheckpoints,
     });
     const replacements = new Map(records.map((record, index) => [record, reading[index]]));
     return projectForeground(reading, options, pins.map((pin) => replacements.get(pin) ?? pin));
@@ -653,7 +654,8 @@ export class CortiV extends Cormini {
     }, {
       name: 'activity_plan',
       description: 'Read a persistent flexible activity agenda; review requests asynchronous planning and returns immediately. '
-        + 'Read and verify a background proposal before adopt. focus selects a current stage. update records actual progress '
+        + 'Read and verify a background proposal before adopt. adopt with id adds that new candidate while preserving '
+        + 'existing progress; omit id to replace the agenda only when its revision is current. focus selects a current stage. update records actual progress '
         + 'or marks a stage done/deferred/queued with evidence in note. Plans do not execute World actions; '
         + 'completion is never inferred from time or task acceptance. Details and references are loaded only when needed.',
       tags: ['write'],
@@ -661,7 +663,7 @@ export class CortiV extends Cormini {
         type: 'object', additionalProperties: false,
         properties: {
           operation: { type: 'string', enum: ['read', 'review', 'adopt', 'focus', 'update'] },
-          id: { type: 'string', minLength: 1, maxLength: 80, description: 'Exact item id for focus/update.' },
+          id: { type: 'string', minLength: 1, maxLength: 80, description: 'Exact item id for focus/update; adopt: one verified new candidate id, even if other stages changed.' },
           status: { type: 'string', enum: ['queued', 'deferred', 'done'], description: 'update: omit to retain the current stage status.' },
           note: { type: 'string', minLength: 1, maxLength: 400, description: 'update: actual evidence, progress or reason for deferral.' },
         }, required: ['operation'],
@@ -709,7 +711,14 @@ export class CortiV extends Cormini {
       this.fullContextBaseline = null;
     }
     const facts = this.requestWorldFacts();
-    const pins = [...facts.pins, ...[this.recentSpeech.note(), this.actionEvidence(ctx.messages), this.pendingWork?.summary() || '[待办] 当前没有等待中或待复核的事项。', this.activityAgenda?.summary() ?? '', this.viewerRecallContext.text(), this.referenceLibrary.context()].filter(Boolean)
+    const recentSpeech = this.recentSpeech.note();
+    const pending = this.pendingWork?.summary() || '[待办] 当前没有等待中或待复核的事项。';
+    const agenda = this.activityAgenda?.summary() ?? '';
+    const coveredCheckpoints = [
+      ...(recentSpeech ? ['recent_speech'] : []), ...(this.pendingWork ? ['pending_work'] : []),
+      ...(agenda ? ['activity_plan', ...(this.planningConfig().agendaEnabled ? ['planning'] : [])] : []),
+    ];
+    const pins = [...facts.pins, ...[recentSpeech, this.actionEvidence(ctx.messages), pending, agenda, this.viewerRecallContext.text(), this.referenceLibrary.context()].filter(Boolean)
       .map((text) => message('user', text))];
     const handoffSources = new Map<string, { digest: string; original: boolean }>();
     this.foregroundCurrentHandoffs = ctx.messages.flatMap((record) => {
@@ -726,6 +735,7 @@ export class CortiV extends Cormini {
     const view = this.foregroundEpoch.prepare(ctx.messages, {
       maxHistoryTokens: cfg.maxHistoryTokens, minRecentRounds: cfg.minRecentRounds,
       coveredSnapshots: facts.coveredSnapshots,
+      coveredCheckpoints,
     }, pins, this.foregroundNotice);
     this.foregroundRecordIds = new Set(ctx.messages.flatMap((record) => record.item.id ? [record.item.id] : []));
     this.foregroundHandoffSources = handoffSources;
@@ -735,6 +745,7 @@ export class CortiV extends Cormini {
       historyTokens: view.historyTokens, protectedTokens: view.protectedTokens,
       appendedRecords: view.appendedRecords, appendedPins: view.appendedPins,
       coveredSnapshots: facts.coveredSnapshots,
+      coveredCheckpoints,
     } });
     return view.messages;
   }

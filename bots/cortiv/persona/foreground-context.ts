@@ -99,6 +99,8 @@ export function projectForeground(
     minRecentRounds: number;
     /** Supplied current facts fully replace these source/type snapshot streams. */
     coveredSnapshots?: readonly { source: string; type: string }[];
+    /** Supplied Persona state replaces historical checkpoint notes of these types. */
+    coveredCheckpoints?: readonly string[];
   },
   pins: readonly ContextRecord[] = [],
 ): ForegroundProjection {
@@ -114,6 +116,7 @@ export function projectForeground(
   let latestUserInput = -1;
   const latestPins = new Map<string, number>();
   const coveredSnapshots = new Set((options.coveredSnapshots ?? []).map(({ source, type }) => JSON.stringify([source, type])));
+  const coveredCheckpoints = new Set(options.coveredCheckpoints ?? []);
   for (const [index, record] of records.entries()) {
     if (prefix(record)) mandatory.add(index);
     const item = record.item;
@@ -121,7 +124,8 @@ export function projectForeground(
     if ((item.type === 'function_call' && item.name === FRAME_TOOL)
       || record.context.frame?.events.some((event) => event.source !== 'persona')) latestInput = index;
     for (const event of record.context.frame?.events ?? []) {
-      if (event.source === 'persona' && PINNED_TYPES.has(event.type)) latestPins.set(event.type, index);
+      if (event.source === 'persona' && PINNED_TYPES.has(event.type)
+        && !coveredCheckpoints.has(event.type)) latestPins.set(event.type, index);
       // Snapshot frames may carry deltas whose earlier baseline remains necessary.
       if (event.tags?.includes('snapshot') && !coveredSnapshots.has(JSON.stringify([event.source, event.type]))) mandatory.add(index);
     }

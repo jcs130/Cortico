@@ -186,7 +186,8 @@ describe('Persona social review with real Memory tools', () => {
       return result;
     });
     await review(p, { history: history(Array.from({ length: SOCIAL_REVIEW_LIMITS.pageEntries + 3 }, (_, i) => audience(i))) });
-    await vi.waitFor(async () => expect((await state(p)).social.scheduled).toBe(false));
+    // Both pages wait for real Memory writes and Git checkpoints, not just fork completion.
+    await vi.waitFor(async () => expect((await state(p)).social.scheduled).toBe(false), { timeout: 10_000 });
     expect(forks).toBe(2);
     expect((await state(p)).social).toMatchObject({ committedSeq: SOCIAL_REVIEW_LIMITS.pageEntries + 3, pendingEntries: 1 });
   });

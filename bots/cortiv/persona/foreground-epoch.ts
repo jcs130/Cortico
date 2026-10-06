@@ -10,6 +10,7 @@ export interface ForegroundEpochOptions {
   maxHistoryTokens: number;
   minRecentRounds: number;
   coveredSnapshots?: readonly { source: string; type: string }[];
+  coveredCheckpoints?: readonly string[];
 }
 
 /** A factory may excerpt old records before projecting; source identity still uses the raw ledger. */
@@ -89,6 +90,7 @@ function optionsKey(options: ForegroundEpochOptions, notice?: ContextRecord): st
     minRecentRounds: options.minRecentRounds,
     coveredSnapshots: [...new Set((options.coveredSnapshots ?? [])
       .map(({ source, type }) => JSON.stringify([source, type])))].sort(),
+    coveredCheckpoints: [...new Set(options.coveredCheckpoints ?? [])].sort(),
     notice: notice ? pinFingerprint(notice) : null,
   });
 }
