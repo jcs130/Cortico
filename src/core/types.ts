@@ -849,6 +849,12 @@ export interface ShutdownExternalCheck {
 export interface WorldRequestFacts {
   text: string;
   snapshotTypes: readonly string[];
+  /**
+   * Optional complete partition of text for incremental request replay. Keys stay stable;
+   * a cleared part remains with empty text. Observation time belongs in a separate part
+   * when sampling alone leaves the other facts unchanged. Consumers may use text instead.
+   */
+  parts?: readonly { key: string; text: string }[];
 }
 
 /** World 的环境描述、事件和工具契约。 */

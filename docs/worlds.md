@@ -14,7 +14,7 @@ World 不直接访问 Memory 或调用 Persona 的工具。
 | `id` | 同时用于配置段 `worlds.<id>` 和控制台页 `world:<id>` |
 | `envPromptVars()` | 环境提示词模板的当前占位符值。返回 `null` 时省略整段,`{}` 时使用无变量模板;前缀重建时重新调用 |
 | `tools()` | 这个 World 暴露的工具 |
-| `requestFacts?()` | 同步只读的完整状态缓存，正文含观察时间；`snapshotTypes` 声明可被该完整读数替代的增量事件类型。没有完整读数时返回 `null` |
+| `requestFacts?()` | 同步只读的完整状态缓存，正文含观察时间；`snapshotTypes` 声明可被该完整读数替代的增量事件类型。可选 `parts` 按稳定键提供完整分段；清空的段保留空正文，采样时刻单独成段。没有完整读数时返回 `null` |
 | `start(host)` / `stop()` | 启动与停止;运行中挂载时先调用 `start`,成功后加入挂载表 |
 | `console?()` | 控制台页声明(见 [console.md](console.md)) |
 | `outputTap?()` | 主 session 输出流的接收器(演出、字幕);这一刻没有接收器时返回 `undefined` |
