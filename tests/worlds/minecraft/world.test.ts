@@ -4686,6 +4686,31 @@ describe('地点相对化(回执侧、事实措辞)', () => {
     expect(m.requestFacts()?.text).toBe(done);
   });
 
+  it('完整事实按稳定键分段，走动与采样不改写未变化的背包，终态独立更新', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      const m = new MinecraftWorld({ cfg: cfg({ port: 1 }) });
+      const bot = idleBot();
+      stub(m, { host: new FakeHost(), bridge: { connected: true, bot, invSynced: true } });
+      const render = () => { (m as any).lastSnapshotRenderAt = 0; (m as any).renderSnapshotEvent(); };
+      render();
+      const before = m.requestFacts()!;
+      expect(before.parts!.map(part => part.text).filter(Boolean).join('\n')).toBe(before.text);
+      vi.advanceTimersByTime(1000);
+      (bot as any).entity.position.x += 1;
+      render();
+      const after = m.requestFacts()!;
+      const part = (facts: typeof after, key: string) => facts.parts!.find(part => part.key === key)!;
+      expect(after.parts!.map(part => part.key)).toEqual(before.parts!.map(part => part.key));
+      expect(part(after, 'gear')).toEqual(part(before, 'gear'));
+      expect(part(after, 'sample')).not.toEqual(part(before, 'sample'));
+      expect(part(after, 'place')).not.toEqual(part(before, 'place'));
+      (part(after, 'gear') as { text: string }).text = '不应改变内部缓存';
+      expect(part(m.requestFacts()!, 'gear')).toEqual(part(before, 'gear'));
+    } finally { vi.useRealTimers(); }
+  });
+
   it('请求事实在断线后不可读，新连接采样前不复用旧连接读数', () => {
     const m = new MinecraftWorld({ cfg: cfg({ port: 1 }) });
     const bot = Object.assign(new EventEmitter(), idleBot() as Record<string, unknown>);

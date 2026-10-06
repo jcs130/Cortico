@@ -3240,6 +3240,7 @@ export class MinecraftWorld implements World {
       ? { at: nowIso(this.timezone, new Date(last.at)), kind: last.kind, text: last.text }
       : null);
     return { ...this.requestFactsCache, text: `${this.requestFactsCache.text}\n${outcome}`,
+      parts: [...(this.requestFactsCache.parts ?? []).map(part => ({ ...part })), { key: 'lastTask', text: outcome }],
       snapshotTypes: [...this.requestFactsCache.snapshotTypes] };
   }
 
@@ -7961,9 +7962,12 @@ export class MinecraftWorld implements World {
       ...segs.filter((segment) => segment.key === 'queue'
         || segment.key === 'goals' || segment.key === 'marks' || segment.key === 'foodReserve'),
     ];
+    const parts = [{ key: 'sample', text: `[Minecraft 当前读数；采样 ${snap.realTime}]` },
+      ...fullSegments.map(({ key, text }) => ({ key, text })),
+      { key: 'explored', text: this.explored.summary(normalizeDimension(snap.dimension)) }];
     this.requestFactsCache = {
-      text: `[Minecraft 当前读数；采样 ${snap.realTime}]\n`
-        + fullSegments.map((segment) => segment.text).filter(Boolean).join('\n'),
+      text: parts.map(part => part.text).filter(Boolean).join('\n'),
+      parts,
       snapshotTypes: ['minecraft.world.snapshot', 'minecraft.task.queue'],
     };
     // 按变化量发:与上一拍比没有实质变化、人也没挪窝,这一拍整条不发(基线不动,
