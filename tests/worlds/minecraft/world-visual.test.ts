@@ -30,7 +30,7 @@ function rig(connected = true) {
   const cfg = structuredClone(MINECRAFT_DEFAULTS) as MinecraftConfigSection;
   const world = new MinecraftWorld({ cfg });
   const host = new FakeHost();
-  const bot = { entity: { position: new Vec3(1.5, 64, -3.5) }, game: { dimension: 'overworld' },
+  const bot = { entity: { position: new Vec3(1.5, 64, -3.5), onGround: true }, game: { dimension: 'overworld' },
     blockAt: vi.fn((_position: Vec3): { name: string } | null => null), oxygenLevel: 20 };
   const bridge = { bot: connected ? bot : null, viewerUrl: connected ? 'http://127.0.0.1:12345' : null };
   Object.assign(world, { host, bridge });
@@ -146,7 +146,23 @@ describe('mc_visual scene observation', () => {
     expect(unread.text).not.toContain('未读到水');
     bot.blockAt.mockReturnValue({ name: 'air' });
     const dry = await tool.handler({ raw: true }, ctx) as ToolOutcome;
-    expect(dry.text).toContain('头脚所在格未读到水，安全落脚面仍需核验');
+    expect(dry.text).toContain('头脚所在格未读到水');
+  });
+
+  it('reports ground below the feet separately from the air occupied by the body', async () => {
+    const { host, tool, ctx, bot } = rig();
+    bot.blockAt.mockImplementation(position => ({ name: position.y < 64 ? 'stone_slab' : 'air' }));
+    let material = '';
+    Object.assign(host, { cognition: { request: async (request: CognitionRequest) => {
+      material = request.brief;
+      return { text: '角色站在石台阶上，身体所在格为空气。' };
+    } } });
+    const result = await tool.handler({ focus: '我是否站在岸上' }, ctx) as ToolOutcome;
+    for (const text of ['脚部格 air；头部格 air', '脚底下方格 stone_slab；物理接地：是',
+      '空气不表示脚下悬空']) {
+      expect(material).toContain(text);
+      expect(result.text).toContain(text);
+    }
   });
 
   it('returns the real image and failure reason when focused observation is unavailable', async () => {

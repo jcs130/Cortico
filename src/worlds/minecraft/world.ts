@@ -4224,18 +4224,21 @@ export class MinecraftWorld implements World {
       const observedAt = new Date().toISOString();
       const feet = bot.blockAt(after);
       const head = bot.blockAt(after.offset(0, 1, 0));
+      const ground = bot.blockAt(after.offset(0, -0.05, 0));
+      const contact = bot.entity.onGround === true ? '是' : bot.entity.onGround === false ? '否' : '未知';
       const feetWet = feet ? WATER_BLOCKS.has(feet.name) : undefined;
       const headWet = head ? WATER_BLOCKS.has(head.name) : undefined;
       const waterState = headWet === true ? '头部在水中，水底可见不表示已登岸'
         : feetWet === true ? '脚部在水中，尚未确认登岸'
         : feetWet === undefined || headWet === undefined ? '水中状态未核实'
-        : '头脚所在格未读到水，安全落脚面仍需核验';
+        : '头脚所在格未读到水';
       const oxygen = headWet && Number.isFinite(bot.oxygenLevel)
         ? `；氧气 ${Math.max(0, Math.min(20, bot.oxygenLevel))}/20` : '';
       const description = [
         `[mc_visual] ${capture.capturedAt} 网页实景截图，${capture.mode} 视角，${capture.width}×${capture.height}，`
           + `${dimension}，截图完成后玩家位置 (${location})。`,
         `[现场读数 ${observedAt}] 脚部格 ${feet?.name ?? '未加载，未知'}；头部格 ${head?.name ?? '未加载，未知'}；${waterState}${oxygen}。`,
+        `脚底下方格 ${ground?.name ?? '未加载，未知'}；物理接地：${contact}。头脚所在格描述身体空间，空气不表示脚下悬空。`,
         focus ? `这次想看：${focus}。` : '',
         'focus 只提出本帧问题，不改变玩家位置或镜头朝向，也不证明所写地点或对象就在画面中。',
         capture.includesHud ? '本帧包含游戏界面和当前可见菜单。' : '本帧只包含 3D 场景，未拍摄界面。',
