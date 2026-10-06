@@ -682,8 +682,54 @@ describe('CortiV 并行梦', () => {
     const latest = forks[0].messages[2].content;
     expect(latest).toContain('[adventure]');
     expect(latest).toContain(fact);
-    expect(latest).toContain('采样于');
+    expect(latest).toContain('读取于');
     expect(latest).not.toContain('ordinary');
+  });
+
+  it('记忆整理接收交接历史之后的现场缓存与结果，读取不把原始采样时间改为当前时间', async () => {
+    const sampledAt = '2026-10-03T14:38:43+08:00';
+    const current = `采样 ${sampledAt}：背包小麦×0；个人重生点尚未核实。`;
+    const fact = '服务端回执：收粮委托已完成，小麦×16已扣除。';
+    const worlds: World[] = [{ id: 'adventure', envPromptVars: () => ({}), tools: () => [],
+      start: async () => {}, stop: async () => {},
+      requestFacts: () => ({ text: current, snapshotTypes: ['adventure.snapshot'] }),
+      verifiedFacts: () => fact }];
+    p = new CortiV({ memoryDir: dir, context: NOTE_CONTEXT, worlds });
+    p.attach(makeFakeHarnessApi({ injectInternal: (text, kind) => injected.push({ text, kind }),
+      injectExternal: (text, kind) => externals.push({ text, kind }), sessionInfo: sessionInfoOf(900),
+      spawnFork: async (opts) => { forks.push(opts); return '(nothing)'; } }));
+    await p.onHandoff(records([{ role: 'user', content: '旧观察：小麦×16，尚未交付委托。' }]), HANDOFF_CTX);
+    await sleep(0);
+    expect(forks).toHaveLength(1);
+    const latest = forks[0].messages[2].content as string;
+    expect(latest).toContain(current);
+    expect(latest).toContain(fact);
+    expect(latest).toContain('原始采样时刻');
+    expect(forks[0].messages[1].content).toContain('旧观察');
+    expect(latest).not.toContain('旧观察');
+  });
+
+  it('一种 World 事实来源失败仍保留另一种来源，不用旧历史代替读取失败', async () => {
+    const worlds: World[] = [{ id: 'current-only', envPromptVars: () => ({}), tools: () => [],
+      start: async () => {}, stop: async () => {},
+      requestFacts: () => ({ text: '现场缓存：位置已经改变。', snapshotTypes: ['current-only.snapshot'] }),
+      verifiedFacts: () => { throw new Error('durable evidence unavailable'); } },
+    { id: 'durable-only', envPromptVars: () => ({}), tools: () => [],
+      start: async () => {}, stop: async () => {},
+      requestFacts: () => { throw new Error('current cache unavailable'); },
+      verifiedFacts: () => '服务端已核实完成。' }];
+    p = new CortiV({ memoryDir: dir, context: NOTE_CONTEXT, worlds });
+    p.attach(makeFakeHarnessApi({ injectInternal: (text, kind) => injected.push({ text, kind }),
+      injectExternal: (text, kind) => externals.push({ text, kind }), sessionInfo: sessionInfoOf(900),
+      spawnFork: async (opts) => { forks.push(opts); return '(nothing)'; } }));
+    await p.onHandoff(records([{ role: 'user', content: '旧观察：尚未完成。' }]), HANDOFF_CTX);
+    await sleep(0);
+    const latest = forks[0].messages[2].content as string;
+    expect(latest).toContain('[current-only] 已有现场事实');
+    expect(latest).toContain('位置已经改变');
+    expect(latest).toContain('[durable-only] 已核实结果');
+    expect(latest).toContain('服务端已核实完成');
+    expect(latest).not.toContain('尚未完成');
   });
 
   it('无软阈值连续交接仅投递本窗最近段,上一份 note 不套娃且新台词不逐轮缩短', async () => {

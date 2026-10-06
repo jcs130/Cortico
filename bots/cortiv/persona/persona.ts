@@ -88,8 +88,9 @@ const SOCIAL_REVIEW = 'social-memory';
  * 梦整理的最大轮数；完成整理后可提前结束。
  */
 const DREAM_ROUNDS = 8;
-const DREAM_WORLD_FACTS_MAX_CHARS = 1800;
+const DREAM_WORLD_FACTS_MAX_CHARS = 4800;
 const DREAM_WORLD_FACT_MAX_CHARS = 500;
+const DREAM_WORLD_CURRENT_FACT_MAX_CHARS = 2400;
 /** 梦整理失败后的退避;只重试一次(见 dreamWithRetry) */
 const DREAM_RETRY_MS = 30_000;
 /** 认知外包受理 session 声明 id(World 请托的后台构思) */
@@ -1924,19 +1925,27 @@ export class CortiV extends Cormini {
   private async verifiedWorldFacts(): Promise<{ text: string; sampledAt: string } | null> {
     const core = this.core;
     const facts = await Promise.all([...this.worlds].sort((a, b) => a.id.localeCompare(b.id)).map(async (world) => {
-      if (!world.verifiedFacts) return '';
-      try {
-        const value = await withDeadline(Promise.resolve().then(() => world.verifiedFacts!()), 1000, `${world.id} verifiedFacts`);
-        return value?.trim() ? `[${world.id}] ${clip(value, DREAM_WORLD_FACT_MAX_CHARS)}` : '';
-      } catch (error) {
-        core?.log.warn('World 已核实事实读取失败', { world: world.id, err: String(error) });
-        return '';
-      }
+      const results = await Promise.allSettled([
+        Promise.resolve().then(() => {
+          const current = world.requestFacts?.();
+          return current?.text.trim() ? `[${world.id}] 已有现场事实；原始采样时刻见正文：\n${clip(current.text, DREAM_WORLD_CURRENT_FACT_MAX_CHARS)}` : '';
+        }),
+        world.verifiedFacts
+          ? withDeadline(Promise.resolve().then(() => world.verifiedFacts!()), 1000, `${world.id} verifiedFacts`)
+            .then(value => value?.trim() ? `[${world.id}] 已核实结果：\n${clip(value, DREAM_WORLD_FACT_MAX_CHARS)}` : '')
+          : Promise.resolve(''),
+      ]);
+      return results.flatMap((result, index) => {
+        if (result.status === 'fulfilled') return result.value ? [result.value] : [];
+        core?.log.warn('World 只读事实读取失败', { world: world.id,
+          source: index === 0 ? 'requestFacts' : 'verifiedFacts', err: String(result.reason) });
+        return [];
+      }).join('\n');
     }));
     const content = facts.filter(Boolean).join('\n');
     if (!content) return null;
     const sampledAt = new Date().toISOString();
-    return { sampledAt, text: `【World 只读事实；采样于 ${sampledAt}】\n${clip(content, DREAM_WORLD_FACTS_MAX_CHARS)}\n交接笔记与这些事实冲突时，核对各自回执的时间。` };
+    return { sampledAt, text: `【World 只读事实；读取于 ${sampledAt}，原始采样时刻与结果时间见正文】\n${clip(content, DREAM_WORLD_FACTS_MAX_CHARS)}\n交接笔记与这些事实冲突时，核对各自回执的时间；本次读取不改变原事实时间。` };
   }
 
   /** 梦这一轮写的交接笔记;没写成就返回空串(上一场的旧文件不冒充新的) */
