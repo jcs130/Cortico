@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 export const AGENDA_FILE = 'activity-agenda.json';
 export const AGENDA_SUMMARY_MAX_CHARS = 1_200;
 export const AGENDA_MAX_ITEMS = 8;
+export const AGENDA_RECENT_COMPLETIONS = 3;
 export interface AgendaItem {
   id: string;
   title: string;
@@ -152,13 +153,17 @@ export class ActivityAgenda {
     const next = this.ledger.items.filter(item => item.status === 'queued');
     const deferred = this.ledger.items.filter(item => item.status === 'deferred')
       .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
-    const done = this.ledger.items.filter(item => item.status === 'done').length;
+    const completed = this.ledger.items.filter(item => item.status === 'done')
+      .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
     const draft = this.ledger.proposal;
     const lines = ['[活动日程；意图与执行结果分别记录]',
-      `已完成 ${done} 项，排队 ${next.length} 项，挂起 ${deferred.length} 项；规划时的背景说明仅在 read 中保留，现场以当前观察为准。`,
+      `已完成 ${completed.length} 项，排队 ${next.length} 项，挂起 ${deferred.length} 项；规划时的背景说明仅在 read 中保留，现场以当前观察为准。`,
       active ? `当前 id=${JSON.stringify(active.id)} ${clip(active.title, 80)}；阶段记录更新于 ${active.updatedAt}，记录时间不证明世界已变化；够了就收尾：${clip(active.doneWhen, 160)}；条件：${clip(active.when, 100)}；受阻：${clip(active.ifBlocked, 100)}${active.note ? '；最近证据：' + clip(active.note, 160) : ''}`
         : next.length || deferred.length ? '当前阶段尚未选择；结合现场自行选下一项。'
           : '当前没有未完成阶段；完成记录是历史。结合长期目标和现场选择新阶段，可 review 异步请求候选，期间独立行动可以继续。',
+      ...(completed.length ? ['最近结案说明（你记录的进展，外部生效仍以实际回执为准；较早记录按 id 或 includeCompleted:true 读取）：'] : []),
+      ...completed.slice(0, AGENDA_RECENT_COMPLETIONS).map(item =>
+        `已结案 id=${JSON.stringify(item.id)} ${clip(item.title, 32)}；${item.updatedAt} 记录：${clip(item.note, 64)}`),
       ...next.map(item => `候选 id=${JSON.stringify(item.id)} ${clip(item.title, 80)}`),
       ...(deferred.length ? ['挂起阶段仅在新条件出现后复核，read 可查恢复条件；其他可行活动可以继续。'] : []),
       ...deferred.map(item => `挂起 id=${JSON.stringify(item.id)} ${clip(item.title, 50)}；${item.updatedAt} 记录的依据：${clip(item.note, 100)}；新观察是否改变条件须核验。`),

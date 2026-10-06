@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ActivityAgenda, AGENDA_FILE, AGENDA_MAX_ITEMS, AGENDA_SUMMARY_MAX_CHARS, type AgendaPlan } from '../../bots/cortiv/persona/activity-agenda.ts';
+import { ActivityAgenda, AGENDA_FILE, AGENDA_MAX_ITEMS, AGENDA_RECENT_COMPLETIONS, AGENDA_SUMMARY_MAX_CHARS, type AgendaPlan } from '../../bots/cortiv/persona/activity-agenda.ts';
 import { CortiV } from '../../bots/cortiv/persona/persona.ts';
 import { FOREGROUND_CONTEXT_DEFAULTS } from '../../bots/cortiv/persona/foreground-context.ts';
 import { makeFakeHarnessApi } from '../core/helpers.ts';
@@ -295,5 +295,49 @@ describe('persistent Persona activity agenda', () => {
     expect(context).toContain(stamp);
     expect(context).toContain('改善入口');
     expect(new ActivityAgenda(dir, now).state().items.find(item => item.id === 'river')?.status).toBe('deferred');
+  });
+
+  it('restored foreground requests retain a completed result beside an older related waiting stage', () => {
+    const { dir, agenda } = rig();
+    const value = plan();
+    value.items[0].title = '交付收集任务';
+    value.items[1].title = '等待同一批材料';
+    adopt(agenda, value);
+    agenda.operate({ operation: 'update', id: 'river', status: 'deferred', note: '此前材料还不够，等产出后再交' });
+    agenda.operate({ operation: 'update', id: 'finish-home', status: 'done', note: '服务端确认已交付，材料扣除，奖励到账' });
+    const before = new ActivityAgenda(dir, now).state();
+    const persona = new CortiV({ memoryDir: dir, tickDelayMs: () => null,
+      foreground: () => ({ ...FOREGROUND_CONTEXT_DEFAULTS, enabled: true }) });
+    persona.attach(makeFakeHarnessApi());
+    const view = persona.prepareRequest({ sessionId: 'main', round: 1, messages: [message('user', '继续当前活动')] });
+    const context = view!.map(record => itemText(record.item)).join('\n');
+    expect(context).toContain('已结案 id="finish-home" 交付收集任务');
+    expect(context).toContain('服务端确认已交付，材料扣除，奖励到账');
+    expect(context).toContain(stamp);
+    expect(context).toContain('外部生效仍以实际回执为准');
+    expect(context).toContain('挂起 id="river"');
+    expect(new ActivityAgenda(dir, now).state()).toEqual(before);
+  });
+
+  it('bounds recent completion evidence while retaining older results for explicit reads', () => {
+    const { dir } = rig();
+    let at = now();
+    const agenda = new ActivityAgenda(dir, () => at);
+    const value = plan();
+    value.items = Array.from({ length: AGENDA_RECENT_COMPLETIONS + 1 }, (_, index) => ({
+      ...value.items[0], id: `stage-${index}`, title: `阶段 ${index}`,
+    }));
+    adopt(agenda, value);
+    for (const item of value.items) {
+      at += 1000;
+      agenda.operate({ operation: 'update', id: item.id, status: 'done', note: `回执确认 ${item.id}` });
+    }
+    const summary = new ActivityAgenda(dir, () => at).summary();
+    expect(summary.length).toBeLessThanOrEqual(AGENDA_SUMMARY_MAX_CHARS);
+    expect(summary.match(/已结案 id=/g)).toHaveLength(AGENDA_RECENT_COMPLETIONS);
+    expect(summary).not.toContain('已结案 id="stage-0"');
+    expect(summary).toContain(`回执确认 stage-${AGENDA_RECENT_COMPLETIONS}`);
+    expect(JSON.parse(agenda.operate({ operation: 'read', id: 'stage-0' })).items)
+      .toMatchObject([{ id: 'stage-0', status: 'done', note: '回执确认 stage-0' }]);
   });
 });
