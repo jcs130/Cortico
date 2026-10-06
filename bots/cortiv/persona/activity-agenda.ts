@@ -60,6 +60,19 @@ function clip(value: string, max: number): string {
   return flat.length <= max ? flat : flat.slice(0, max - 1) + '…';
 }
 
+/** Each state section keeps a reading window; omitted detail remains in the ledger. */
+function section(lines: string[], budget: number): string {
+  const text = lines.join('\n');
+  if (text.length <= budget) return text;
+  const omitted = '\n[其余未展开；activity_plan read 查看]';
+  const kept: string[] = [];
+  for (const line of lines) {
+    if ([...kept, line].join('\n').length + omitted.length > budget) break;
+    kept.push(line);
+  }
+  return kept.length ? kept.join('\n') + omitted : omitted.trim().slice(0, budget);
+}
+
 export class ActivityAgenda {
   private readonly file: string;
   private ledger: Ledger = { version: 1, revision: 0, summary: '', items: [], proposal: null };
@@ -158,19 +171,24 @@ export class ActivityAgenda {
     const draft = this.ledger.proposal;
     const lines = ['[活动日程；意图与执行结果分别记录]',
       `已完成 ${completed.length} 项，排队 ${next.length} 项，挂起 ${deferred.length} 项；规划时的背景说明仅在 read 中保留，现场以当前观察为准。`,
-      active ? `当前 id=${JSON.stringify(active.id)} ${clip(active.title, 80)}；阶段记录更新于 ${active.updatedAt}，记录时间不证明世界已变化；够了就收尾：${clip(active.doneWhen, 160)}；条件：${clip(active.when, 100)}；受阻：${clip(active.ifBlocked, 100)}${active.note ? '；最近证据：' + clip(active.note, 160) : ''}`
+      active ? `当前 id=${JSON.stringify(active.id)} ${clip(active.title, 48)}；阶段记录更新于 ${active.updatedAt}，记录时间不证明世界已变化。`
         : next.length || deferred.length ? '当前阶段尚未选择；结合现场自行选下一项。'
           : '当前没有未完成阶段；完成记录是历史。结合长期目标和现场选择新阶段，可 review 异步请求候选，期间独立行动可以继续。',
-      ...(completed.length ? ['最近结案说明（你记录的进展，外部生效仍以实际回执为准；较早记录按 id 或 includeCompleted:true 读取）：'] : []),
-      ...completed.slice(0, AGENDA_RECENT_COMPLETIONS).map(item =>
-        `已结案 id=${JSON.stringify(item.id)} ${clip(item.title, 32)}；${item.updatedAt} 记录：${clip(item.note, 64)}`),
-      ...next.map(item => `候选 id=${JSON.stringify(item.id)} ${clip(item.title, 80)}`),
-      ...(deferred.length ? ['挂起阶段仅在新条件出现后复核，read 可查恢复条件；其他可行活动可以继续。'] : []),
-      ...deferred.map(item => `挂起 id=${JSON.stringify(item.id)} ${clip(item.title, 50)}；${item.updatedAt} 记录的依据：${clip(item.note, 100)}；新观察是否改变条件须核验。`),
-      ...(draft ? [`后台候选采样于 ${draft.capturedAt}，${draft.baseRevision === this.ledger.revision ? '待核验采用' : '整份已落后于当前进展'}：${draft.items.map(item => `${JSON.stringify(item.id)} ${clip(item.title, 60)}`).join('；')}。read 核验后可 adopt 指定一项，不改现有进展；整份过期则 review。`] : []),
-      '阶段变化用 activity_plan update 留证据；详情和资料按需 read；日程不阻止交流、应急和新的选择。'];
-    const result = lines.join('\n');
-    return result.length <= AGENDA_SUMMARY_MAX_CHARS ? result : result.slice(0, AGENDA_SUMMARY_MAX_CHARS - 1) + '…';
+      ...(draft ? [`后台候选采样于 ${draft.capturedAt}，共 ${draft.items.length} 项，${draft.baseRevision === this.ledger.revision ? '待核验采用' : '整份已落后于当前进展'}；activity_plan read 核验全部候选与前提后可 adopt 指定一项，不改现有进展；整份过期则 review。`] : [])];
+    const footer = '阶段变化用 activity_plan update 留证据；详情和资料用 activity_plan read；日程不阻止交流、应急和新的选择。';
+    const sections = [
+      ...(active ? [[`够了就收尾：${clip(active.doneWhen, 160)}`,
+        `条件：${clip(active.when, 100)}；受阻：${clip(active.ifBlocked, 100)}`,
+        ...(active.note ? ['最近证据：' + clip(active.note, 160)] : [])]] : []),
+      next.map(item => `候选 id=${JSON.stringify(item.id)} ${clip(item.title, 48)}`),
+      deferred.map(item => `挂起 id=${JSON.stringify(item.id)} ${clip(item.title, 32)}；${item.updatedAt} 记录的依据：${clip(item.note, 64)}；新观察是否改变条件须核验。`),
+      draft?.items.map(item => `后台候选 id=${JSON.stringify(item.id)} ${clip(item.title, 36)}`) ?? [],
+      completed.slice(0, AGENDA_RECENT_COMPLETIONS).map(item =>
+        `已结案 id=${JSON.stringify(item.id)} ${clip(item.title, 24)}；${item.updatedAt} 记录（外部生效仍以实际回执为准）：${clip(item.note, 64)}`),
+    ].filter(part => part.length);
+    const remaining = AGENDA_SUMMARY_MAX_CHARS - [...lines, footer].join('\n').length - sections.length;
+    const budget = sections.length ? Math.max(0, Math.floor(remaining / sections.length)) : 0;
+    return [...lines, ...sections.map(part => section(part, budget)), footer].join('\n');
   }
   /** Background planning reads open objectives and a bounded window of completion evidence. */
   planningReadout(): string {

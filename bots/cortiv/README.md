@@ -133,7 +133,9 @@ Memory 使用工作区文件，由 [Persona](persona/persona.ts) 管理。
 近期投影；较早会话通过工作区交接笔记按需读取。长期规划使用独立 `planning` 请求，
 `planning.agendaEnabled` 可保存模型提出的灵活活动日程。主意识核验候选后用
 `activity_plan` 采用、选择阶段并记录进展；日程不会自行调用World。每轮保留最多
-1,200字符摘要，详细阶段和玩法按需读回；重启保留证据，迟到候选不能覆盖新进展。
+1,200字符摘要，固定保留当前阶段、候选数量与时间、读取和采用入口；阶段证据、
+挂起事项、候选索引与最近结案说明分别分配摘要空间，未展开内容用 `activity_plan read`
+读回。重启保留证据，迟到候选不能覆盖新进展。
 见 [`ACTIVITY_AGENDA.md`](persona/ACTIVITY_AGENDA.md)。
 玩法资料的 `detail` 可以只传唯一的 `activity_id`；跨主题重名时需用 `topic_key`
 消歧，不根据上次展开的主题猜测。`guides` 仍需要主题编号，资料读取不代表学会或执行。

@@ -210,6 +210,41 @@ describe('persistent Persona activity agenda', () => {
       ? summary.length : summary.indexOf('"stage-0"'));
     expect(JSON.parse(agenda.operate({ operation: 'read' })).items).toHaveLength(AGENDA_MAX_ITEMS);
   });
+  it('restored foreground keeps proposal retrieval and adoption visible beside long progress history', () => {
+    const { dir, agenda } = rig();
+    const historical = { ...plan(), items: Array.from({ length: AGENDA_MAX_ITEMS }, (_, index) => ({
+      ...plan().items[0], id: `completed-${index}`, title: '已经完成的阶段标题'.repeat(8),
+    })) };
+    adopt(agenda, historical);
+    for (const item of agenda.state().items) {
+      agenda.operate({ operation: 'update', id: item.id, status: 'done', note: '已核对实际世界变化'.repeat(30) });
+    }
+    adopt(agenda, { ...plan(), items: Array.from({ length: 3 }, (_, index) => ({
+      ...plan().items[1], id: `blocked-${index}`, title: '等待条件变化再复核'.repeat(8),
+    })) });
+    for (const item of agenda.state().items.filter(item => item.status !== 'done')) {
+      agenda.operate({ operation: 'update', id: item.id, status: 'deferred', note: '当前条件尚未改变'.repeat(35) });
+    }
+    agenda.propose(JSON.stringify({ ...plan(), items: Array.from({ length: AGENDA_MAX_ITEMS }, (_, index) => ({
+      ...plan().items[1], id: `new-${index}`, title: '尚未选择的新阶段'.repeat(10),
+    })) }), agenda.revision(), stamp);
+    const before = agenda.state();
+    const persona = new CortiV({ memoryDir: dir, tickDelayMs: () => null,
+      foreground: () => ({ ...FOREGROUND_CONTEXT_DEFAULTS, enabled: true }) });
+    persona.attach(makeFakeHarnessApi());
+    const request = persona.prepareRequest({ sessionId: 'main', round: 1, messages: [message('user', '继续')] });
+    const summary = request!.map(record => itemText(record.item)).find(text => text.startsWith('[活动日程'))!;
+    expect(summary.length).toBeLessThanOrEqual(AGENDA_SUMMARY_MAX_CHARS);
+    expect(summary).toContain(`后台候选采样于 ${stamp}`);
+    expect(summary).toContain('待核验采用');
+    expect(summary).toContain('activity_plan read');
+    expect(summary).toContain('adopt');
+    expect(summary).toContain('update');
+    const reading = JSON.parse(agenda.operate({ operation: 'read' }));
+    expect(reading.proposal.items.map((item: { id: string }) => item.id))
+      .toEqual(Array.from({ length: AGENDA_MAX_ITEMS }, (_, index) => `new-${index}`));
+    expect(new ActivityAgenda(dir, now).state()).toEqual(before);
+  });
   it('fresh candidate preserves stable objective evidence; focus never reopens a completed phase', () => {
     const { agenda } = rig(); adopt(agenda);
     agenda.operate({ operation: 'update', id: 'finish-home', status: 'done', note: '通行验收通过' });
