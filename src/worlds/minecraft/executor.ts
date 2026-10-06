@@ -4063,7 +4063,7 @@ export class Executor {
     if (!bot) return null;
     try {
       const hit = precheckSteps(bot, [...steps], this.precheckDeps(bot)).find(({ index, note }) =>
-        ['use.hoeWrongBlock', 'use.hoeCovered', 'use.seedWrongBlock', 'use.soilCell'].includes(note.rule)
+        ['use.hoeWrongBlock', 'use.hoeCovered', 'use.seedWrongBlock', 'use.seedFlooded', 'use.soilCell'].includes(note.rule)
         // 之前若已有挖掘、放置等动作，目标方块可能改变，仍交给执行刻判定。
         && steps.slice(0, index).every((step) => step.skill === 'goto'
           || (note.rule === 'use.seedWrongBlock' && step.skill === 'use' && !!step.item

@@ -191,6 +191,39 @@ describe('Executor admission feedback', () => {
 });
 
 describe('MinecraftWorld admission turn boundary', () => {
+  it('refuses a flooded crop cell before replacing work and admits it immediately after water clears', () => {
+    const r = farmRig();
+    r.blocks.set('3,63,0', 'farmland');
+    r.blocks.set('3,64,0', 'water');
+    const seed: SkillCall = { skill: 'use', item: 'wheat_seeds', at: [3, 63, 0] };
+    try {
+      r.exec.submit([{ skill: 'chat', text: 'existing work' }]);
+      const before = r.exec.status();
+      expect(r.submit([{ skill: 'goto', at: [1, 64, 0] }, seed]))
+        .toMatchObject({ failed: true, text: expect.stringContaining('占住了作物格') });
+      expect(r.exec.status()).toEqual(before);
+      expect(r.cancellations).toEqual([]);
+      expect(r.inv.get('wheat_seeds')).toBe(8);
+      expect(r.reports).toEqual([]);
+      r.blocks.delete('3,64,0');
+      expect(r.submit([seed], 'append')).toContain('任务#');
+      expect(r.cancellations).toEqual(['task']);
+    } finally { r.exec.shutdown(); }
+  });
+
+  it('allows an earlier bucket operation to change a flooded cell before planting', () => {
+    const r = farmRig();
+    r.blocks.set('3,63,0', 'farmland');
+    r.blocks.set('3,64,0', 'water');
+    r.inv.set('bucket', 1);
+    try {
+      expect(r.exec.submitDetailed([
+        { skill: 'use', item: 'bucket', at: [3, 64, 0] },
+        { skill: 'use', item: 'wheat_seeds', at: [3, 63, 0] },
+      ]).accepted).toBe(true);
+    } finally { r.exec.shutdown(); }
+  });
+
   it('replans a proven invalid farm target immediately, preserves idle and queue on rejection, and interrupts idle only for admitted work', () => {
     const r = farmRig();
     const seed: SkillCall = { skill: 'use', item: 'wheat_seeds', at: [3, 64, 0] };

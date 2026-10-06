@@ -760,7 +760,7 @@ export function precheckSteps(bot: Bot, steps: SkillCall[], deps: PrecheckDeps):
         && (matchItemName(neededItem, earlier.item) || matchItemName(earlier.item, neededItem)))) continue;
     // 同单先锄后种时，受理刻看见的是锄地前的草方块；种子的执行刻会重读耕地。
     // 相对落点前面若还有 goto，也不能把当前站位误当作将来的目标格。
-    if (current.skill === 'use' && ['use.seedWrongBlock', 'use.hoeWrongBlock', 'use.hoeCovered', 'use.soilCell'].includes(note.rule)
+    if (current.skill === 'use' && ['use.seedWrongBlock', 'use.seedFlooded', 'use.hoeWrongBlock', 'use.hoeCovered', 'use.soilCell'].includes(note.rule)
       && current.at !== undefined) {
       const relative = Array.isArray(current.at) && current.at.some((n) => typeof n !== 'number');
       if (relative && steps.slice(0, i).some((earlier) => earlier.skill === 'goto')) continue;

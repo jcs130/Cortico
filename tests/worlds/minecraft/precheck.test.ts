@@ -526,6 +526,13 @@ describe('前置试算 · 判死的必须真的做不成', () => {
     expect(precheckSteps(bot, [call({ skill: 'goto', at: [8, 64, 0] }), hoe], makeDeps(bot))).toEqual([]);
   });
 
+  it('goto 后的相对种植格不沿用当前位置的水占位状态', () => {
+    const bot = fakeBot({ bag: [['wheat_seeds', 8]], blocks: { '1,64,0': 'farmland', '1,65,0': 'water' } });
+    const seed = call({ skill: 'use', item: 'wheat_seeds', at: ['~1', '~', '~'] });
+    expect(precheckStep(bot, seed, makeDeps(bot))).toMatchObject({ rule: 'use.seedFlooded' });
+    expect(precheckSteps(bot, [call({ skill: 'goto', at: [8, 64, 0] }), seed], makeDeps(bot))).toEqual([]);
+  });
+
   it('锄过别的土格不消除当前种植目标的错误状态', () => {
     const bot = fakeBot({ bag: [['iron_hoe', 1], ['wheat_seeds', 8]], blocks: { '3,64,0': 'grass_block', '4,64,0': 'dirt' } });
     expect(precheckSteps(bot, [
