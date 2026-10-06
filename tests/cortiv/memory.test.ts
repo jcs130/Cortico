@@ -398,6 +398,37 @@ describe('CortiV 观众档案唤起', () => {
     const out = await list.handler({}, { role: 'main', log: console as never });
     expect(String(out)).toContain('viewers/bilibili/314544096.md');
   });
+
+  it('阅读归档增长不扩张常驻目录，当前笔记与按需原文仍可读取', async () => {
+    mkdirSync(join(dir, 'sessions', 'archive'), { recursive: true });
+    writeFileSync(join(dir, RECENT_FILE), '当前正在进行的阶段', 'utf8');
+    writeFileSync(join(dir, 'sessions', 'archive-notes.md'), '归档使用说明', 'utf8');
+    const source = 'sessions/archive/source-first.jsonl';
+    const body = '{"observedAt":"2026-01-01T00:00:00Z","text":"原始执行回执"}\n';
+    writeFileSync(join(dir, source), body, 'utf8');
+    const workspace = async () => (await p.systemSegments({ now: new Date(), timezone: 'Asia/Shanghai', worlds: [] }))
+      .find(segment => segment.title === 'WORKSPACE')!.text;
+    const before = await workspace();
+    for (let index = 0; index < 150; index++) {
+      writeFileSync(join(dir, 'sessions', 'archive', `reading-${index}.jsonl`), '{}\n', 'utf8');
+    }
+    const after = await workspace();
+    expect(after).toContain(RECENT_FILE);
+    expect(after).toContain('sessions/archive-notes.md');
+    expect(after).toContain('sessions/archive/ (151 ');
+    expect(after).not.toContain(source);
+    expect(after).not.toContain('reading-149.jsonl');
+    expect(after.length - before.length).toBeLessThan(10);
+
+    const tools = p.declareSessions()[0].tools();
+    const ctx = { role: 'main', log: console as never };
+    const listing = await tools.find(tool => tool.name === 'list_files')!.handler({ dir: 'sessions/archive' }, ctx);
+    expect(String(listing)).toContain(source);
+    expect(String(listing)).toContain('reading-149.jsonl');
+    const read = await tools.find(tool => tool.name === 'read_file')!.handler({ path: source }, ctx);
+    expect(typeof read === 'string' ? read : read.text).toContain(body.trim());
+    expect(readFileSync(join(dir, source), 'utf8')).toBe(body);
+  });
 });
 
 describe('CortiV recall_viewer:按 id 或名字取整份档案', () => {

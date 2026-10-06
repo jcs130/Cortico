@@ -1707,12 +1707,13 @@ export class CortiV extends Cormini {
     return join(this.memoryDir, 'PHANT.md');
   }
 
-  /** viewers/ 也折叠为计数(几百份档案会撑爆缓存前缀);recall_viewer 按 id 或名字取档。 */
+  /** 人物档案与内部阅读归档在常驻目录中折叠为计数，原文仍可按需读取。 */
   protected override prefixFolds(): Array<{ prefix: string; line: (n: number) => string }> {
     return [
       ...super.prefixFolds(),
       { prefix: `${VIEWERS_DIR}/`, line: (n) => `${VIEWERS_DIR}/ (${n} 份人物档案;recall_viewer 按 id 或名字取档)` },
       { prefix: 'social/reviews/', line: (n) => `social/reviews/ (${n} 份观众交流审阅凭据与阅读归档)` },
+      { prefix: 'sessions/archive/', line: (n) => `sessions/archive/ (${n} 份历史正文与阅读归档;list_files 指定 dir 为 sessions/archive 可列出全部)` },
     ];
   }
 
