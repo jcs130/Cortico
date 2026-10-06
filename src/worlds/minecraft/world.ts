@@ -2197,7 +2197,9 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
       + 'otherwise returns the actual image. raw=true requests the image directly. Inspect entrances and routes, visible player '
       + 'actions. background=true accepts one observation job immediately and later delivers its result as a minecraft.visual event; '
       + 'acceptance does not mean the image or analysis is ready. Only one observation may remain in flight, '
-      + 'including synchronous calls; wait for its result instead of switching call modes to repeat it. Inspect '
+      + 'including synchronous calls; wait for its result instead of switching call modes to repeat it. '
+      + 'Pending results arrive as events. A call made while an observation '
+      + 'is pending ends the current decision turn; queued game actions keep running. Inspect '
       + 'combat situations, item icons and open menus, as well as buildings and landscapes. '
       + 'Compare fresh observations to check action results. include_hud includes the current game '
       + 'interface. A still image does not prove intent, motion or hidden facts; move to a useful vantage '
@@ -4126,7 +4128,8 @@ export class MinecraftWorld implements World {
     if (this.visualInFlight) {
       return { text: this.toolLog('mc_visual', args,
         `[mc_visual 未受理] 观察 job_id:${this.visualInFlight.id} 仍在收尾；本次没有拍摄或新建分析。`
-          + '等待原观察结果；期间可执行不依赖该结果的其他行动'), failed: true };
+          + '本轮结束，等待原观察结果；游戏任务继续运行。不要重复调用轮询；结果回来后再选择下一步行动'),
+        failed: true, endsTurn: true };
     }
     const job: VisualObservationJob = {
       id: `vis_${randomUUID()}`, host, bot, viewerUrl,
@@ -4143,7 +4146,8 @@ export class MinecraftWorld implements World {
     if (args.background !== true) return work;
     void this.deliverVisualObservation(job, work);
     return { text: this.toolLog('mc_visual', args,
-      `[mc_visual 已受理] job_id:${job.id}；画面和分析尚未完成，结果稍后通过 minecraft.visual 事件交回。`) };
+      `[mc_visual 已受理] job_id:${job.id}；画面和分析尚未完成，结果稍后通过 minecraft.visual 事件交回。`
+        + '可继续不依赖观察结果的行动；需要等它时结束本轮，不要重复调用轮询。') };
   }
 
   private visualJobIsCurrent(job: VisualObservationJob): boolean {

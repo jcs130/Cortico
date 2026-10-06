@@ -272,6 +272,7 @@ describe('mc_visual background observation', () => {
     vi.mocked(captureMinecraftView).mockImplementationOnce(() => capture.promise);
     const accepted = await tool.handler({ background: true, raw: true, focus: '门口' }, { ...ctx, callId: 'look-1' }) as ToolOutcome;
     expect(accepted.failed).toBeUndefined();
+    expect(accepted.endsTurn).toBeUndefined();
     expect(accepted.text).toContain('已受理');
     expect(accepted.text).toContain('尚未完成');
     expect(accepted.blobs).toBeUndefined();
@@ -289,13 +290,13 @@ describe('mc_visual background observation', () => {
     expect(host.pushOpts[0]).toEqual({ trigger: 'debounce' });
   });
 
-  it('keeps one in-flight job without duplicating capture and permits another after settlement', async () => {
+  it('ends a duplicate polling turn while preserving the pending job and permits another after settlement', async () => {
     const { host, tool, ctx } = rig();
     const capture = deferred<ReturnType<typeof image>>();
     vi.mocked(captureMinecraftView).mockImplementationOnce(() => capture.promise);
     const first = await tool.handler({ background: true, raw: true }, ctx) as ToolOutcome;
     const second = await tool.handler({ background: true, raw: true }, ctx) as ToolOutcome;
-    expect(second.failed).toBe(true);
+    expect(second).toMatchObject({ failed: true, endsTurn: true });
     const id = first.text.match(/job_id:(vis_[\w-]+)/)?.[1];
     expect(id).toBeTruthy();
     expect(second.text).toContain(id!);
@@ -340,7 +341,7 @@ describe('mc_visual background observation', () => {
     const first = background ? await pending as ToolOutcome : undefined;
     for (const next of [{ background: true }, { background: false }, { raw: true }]) {
       const refused = await tool.handler(next, ctx) as ToolOutcome;
-      expect(refused.failed).toBe(true);
+      expect(refused).toMatchObject({ failed: true, endsTurn: true });
       expect(refused.text).toContain('没有拍摄或新建分析');
       if (first) expect(refused.text).toContain(first.text.match(/job_id:(vis_[\w-]+)/)![1]);
       expect(refused.blobs).toBeUndefined();
