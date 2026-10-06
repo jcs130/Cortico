@@ -2724,7 +2724,7 @@ describe('use:(item × 目标方块) 效果表', () => {
     const r = await runUse(bot, { skill: 'use', item: 'water_bucket', at: [1, 64, 0] });
     expect(r.kind).toBe('blocked');
     expect(r.text).toContain('包里空桶 0 → 0 个');
-    expect(r.text).toContain('用掉:水桶×1');
+    expect(r.text).toContain('背包净减:水桶×1');
   });
 
   it('种子没种上:「对方块使用」那条路的受阻回执同样带背包增减', async () => {
@@ -2736,7 +2736,7 @@ describe('use:(item × 目标方块) 效果表', () => {
     const r = await runUse(bot, { skill: 'use', item: 'wheat_seeds', at: [1, 64, 0] });
     expect(r.kind).toBe('blocked');
     expect(r.text).toContain('要看到的是:(1, 65, 0) 长出小麦');
-    expect(r.text).toContain('用掉:小麦种子×1');
+    expect(r.text).toContain('背包净减:小麦种子×1');
   });
 
   // A2 放宽的是满桶那一条,不许把整条「对方块使用」带偏:打火石仍走 activateBlock

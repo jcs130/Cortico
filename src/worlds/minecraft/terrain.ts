@@ -18,6 +18,7 @@ import { piglinIsHostile } from './piglin.ts';
 import { itemCustomName } from './item-display.ts';
 import { animalStateNote, type FactBot, type FactEntity } from './animal-state.ts';
 import { BURNING_BLOCKS, SCORCHING_FLOOR, hazardBodyBounds } from './hazard-geometry.ts';
+import { remainingEffectTicks } from './status-effects.ts';
 export { BURNING_BLOCKS, SCORCHING_FLOOR } from './hazard-geometry.ts';
 
 /** 八方位罗盘。北=-z 南=+z 东=+x 西=-x,与 move 技能同一套词。 */
@@ -118,7 +119,7 @@ interface StatusEffect {
   name: string;
   /** 原版 amplifier + 1,即她看见的那个罗马数字的值 */
   level: number;
-  /** 剩余秒数;信标那种一直续的照报当刻读数 */
+  /** 按收包时刻估算的剩余秒数；归零后仍等服务端移除确认。 */
   seconds: number;
 }
 
@@ -636,6 +637,7 @@ function gearPhrase(p: GearPiece): string {
 
 function effectPhrase(e: StatusEffect): string {
   const lvl = e.level > 1 ? roman(e.level) : '';
+  if (e.seconds === 0) return `${zhEffect(e.name)}${lvl}预计时长已到，等待服务端确认结束`;
   return `${zhEffect(e.name)}${lvl}还有 ${e.seconds} 秒`;
 }
 
@@ -1627,7 +1629,7 @@ function readEffects(bot: any): StatusEffect[] {
     out.push({
       name: bot.registry?.effects?.[e.id]?.name ?? `effect_${e.id}`,
       level: (e.amplifier ?? 0) + 1,
-      seconds: Math.round(e.duration / 20),
+      seconds: Math.ceil(remainingEffectTicks(e) / 20),
     });
   }
   return out.sort((a, b) => b.seconds - a.seconds);

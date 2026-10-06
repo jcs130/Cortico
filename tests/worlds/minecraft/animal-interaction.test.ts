@@ -37,7 +37,7 @@ describe('动物交互选择与结果', () => {
     const ctx = { aborted: () => false } as SkillContext;
     const first = useOnce(bot as unknown as Bot, { skill: 'use', target: 'chicken', entityId: 12 }, ctx);
     await vi.runAllTimersAsync();
-    expect(await first).toContain('用掉:');
+    expect(await first).toContain('背包净减:');
     const second = useOnce(bot as unknown as Bot, { skill: 'use', target: 'chicken', entityId: 11 }, ctx);
     await vi.runAllTimersAsync();
     await second;

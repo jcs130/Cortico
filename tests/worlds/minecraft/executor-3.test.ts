@@ -2978,7 +2978,7 @@ describe('build 单锚点 / use:位置由她定,结果按服务端回读认', ()
     // times>1 两句制:整段净差在前,最后一次现场读数在后 —— 只报最后一次会自相矛盾
     // (第 3 次对已驯服的狼用骨头不消耗,「包里一样没动」逐字属实却把前两根说没了)
     expect(reports[0].text).toContain('这 2 次合计');
-    expect(reports[0].text).toContain('用掉:骨粉');
+    expect(reports[0].text).toContain('背包净减:骨粉');
   });
 
   it('parseSteps:build 不写 shape 就是"就这些格";use 的 at 与 target 互斥,且不能三样都不给', () => {

@@ -18,6 +18,7 @@ import type {
 import { Vec3 } from 'vec3';
 import type { Bot } from 'mineflayer';
 import { nowIso } from '../../core/util.ts';
+import { observeStatusEffects } from './status-effects.ts';
 import { Bridge } from './bridge.ts';
 import { captureMinecraftView, closeMinecraftViewCapture, warmMinecraftViewCapture } from './visual-capture.ts';
 import { PlayerObservations, playerObservationMeta, renderPlayerObservation, type PlayerObservation } from './player-observation.ts';
@@ -6387,6 +6388,7 @@ export class MinecraftWorld implements World {
   private hookBotEvents(bot: any): void {
     if (this.hookedBots.has(bot)) return;
     this.hookedBots.add(bot);
+    observeStatusEffects(bot);
     this.lastServerFeedback = null;
     this.recentSystemMessages.clear();
     const detachUses = this.serverActionWait.observeUses(bot._client, (at) =>

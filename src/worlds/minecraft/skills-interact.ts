@@ -586,13 +586,13 @@ export async function settleProbe(probe: UseProbe): Promise<{ met: boolean; actu
   return probe.read();
 }
 
-/** 一次右键在包里留下的痕迹:进包的与用掉的都报。一样没动返回空串,不占一句话 */
+/** 观察区间的背包净变化；单凭差量不能确认它由本次使用造成。 */
 export function useInvNote(before: Map<string, number>, bot: Bot): string {
   const parts: string[] = [];
   const gains = invGains(before, bot);
   const losses = invLosses(before, bot);
-  if (gains.length > 0) parts.push(`进包:${gains.join('、')}`);
-  if (losses.length > 0) parts.push(`用掉:${losses.join('、')}`);
+  if (gains.length > 0) parts.push(`背包净增:${gains.join('、')}`);
+  if (losses.length > 0) parts.push(`背包净减:${losses.join('、')}`);
   return parts.join(';');
 }
 
@@ -1069,7 +1069,7 @@ export async function useOnce(bot: Bot, call: Extract<SkillCall, { skill: 'use' 
     return `用了${label};打开了${opened?.title ?? '交互窗口'}${capacity}${contents.length > 0 ? `,里面有:${contents.join('、')}${omitted}` : ',里面暂时是空的'}${note ? `;${note}` : ''}`;
   }
   return note
-    ? `用了${label};${note}`
+    ? `拿着${label}发送了使用请求;${note};没有登记的使用效果，背包变化不能单独证明本次使用生效`
     : `拿着${label}按了一下使用;包里一样没动,这样东西没有登记的使用效果,光凭库存读不出有没有发生什么`;
 }
 

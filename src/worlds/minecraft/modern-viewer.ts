@@ -30,6 +30,7 @@ import { serveViewerAsset } from './viewer-asset-server.ts';
 import { minecraftTextComponent } from './text-component.ts';
 import type { EventEmitter } from 'node:events';
 import { isRaining } from './terrain.ts';
+import { observeStatusEffects, remainingEffectTicks } from './status-effects.ts';
 export { viewerItem } from './viewer-state.ts';
 
 export function viewerMessageKind(message: { translate?: string; toString(): string }, position: string): string | null {
@@ -423,6 +424,7 @@ export function observeViewerInventoryPreview(
 }
 
 export async function startModernViewer(bot: mineflayer.Bot, options: ModernViewerOptions): Promise<ModernViewerHandle> {
+  observeStatusEffects(bot);
   const root = path.resolve(options.assetsDir);
   if (!(await requiredAssetsPresent(root, bot.version))) throw new Error(`modern viewer: ${bot.version} 资源不完整 ${root}`);
   const soundRegistry = await loadViewerSoundRegistry(root, bot.version,
@@ -1156,7 +1158,7 @@ export async function startModernViewer(bot: mineflayer.Bot, options: ModernView
       socket.emit('castCue', recentCastCue.cue);
     for (const effect of Object.values((bot.entity as unknown as { effects?: Record<number, { id: number; amplifier: number; duration: number }> }).effects ?? {})) {
       socket.emit('presentationEvent', { kind: 'effect', self: true, active: true, id: effect.id,
-        ...effectDetails(effect.id), amplifier: effect.amplifier, durationTicks: effect.duration });
+        ...effectDetails(effect.id), amplifier: effect.amplifier, durationTicks: remainingEffectTicks(effect) });
     }
     socket.emit('biome', { name: 'unknown', dimension: String(bot.game.dimension || 'minecraft:overworld'), id: null });
     socket.emit(view === 'third' ? 'entity' : 'playerEntity', ownEntity(bot));
