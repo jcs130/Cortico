@@ -66,7 +66,7 @@ export function describeSkill(c: SkillCall, heldItem?: string | null): string {
     : '';
   switch (c.skill) {
     case 'goto': {
-      const where = c.groundY ? `(${c.at[0]},${c.at[2]}) 的地表` : `坐标 ${anchorsText([c.at])}`;
+      const where = c.groundY ? `水平坐标 (${c.at[0]},${c.at[2]}) 附近` : `坐标 ${anchorsText([c.at])}`;
       const dimension = c.dimension ? `[${zhDimension(c.dimension)}] ` : '';
       return c.dryRun ? `探路到 ${dimension}${where}` : `去${dimension}${where}`;
     }

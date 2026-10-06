@@ -697,7 +697,10 @@ async function runSkill(bot: Bot, call: SkillCall, ctx: SkillContext): Promise<s
           call.groundY ? (sceneTarget === target ? finalGoal : levelTravelGoal(sceneTarget.x, sceneTarget.z)) : undefined,
         );
       }
-      return `到了 ${cellText(feetOf(bot))}${note ? `。\n${note}` : ''}`;
+      const water = headInWater(bot) || bodyInWater(bot);
+      const arrival = call.groundY ? ';本次只满足水平接近条件，高度未作为到达条件' : '';
+      const footing = water ? ';仍在水中，未确认登岸' : '';
+      return `到了 ${cellText(feetOf(bot))}${arrival}${footing}${note ? `。\n${note}` : ''}`;
     }
     case 'transit': return skillTransit(bot, call, ctx);
     case 'find': return skillFind(bot, call.target, call.direction, call.distance, ctx, call.until);
@@ -6058,6 +6061,7 @@ export class Reflexes {
     at: { x: number; y: number; z: number };
     /** 目标格(登岸/换气点):零推进撤销后进本轮溺水的排除集,不再重选 */
     target?: Cell;
+    drownPhase?: 'breathing' | 'landing';
   } | null = null;
 
   constructor(private readonly opts: ReflexOptions) {}
@@ -6141,12 +6145,13 @@ export class Reflexes {
    */
   private setEscapeGoal(
     bot: Bot, kind: 'drown' | 'lava' | 'flee', goal: InstanceType<typeof goals.Goal>, target?: Cell,
+    drownPhase?: 'breathing' | 'landing',
   ): void {
     // 同步登记给 releaseBody:别人交还身体时不许把正在救命的这一张撤掉。
     // 下达与登记是同一处(setOwnedGoal 记的就是 escape 这一档),两本账合成一本
     setOwnedGoal(bot, goal, 'escape', escapeIntent(kind), { diag: this.opts.diag });
     const p = bot.entity.position;
-    this.escapeGoal = { kind, goal, since: Date.now(), at: { x: p.x, y: p.y, z: p.z }, target };
+    this.escapeGoal = { kind, goal, since: Date.now(), at: { x: p.x, y: p.y, z: p.z }, target, drownPhase };
   }
 
   /**
@@ -6856,7 +6861,7 @@ export class Reflexes {
       this.oxygenTrusted = true;
     }
     const oxygen = Math.max(0, Math.min(20, rawOxygen ?? 20));
-    // 头部出水后按落脚或换气条件清除溺水状态；环境租约由剩余危机与落脚稳定性决定。
+    // 已找到的登岸路线保留到干燥落脚；只有换气目标时可在氧气恢复后交还队列。
     if (!headWet) {
       if (hasDryFooting(bot)) this.waterTrap = null;
       if (!this.drowning) {
@@ -6864,12 +6869,11 @@ export class Reflexes {
         return;
       }
       if (this.surfacedAt === 0) this.surfacedAt = now;
-      bot.setControlState('jump', false);
       const dry = hasDryFooting(bot);
-      // 头部出水后，干燥落脚或可信氧气达到 15/20 即清除溺水状态；氧气不可信时要求连续出水三秒。
-      // 仍在水中且无其他环境身份时立即释放环境租约；干燥落脚走稳定窗口，登岸交给正常寻路。
+      const landing = this.escapeGoal?.kind === 'drown' && this.escapeGoal.drownPhase === 'landing';
+      bot.setControlState('jump', !dry && landing);
       const breathing = this.oxygenTrusted ? oxygen >= 15 : now - this.surfacedAt >= SURFACED_CLEAR_MS;
-      if (dry || breathing) {
+      if (dry || (breathing && !landing)) {
         const why = this.oxygenTrusted ? `氧气回满 ${oxygen}/20` : `已出水 ${Math.round((now - this.surfacedAt) / 1000)} 秒`;
         this.drowning = false;
         this.submergedAt = 0;
@@ -6956,7 +6960,7 @@ export class Reflexes {
         msg: `头顶被盖住,先游到 (${breath.x}, ${breath.y}, ${breath.z}) 的水面换气`,
         data: { breath, position: bot.entity.position, oxygen, excluded: [...this.drownExcluded] },
       });
-      this.setEscapeGoal(bot, 'drown', new goals.GoalBlock(breath.x, breath.y, breath.z), breath);
+      this.setEscapeGoal(bot, 'drown', new goals.GoalBlock(breath.x, breath.y, breath.z), breath, 'breathing');
       return;
     }
     const land = findNearbyAirColumn(bot, 12, up, excluded);
@@ -6971,7 +6975,7 @@ export class Reflexes {
       data: { land, position: bot.entity.position, oxygen, excluded: [...this.drownExcluded] },
     });
     if (land) {
-      this.setEscapeGoal(bot, 'drown', new goals.GoalBlock(land.x, land.y, land.z), land);
+      this.setEscapeGoal(bot, 'drown', new goals.GoalBlock(land.x, land.y, land.z), land, 'landing');
     }
   }
 

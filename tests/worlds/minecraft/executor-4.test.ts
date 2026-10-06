@@ -2662,7 +2662,7 @@ describe('Reflexes 防溺水', () => {
     expect(reports).toHaveLength(1);
   });
 
-  it('头出水不交还任务,稳定干燥落脚 600ms 后才恢复环境断点', () => {
+  it('已找到登岸点时氧气回满仍保持上浮和逃生目标,稳定干燥落脚后恢复环境断点', () => {
     let feet = 'water';
     let head = 'water';
     const controls: Array<[string, boolean]> = [];
@@ -2718,10 +2718,12 @@ describe('Reflexes 防溺水', () => {
     expect(goals.length).toBeGreaterThan(0);
 
     head = 'air';
+    bot.oxygenLevel = 20;
     vi.advanceTimersByTime(1_000);
     expect(resumes).toEqual([]);
     expect(held).toBe(true);
     expect(reflexes.environmentOwnerKind).toBe('drown');
+    expect(controls.filter(([key]) => key === 'jump').at(-1)).toEqual(['jump', true]);
 
     feet = 'air';
     entity.onGround = true;
@@ -3202,6 +3204,24 @@ describe('probe 逐格/target/差分 + goto 地表 + surface 陆地脱困', () =
     expect(reports[0].kind).toBe('done');
     expect(reports[0].text).toContain('到了 (10, 64, 5)');
     expect(seen.at(-1)?.constructor.name).toBe('GoalNearXZ');
+  });
+
+  it('goto [x,z] 到水平目标的水中位置时区分水平到达与登岸', async () => {
+    const bot = probeBot({
+      '10,60,5': 'stone',
+      '10,64,5': 'water',
+      '10,65,5': 'water',
+    });
+    bot.pathfinder.goto = async (goal: FakeGoal) => {
+      bot.entity.position = new V(goal.x ?? 0, 64, goal.z ?? 0);
+    };
+    const { exec, reports } = makeExecutorOn(bot);
+    const receipt = exec.submit([{ skill: 'goto', at: [10, 0, 5], groundY: true }]);
+    expect(receipt).toContain('水平坐标 (10,5) 附近');
+    await waitUntil(() => reports.length === 1, 8000);
+    expect(reports[0].kind).toBe('done');
+    expect(reports[0].text).toContain('本次只满足水平接近条件，高度未作为到达条件');
+    expect(reports[0].text).toContain('仍在水中，未确认登岸');
   });
 
   it('地表读数不把树冠和树干顶部当作地面', () => {
