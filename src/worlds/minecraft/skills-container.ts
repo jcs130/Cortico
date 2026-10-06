@@ -1274,7 +1274,7 @@ export function pickSmeltInput(bot: Bot, item: string) {
 }
 
 /**
- * smelt 下料并点火后结束，不等待世界侧烧炼或宣称实际产量。
+ * smelt 确认烧炼启动后结束，不等待世界侧烧完或宣称实际产量。
  * 回执提供炉位、投入量、预计完成时间和取货方式；expectedDoneAt 到期由账本通知。
  * 未开窗炉子的槽位不持续同步，实际产物须取货时读取。
  */
@@ -1394,6 +1394,15 @@ export async function skillSmelt(
         await furnace.putInput(input.type, input.metadata ?? null, want);
         // 炉火点起来在画面上亮一拍再关窗
         await show.beat('result');
+        // 槽位确认可能先于窗口进度包；短暂等回读，不用本地配方表排除自定义配方。
+        const deadline = Date.now() + WINDOW_SETTLE_MS * 2;
+        while (Date.now() < deadline) {
+          checkAbort(ctx);
+          const output = furnace.outputItem();
+          if ((furnace.progress ?? 0) > 0 || (output && (outputBefore === null
+            || output.name !== outputBefore.name || output.count > outputBefore.count))) break;
+          await sleep(50);
+        }
       } catch (err) {
         if (err instanceof Aborted) throw err;
         throw new SkillBlocked(`往${where}里放东西失败: ${zhErrorText((err as Error).message)}`);
@@ -1426,6 +1435,12 @@ export async function skillSmelt(
   }
   if (!loaded.fuel && !(loaded.fuelLevel > 0) && !outputAdvanced) {
     throw new SkillBlocked(`${station}往${where}下料后读到:${slots}。燃料槽为空且炉火未起,没有新产物;未点火。原料仍在炉里,可点名 take 的 item+count 收回`);
+  }
+  if (!(loaded.progress > 0) && !outputAdvanced) {
+    throw new SkillBlocked(`${station}在${where}下料后读到:${staleNote}${slots}。${burning},${progress}。`
+      + '观察期内没有烧炼进度或新产物，未确认烧炼启动；槽位有物品不证明配方有效。'
+      + '原料和剩余燃料留在炉里，可点名 take 的 item+count 收回。先核对配方、燃料或输出槽再决定下一步',
+    [], 'server', 'target-not-ready');
   }
   const etaClock = loaded.doneAt !== null && ctx.clock ? `${ctx.clock(loaded.doneAt)} 左右,` : '';
   const estimate = loaded.doneAt === null ? '当前不估完成时间。'

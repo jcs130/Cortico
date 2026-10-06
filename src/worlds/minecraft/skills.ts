@@ -1377,6 +1377,7 @@ const SKILLS: readonly SkillSpec[] = [
     doc: `{"skill":"smelt","input":"raw_iron","count":8,"fuel":"charcoal"}
                                                  走到炉边下料点火就走,input 与 fuel 都必写。炉子自己烧
                                                  input 与 fuel 是从背包放入炉槽的物品；use 只查看炉子，take 取出炉中已有物品。
+                                                 入槽后等待短暂回读；有烧炼进度或新产物才确认启动，未启动则受阻并保留炉中物品。
                                                  (熔炉一件约 10 秒),烧好会有事件提醒;输出槽有成品时用 take 的 at 指着炉子取货。
                                                  够得着的炉子直接用;够不着就放一个自己带的,包里没有才走去现成的。
                                                  还烧着别的东西的炉子不挑,几座炉子可以同时各烧各的;
