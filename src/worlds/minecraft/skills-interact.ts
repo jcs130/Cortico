@@ -44,7 +44,7 @@ import { itemCustomName } from './item-display.ts';
 import { windowSnapshot } from './viewer-state.ts';
 import { consumesOpenWindow, selectionMenuTitle, storageWindow } from './window-semantics.ts';
 import { clearHandForBlockInteraction, withPreparedInteractionHand } from './hand-interaction.ts';
-import { farmingClickCell } from './farming-target.ts';
+import { farmingClickCell, floodedCropSpace } from './farming-target.ts';
 
 const { goals } = pathfinderPkg;
 
@@ -751,7 +751,9 @@ function farmingUseBlockedFact(
   }
   const plantingOn = held === 'nether_wart' ? 'soul_sand' : held && SEED_CROP[held] ? 'farmland' : null;
   // Writing a sign is a separate explicit operation; beds/doors may have their own use effect.
-  if (!plantingOn || writingSign || target === plantingOn || useProbeAt(bot, held, cell, target, ctx, face)) return null;
+  if (!plantingOn || writingSign) return null;
+  if (target === plantingOn) return floodedCropSpace(bot, cell, held!);
+  if (useProbeAt(bot, held, cell, target, ctx, face)) return null;
   return `${cellText(cell)} 是${zhName(target)}，${zhName(held!)}要对${zhName(plantingOn)}使用；没有发送使用。先探查目标土格及其上方空间`;
 }
 
@@ -917,7 +919,13 @@ export async function useOnce(bot: Bot, call: Extract<SkillCall, { skill: 'use' 
       // 空桶没有“对任意方块试一下”的安全泛型语义。粉雪、水源和岩浆源都在效果表里；
       // 其余方块若无明确 handler，库存不变不能再被记作 done。
       if (held === 'bucket') {
-        throw new SkillBlocked(`${cellText(cell)} 的${zhName(target.name)}没有空桶可执行的明确操作,没有使用`);
+        const aboveCell = { x: cell.x, y: cell.y + 1, z: cell.z };
+        const above = blockAtCell(bot, aboveCell);
+        const fluidAbove = above && (above.name === 'water' || above.name === 'lava')
+          ? `；上方 ${cellText(aboveCell)} 是${zhName(above.name)}[level=${blockProp(above, 'level') ?? '(读不到)'}]，`
+            + '空桶须点液体的源方块坐标本身，不能点下方土格；先核对源方块再改 at'
+          : '';
+        throw new SkillBlocked(`${cellText(cell)} 的${zhName(target.name)}没有空桶可执行的明确操作,没有使用${fluidAbove}`);
       }
       if (AIR_NAMES.has(target.name) || LIQUIDS.has(target.name)) {
         throw nothingThere(bot, cell, target.name, label);

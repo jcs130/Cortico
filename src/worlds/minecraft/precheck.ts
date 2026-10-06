@@ -21,7 +21,7 @@ import { bestRangedWeapon, hasRangedLos, hasUsableArrows, type RangedTarget } fr
 import { taggedCraftChoice } from './tagged-crafting.ts';
 import { inventoryReadConfirmed } from './inventory-window-sync.ts';
 import { HOE_TILLED } from './blueprint-registry.ts';
-import { farmingClickCell, isHoeUseItem } from './farming-target.ts';
+import { farmingClickCell, floodedCropSpace, isHoeUseItem } from './farming-target.ts';
 import { SEED_CROP } from './placed-ledger.ts';
 import { AIR_NAMES, LIQUIDS, PLACE_REACH, cellText } from './cell-facts.ts';
 
@@ -389,6 +389,8 @@ function precheckSoilCell(
       text: `(${cell.x},${cell.y},${cell.z}) 是${zhName(b.name)}，${zhName(item)}要对${zhName(soil)}使用；先探查正确土格与上方空间`,
       rule: 'use.seedWrongBlock',
     };
+    const flooding = floodedCropSpace(bot, cell, item);
+    if (flooding) return { level: 'hard', text: flooding, rule: 'use.seedFlooded' };
   }
   if (!AIR_NAMES.has(b.name)) return null;
   if (farmingClickCell(bot, cell, item, call.face)) return null;

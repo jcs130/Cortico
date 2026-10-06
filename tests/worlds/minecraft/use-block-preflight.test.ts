@@ -6,6 +6,8 @@ import { parseSteps } from '../../../src/worlds/minecraft/skills.ts';
 import { resolveAt } from '../../../src/worlds/minecraft/cell-facts.ts';
 import type { SkillContext } from '../../../src/worlds/minecraft/skill-context.ts';
 import type { SkillCall } from '../../../src/worlds/minecraft/skills.ts';
+import { blockAtCell } from '../../../src/worlds/minecraft/cell-facts.ts';
+import { precheckStep, type PrecheckDeps } from '../../../src/worlds/minecraft/precheck.ts';
 
 const { navigation } = vi.hoisted(() => ({ navigation: vi.fn() }));
 vi.mock('../../../src/worlds/minecraft/travel.ts', async (importOriginal) => ({
@@ -51,6 +53,40 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe('known block use prerequisites precede travel', () => {
+  it.each(['water', 'lava'])('a flooded crop cell containing %s preserves seeds and sends no movement or use', async (liquid) => {
+    for (const item of ['wheat_seeds', 'beetroot_seeds', 'carrot', 'potato', 'melon_seeds', 'pumpkin_seeds',
+      'torchflower_seeds', 'pitcher_pod', 'nether_wart']) {
+      const r = rig(item, item === 'nether_wart' ? 'soul_sand' : 'farmland', liquid);
+      const deps: PrecheckDeps = { resolve: (at) => resolveAt(r.bot, at as never),
+        blockAt: (at) => blockAtCell(r.bot, at), cellsOf: () => null };
+      expect(precheckStep(r.bot, { skill: 'use', item, at: AT }, deps))
+        .toMatchObject({ level: 'hard', rule: 'use.seedFlooded' });
+      await expect(r.run()).rejects.toThrow('(10, 64, 0)');
+      expect(navigation).not.toHaveBeenCalled();
+      expect(r.activate).not.toHaveBeenCalled();
+      expect(r.bot.activateItem).not.toHaveBeenCalled();
+      expect(r.stack.count).toBe(8);
+    }
+  });
+
+  it('a crop cell flooded during travel is rechecked before consuming a seed', async () => {
+    const r = rig('wheat_seeds', 'farmland');
+    navigation.mockImplementation(async () => { r.blocks.set('10,64,0', 'water'); });
+    await expect(r.run()).rejects.toThrow('占住了作物格');
+    expect(navigation).toHaveBeenCalledOnce();
+    expect(r.activate).not.toHaveBeenCalled();
+    expect(r.stack.count).toBe(8);
+  });
+
+  it('an empty bucket aimed at soil reports the liquid cell above without using the item', async () => {
+    const r = rig('bucket', 'farmland', 'water');
+    navigation.mockResolvedValue(undefined);
+    await expect(r.run()).rejects.toThrow('上方 (10, 64, 0)');
+    expect(r.activate).not.toHaveBeenCalled();
+    expect(r.bot.activateItem).not.toHaveBeenCalled();
+    expect(r.stack.count).toBe(8);
+  });
+
   it.each(['wheat_seeds', 'beetroot_seeds', 'carrot', 'potato', 'melon_seeds', 'pumpkin_seeds',
     'torchflower_seeds', 'pitcher_pod', 'nether_wart'])('loaded wrong soil for %s sends neither navigation nor use', async (item) => {
     const r = rig(item);
