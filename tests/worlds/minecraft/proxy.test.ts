@@ -158,11 +158,17 @@ describe('MinecraftWorldProxy(引擎子进程)', () => {
     expect(typeof chests!.stat()).toBe('string');
     const cleared = await chests!.clear();
     expect(typeof cleared).toBe('string');
-    // 前缀渲染在主进程；任务与目标状态从引擎状态帧同步过来。
+    // 实时状态仍跨进程同步；固定环境契约不随当前任务改变。
     await waitFor(() => proxy.envPromptVars()['minecraft.current_task'] === '(手上没有在做的事)');
     const { text } = await renderWorldEnvPrompt(proxy);
-    expect(text).toContain('**正在做**：(手上没有在做的事)');
+    expect(text).toContain('每轮的 Minecraft 当前读数');
     expect(text).not.toContain('{{minecraft.current_task}}');
+    (proxy as any).onMessage({ t: 'note', note: { kind: 'status', decl: {}, storage: [],
+      promptVars: { 'minecraft.current_task': '正在去门的另一侧', 'minecraft.goals': '入口通行待核验' },
+      requestFacts: { text: '当前队列：正在去门的另一侧', snapshotTypes: ['minecraft.task.queue'] },
+    } });
+    expect((await renderWorldEnvPrompt(proxy)).text).toBe(text);
+    expect(proxy.requestFacts()?.text).toContain('正在去门的另一侧');
   });
 
   it('子进程日志转发回主进程宿主', async () => {

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { envPromptDocOf, renderWorldEnvPrompt } from '../src/core/prefix.ts';
-import { templateVarNames, unknownVarNames } from '../src/core/template.ts';
+import { unknownVarNames } from '../src/core/template.ts';
 import type { World } from '../src/core/types.ts';
 import { BilibiliWorld } from '../src/worlds/bilibili/world.ts';
 import { ConsoleFixtureWorld } from '../src/worlds/console-fixture/world.ts';
@@ -38,11 +38,9 @@ describe('环境提示词模板契约', () => {
       expect(doc, '每个 World 都该声明 role=envPrompt 的模板').toBeTruthy();
 
       const declared = (doc!.vars ?? []).map((v) => v.name).sort();
-      const inTemplate = templateVarNames(readFileSync(doc!.path, 'utf8')).sort();
+      const unknown = unknownVarNames(readFileSync(doc!.path, 'utf8'), declared);
       const reported = Object.keys((await mod.envPromptVars()) ?? {}).sort();
-
-
-      expect(inTemplate, '模板用到的占位符都要在 vars 里声明').toEqual(declared);
+      expect(unknown, '模板用到的占位符都要在 vars 里声明').toEqual([]);
 
       expect(reported, 'vars 声明的占位符都要有运行时值').toEqual(declared);
     },

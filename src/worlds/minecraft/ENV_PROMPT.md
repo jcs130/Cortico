@@ -75,11 +75,7 @@
 
 {{minecraft.camera}}
 
-## 当前状态（自动刷新——交接后也不会忘）
-
-**正在做**：{{minecraft.current_task}}
-
-**挂着的目标**：{{minecraft.goals}}
+当前队列、目标与最近执行终态由每轮的 Minecraft 当前读数提供；缺少现读时可用 mc_queue、mc_goal 核对。
 
 ## 空闲小动作
 
