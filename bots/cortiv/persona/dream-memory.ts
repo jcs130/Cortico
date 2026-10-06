@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { ToolDef } from 'cortico/core/types.ts';
 import type { GitWorkspaceMemory } from '../../cormini/persona/memory.ts';
+import { MemoryNoteProvenance, type NoteObservation } from './note-provenance.ts';
 
 const FILE_WRITES = new Set(['write_file', 'edit_file', 'append_file', 'delete_file', 'save_blob']);
 export function dreamWorkspaceTools(tools: readonly ToolDef[]): ToolDef[] {
@@ -15,12 +16,23 @@ export class DreamMemory {
   private readonly written = new Map<string, string | null>();
   private readonly pinned = new Map<string, string | null>();
   private mutated = false;
+  private readonly currentNotes = new Map<string, NoteObservation>();
+  private readonly provenance: MemoryNoteProvenance;
 
-  constructor(private readonly memory: GitWorkspaceMemory, private readonly signal: AbortSignal) {}
+  constructor(private readonly memory: GitWorkspaceMemory, private readonly signal: AbortSignal) {
+    this.provenance = new MemoryNoteProvenance(memory);
+  }
+
+  trackCurrentNote(path: string, observation: NoteObservation): void {
+    this.currentNotes.set(this.path(path), observation);
+  }
 
   get hasWrites(): boolean { return this.mutated; }
 
-  private path(path: string): string { return this.memory.resolveSafe(path); }
+  private path(path: string): string {
+    const absolute = this.memory.resolveSafe(path);
+    return process.platform === 'win32' ? absolute.toLowerCase() : absolute;
+  }
 
   private revision(path: string): string | null {
     try { return createHash('sha256').update(readFileSync(path)).digest('hex'); }
@@ -67,6 +79,11 @@ export class DreamMemory {
         return { failed: true as const,
           text: `[memory conflict] ${String(args.path)} 已由其他线程更新；本任务捕获的经历不能覆写较新的近期状态，重新读取也不解除此限制。请保留现有短笺，把本次有证据的经历存入场次记录或在结论中注明观察截止时间。未写入。` };
       }
+      const observation = this.currentNotes.get(file);
+      if (write && observation) {
+        const conflict = this.provenance.conflict(String(args.path), observation);
+        if (conflict) return { failed: true as const, text: `[memory conflict] ${conflict} 未写入。` };
+      }
       if (write && before !== null && !this.observed.has(file)) {
         return { failed: true as const,
           text: `[memory conflict] ${String(args.path)} 尚未读取当前版本；先 read_file，再决定如何合并。未写入。` };
@@ -85,6 +102,7 @@ export class DreamMemory {
         this.observed.set(file, after);
         this.written.set(file, after);
         if (this.pinned.has(file)) this.pinned.set(file, after);
+        if (observation && after !== null) this.provenance.stamp(String(args.path), observation);
       }
       return operation;
     } }));

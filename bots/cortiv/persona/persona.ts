@@ -64,6 +64,7 @@ import { ForegroundEpoch } from './foreground-epoch.ts';
 import { DreamContext, DREAM_DEFAULTS, dreamHistoryWithinBudget, normalizeDreamConfig, renderDreamHistory, type DreamConfig, type DreamHistory } from './dream-context.ts';
 import { DreamTaskQueue, DreamTaskStoppedError, dreamAbortable, dreamDelay } from './dream-task-queue.ts';
 import { DreamMemory, dreamWorkspaceTools } from './dream-memory.ts';
+import { MemoryNoteProvenance, NOTE_PROVENANCE_DIR } from './note-provenance.ts';
 import { ToolCallRecoveryFallback, TOOL_CALL_RECOVERY_DEFAULTS, type ToolCallRecoveryConfig } from './tool-call-recovery.ts';
 import { SleepReview, SLEEP_REVIEW_DEFAULTS, type SleepReviewConfig } from './sleep-review.ts';
 import { SocialMemoryReview, socialReviewPrompt, verifySocialReviewProof } from './social-memory-review.ts';
@@ -1015,9 +1016,11 @@ export class CortiV extends Cormini {
 
   /** 写类工具成功后尝试提交工作区；Git 失败不撤销文件写入。另提供版本历史与观众档案读取工具。 */
   protected override tools(): ToolDef[] {
+    const provenance = new MemoryNoteProvenance(this.memory);
     return [
       ...super.tools().map((t) => (
-        t.name === 'write_file' ? this.committedWrite(t)
+        t.name === 'read_file' ? provenance.readTool(t)
+          : t.name === 'write_file' ? this.committedWrite(t)
           : t.name === 'edit_file' ? this.committed(t, 'edit', '[edited] ')
             : t.name === 'delete_file' ? this.committed(t, 'delete', '[deleted] ')
               : t.name === 'append_file' ? this.committed(t, 'append', '[appended] ')
@@ -1078,6 +1081,10 @@ export class CortiV extends Cormini {
 
   protected override writeGuard(op: 'write' | 'append' | 'rename' | 'delete', path: string, role: string): string | null {
     const normalized = this.memory.normalize(path);
+    const provenancePath = process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+    if (provenancePath === NOTE_PROVENANCE_DIR || provenancePath.startsWith(`${NOTE_PROVENANCE_DIR}/`)) {
+      return '笔记来源元数据由记忆管理器维护，不能直接改写；事实时间与证据写在对应笔记中。';
+    }
     if ((process.platform === 'win32' ? normalized.toLowerCase() : normalized) === 'pending-work.json') {
       return 'pending-work.json 由待办管理器维护；使用 pending_work 更新，不直接改写或删除。';
     }
@@ -1719,7 +1726,7 @@ export class CortiV extends Cormini {
     const queuedAt = new Date().toISOString();
     const basis = `整理缘由：${reason}；${reason === '上下文交接' ? '旧会话观察截止' : '记录观察截止'} ${observedUntilAt ?? '未记录时间'}；${reason === '上下文交接' ? '交接排队于' : '排队于'} ${queuedAt}`;
     const config = normalizeDreamConfig(this.dreamConfig());
-    const accepted = this.dreamQueue.enqueue(signal => this.dreamWithRetry(captured, basis, config, signal), {
+    const accepted = this.dreamQueue.enqueue(signal => this.dreamWithRetry(captured, basis, config, signal, observedUntilAt), {
       timeoutMs: config.timeoutMs, maxPendingTasks: config.maxPendingTasks, label: basis,
       onError: error => {
         if (error instanceof DreamTaskStoppedError) return;
@@ -1790,10 +1797,10 @@ export class CortiV extends Cormini {
     return accepted;
   }
 
-  private async dreamWithRetry(snapshot: ContextRecord[], basis: string, config: DreamConfig, signal: AbortSignal): Promise<void> {
+  private async dreamWithRetry(snapshot: ContextRecord[], basis: string, config: DreamConfig, signal: AbortSignal, observedUntilAt: string | null): Promise<void> {
     const access = new DreamMemory(this.memory, signal);
     try {
-      await this.runDream(snapshot, basis, config, signal, access);
+      await this.runDream(snapshot, basis, config, signal, access, observedUntilAt);
       signal.throwIfAborted();
       this.dreamUnfinished = false;
       return;
@@ -1815,7 +1822,7 @@ export class CortiV extends Cormini {
       );
       await dreamDelay(DREAM_RETRY_MS, signal);
       try {
-        await this.runDream(snapshot, basis, config, signal, access);
+        await this.runDream(snapshot, basis, config, signal, access, observedUntilAt);
         signal.throwIfAborted();
         this.dreamUnfinished = false;
       } catch (second) {
@@ -1827,7 +1834,7 @@ export class CortiV extends Cormini {
     }
   }
 
-  private async runDream(snapshot: ContextRecord[], basis: string, config: DreamConfig, signal: AbortSignal, access: DreamMemory): Promise<void> {
+  private async runDream(snapshot: ContextRecord[], basis: string, config: DreamConfig, signal: AbortSignal, access: DreamMemory, observedUntilAt: string | null): Promise<void> {
     const core = this.core;
     if (!core) return;
     signal.throwIfAborted();
@@ -1837,6 +1844,8 @@ export class CortiV extends Cormini {
     let transcript = fullTranscript;
     if (!transcript.trim()) return;
     const worldFacts = await dreamAbortable(this.verifiedWorldFacts(), signal);
+    access.trackCurrentNote(RECENT_FILE, { observedUntilAt, source: basis,
+      ...(worldFacts ? { worldFactsSampledAt: worldFacts.sampledAt } : {}) });
     signal.throwIfAborted();
     const provenance = `【后台整理依据：${basis}${worldFacts ? `；World 只读事实读取于 ${worldFacts.sampledAt}` : ''}。摘要送达前主意识仍在继续行动；当前状态以较新的实际回执为准。】`;
     const readingId = crypto.randomUUID();
@@ -1902,7 +1911,7 @@ export class CortiV extends Cormini {
     // 从本次更新的 recent 文件读取摘要，独立于 fork 最终文本。
     const recent = this.readRecent();
     if (recent && recent !== before && access.ownsCurrent(RECENT_FILE)) {
-      core.injectInternal(`[memory] 最近在说的事:\n${provenance}\n${excerptRecent(recent)}`, 'dream');
+      core.injectInternal(`[memory] 最近在说的事:\n${new MemoryNoteProvenance(this.memory).describe(RECENT_FILE)}\n${provenance}\n${excerptRecent(recent)}`, 'dream');
     }
     const text = surfaced.trim();
     if (text && text !== '(nothing)') {
@@ -1967,6 +1976,7 @@ export class CortiV extends Cormini {
       '   先用最近的回执和现场变化对账：哪些目标已完成、哪些仍在做、哪些受阻。',
       '   调用被受理、排队或发送只证明该步骤发生；外部目标是否生效，要看相应回执或核验。未确认的结果写成待核验，明确被拒的尝试保留拒绝原因。',
       '   短笺写明所依据的观察时间；“当前”只指材料最后观察到的状态，主意识送达时可能已有更新。整理完成时间不能当作事实发生时间。',
+      '   核对同一对象、同一属性和适用范围的较新证据；更新可变状态的现有段落，旧库存、位置和待办移入带日期的历史。已经过期的状态不能因为本次重写而获得新的发生时间。历史经历与稳定身份分别保留，不按文件修改日期整篇丢弃。',
       '   后来一次尝试失败，不会撤销先前已经验证的成果；旧计划不能因此变回未完成。',
       '   短笺前段先写当前行动、仍可执行的目标和等待什么条件；已完成事项紧接着点明。',
       '   300 字以内、连贯的中文散文；只留答应观众的事、未了目标和还挂着的梗。',

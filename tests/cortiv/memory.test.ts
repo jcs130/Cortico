@@ -875,9 +875,11 @@ describe('CortiV 并行梦', () => {
       expect(note.text).toContain('旧会话观察截止 2026-10-04T00:29:57Z');
       expect(note.text).toContain('交接排队于 2026-10-04T00:30:00.000Z');
       expect(note.text).toContain('较新的实际回执');
-      expect(note.text).not.toContain('2026-10-04T00:31:00');
+      expect(note.text).not.toContain('观察截止 2026-10-04T00:31:00');
       expect(note.text).not.toContain('2026-10-04T02:00:00');
     }
+    expect(notes.find(note => note.text.includes('最近在说的事'))!.text)
+      .toContain('整理写入于 2026-10-04T00:31:00.000Z');
     expect(forks[0].messages.find((item) => item.role === 'user')!.content).toContain('旧会话观察截止 2026-10-04T00:29:57Z');
     expect(readFileSync(join(dir, RECENT_FILE), 'utf8')).toBe('任务还在执行，等它结束。');
   });

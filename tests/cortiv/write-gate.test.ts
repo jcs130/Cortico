@@ -101,7 +101,7 @@ describe('git_log / git_show:她自己读得到自己的编辑历史', () => {
     const out = await run(tool(p, 'git_show'), { path: '地图.md', rev: hashes[1] });
     expect(out).toContain('小麦、胡萝卜、床、铁锭');
     // 只读:没有 checkout/回滚,盘上仍是挖空的那一版
-    expect(await run(tool(p, 'read_file'), { path: '地图.md' })).toBe(gutted);
+    expect((await run(tool(p, 'read_file'), { path: '地图.md' })).endsWith(gutted)).toBe(true);
   });
 
   it('路径逃逸被拒;hash 打错说得清楚', async () => {
@@ -173,14 +173,14 @@ describe('append_file:只往后长的那条路', () => {
     await run(writeTool(p), { path: '日志/0828.md', content: '# 0828\n第一条\n' });
     const out = await run(appendTool(), { path: '日志/0828.md', content: '第二条\n' });
     expect(out).toBe('[appended] 日志/0828.md +4 字符,现在 15 字符。');
-    expect(await run(tool(p, 'read_file'), { path: '日志/0828.md' })).toBe('# 0828\n第一条\n第二条\n');
+    expect((await run(tool(p, 'read_file'), { path: '日志/0828.md' })).endsWith('# 0828\n第一条\n第二条\n')).toBe(true);
   });
 
   it('文件不存在就是新建,回执说明这一点(父目录一并建出来)', async () => {
     const out = await run(appendTool(), { path: '日志/新的/0828.md', content: '第一条\n' });
     expect(out).toContain('原本没有这份文件,已新建');
     expect(out).toContain('+4 字符,现在 4 字符');
-    expect(await run(tool(p, 'read_file'), { path: '日志/新的/0828.md' })).toBe('第一条\n');
+    expect((await run(tool(p, 'read_file'), { path: '日志/新的/0828.md' })).endsWith('第一条\n')).toBe(true);
   });
 
   it('上一行没换行就先补一个,并在回执里说清', async () => {
@@ -190,7 +190,7 @@ describe('append_file:只往后长的那条路', () => {
     // 补的换行算进加了多少:数字对得上盘上的正文
     expect(out).toContain('+4 字符');
     expect(out).toContain('现在 7 字符');
-    expect(await run(tool(p, 'read_file'), { path: 'a.md' })).toBe('第一条\n第二条');
+    expect((await run(tool(p, 'read_file'), { path: 'a.md' })).endsWith('第一条\n第二条')).toBe(true);
   });
 
   it('追加同样进 git 历史,署她自己的名', async () => {
@@ -256,7 +256,7 @@ describe('edit_file / delete_file 留痕', () => {
     const log = subjects();
     expect(log).toContain(`corti|她改了 ${path}`);
     expect(log).toContain(`corti|后台整理改了 ${path}`);
-    expect(await run(tool(p, 'read_file'), { path })).toBe('甲(1) — 再新的印象\n\n事实一。\n');
+    expect((await run(tool(p, 'read_file'), { path })).endsWith('甲(1) — 再新的印象\n\n事实一。\n')).toBe(true);
   });
 
   it('失败的改动不提交;删除提交一次并能在历史里看到', async () => {
