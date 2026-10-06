@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Cormini } from '../../bots/cormini/persona/persona.ts';
 import { globToRegExp } from '../../bots/cormini/persona/memory.ts';
+import { READ_FILE_DEFAULT_LINES, workspaceTools } from '../../bots/cormini/persona/workspaceTools.ts';
 import { nullLogger } from '../../src/core/util.ts';
 
 
@@ -27,17 +28,53 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-describe('read_file:整份或行区间', () => {
+describe('read_file:短文件与长文件分页', () => {
   beforeEach(() => put('a.md', '一\n二\n三\n'));
 
-  it('不给区间就是原文,一个字不加', async () => {
+  it('短文件不给区间就是原文,一个字不加', async () => {
     expect(await run('read_file', { path: 'a.md' })).toBe('一\n二\n三\n');
   });
 
   it('offset + limit 取一段,抬头说清第几到第几行、共几行', async () => {
-    expect(await run('read_file', { path: 'a.md', offset: 2, limit: 1 })).toBe('[a.md 第 2-2 行,共 3 行]\n二');
+    expect(await run('read_file', { path: 'a.md', offset: 2, limit: 1 })).toBe('[a.md 第 2-2 行,共 3 行;后续从 offset=3 继续读取]\n二');
     expect(await run('read_file', { path: 'a.md', offset: 2 })).toBe('[a.md 第 2-3 行,共 3 行]\n二\n三');
-    expect(await run('read_file', { path: 'a.md', limit: 2 })).toBe('[a.md 第 1-2 行,共 3 行]\n一\n二');
+    expect(await run('read_file', { path: 'a.md', limit: 2 })).toBe('[a.md 第 1-2 行,共 3 行;后续从 offset=3 继续读取]\n一\n二');
+  });
+
+  it('默认读取长文件会分页,按回执的 offset 能完整恢复正文', async () => {
+    const lines = Array.from({ length: READ_FILE_DEFAULT_LINES * 2 + 7 }, (_, i) => `记录 ${i + 1}`);
+    put('long.md', `${lines.join('\n')}\n`);
+    let offset: number | undefined;
+    const recovered: string[] = [];
+    do {
+      const page = await run('read_file', { path: 'long.md', ...(offset === undefined ? {} : { offset }) });
+      const [header, ...body] = page.split('\n');
+      expect(body.length).toBeLessThanOrEqual(READ_FILE_DEFAULT_LINES);
+      recovered.push(...body);
+      const continuation = header.match(/offset=(\d+)/);
+      offset = continuation ? Number(continuation[1]) : undefined;
+    } while (offset !== undefined);
+    expect(recovered).toEqual(lines);
+    expect(disk('long.md')).toBe(`${lines.join('\n')}\n`);
+  });
+
+  it('显式 limit 可扩大区间,负 offset 可直接读长文件末尾', async () => {
+    const lines = Array.from({ length: READ_FILE_DEFAULT_LINES + 3 }, (_, i) => `记录 ${i + 1}`);
+    put('long.md', lines.join('\n'));
+    const whole = await run('read_file', { path: 'long.md', limit: lines.length });
+    expect(whole.split('\n').slice(1)).toEqual(lines);
+    expect(whole.split('\n')[0]).not.toContain('offset=');
+    const tail = await run('read_file', { path: 'long.md', offset: -2 });
+    expect(tail.split('\n').slice(1)).toEqual(lines.slice(-2));
+  });
+
+  it('虚拟文件也能分页读取', async () => {
+    const lines = Array.from({ length: READ_FILE_DEFAULT_LINES + 1 }, (_, i) => `虚拟记录 ${i + 1}`);
+    const tool = workspaceTools({ memory: p.memory, writeGuard: () => null,
+      readOverride: () => lines.join('\n'), prefixResidentFiles: () => [] }).find(t => t.name === 'read_file')!;
+    const page = await tool.handler({ path: 'virtual.md', offset: -2 }, { role: 'main', log: nullLogger() });
+    expect(typeof page).toBe('string');
+    expect((page as string).split('\n').slice(1)).toEqual(lines.slice(-2));
   });
 
   it('负 offset 从文件尾倒数:读长笔记的末尾几行', async () => {

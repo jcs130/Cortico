@@ -22,7 +22,8 @@ Open `http://127.0.0.1:7788/` and talk to it in the terminal view.
 ## What it does
 
 - **The workspace is the memory.** `workspace/` is the whole of it. The bot works on it
-  with the standard file toolset: `read_file` (whole file or a line range), `write_file`,
+  with the standard file toolset: `read_file` (short files whole, longer files in 200-line
+  pages with a continuation offset; explicit `limit` selects a larger range), `write_file`,
   `edit_file` (exact-string replace), `delete_file`, `list_files` (folded directory
   listing), `glob_files` (by name pattern) and `grep_files` (by content); nothing else
   survives a context handoff. The file listing is part of the system prefix, so the bot

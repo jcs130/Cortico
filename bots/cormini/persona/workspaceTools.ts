@@ -11,6 +11,8 @@ import { BLOBS_DIR, LIST_DIR_CAP, globToRegExp, memHandle, type GitWorkspaceMemo
 
 /** `glob_files` 一次最多交回的文件数。 */
 const GLOB_LIMIT = 100;
+/** `read_file` 缺省交回的行数；回执给出后续区间的起点。 */
+export const READ_FILE_DEFAULT_LINES = 200;
 /** `grep_files` 缺省最多交回的命中行(或文件)数。 */
 const GREP_DEFAULT_LIMIT = 50;
 /** `grep_files` 每行交回的最大字符数,更长的截断。 */
@@ -42,46 +44,47 @@ export interface WorkspaceHost {
 function readTool(host: WorkspaceHost): ToolDef {
   return {
     name: 'read_file',
-    description: 'Read a file from your workspace. Whole file by default; '
-      + 'give offset and limit to read a slice of a long note (a negative offset counts from the end, so offset -20 reads the last 20 lines).',
+    description: `Read a file from your workspace, up to ${READ_FILE_DEFAULT_LINES} lines by default. `
+      + 'Long files include the next offset; use grep_files to locate relevant passages, then offset and limit to read them. '
+      + 'A negative offset counts from the end, so offset -20 reads the last 20 lines.',
     tags: ['read'],
     parameters: {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Path relative to your workspace.' },
         offset: { type: 'integer', description: 'First line to read, 1-indexed. Negative counts from the end (-1 is the last line). Omit to start at the top.' },
-        limit: { type: 'integer', description: 'How many lines to read. Omit to read to the end.' },
+        limit: { type: 'integer', description: `How many lines to read. Defaults to ${READ_FILE_DEFAULT_LINES}; give a larger value when needed.` },
       },
       required: ['path'],
     },
     handler: async (args) => {
       const path = String(args.path ?? '');
       const virtual = host.readOverride(path);
-      if (virtual !== null) return virtual;
       // blobs/ 下是二进制:不回正文,回执附上句柄,渲染层决定她看到的是分片还是那一行
       const rel = path.replace(/\\/g, '/').replace(/^\.\//, '');
-      if (rel.startsWith(BLOBS_DIR)) {
+      if (virtual === null && rel.startsWith(BLOBS_DIR)) {
         const got = host.memory.blobs.get(memHandle(rel));
         if (!got) return `[not found] ${path}`;
         return { text: '', blobs: [{ handle: memHandle(rel), fallbackText: `${got.mime} ${got.bytes.byteLength} 字节` }] };
       }
       let text: string;
       try {
-        text = readFileSync(host.memory.insideWorkspace(path), 'utf8');
+        text = virtual ?? readFileSync(host.memory.insideWorkspace(path), 'utf8');
       } catch {
         return `[not found] ${path}`;
       }
       const offset = intArg(args.offset);
       const limit = intArg(args.limit);
-      if (offset === undefined && limit === undefined) return text;
       const lines = text.split('\n');
       const total = text === '' ? 0 : text.endsWith('\n') ? lines.length - 1 : lines.length;
+      if (offset === undefined && limit === undefined && total <= READ_FILE_DEFAULT_LINES) return text;
       if (total === 0) return `[${path} 是空文件]`;
       let start = offset === undefined || offset === 0 ? 1 : offset > 0 ? offset : total + offset + 1;
       if (start < 1) start = 1;
       if (start > total) return `[${path} 共 ${total} 行,没有第 ${start} 行]`;
-      const end = limit === undefined ? total : Math.min(total, start + Math.max(limit, 1) - 1);
-      return `[${path} 第 ${start}-${end} 行,共 ${total} 行]\n${lines.slice(start - 1, end).join('\n')}`;
+      const end = Math.min(total, start + Math.max(limit ?? READ_FILE_DEFAULT_LINES, 1) - 1);
+      const continuation = end < total ? `;后续从 offset=${end + 1} 继续读取` : '';
+      return `[${path} 第 ${start}-${end} 行,共 ${total} 行${continuation}]\n${lines.slice(start - 1, end).join('\n')}`;
     },
   };
 }
