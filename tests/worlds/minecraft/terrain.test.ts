@@ -597,8 +597,8 @@ describe('bearing / facingOf', () => {
   });
 
   it('yaw → 罗盘度数:北=0 东=90 南=180 西=270,给解说定位用', () => {
-    expect(facingDegrees(0)).toBe(180);
-    expect(facingDegrees(Math.PI)).toBe(0);
+    expect(facingDegrees(0)).toBe(0);
+    expect(facingDegrees(Math.PI)).toBe(180);
     expect(facingDegrees(Math.PI / 2)).toBe(270);
     expect(facingDegrees(-Math.PI / 2)).toBe(90);
     // 八方位只有 45° 分辨率;转头 20° 画面换一半,度数才对得上
@@ -609,14 +609,14 @@ describe('bearing / facingOf', () => {
   it('俯仰只在明显低头抬头时说一句', () => {
     expect(pitchPhrase(0)).toBeNull();
     expect(pitchPhrase(0.2)).toBeNull();
-    expect(pitchPhrase(Math.PI / 5)).toBe('低头看着地面');
-    expect(pitchPhrase(Math.PI / 3)).toBe('几乎盯着脚下');
-    expect(pitchPhrase(-Math.PI / 3)).toBe('仰头看天');
+    expect(pitchPhrase(Math.PI / 5)).toBe('抬头往上看');
+    expect(pitchPhrase(Math.PI / 3)).toBe('仰头看天');
+    expect(pitchPhrase(-Math.PI / 3)).toBe('几乎盯着脚下');
   });
 
-  it('yaw → 朝向:mineflayer 的 yaw=0 是朝南', () => {
-    expect(facingOf(0)).toBe('south');
-    expect(facingOf(Math.PI)).toBe('north');
+  it('yaw → 朝向:mineflayer 的 yaw=0 是朝北', () => {
+    expect(facingOf(0)).toBe('north');
+    expect(facingOf(Math.PI)).toBe('south');
     expect(facingOf(Math.PI / 2)).toBe('west');
   });
 });
@@ -1220,7 +1220,7 @@ describe('snapshotFromBot 运动与方位', () => {
     const snap = snapshotFromBot(bot);
     expect(snap.motion).toBe('walking');
     expect(snap.heading).toBe('north');
-    expect(snap.facing).toBe('north');
+    expect(snap.facing).toBe('south'); // 可以朝南看、同时向北走，视线不等于速度方向
     const fast = { ...bot, entity: { ...bot.entity, velocity: { x: 0, y: 0, z: -0.3 } } };
     expect(snapshotFromBot(fast).motion).toBe('sprinting');
   });

@@ -49,9 +49,9 @@ export function bearing(dx: number, dz: number): Direction | null {
   return COMPASS[idx];
 }
 
-/** 视线偏航角(mineflayer 的 yaw) → 八方位 */
+/** Mineflayer 的 yaw=0 朝北，水平视线为 (-sin(yaw), -cos(yaw))。 */
 export function facingOf(yaw: number): Direction {
-  return bearing(-Math.sin(yaw), Math.cos(yaw)) ?? 'south';
+  return bearing(-Math.sin(yaw), -Math.cos(yaw)) ?? 'north';
 }
 
 /**
@@ -59,17 +59,17 @@ export function facingOf(yaw: number): Direction {
  * 八方位只有 45° 的分辨率;转头 20° 画面就换了一半,度数才对得上。
  */
 export function facingDegrees(yaw: number): number {
-  const deg = (Math.atan2(-Math.sin(yaw), -Math.cos(yaw)) * 180) / Math.PI;
+  const deg = (Math.atan2(-Math.sin(yaw), Math.cos(yaw)) * 180) / Math.PI;
   return Math.round(((deg % 360) + 360) % 360);
 }
 
-/** 俯仰(mineflayer 的 pitch,弧度,正数是低头) → 一句话;平视返回 null */
+/** 俯仰(mineflayer 的 pitch,弧度,正数是抬头) → 一句话;平视返回 null */
 export function pitchPhrase(pitch: number): string | null {
   const deg = (pitch * 180) / Math.PI;
-  if (deg > 45) return '几乎盯着脚下';
-  if (deg > 20) return '低头看着地面';
-  if (deg < -45) return '仰头看天';
-  if (deg < -20) return '抬头往上看';
+  if (deg > 45) return '仰头看天';
+  if (deg > 20) return '抬头往上看';
+  if (deg < -45) return '几乎盯着脚下';
+  if (deg < -20) return '低头看着地面';
   return null;
 }
 
