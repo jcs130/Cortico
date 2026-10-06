@@ -2696,6 +2696,23 @@ describe('use:(item × 目标方块) 效果表', () => {
     expect(bot.itemActivated).toBe(1);
   });
 
+  it('倒水回执把作物格变水与空桶增加分开报告', async () => {
+    const bot = effectBot({
+      cells: { ...FLOOR, '1,64,0': 'farmland', '1,65,0': { name: 'wheat', props: { age: '0' } } },
+      bag: [{ name: 'water_bucket', count: 1 }],
+      onUse: (b) => {
+        b.bag.splice(0, 1); b.bag.push({ name: 'bucket', count: 1 });
+        b.world.set('1,65,0', { name: 'water', props: { level: '0' } });
+      },
+    });
+    const r = await runUse(bot, { skill: 'use', item: 'water_bucket', at: [1, 64, 0] });
+    expect(r.kind).toBe('done');
+    expect(r.text).toContain('包里空桶 0 → 1 个');
+    expect(r.text).toContain('面外相邻格 (1, 65, 0) 小麦[age=0] → 水[level=0]');
+    expect(r.text).toContain('桶倒空只证明库存变化');
+    expect(r.text).not.toContain('农田已灌溉');
+  });
+
   // 成功路径带背包增减、失败路径不带,于是「包里少了什么」在受阻那一刻整句丢掉。
   // 这里桶用掉了却没换回空桶(服务端吃了这一下):她要看得见的正是这半句
   it('满桶倒水判负:受阻回执带上包里少掉的那一样', async () => {

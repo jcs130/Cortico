@@ -147,6 +147,27 @@ export function faceVector(face: BlockFace): Vec3 {
   return new Vec3(x, y, z);
 }
 
+/** 瞄准所选面实际形状的中心；部分高度方块的顶面不在格顶。 */
+export function bucketAimPoint(
+  cell: Cell, face: BlockFace, shapes: readonly (readonly number[])[] = [],
+): Vec3 {
+  const direction = BLOCK_FACES[face];
+  const axis = direction.findIndex((n) => n !== 0);
+  const edgeIndex = axis + (direction[axis] > 0 ? 3 : 0);
+  const boxes = shapes.length ? shapes : [[0, 0, 0, 1, 1, 1]];
+  const edge = direction[axis] > 0
+    ? Math.max(...boxes.map((box) => box[edgeIndex]))
+    : Math.min(...boxes.map((box) => box[edgeIndex]));
+  const area = (box: readonly number[]): number => box.slice(0, 3).reduce(
+    (size, min, i) => i === axis ? size : size * (box[i + 3] - min), 1,
+  );
+  const surface = boxes.filter((box) => box[edgeIndex] === edge)
+    .reduce((largest, box) => area(box) > area(largest) ? box : largest);
+  const point = [cell.x, cell.y, cell.z].map((origin, i) =>
+    origin + (i === axis ? edge : (surface[i] + surface[i + 3]) / 2));
+  return new Vec3(point[0], point[1], point[2]);
+}
+
 /**
  * 往一块告示牌上写字。原版这件事分两步:**先右键把编辑框打开**(服务端由此记住
  * "现在是谁在编辑这块牌子"),客户端再把四行字发回去;跳过第一步的 update_sign
@@ -293,7 +314,8 @@ export function probeCell(
 }
 
 /** 表外方块物品只报告点击格与面外格的回读；方块属性变化也保留在读数中。 */
-function blockUseReadback(bot: Bot, cell: Cell, face: BlockFace): () => string {
+function blockUseReadback(bot: Bot, cell: Cell, face: BlockFace,
+  note = '这是点击附近的读数，放置目标用 build 的 anchors 指定并核验'): () => string {
   const cells = [cell, cellOnFace(cell, face)];
   const read = (at: Cell): string => {
     const block = blockAtCell(bot, at);
@@ -304,7 +326,7 @@ function blockUseReadback(bot: Bot, cell: Cell, face: BlockFace): () => string {
   const before = cells.map(read);
   return () => `；点击${FACE_ZH[face]}面，回读：` + cells.map((at, i) =>
     `${i === 0 ? '点击格' : '面外相邻格'} ${cellText(at)} ${before[i]} → ${read(at)}`,
-  ).join('；') + '。这是点击附近的读数，放置目标用 build 的 anchors 指定并核验';
+  ).join('；') + `。${note}`;
 }
 
 /** 读包:某一类东西的净增(gain)或净减 */
@@ -911,12 +933,14 @@ export async function useOnce(bot: Bot, call: Extract<SkillCall, { skill: 'use' 
     const filling = bucketFluid || scoopingPowderSnow || fillingBottle;
     if (filling || pouring) {
       const beforeScoop = invSnapshot(bot);
-      // 瞄点照船那一套:实心格瞄它的顶面(液体落在上面那格),空气/液体格瞄这一格自己
       const solidHere = !AIR_NAMES.has(target.name) && !LIQUIDS.has(target.name);
+      const face = call.face ?? USE_FACE;
+      const pourReadback = pouring ? blockUseReadback(bot, cell, face,
+        '桶倒空只证明库存变化；服务端沿视线选择落点，水源位置与灌溉范围须按现场读数核对') : null;
       await aimThenUse(
         bot,
         solidHere
-          ? new Vec3(cell.x + 0.5, cell.y + 1, cell.z + 0.5)
+          ? bucketAimPoint(cell, face, target.shapes)
           : new Vec3(cell.x + 0.5, cell.y + 0.5, cell.z + 0.5),
         activateItem,
       );
@@ -934,14 +958,14 @@ export async function useOnce(bot: Bot, call: Extract<SkillCall, { skill: 'use' 
         // 看不见「水桶 1 → 1、还在包里」这个把病因指出来的事实
         if (!v.met) {
           throw new SkillBlocked(
-            `${scoopHead},${v.actual}${scoopNote ? `。${scoopNote}` : ''}${vapor}`,
+            `${scoopHead},${v.actual}${scoopNote ? `。${scoopNote}` : ''}${vapor}${pourReadback?.() ?? ''}`,
             [`要看到的是:${probe.want}`],
             'server',
           );
         }
-        return `${scoopHead},${v.actual}${scoopNote ? `。${scoopNote}` : ''}${vapor}`;
+        return `${scoopHead},${v.actual}${scoopNote ? `。${scoopNote}` : ''}${vapor}${pourReadback?.() ?? ''}`;
       }
-      return `${scoopHead}。${scoopNote || '包里一样没动'}${vapor}`;
+      return `${scoopHead}。${scoopNote || '包里一样没动'}${vapor}${pourReadback?.() ?? ''}`;
     }
     const beforeInv = invSnapshot(bot);
     const beforeWindow = bot.currentWindow;
