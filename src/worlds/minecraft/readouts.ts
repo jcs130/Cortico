@@ -142,9 +142,12 @@ export function renderQueueReadout(
   q: QueueStatus,
   last: { at: string; kind: string; text: string } | null,
 ): string {
-  const lines = [`[队列] ${renderQueue(q)}`];
-  lines.push(last ? `[最近一单] ${last.at} ${last.text}` : '[最近一单] 这一场还没有跑完过任何一单。');
-  return lines.join('\n');
+  return [`[队列] ${renderQueue(q)}`, renderLastTaskReadout(last)].join('\n');
+}
+
+/** 只搬运已有执行终态；当前请求事实和按需队列查询使用同一份原文。 */
+export function renderLastTaskReadout(last: { at: string; kind: string; text: string } | null): string {
+  return last ? `[最近一单] ${last.at} ${last.text}` : '[最近一单] 这一场还没有跑完过任何一单。';
 }
 
 /** 队列读数的指纹。**不含时钟** —— 已跑多少秒每次都在变,进了指纹这道闸等于不存在 */

@@ -30,7 +30,7 @@ export type EngineRequest =
   | { kind: 'panel'; panel: string; method: string; args: unknown[] }
   | { kind: 'storage-clear'; key: string }
   /** 投递时调用子进程登记的渲染回调；null 表示不生成事件正文。 */
-  | { kind: 'render-deferred'; type: string }
+  | { kind: 'render-deferred'; type: string; renderId: number }
   | { kind: 'shutdown' };
 
 /** 主 → 子:单向投递 */
@@ -60,6 +60,7 @@ export type EngineNote =
   | {
       kind: 'arm-deferred';
       type: string;
+      renderId: number;
       senderKey?: string;
       meta?: Record<string, unknown>;
       tags?: readonly EventTag[];

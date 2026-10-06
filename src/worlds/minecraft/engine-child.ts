@@ -2,6 +2,7 @@
 import { createIpcLogger } from '../../core/ipc-logger.ts';
 import { withAnchors } from '../../core/log-context.ts';
 import { MinecraftWorld } from './world.ts';
+import { DeferredRenders } from './deferred-renders.ts';
 import type {
   ChildToMain,
   CognitionReply,
@@ -17,7 +18,6 @@ import type {
   WorldHost,
   Logger,
   StoragePart,
-  DeferredRendered,
 } from '../../core/types.ts';
 
 function send(msg: ChildToMain): void {
@@ -60,13 +60,7 @@ const store: EventStoreReader = {
   grep: () => unavailable('store.grep'),
 };
 
-/** 按事件类型保存延迟渲染回调。 */
-const textRender = (render: () => DeferredRendered | null | Promise<DeferredRendered | null>) =>
-  async (): Promise<string | null> => {
-    const out = await render();
-    return out === null || typeof out === 'string' ? out : out.text;
-  };
-const deferredRenders = new Map<string, () => Promise<string | null>>();
+const deferredRenders = new DeferredRenders();
 
 let cognitionOn = false;
 
@@ -84,12 +78,13 @@ const cognitionHost: NonNullable<WorldHost['cognition']> = {
 const host: WorldHost = {
   pushEvent: (e, opts) => hostRpc({ kind: 'push', evt: e as Parameters<typeof host.pushEvent>[0] & { blobs?: undefined }, opts }) as Promise<EventEnvelope>,
   pushDeferred: (e, opts) => {
-    deferredRenders.set(e.type, textRender(e.render));
+    const renderId = deferredRenders.arm(e.type, e.render);
     send({
       t: 'note',
       note: {
         kind: 'arm-deferred',
         type: e.type,
+        renderId,
         ...(e.senderKey !== undefined ? { senderKey: e.senderKey } : {}),
         ...(e.meta !== undefined ? { meta: e.meta } : {}),
         ...(e.tags !== undefined ? { tags: e.tags } : {}),
@@ -192,8 +187,7 @@ async function handleRequest(req: EngineRequest): Promise<unknown> {
   }
   if (req.kind === 'render-deferred') {
     /** 渲染失败返回 null。 */
-    const render = deferredRenders.get(req.type);
-    return render ? await render() : null;
+    return deferredRenders.render(req.type, req.renderId);
   }
   if (!mod) throw new Error('Minecraft 引擎还没 init');
   if (req.kind === 'tool') {

@@ -638,6 +638,28 @@ describe('Executor 编排', () => {
     expect(exec.submit([{ skill: 'goto', at: [11, 64, 0] }])).toContain('排进队尾');
   });
 
+  it('exact arrival moves from an adjacent cell while ordinary arrival is already satisfied', async () => {
+    const { bot } = chestBot();
+    bot.entity.position = new V(0.5, 64, 0.5);
+    const arrivals: boolean[] = [];
+    bot.pathfinder.goto = (async (goal: { isEnd: (pos: { x: number; y: number; z: number }) => boolean }) => {
+      arrivals.push(goal.isEnd({ x: 0, y: 64, z: 0 }));
+      bot.entity.position = new V(1.5, 64, 0.5);
+      expect(goal.isEnd({ x: 1, y: 64, z: 0 })).toBe(true);
+    }) as never;
+    const { exec, reports } = makeExecutorOn(bot);
+    try {
+      expect(exec.submitDetailed([{ skill: 'goto', at: [1, 64, 0] }])).toMatchObject({ completedImmediately: true });
+      expect(exec.submitDetailed([{ skill: 'goto', at: [1, 64, 0], exact: true }])).toMatchObject({ accepted: true });
+      await waitUntil(() => reports.length > 0);
+      expect(arrivals).toEqual([false]);
+      expect(reports[0]).toMatchObject({ kind: 'done' });
+      expect(reports[0].text).toContain('精确落脚格');
+      expect(bot.entity.position).toEqual(new V(1.5, 64, 0.5));
+      expect(exec.submitDetailed([{ skill: 'goto', at: [1, 64, 0], exact: true }])).toMatchObject({ completedImmediately: true });
+    } finally { exec.shutdown(); }
+  });
+
   it('已满足的单步 goto 立即成功，重复请求不创建完成事件或消耗任务号', async () => {
     const { bot } = chestBot();
     bot.entity.position = new V(-562, 67, -460);

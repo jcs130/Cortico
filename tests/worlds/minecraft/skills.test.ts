@@ -1,6 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import { parseSteps } from '../../../src/worlds/minecraft/skills.ts';
 
+describe('explicit movement and door states', () => {
+  it('preserves exact arrival and both desired door states', () => {
+    const steps = [{ skill: 'use', at: [1, 64, 0], open: true },
+      { skill: 'goto', at: [2, 64, 0], exact: true },
+      { skill: 'use', at: [1, 64, 0], open: false }];
+    expect(parseSteps(steps)).toEqual({ steps });
+    expect(parseSteps([{ skill: 'goto', at: [2, 0], exact: true }])).toHaveProperty('error');
+    expect(parseSteps([{ skill: 'goto', at: [2, 64, 0], exact: 'true' }])).toHaveProperty('error');
+    expect(parseSteps([{ skill: 'use', target: 'cow', open: true }])).toHaveProperty('error');
+    expect(parseSteps([{ skill: 'use', at: [1, 64, 0], open: false, times: 2 }])).toHaveProperty('error');
+  });
+});
+
 describe('use target contract', () => {
   it('rejects ambiguous block and entity targets with the correct distinction', () => {
     const parsed = parseSteps([{ skill: 'use', at: [1, 64, 3], target: 'bed' }]);

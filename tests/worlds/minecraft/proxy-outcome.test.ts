@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ToolOutcome } from '../../../src/core/types.ts';
+import type { ToolOutcome, WorldHost } from '../../../src/core/types.ts';
 import { MinecraftWorldProxy } from '../../../src/worlds/minecraft/proxy.ts';
 import { MINECRAFT_DEFAULTS } from '../../../src/worlds/minecraft/config.ts';
 import { FakeHost } from '../../helpers/fake-host.ts';
@@ -27,6 +27,33 @@ afterEach(async () => {
 });
 
 describe('Minecraft engine tool outcome IPC', () => {
+  it('keeps delayed task metadata bound to its actual engine registration', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'mc-deferred-ipc-'));
+    fixture.path = join(dir, 'engine-fixture.mjs');
+    const worldUrl = new URL('../../../src/worlds/minecraft/world.ts', import.meta.url).href;
+    const engineUrl = new URL('../../../src/worlds/minecraft/engine-child.ts', import.meta.url).href;
+    writeFileSync(fixture.path, `
+      import { MinecraftWorld } from ${JSON.stringify(worldUrl)};
+      MinecraftWorld.prototype.start = async function (host) {
+        host.pushDeferred({ type: 'minecraft.task.queue', meta: { taskId: 10 }, render: () => 'task 10' });
+        host.pushDeferred({ type: 'minecraft.task.queue', meta: { taskId: 11 }, render: () => 'task 11' });
+      };
+      MinecraftWorld.prototype.stop = async function () {};
+      MinecraftWorld.prototype.console = function () { return { panels: [], storage: [] }; };
+      MinecraftWorld.prototype.envPromptRuntimeVars = function () { return {}; };
+      await import(${JSON.stringify(engineUrl)});
+    `, 'utf8');
+    const host = new FakeHost();
+    const notices: Array<Parameters<WorldHost['pushDeferred']>[0]> = [];
+    Object.assign(host, { pushDeferred: (spec: Parameters<WorldHost['pushDeferred']>[0]) => { notices.push(spec); } });
+    proxy = new MinecraftWorldProxy({ cfg: structuredClone(MINECRAFT_DEFAULTS) });
+    await proxy.start(host);
+    expect(notices.map(notice => notice.meta?.taskId)).toEqual([10, 11]);
+    expect(await notices[0].render()).toBeNull();
+    expect(await notices[1].render()).toBe('task 11');
+    expect(await notices[1].render()).toBeNull();
+  }, 20_000);
+
   it.each([false, true])('retains failed and endsTurn through the actual engine entry (image=%s)', async (withImage) => {
     dir = mkdtempSync(join(tmpdir(), 'mc-outcome-ipc-'));
     fixture.path = join(dir, 'engine-fixture.mjs');

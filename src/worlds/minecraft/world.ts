@@ -35,7 +35,7 @@ import {
 } from './round.ts';
 import {
   bagStamp, blockedStamp, queueStamp,
-  renderBagReadout, renderBlockedReadout, renderQueueReadout, renderStorageReadout, renderStoredItemReadout,
+  renderBagReadout, renderBlockedReadout, renderLastTaskReadout, renderQueueReadout, renderStorageReadout, renderStoredItemReadout,
 } from './readouts.ts';
 import type { SiteZone } from './pathfinder-perf.ts';
 import {
@@ -3230,10 +3230,17 @@ export class MinecraftWorld implements World {
     };
   }
 
-  /** 已有快照的完整读数；只读缓存，不扫描、不推进增量基线。 */
+  /** 已有快照及最近执行终态；只读已有状态，不扫描、不推进增量基线。 */
   requestFacts(): WorldRequestFacts | null {
     if (!this.bridge?.connected || !this.requestFactsCache) return null;
-    return { ...this.requestFactsCache, snapshotTypes: [...this.requestFactsCache.snapshotTypes] };
+    const last = this.lastFinishedTask;
+    // 终态可能刚投递，而下一拍快照尚未发生。读取最新原文，避免只有受理回执
+    // 留在历史里时重做已经完成或受阻的单；日期也保留，不能当成当前队列。
+    const outcome = renderLastTaskReadout(last
+      ? { at: nowIso(this.timezone, new Date(last.at)), kind: last.kind, text: last.text }
+      : null);
+    return { ...this.requestFactsCache, text: `${this.requestFactsCache.text}\n${outcome}`,
+      snapshotTypes: [...this.requestFactsCache.snapshotTypes] };
   }
 
   console(): WorldConsoleDecl {

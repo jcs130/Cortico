@@ -101,6 +101,49 @@ describe('use at without item', () => {
     expect(describeSkill({ skill: 'use', item: 'ender_pearl', at: AT }, 'wheat')).toContain('用末影珍珠右键');
   });
 
+  it('sets a desired door state once and preserves it on the repeated request', async () => {
+    const r = rig('iron_sword');
+    let open = false;
+    let clicks = 0;
+    r.chest.name = 'spruce_door';
+    Object.assign(r.chest, { getProperties: () => ({ open, half: 'lower' }) });
+    r.bot.activateBlock = async () => { clicks++; open = !open; };
+    for (const desired of [true, true, false, false]) {
+      const pending = useOnce(r.bot, { skill: 'use', at: AT, open: desired }, ctx as never);
+      await vi.runAllTimersAsync();
+      expect(await pending).toContain('open');
+      expect(open).toBe(desired);
+    }
+    expect(clicks).toBe(2);
+    expect(r.stack.count).toBe(2);
+  });
+
+  it('reads the lower door half when the upper half has a different transient state', async () => {
+    const r = rig('iron_sword');
+    r.bot.blockAt = position => ({ ...r.chest, name: 'spruce_door', position,
+      getProperties: () => ({ half: position.y === AT[1] ? 'lower' : 'upper', open: position.y !== AT[1] }) }) as never;
+    let clicks = 0;
+    r.bot.activateBlock = async () => { clicks++; };
+    const pending = useOnce(r.bot, { skill: 'use', at: [AT[0], AT[1] + 1, AT[2]], open: false }, ctx as never);
+    await vi.runAllTimersAsync();
+    expect(await pending).toContain('已经关闭');
+    expect(clicks).toBe(0);
+  });
+
+  it('reports a server refusal to reach the desired state and rejects unsupported targets', async () => {
+    const r = rig('iron_sword');
+    r.chest.name = 'iron_door';
+    Object.assign(r.chest, { getProperties: () => ({ open: false, half: 'lower' }) });
+    r.bot.activateBlock = async () => undefined;
+    const pending = useOnce(r.bot, { skill: 'use', at: AT, open: true }, ctx as never);
+    const check = expect(pending).rejects.toThrow('open false → false');
+    await vi.runAllTimersAsync();
+    await check;
+    r.chest.name = 'chest';
+    await expect(useOnce(r.bot, { skill: 'use', at: AT, open: true }, ctx as never)).rejects.toThrow('不支持 open');
+    expect(r.facts().openedContainers).toBe(0);
+  });
+
   it('reports an unchanged portal dimension and the crossing operation without moving or crossing', async () => {
     const r = rig('iron_sword');
     r.chest.name = 'nether_portal';

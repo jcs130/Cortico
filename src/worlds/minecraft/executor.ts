@@ -622,7 +622,8 @@ export function sendChat(bot: Bot, text: string): void {
 function gotoArrivalGoal(call: Extract<SkillCall, { skill: 'goto' }>, target: Cell): InstanceType<typeof goals.Goal> {
   return call.groundY
     ? levelTravelGoal(target.x, target.z)
-    : new goals.GoalNear(target.x, target.y, target.z, 1);
+    : call.exact ? new goals.GoalBlock(target.x, target.y, target.z)
+      : new goals.GoalNear(target.x, target.y, target.z, 1);
 }
 
 async function runSkill(bot: Bot, call: SkillCall, ctx: SkillContext): Promise<string> {
@@ -661,7 +662,7 @@ async function runSkill(bot: Bot, call: SkillCall, ctx: SkillContext): Promise<s
       // may be a roof above a valid entrance. Keep probes and movement aligned.
       const finalGoal = gotoArrivalGoal(call, target);
       if (call.dryRun) {
-        const probes = ctx.probeRoutes?.(target, call.groundY ? finalGoal : undefined);
+        const probes = ctx.probeRoutes?.(target, call.groundY || call.exact ? finalGoal : undefined);
         if (!probes || probes.length === 0) throw new SkillBlocked('探路器不可用(没连上服务器)');
         const me = bot.entity.position;
         const startDist = call.groundY
@@ -671,7 +672,7 @@ async function runSkill(bot: Bot, call: SkillCall, ctx: SkillContext): Promise<s
           startDist, diag: call.groundY ? null : ctx.probeTarget?.(target) ?? null,
         });
       }
-      const note = routeNote(bot, ctx, target, call.groundY ? finalGoal : undefined);
+      const note = routeNote(bot, ctx, target, call.groundY || call.exact ? finalGoal : undefined);
       const startedAt = Date.now();
       let sceneTarget = target;
       try {
@@ -694,11 +695,12 @@ async function runSkill(bot: Bot, call: SkillCall, ctx: SkillContext): Promise<s
           bot, ctx, err, sceneTarget,
           [...digBackoffScene(ctx, startedAt), ...(note ? [note] : []),
             ...(sceneTarget !== target ? [`长途最终目标 ${cellText(target)}，这一段先去 ${cellText(sceneTarget)}`] : [])],
-          call.groundY ? (sceneTarget === target ? finalGoal : levelTravelGoal(sceneTarget.x, sceneTarget.z)) : undefined,
+          call.groundY || call.exact ? (sceneTarget === target ? finalGoal : levelTravelGoal(sceneTarget.x, sceneTarget.z)) : undefined,
         );
       }
       const water = headInWater(bot) || bodyInWater(bot);
-      const arrival = call.groundY ? ';本次只满足水平接近条件，高度未作为到达条件' : '';
+      const arrival = call.groundY ? ';本次只满足水平接近条件，高度未作为到达条件'
+        : call.exact ? ';已满足精确落脚格到达条件' : '';
       const footing = water ? ';仍在水中，未确认登岸' : '';
       return `到了 ${cellText(feetOf(bot))}${arrival}${footing}${note ? `。\n${note}` : ''}`;
     }

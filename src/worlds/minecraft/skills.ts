@@ -80,7 +80,7 @@ export type AttackMode = 'auto' | 'melee' | 'ranged' | 'kite';
 
 /** 一步技能:动作参数,外加边界声明(StepBounds)。 */
 export type SkillCall = StepBounds & (
-  | { skill: 'goto'; at: Anchor; dimension?: string; groundY?: true; dryRun?: boolean }
+  | { skill: 'goto'; at: Anchor; dimension?: string; groundY?: true; exact?: boolean; dryRun?: boolean }
   | { skill: 'look'; at: Anchor }
   | { skill: 'transit'; at: Anchor }
   | { skill: 'goto_player'; name: string }
@@ -139,6 +139,8 @@ export type SkillCall = StepBounds & (
       entityId?: number;
       index?: number;
       times?: number;
+      /** 门、活板门与栅栏门的期望开启状态；已符合时不再点击。 */
+      open?: boolean;
       /** 只对告示牌:右键打开编辑框之后把这几行字写上去(\n 分行,最多 4 行) */
       text?: string;
       /** 写在牌子背面(1.20 起两面各有一套字);缺省写正面 */
@@ -404,6 +406,8 @@ const LEAD_TOL = { lo: 1, hi: 16, def: 3 } as const;
 function parseGoto(c: Record<string, unknown>, at: string, marks?: MarkLookup): ParseResult {
   // [x,z] 两分量 = 在对应水平位置找可达落脚点；不强制站上屋顶。
   const flat = Array.isArray(c.at) && c.at.length === 2;
+  if (c.exact !== undefined && typeof c.exact !== 'boolean') return { error: `${at} goto 的 exact 要布尔值` };
+  if (flat && c.exact === true) return { error: `${at} goto 的 exact 需要完整 [x,y,z] 落脚格` };
   const to = anchorOf(flat ? [(c.at as unknown[])[0], 0, (c.at as unknown[])[1]] : c.at, marks);
   if (!to) {
     return {
@@ -416,6 +420,7 @@ function parseGoto(c: Record<string, unknown>, at: string, marks?: MarkLookup): 
       skill: 'goto', at: to,
       ...(str(c.dimension) ? { dimension: normalizeDimension(str(c.dimension)) } : {}),
       ...(flat ? { groundY: true as const } : {}),
+      ...(c.exact === true ? { exact: true } : {}),
       ...(c.dryRun === true ? { dryRun: true } : {}),
     },
   };
@@ -667,6 +672,9 @@ function parseUse(c: Record<string, unknown>, at: string, marks?: MarkLookup): P
 
   const times = intIn(c.times, 1, USE_TIMES_MAX, 1);
   if (times === null) return { error: `${at} use 的 times 要在 1-${USE_TIMES_MAX} 之间` };
+  if (c.open !== undefined && (typeof c.open !== 'boolean' || !useAt || times !== 1)) {
+    return { error: `${at} use 的 open 要布尔值，并与方块 at 一起给；明确开关状态只执行一次` };
+  }
   let index: number | undefined;
   if (c.index !== undefined) {
     if (!target) return { error: `${at} use 的 index 是报价菜单序号,要和 target 一起给` };
@@ -723,6 +731,7 @@ function parseUse(c: Record<string, unknown>, at: string, marks?: MarkLookup): P
       ...(entityId !== undefined ? { entityId } : {}),
       ...(index !== undefined ? { index } : {}),
       ...(times > 1 ? { times } : {}),
+      ...(typeof c.open === 'boolean' ? { open: c.open } : {}),
       ...(text !== undefined ? { text } : {}),
       ...(back ? { back: true as const } : {}),
       ...(face ? { face } : {}),
@@ -1006,6 +1015,7 @@ const SKILLS: readonly SkillSpec[] = [
                                                  **只写 [x,z] = 按水平距离到那儿附近**，高度不进到达判据，也不保证站上陆地；不会强制爬上同列屋顶(区块没加载会照实受阻)。
                                                  要指定楼层或高度,请给完整 [x,y,z]。
                                                  完整坐标的到达判定允许离目标格 1 格，回执给出实际落脚格；到门旁不代表已经进屋。
+                                                 exact:true 要完整 [x,y,z]，脚下必须到该格；用于穿过门洞或精确站位，不会把门外邻格当作进屋。
                                                  dryRun 只计算路线，不移动身体。穿过门洞要选择门另一侧的可站立空气格，并核对实际位置。
                                                  at 也收 mc_map 的路标名:{"skill":"goto","at":"家"}。
                                                  赶路可能挖方块或搭路；已绑定蓝图范围内不生成这些动作，完工后仍生效。
@@ -1019,6 +1029,7 @@ const SKILLS: readonly SkillSpec[] = [
         doc: '只写 [x,z] = 到附近可达落脚点(不强制爬屋顶);指定楼层请给 [x,y,z];给字符串 = mc_map 路标名',
       },
       { key: 'dimension', kind: 'string', doc: '可选的当前维度前置条件(overworld/the_nether/the_end)' },
+      { key: 'exact', kind: 'flag', doc: '完整 [x,y,z] 的精确落脚格；缺省允许邻格到达' },
       { key: 'dryRun', kind: 'flag' },
     ],
   },
@@ -1274,6 +1285,7 @@ const SKILLS: readonly SkillSpec[] = [
     name: 'use',
     doc: `{"skill":"use","at":[103,64,-31]}
                                                  空手右键世界里已有的那一格:开门、拉杆、按钮、开箱子看一眼、点床睡觉。
+                                                 门、活板门或栅栏门可给 open:true 开启、open:false 关闭；已符合就保持，不反复翻转。回执核验期望状态。
                                                  at 是要点击的方块坐标；item 是从背包拿在手里的物品，不是被点击方块的名字。
                                                  点击已有方块不要求包里有同名物品。查看方块容器后会关窗；要取物直接用 take at 点名方块。
 {"skill":"use","item":"flint_and_steel","at":[103,64,-31]}
@@ -1312,6 +1324,7 @@ const SKILLS: readonly SkillSpec[] = [
       { key: 'entityId', kind: 'int', lo: 0, hi: 2_147_483_647, def: 0, doc: '可选；本连接里观察到的实体 ID，与 target 一起给，精确点该实体，不退回最近者' },
       { key: 'index', kind: 'int', lo: 1, hi: 99, def: 1 },
       { key: 'times', kind: 'int', lo: 1, hi: USE_TIMES_MAX, def: 1, doc: '连着右键几次;带 index 时是成交几次' },
+      { key: 'open', kind: 'flag', doc: '门、活板门、栅栏门的期望状态；true 开、false 关，已符合不点击；与 at 一起给' },
       { key: 'text', kind: 'string', doc: `写在告示牌上的字,\\n 分行;最多 ${SIGN_LINES} 行、每行 ${SIGN_LINE_CHARS} 字符` },
       { key: 'back', kind: 'flag', doc: '写在牌子背面;缺省正面' },
       { key: 'face', kind: 'enum', values: FACE_NAMES, error: `use 的 face 要是 ${FACE_NAMES.join('/')} 之一`, doc: '右键那一格的哪一面;缺省顶面' },

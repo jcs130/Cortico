@@ -366,6 +366,23 @@ export function probeProp(
   };
 }
 
+/** Doors keep the authoritative open property on their lower half. */
+function openStateCell(bot: Bot, cell: Cell): Cell {
+  const block = blockAtCell(bot, cell);
+  return block?.name.endsWith('_door') && blockProp(block, 'half') === 'upper'
+    ? { ...cell, y: cell.y - 1 } : cell;
+}
+
+function desiredOpenProbe(bot: Bot, cell: Cell, target: string, open: boolean): UseProbe {
+  if (!TOGGLES.some(toggle => toggle.prop === 'open' && toggle.re.test(target))) {
+    throw new SkillBlocked(`${cellText(cell)} 的${zhName(target)}不支持 open；只有门、活板门和栅栏门可指定开关状态`);
+  }
+  const stateCell = openStateCell(bot, cell);
+  const probe = probeProp(bot, stateCell, 'open', (_was, now) => now === String(open), `open=${open}`);
+  if (!probe) throw new SkillBlocked(`${cellText(stateCell)} 的开关状态读不到，未点击`);
+  return probe;
+}
+
 /**
  * 按物品与目标确定右键效果的观测位置：床读 sleeping，种子读耕地上方。
  * 无法确定时返回 null，仅报告事实并记 debug。
@@ -872,10 +889,14 @@ export async function useOnce(bot: Bot, call: Extract<SkillCall, { skill: 'use' 
     checkAbort(ctx);
     const target = blockAtCell(bot, cell);
     if (!target) throw new SkillBlocked(`${cellText(cell)} 所在区块没加载`);
+    const desiredProbe = call.open !== undefined ? desiredOpenProbe(bot, cell, target.name, call.open) : null;
+    if (desiredProbe?.read().met) {
+      return `${cellText(cell)} 的${zhName(target.name)}已经${call.open ? '打开' : '关闭'}，保持状态，未点击；${desiredProbe.read().actual}`;
+    }
     // 「开门→赶路」是通行意图。门已经打开时再次 use 会把它关上，
     // 下一步寻路便在门框处撞住；保留开门事实并直接走下一步。
     const nextStep = ctx.batch?.steps[(ctx.batch.index ?? 0) + 1];
-    if (!call.item && nextStep?.skill === 'goto'
+    if (call.open === undefined && !call.item && nextStep?.skill === 'goto'
       && (target.name.endsWith('_door') || target.name.endsWith('_fence_gate'))
       && blockProp(target, 'open') === 'true') {
       return `${cellText(cell)} 的${zhName(target.name)}已经打开，保持开启，继续赶路`;
@@ -912,7 +933,7 @@ export async function useOnce(bot: Bot, call: Extract<SkillCall, { skill: 'use' 
       return `空手右键了 ${cellText(cell)} 的${zhName(target.name)}:这一下把编辑框打开了,没写字;要写字就在同一条 use 里给 text`;
     }
     // (item, 目标方块) 表决定去哪儿读;表外那一对退回「报事实不下结论」
-    const probe = useProbeAt(bot, held, cell, target.name, ctx, call.face);
+    const probe = desiredProbe ?? useProbeAt(bot, held, cell, target.name, ctx, call.face);
     const placementReadback = !probe && held && bot.registry?.blocksByName?.[held]
       ? blockUseReadback(bot, cell, call.face ?? USE_FACE) : null;
     if (!probe) {

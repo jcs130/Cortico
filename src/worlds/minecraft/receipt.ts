@@ -66,7 +66,7 @@ export function describeSkill(c: SkillCall, heldItem?: string | null): string {
     : '';
   switch (c.skill) {
     case 'goto': {
-      const where = c.groundY ? `水平坐标 (${c.at[0]},${c.at[2]}) 附近` : `坐标 ${anchorsText([c.at])}`;
+      const where = c.groundY ? `水平坐标 (${c.at[0]},${c.at[2]}) 附近` : `${c.exact ? '精确落脚' : '坐标'} ${anchorsText([c.at])}`;
       const dimension = c.dimension ? `[${zhDimension(c.dimension)}] ` : '';
       return c.dryRun ? `探路到 ${dimension}${where}` : `去${dimension}${where}`;
     }
@@ -121,7 +121,8 @@ export function describeSkill(c: SkillCall, heldItem?: string | null): string {
       if (c.text !== undefined && c.at) {
         return `在 ${anchorsText([c.at])} 的告示牌${c.back ? '背面' : ''}上写 ${signLinesText(c.text)}`;
       }
-      if (c.at) return `${what}右键 ${anchorsText([c.at])}${n}`;
+      if (c.at) return c.open !== undefined ? `${c.open ? '打开' : '关闭'} ${anchorsText([c.at])} 的门`
+        : `${what}右键 ${anchorsText([c.at])}${n}`;
       return `${what}右键${n}`;
     }
     case 'craft':

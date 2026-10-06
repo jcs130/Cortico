@@ -405,7 +405,7 @@ export class MinecraftWorldProxy implements World {
             render: async () => {
               try {
                 return (await this.rpc(
-                  { kind: 'render-deferred', type },
+                  { kind: 'render-deferred', type, renderId: note.renderId },
                   DEFERRED_RENDER_TIMEOUT_MS,
                 )) as string | null;
               } catch {

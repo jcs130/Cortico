@@ -4658,6 +4658,34 @@ describe('地点相对化(回执侧、事实措辞)', () => {
     expect(render()).toContain('包里有：橡木原木×3、面包×2。');
   });
 
+  it('请求事实立即保留真实执行终态，不等待下次快照或依赖被裁剪的任务事件', () => {
+    const m = new MinecraftWorld({ cfg: cfg({ port: 1 }) });
+    const bot = idleBot();
+    stub(m, { host: new FakeHost(), bridge: { connected: true, bot, invSynced: true } });
+    vi.spyOn(m as any, 'publishGoalPlanEdges').mockImplementation(() => {});
+    vi.spyOn(m as any, 'adviseBlockedTask').mockResolvedValue(undefined);
+    (m as any).renderSnapshotEvent();
+    expect(m.requestFacts()?.text).toContain('还没有跑完过任何一单');
+    const baseline = (m as any).snapshotBaseline;
+    const scan = vi.spyOn(bot as any, 'findBlocks');
+    const at = Date.now();
+    (m as any).onTaskReport({ kind: 'blocked', taskId: 24, text: '任务#24 没做成：箱里没有泥土。' });
+    const blocked = m.requestFacts()!.text;
+    expect(blocked).toContain('任务#24 没做成：箱里没有泥土。');
+    // 带完整日期和时刻，而非只保留当日钟点；不追加扫描或推进事件差分。
+    expect(blocked).toMatch(/\[最近一单\] \d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}/);
+    expect((m as any).lastFinishedTask.at).toBeGreaterThanOrEqual(at);
+    expect((m as any).snapshotBaseline).toBe(baseline);
+    expect(scan).not.toHaveBeenCalled();
+    (m as any).onTaskReport({ kind: 'done', taskId: 25, text: '任务#25 做完：到了 (-527,68,-459)。' });
+    const done = m.requestFacts()!.text;
+    expect(done).toContain('任务#25 做完：到了 (-527,68,-459)。');
+    expect(done).not.toContain('任务#24');
+    // 临时挂起不是新的终态，不覆盖已经核对的结果。
+    (m as any).onTaskReport({ kind: 'suspended', taskId: 26, text: '任务#26 暂时挂起。' });
+    expect(m.requestFacts()?.text).toBe(done);
+  });
+
   it('请求事实在断线后不可读，新连接采样前不复用旧连接读数', () => {
     const m = new MinecraftWorld({ cfg: cfg({ port: 1 }) });
     const bot = Object.assign(new EventEmitter(), idleBot() as Record<string, unknown>);
