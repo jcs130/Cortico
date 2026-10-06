@@ -945,6 +945,7 @@ export async function useOnce(bot: Bot, call: Extract<SkillCall, { skill: 'use' 
     }
     const beforeInv = invSnapshot(bot);
     const beforeWindow = bot.currentWindow;
+    const beforeDimension = dimensionOf(bot);
     const interactionStartedAt = Date.now();
     await activateBlock(target, call.face ? faceVector(call.face) : undefined);
     const keepWindow = (call.times ?? 1) === 1 && consumesOpenWindow(nextStep);
@@ -976,7 +977,13 @@ export async function useOnce(bot: Bot, call: Extract<SkillCall, { skill: 'use' 
       // 右键箱子是开一下看看、按钮按下去自己弹回来:原版里这些本来就没有"成没成"
       const after = blockAtCell(bot, cell);
       const changed = after && after.stateId !== target.stateId ? `,那一格现在是${zhName(after.name)}` : '';
-      return `${head}${changed}。${note || '包里一样没动'}${placementReadback?.() ?? ''}${seen}`;
+      const portalNote = target.name === 'nether_portal'
+        ? dimensionOf(bot) === beforeDimension
+          ? `；实测维度仍为${zhDimension(beforeDimension)}，未确认穿门。原版右键不会穿过下界传送门，`
+            + `要踏入并等待维度切换，用 {"skill":"transit","at":[${cell.x},${cell.y},${cell.z}]}`
+          : `；实测维度从${zhDimension(beforeDimension)}变为${zhDimension(dimensionOf(bot))}，后续坐标须按当前维度核对`
+        : '';
+      return `${head}${changed}。${note || '包里一样没动'}${placementReadback?.() ?? ''}${seen}${portalNote}`;
     }
     const v = await settleProbe(probe);
     // 失败路径与成功路径报同一份背包增减:存量事实往往就是病因所在

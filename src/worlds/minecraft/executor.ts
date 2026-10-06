@@ -2888,11 +2888,13 @@ export class Executor {
     const prior = this.unmovedFindHits.get(this.unmovedFindKey(find, dimensionOf(bot)));
     if (!prior || Math.hypot(pos.x - prior.from.x, pos.z - prior.from.z) > 4
       || Math.abs(pos.y - prior.from.y) > 3) return null;
-    // 先走出当前观察范围再找，是有进展的新计划；已在容差内的 goto 不算。
+    // 前序移动可能改变观察现场；只有已满足实际到达条件的 goto 才能当成原地重找。
     if (steps.slice(0, i).some((step) => {
       if (step.skill === 'server_travel') return true;
-      if (step.skill !== 'goto' || !Array.isArray(step.at) || step.at.length !== 3) return false;
-      return Math.hypot(Number(step.at[0]) - pos.x, Number(step.at[2]) - pos.z) > 3;
+      if (step.skill !== 'goto' || step.dryRun
+        || (step.dimension && normalizeDimension(dimensionOf(bot)) !== normalizeDimension(step.dimension))) return false;
+      const resolved = resolveAnchors([step.at], { x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) });
+      return Array.isArray(resolved) && !travelGoalReached(bot, gotoArrivalGoal(step, resolved[0]));
     })) return null;
     return `刚才从这里朝${DIRECTION_ZH[find.direction!]}找${zhThing(find.target)}时，出发点就命中同一可见目标，人并未沿指定方向走；原地重找不会产生新信息。先走离这处至少几格，或改查不同目标；原队列保留`;
   }

@@ -45,7 +45,7 @@ function rig(name: string, full = false) {
     useOn: async () => { entityHand = held?.name ?? null; },
     closeWindow: () => { bot.currentWindow = null; },
   };
-  return { bot: bot as unknown as Bot, stack, slots,
+  return { bot: bot as unknown as Bot, stack, slots, chest,
     facts: () => ({ activatedItems, openedContainers, entityHand }) };
 }
 
@@ -99,5 +99,31 @@ describe('use at without item', () => {
     expect(describeSkill({ skill: 'use', at: AT }, 'ender_pearl')).toContain('空手右键');
     expect(describeSkill({ skill: 'use', target: 'cow' }, 'wheat')).toContain('用小麦右键');
     expect(describeSkill({ skill: 'use', item: 'ender_pearl', at: AT }, 'wheat')).toContain('用末影珍珠右键');
+  });
+
+  it('reports an unchanged portal dimension and the crossing operation without moving or crossing', async () => {
+    const r = rig('iron_sword');
+    r.chest.name = 'nether_portal';
+    r.bot.activateBlock = async () => undefined;
+    const pending = useOnce(r.bot, { skill: 'use', at: AT }, ctx as never);
+    await vi.runAllTimersAsync();
+    const receipt = await pending;
+    expect(receipt).toContain('维度仍为主世界，未确认穿门');
+    expect(receipt).toContain(JSON.stringify({ skill: 'transit', at: AT }));
+    expect(r.bot.game.dimension).toBe('overworld');
+    expect(r.bot.entity.position).toEqual(new Vec3(0.5, 64, 0.5));
+    expect(r.stack.count).toBe(2);
+  });
+
+  it('reports an observed dimension change rather than asserting the portal stayed unchanged', async () => {
+    const r = rig('iron_sword');
+    r.chest.name = 'nether_portal';
+    r.bot.activateBlock = async () => { r.bot.game.dimension = 'the_nether'; };
+    const pending = useOnce(r.bot, { skill: 'use', at: AT }, ctx as never);
+    await vi.runAllTimersAsync();
+    const receipt = await pending;
+    expect(receipt).toContain('维度从主世界变为下界');
+    expect(receipt).toContain('坐标须按当前维度核对');
+    expect(receipt).not.toContain('未确认穿门');
   });
 });

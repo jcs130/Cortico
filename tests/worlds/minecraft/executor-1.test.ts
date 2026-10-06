@@ -967,6 +967,33 @@ describe('find:站着扫与边走边找', () => {
     expect(exec.submit([{ skill: 'goto', at: [0, 64, 8] }, find])).toContain('收下了');
   });
 
+  it.each([
+    [3, 64, 0], [0, 68, 0], ['~3', '~', '~'],
+  ] as const)('短距或垂直移动 %j 后的搜索不能按受理刻原地证据拒绝', async (...at) => {
+    const bot = scoutBot(0);
+    bot.findBlocks = () => [new V(0, 64, -34)];
+    const { exec, reports } = makeExecutorOn(bot);
+    const find: SkillCall = { skill: 'find', target: 'acacia_log', direction: 'south', distance: 64 };
+    exec.submit([find]);
+    await waitUntil(() => reports.length === 1, 5000);
+    expect(exec.submit([{ skill: 'goto', at: [...at] as Anchor }, { ...find, needs: [1] }])).toContain('收下了');
+  });
+
+  it('只试算路线或维度前置条件不符不会解除原地搜索证据', async () => {
+    const bot = scoutBot(0);
+    bot.findBlocks = () => [new V(0, 64, -34)];
+    const { exec, reports } = makeExecutorOn(bot);
+    const find: SkillCall = { skill: 'find', target: 'acacia_log', direction: 'south', distance: 64 };
+    exec.submit([find]);
+    await waitUntil(() => reports.length === 1, 5000);
+    for (const goto of [
+      { skill: 'goto', at: [3, 64, 0], dryRun: true },
+      { skill: 'goto', at: [3, 64, 0], dimension: 'the_nether' },
+    ] satisfies SkillCall[]) {
+      expect(exec.submit([goto, find])).toContain('原地重找不会产生新信息');
+    }
+  });
+
   it('未命中时只引用本执行器真实见过的带年龄线索', async () => {
     const cells: Array<[number, number, number]> = [[6, 64, 0]];
     const bot = standBot(cells);

@@ -1025,7 +1025,8 @@ const SKILLS: readonly SkillSpec[] = [
   {
     name: 'transit',
     doc: `{"skill":"transit","at":[-228,73,58]}          穿过这一格的下界传送门。只认当前维度里已加载的 nether_portal;
-                                                 会先走到门边,再明确踏进门里,等维度和落点都切换后才算完成`,
+                                                 会先走到门边,再明确踏进门里,等维度和落点都切换后才算完成。
+                                                 goto 只到门边，use 只右键；这两种动作不确认穿门。穿门后重新核对当前维度和落点`,
     fields: [
       {
         key: 'at', kind: 'anchor', required: true,
