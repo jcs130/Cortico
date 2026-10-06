@@ -79,6 +79,8 @@ Memory 使用工作区文件，由 [Persona](persona/persona.ts) 管理。
 `dream.maxPendingTasks` 默认2，限制等待任务数，不含正在运行的一项。停机取消在途任务和等待任务。
 任务结束或取消后，迟到结果不得再修改Memory或注入主意识。每次写入核对文件版本，
 文件被前台更新时返回冲突，后台须重新读取并合并。实际写入后发生的失败不整段重试，已落盘内容保留。
+近期状态 `sessions/_recent.md` 固定在任务开始时的版本；其他线程更新后，本次整理重新读取也不能覆写它。
+这时保留现有短笺，将有证据的经历写入场次记录或带观察截止时间的结论。
 
 `dream.maxContextTokens` 和 `dream.maxReadTokensPerRound` 为可关闭的阅读预算 fallback，默认 0。
 前者包含人格、工具定义和阅读材料的 token 估算；后者限制每轮读工具交回的正文。

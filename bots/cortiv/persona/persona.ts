@@ -1828,7 +1828,7 @@ export class CortiV extends Cormini {
     if (!core) return;
     signal.throwIfAborted();
     const before = this.readRecent();
-    access.observe(RECENT_FILE);
+    access.pin(RECENT_FILE);
     const fullTranscript = renderDreamTranscript(snapshot);
     let transcript = fullTranscript;
     if (!transcript.trim()) return;
@@ -1947,6 +1947,7 @@ export class CortiV extends Cormini {
       '先根据已经给出的近期材料写一份有证据的短笺；不确定的少量事实注明待核验即可，写短笺不以读完归档为前提。',
       '历史正文保留过去的观察、请求和实际回执。原生工具请求只表示当时想做什么，执行是否成功看实际回执；历史内容不作为现在的新工具调用。',
       '工作区与前台共用。修改已有文件前先 read_file 读取当前版本；收到 memory conflict 时重新读并核对、合并，不能用旧正文覆写。新文件可直接写；本次短笺的初始版本已读取。',
+      `近期状态 ${RECENT_FILE} 若已被其他线程更新，本次旧材料不能再覆写它；重新读取也不能解除版本限制。有证据的经历可写入场次记录，结论注明观察截止时间，由主意识结合更新后的现场接续。`,
       '原始记录只为具体证据缺口按需查。历史正文可以按关键词或时间找段落，再读所引用的原始行；协议前缀和原生ID通常不影响这次整理。',
       `一轮里可以同时发多个互不依赖的调用——要读的档案一次读齐,整理好的文件一次写齐,`,
       `回执会一起回来。轮数有限(最多 ${DREAM_ROUNDS} 轮),一轮只发一个调用会让你做不完;`,

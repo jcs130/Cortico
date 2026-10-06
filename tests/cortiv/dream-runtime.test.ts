@@ -23,6 +23,28 @@ const state = async (persona: CortiV): Promise<DreamTaskState> => persona.consol
 const handoff = (persona: CortiV, text: string): Promise<unknown> => persona.onHandoff([message('user', text)], { hardTokens: null });
 
 describe('Dream runtime and real Memory tools', () => {
+  it('preserves a newer foreground recent note when a captured-history fork rereads and retries', async () => {
+    const dir = temp();
+    const injected: string[] = [];
+    const persona = new CortiV({ memoryDir: dir }); personas.push(persona);
+    let failed: unknown;
+    persona.attach(makeFakeHarnessApi({ injectInternal: (text, kind) => { if (kind === 'dream') injected.push(text); },
+      spawnFork: async options => {
+        const ctx = { role: 'dream', log: nullLogger() };
+        await persona.declareSessions().find(session => session.id === 'main')!.tools().find(tool => tool.name === 'write_file')!.handler(
+          { path: RECENT_FILE, content: '较新的实际执行终态' }, { ...ctx, role: 'main' });
+        await options.tools!.find(tool => tool.name === 'read_file')!.handler({ path: RECENT_FILE }, ctx);
+        failed = await options.tools!.find(tool => tool.name === 'write_file')!.handler(
+          { path: RECENT_FILE, content: '旧快照里的位置和未完成阶段' }, ctx);
+        return '(nothing)';
+      } }));
+    await handoff(persona, '捕获时尚未完成的阶段');
+    await vi.waitFor(async () => expect((await state(persona)).lastOutcome?.status).toBe('completed'), { timeout: 10_000 });
+    expect(failed).toMatchObject({ failed: true });
+    expect(readFileSync(join(dir, RECENT_FILE), 'utf8')).toBe('较新的实际执行终态');
+    expect(injected).toEqual([]);
+  });
+
   it('retains a successful append and does not replay the fork after a generation failure', async () => {
     vi.useFakeTimers();
     const dir = temp();

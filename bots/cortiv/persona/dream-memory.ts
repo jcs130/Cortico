@@ -13,6 +13,7 @@ export function dreamWorkspaceTools(tools: readonly ToolDef[]): ToolDef[] {
 export class DreamMemory {
   private readonly observed = new Map<string, string | null>();
   private readonly written = new Map<string, string | null>();
+  private readonly pinned = new Map<string, string | null>();
   private mutated = false;
 
   constructor(private readonly memory: GitWorkspaceMemory, private readonly signal: AbortSignal) {}
@@ -35,6 +36,15 @@ export class DreamMemory {
     this.observed.set(file, this.revision(file));
   }
 
+  /** Current-state notes cannot merge a newer writer's state from this task's captured history. */
+  pin(path: string): void {
+    const file = this.path(path);
+    if (this.pinned.has(file)) return;
+    const revision = this.revision(file);
+    this.observed.set(file, revision);
+    this.pinned.set(file, revision);
+  }
+
   ownsCurrent(path: string): boolean {
     const file = this.path(path);
     return this.written.has(file) && this.written.get(file) === this.revision(file);
@@ -53,6 +63,10 @@ export class DreamMemory {
         if (!write) return tool.handler(args, ctx);
         return { failed: true as const, text: `[memory failed] ${String(error)}；未写入。` };
       }
+      if (write && this.pinned.has(file) && this.pinned.get(file) !== before) {
+        return { failed: true as const,
+          text: `[memory conflict] ${String(args.path)} 已由其他线程更新；本任务捕获的经历不能覆写较新的近期状态，重新读取也不解除此限制。请保留现有短笺，把本次有证据的经历存入场次记录或在结论中注明观察截止时间。未写入。` };
+      }
       if (write && before !== null && !this.observed.has(file)) {
         return { failed: true as const,
           text: `[memory conflict] ${String(args.path)} 尚未读取当前版本；先 read_file，再决定如何合并。未写入。` };
@@ -70,6 +84,7 @@ export class DreamMemory {
         this.mutated = true;
         this.observed.set(file, after);
         this.written.set(file, after);
+        if (this.pinned.has(file)) this.pinned.set(file, after);
       }
       return operation;
     } }));

@@ -29,6 +29,28 @@ function conflict(result: string | ToolOutcome): void {
 }
 
 describe('background Memory versions', () => {
+  it('keeps a pinned current-state note after another writer advances it, even after a fresh read', async () => {
+    const r = rig(); r.memory.writeFileAtomic('recent.md', '捕获时的状态');
+    r.access.pin('recent.md');
+    await r.run('write_file', { path: 'recent.md', content: '后台补充的状态' });
+    await r.run('append_file', { path: 'recent.md', content: '同一任务补充' });
+    expect(r.memory.readFile('recent.md')).toBe('后台补充的状态\n同一任务补充');
+    r.memory.writeFileAtomic('recent.md', '前台新的位置与进度');
+    await r.run('read_file', { path: './recent.md' });
+    r.access.pin('recent.md');
+    for (const [name, args] of [
+      ['write_file', { content: '旧材料重写' }], ['edit_file', { old_string: '前台新的位置与进度', new_string: '旧状态' }],
+      ['append_file', { content: '旧状态补充' }], ['delete_file', {}],
+    ] as Array<[string, Record<string, unknown>]>) conflict(await r.run(name, { path: 'recent.md', ...args }));
+    expect(r.memory.readFile('recent.md')).toBe('前台新的位置与进度');
+    expect(r.access.ownsCurrent('recent.md')).toBe(false);
+    const next = new DreamMemory(r.memory, new AbortController().signal);
+    next.pin('recent.md');
+    await next.tools(r.tools).find(tool => tool.name === 'append_file')!.handler(
+      { path: 'recent.md', content: '新任务捕获的经历' }, ctx);
+    expect(r.memory.readFile('recent.md')).toBe('前台新的位置与进度\n新任务捕获的经历');
+  });
+
   it('requires an observed version before rewriting existing files and allows new files', async () => {
     const r = rig(); r.memory.writeFileAtomic('note.md', '前台新事实');
     conflict(await r.run('write_file', { path: 'note.md', content: '旧整理' }));
