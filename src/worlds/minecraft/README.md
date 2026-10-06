@@ -1,4 +1,4 @@
-<!-- Owner: src/worlds/minecraft/definition.ts -->
+<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts -->
 
 # worlds/minecraft
 
@@ -172,8 +172,9 @@ Persona 提供定向认知时，图片只进入本次独立调用，主会话收
 同步与后台观察共用一个进行中的任务槽；原观察结束前切换调用模式也不会重复拍摄或分析。
 它等待已收到的区块完成渲染，在同一视角与尺寸下复用截图页面；浏览器优先使用硬件渲染。
 宿主通过 `/healthz` 声明 `captureSessions` 与 `maxCaptureSessions` 时，浏览器使用
-`x-mc-viewer-capture: 1` 接入独立截图槽。随机的 `x-mc-viewer-capture-key` 只续租本人连接，
-每 15 秒访问 `/capture-lease`，停止续租 60 秒后宿主释放连接。页面随 World 保持运行，
+`x-mc-viewer-capture: 1` 接入独立截图槽。随机的 `x-mc-viewer-capture-key` 只操作本人连接，
+每 15 秒访问 `/capture-lease` 续租，停止续租 60 秒后宿主释放连接。切换视角或关闭页面前，
+向同一地址发送 DELETE 确认释放名额，避免旧页面的断开消息延迟占住新页面。页面随 World 保持运行，
 取消、失败或 World 停止时关闭自有浏览器；`warmMinecraftViewCapture` 可在连接后后台预热，
 首次工具调用等待同一预热完成后复用页面。旧宿主不支持续租时，页面在 50 秒后重建；没有独立截图槽时
 每次截图结束即释放普通连接。连接已满或画面未就绪时返回失败。截图需要已安装的 Edge/Chromium，

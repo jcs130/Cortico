@@ -191,6 +191,37 @@ describe('Minecraft visual capture', () => {
     expect(fake.page.close).toHaveBeenCalledTimes(2);
   });
 
+  it('releases its keyed slot before switching views while socket disconnection is delayed', async () => {
+    const fake = fakeBrowser(async () => Buffer.from('png'));
+    let occupied = false;
+    let owner: string | undefined;
+    const order: string[] = [];
+    fake.goto.mockImplementation(async () => { occupied = true; order.push('connect'); });
+    const fetcher = vi.fn(async (url: string | URL | Request, options?: RequestInit) => {
+      if (String(url).endsWith('/capture-lease')) {
+        const key = new Headers(options?.headers).get('x-mc-viewer-capture-key');
+        if (options?.method === 'DELETE') {
+          expect(key).toBe(owner);
+          occupied = false;
+          order.push('release');
+        } else owner = key ?? undefined;
+        return new Response('{"ok":true}');
+      }
+      return new Response(JSON.stringify({ ok: true, viewers: 2, maxSessions: 2,
+        captureSessions: Number(occupied), maxCaptureSessions: 1 }));
+    }) as unknown as typeof fetch;
+    const manager = new MinecraftViewCaptureManager({ fetcher, launchBrowser: async () => fake.browser });
+    try {
+      await manager.capture({ viewerUrl: 'http://127.0.0.1:7793', mode: 'third' });
+      await manager.capture({ viewerUrl: 'http://127.0.0.1:7793', mode: 'first' });
+      await manager.capture({ viewerUrl: 'http://127.0.0.1:7793', mode: 'dungeon' });
+      expect(order).toEqual(['connect', 'release', 'connect', 'release', 'connect']);
+      expect(fake.goto.mock.calls.map(call => call[0])).toEqual([
+        'http://127.0.0.1:7793/third/', 'http://127.0.0.1:7793/', 'http://127.0.0.1:7793/dungeon/']);
+    } finally { await manager.stop(); }
+    expect(occupied).toBe(false);
+  });
+
   it('closes a failed retained scene so the next capture starts with a new browser', async () => {
     const png = Buffer.from('89504e470d0a1a0a', 'hex');
     const failed = fakeBrowser(async () => { throw new Error('WebGL context lost'); });

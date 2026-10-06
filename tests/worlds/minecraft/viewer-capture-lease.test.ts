@@ -4,6 +4,19 @@ import { ViewerCaptureLease } from '../../../src/worlds/minecraft/viewer-capture
 afterEach(() => vi.useRealTimers());
 
 describe('viewer capture lease', () => {
+  it('releases its slot immediately once and cannot be revived by late renewal', () => {
+    vi.useFakeTimers();
+    const expired = vi.fn();
+    const lease = new ViewerCaptureLease(expired);
+    lease.release();
+    expect(expired).toHaveBeenCalledOnce();
+    lease.release();
+    lease.renew();
+    vi.advanceTimersByTime(120_000);
+    expect(expired).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('retains a renewing capture beyond the original deadline and expires after renewals stop', () => {
     vi.useFakeTimers();
     const expired = vi.fn();

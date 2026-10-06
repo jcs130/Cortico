@@ -679,7 +679,8 @@ export async function startModernViewer(bot: mineflayer.Bot, options: ModernView
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       const pathname = new URL(req.url ?? '/', origin).pathname;
-      if (req.method !== 'GET' || req.headers.host !== `127.0.0.1:${options.port}`) { res.writeHead(403); res.end(); return; }
+      if ((req.method !== 'GET' && !(req.method === 'DELETE' && pathname === '/capture-lease'))
+          || req.headers.host !== `127.0.0.1:${options.port}`) { res.writeHead(403); res.end(); return; }
       if (pathname === '/' || pathname === '/third/' || pathname === '/dungeon/') {
         const viewMode = pathname === '/third/' ? 'third' : pathname === '/dungeon/' ? 'dungeon' : 'first';
         const page = await viewerPageHtml(root, viewMode, PAGE,
@@ -706,7 +707,8 @@ export async function startModernViewer(bot: mineflayer.Bot, options: ModernView
         const key = req.headers['x-mc-viewer-capture-key'];
         const lease = req.headers['x-mc-viewer-capture'] === '1' && typeof key === 'string' ? captureLeases.get(key) : undefined;
         if (!lease) { res.writeHead(404); res.end(); return; }
-        lease.renew();
+        if (req.method === 'DELETE') lease.release();
+        else lease.renew();
         res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
         res.end('{"ok":true}'); return;
       }

@@ -224,7 +224,7 @@ export class MinecraftViewCaptureManager {
       }
       if (session?.page && (session.page.isClosed() || session.mode !== mode || session.width !== width || session.height !== height
           || (!session.renewable && Date.now() - session.openedAtMs! >= LEGACY_SESSION_MS))) {
-        await this.closePage(session);
+        await this.closePage(origin, session);
       }
       const fetcher = this.dependencies.fetcher ?? fetch;
       const healthStarted = performance.now();
@@ -241,8 +241,8 @@ export class MinecraftViewCaptureManager {
       }
       if (!health.ok) throw new VisualCaptureError('unavailable', '本地 viewer 尚未就绪');
       const captureLane = Number.isInteger(health.maxCaptureSessions) && health.maxCaptureSessions! > 0;
-      if (session?.page && session.captureLane !== captureLane) await this.closePage(session);
-      if (session?.page && session.renewable && !await this.renewLease(origin, session)) await this.closePage(session);
+      if (session?.page && session.captureLane !== captureLane) await this.closePage(origin, session);
+      if (session?.page && session.renewable && !await this.renewLease(origin, session)) await this.closePage(origin, session);
       timings.healthMs = performance.now() - healthStarted;
       const ownsCaptureSlot = captureLane && !!session?.page && !session.page.isClosed();
       if (captureLane && !ownsCaptureSlot && (health.captureSessions ?? 0) >= health.maxCaptureSessions!) {
@@ -296,7 +296,7 @@ export class MinecraftViewCaptureManager {
         const leaseKey = session.leaseKey;
         session.leaseTimer = setInterval(() => {
           void this.renewLease(origin, current).then(ok => {
-            if (!ok && current.leaseKey === leaseKey && this.sessions.get(origin) === current) void this.closePage(current);
+            if (!ok && current.leaseKey === leaseKey && this.sessions.get(origin) === current) void this.closePage(origin, current);
           });
         }, LEASE_INTERVAL_MS);
         session.leaseTimer.unref();
@@ -313,7 +313,7 @@ export class MinecraftViewCaptureManager {
         : await page.locator('canvas[data-cortico-capture-scene="true"]').screenshot(screenshotOptions);
       timings.pngMs = performance.now() - pngStarted;
       if (png.length === 0 || png.length > MAX_PNG_BYTES) throw new VisualCaptureError('renderer', 'viewer 截图大小异常');
-      if (!captureLane) await this.closePage(session);
+      if (!captureLane) await this.closePage(origin, session);
       return { png, mode, width, height, capturedAt: new Date().toISOString(), viewerVersion: health.version,
         includesHud: options.includeHud === true, timings };
     } catch (error) {
@@ -358,13 +358,25 @@ export class MinecraftViewCaptureManager {
     } catch { return false; }
   }
 
-  private async closePage(session: CaptureSession): Promise<void> {
+  private async closePage(origin: string, session: CaptureSession): Promise<void> {
     clearInterval(session.leaseTimer);
     session.leaseTimer = undefined;
     const page = session.page;
+    const leaseKey = session.leaseKey;
+    const releaseLease = page && session.captureLane && session.renewable && leaseKey;
     session.page = undefined;
     session.leaseKey = undefined;
     session.renewable = false;
+    // A page close can return before its socket disconnect reaches the server. Release the
+    // keyed slot first so an immediate viewpoint change cannot collide with our own connection.
+    if (releaseLease) {
+      try {
+        await (this.dependencies.fetcher ?? fetch)(`${origin}/capture-lease`, {
+          method: 'DELETE', headers: { 'x-mc-viewer-capture': '1', 'x-mc-viewer-capture-key': leaseKey },
+          signal: AbortSignal.timeout(3_000),
+        });
+      } catch { /* Page closure still disconnects an unavailable or legacy viewer. */ }
+    }
     await page?.close().catch(() => undefined);
   }
 
@@ -372,7 +384,7 @@ export class MinecraftViewCaptureManager {
     const session = this.sessions.get(origin);
     if (!session) return;
     this.sessions.delete(origin);
-    await this.closePage(session);
+    await this.closePage(origin, session);
     await session.browser.close().catch(() => undefined);
   }
 }
