@@ -30,7 +30,8 @@ function rig(connected = true) {
   const cfg = structuredClone(MINECRAFT_DEFAULTS) as MinecraftConfigSection;
   const world = new MinecraftWorld({ cfg });
   const host = new FakeHost();
-  const bot = { entity: { position: new Vec3(1.5, 64, -3.5) }, game: { dimension: 'overworld' } };
+  const bot = { entity: { position: new Vec3(1.5, 64, -3.5) }, game: { dimension: 'overworld' },
+    blockAt: vi.fn((_position: Vec3): { name: string } | null => null), oxygenLevel: 20 };
   const bridge = { bot: connected ? bot : null, viewerUrl: connected ? 'http://127.0.0.1:12345' : null };
   Object.assign(world, { host, bridge });
   const tool = world.tools().find(item => item.name === 'mc_visual')!;
@@ -100,6 +101,52 @@ describe('mc_visual scene observation', () => {
     expect(result.blobs).toBeUndefined();
     expect(request.mock.calls[0][0]).toMatchObject({ hint: { context: 'task', rounds: 1 },
       brief: expect.stringContaining('入口和箱子'), blobs: [{ bytes: png, mime: 'image/png' }] });
+  });
+
+  it('gives focused observation the water readings taken after capture and preserves them while analysis runs', async () => {
+    const { host, tool, ctx, bot } = rig();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(capturedAt));
+    bot.blockAt.mockReturnValue({ name: 'air' });
+    vi.mocked(captureMinecraftView).mockImplementationOnce(async () => {
+      bot.entity.position = new Vec3(8.5, 60, -3.5);
+      bot.blockAt.mockReturnValue({ name: 'water' });
+      bot.oxygenLevel = 9;
+      vi.advanceTimersByTime(200);
+      return image();
+    });
+    let material = '';
+    Object.assign(host, { cognition: { request: async (request: CognitionRequest) => {
+      material = request.brief;
+      bot.blockAt.mockReturnValue({ name: 'air' });
+      bot.entity.position = new Vec3(9.5, 64, -3.5);
+      bot.oxygenLevel = 20;
+      return { text: '可见河床；现场读数表明截图完成时头部在水中。' };
+    } } });
+    const result = await tool.handler({ focus: '哪里可以上岸' }, ctx) as ToolOutcome;
+    for (const text of ['2026-01-01T08:00:00.200Z', '(8.5, 60.0, -3.5)',
+      '脚部格 water；头部格 water', '头部在水中', '氧气 9/20']) {
+      expect(material).toContain(text);
+      expect(result.text).toContain(text);
+    }
+    expect(result.text).not.toContain('氧气 20/20');
+    expect(result.blobs).toBeUndefined();
+  });
+
+  it('distinguishes shallow water, unread cells and dry cells without certifying a landing', async () => {
+    const { tool, ctx, bot } = rig();
+    bot.blockAt.mockImplementation(position => ({ name: position.y < 65 ? 'water' : 'air' }));
+    const shallow = await tool.handler({ raw: true }, ctx) as ToolOutcome;
+    expect(shallow.text).toContain('脚部在水中，尚未确认登岸');
+    expect(shallow.text).not.toContain('头部在水中');
+    expect(shallow.text).not.toContain('氧气');
+    bot.blockAt.mockReturnValue(null);
+    const unread = await tool.handler({ raw: true }, ctx) as ToolOutcome;
+    expect(unread.text).toContain('水中状态未核实');
+    expect(unread.text).not.toContain('未读到水');
+    bot.blockAt.mockReturnValue({ name: 'air' });
+    const dry = await tool.handler({ raw: true }, ctx) as ToolOutcome;
+    expect(dry.text).toContain('头脚所在格未读到水，安全落脚面仍需核验');
   });
 
   it('returns the real image and failure reason when focused observation is unavailable', async () => {

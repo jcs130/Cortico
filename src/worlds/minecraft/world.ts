@@ -93,7 +93,7 @@ import {
 import {
   bearing, canSeeEntity, classifyEntity, dayNightTransition, hazardTouch, isRaining,
   droppedStackOf, narrateWorld, narrateWorldSegments, scanMatureCrops, snapshotFingerprint, snapshotFromBot,
-  standCellsAround, worldDelta, DIRECTION_ZH,
+  standCellsAround, worldDelta, DIRECTION_ZH, WATER_BLOCKS,
   type BlockReader, type ItemStack, type WorldSnapshot,
 } from './terrain.ts';
 import {
@@ -4218,12 +4218,24 @@ export class MinecraftWorld implements World {
       if (!current()) {
         return { text: this.toolLog(name, args, '[mc_visual 失败] 拍摄期间游戏连接或维度改变，旧画面已丢弃'), failed: true };
       }
-      const after = bot.entity.position;
+      const after = bot.entity.position.clone();
       const moved = before.distanceTo(after);
       const location = `${after.x.toFixed(1)}, ${after.y.toFixed(1)}, ${after.z.toFixed(1)}`;
+      const observedAt = new Date().toISOString();
+      const feet = bot.blockAt(after);
+      const head = bot.blockAt(after.offset(0, 1, 0));
+      const feetWet = feet ? WATER_BLOCKS.has(feet.name) : undefined;
+      const headWet = head ? WATER_BLOCKS.has(head.name) : undefined;
+      const waterState = headWet === true ? '头部在水中，水底可见不表示已登岸'
+        : feetWet === true ? '脚部在水中，尚未确认登岸'
+        : feetWet === undefined || headWet === undefined ? '水中状态未核实'
+        : '头脚所在格未读到水，安全落脚面仍需核验';
+      const oxygen = headWet && Number.isFinite(bot.oxygenLevel)
+        ? `；氧气 ${Math.max(0, Math.min(20, bot.oxygenLevel))}/20` : '';
       const description = [
         `[mc_visual] ${capture.capturedAt} 网页实景截图，${capture.mode} 视角，${capture.width}×${capture.height}，`
-          + `${dimension}，玩家位置 (${location})。`,
+          + `${dimension}，截图完成后玩家位置 (${location})。`,
+        `[现场读数 ${observedAt}] 脚部格 ${feet?.name ?? '未加载，未知'}；头部格 ${head?.name ?? '未加载，未知'}；${waterState}${oxygen}。`,
         focus ? `这次想看：${focus}。` : '',
         'focus 只提出本帧问题，不改变玩家位置或镜头朝向，也不证明所写地点或对象就在画面中。',
         capture.includesHud ? '本帧包含游戏界面和当前可见菜单。' : '本帧只包含 3D 场景，未拍摄界面。',
@@ -4242,6 +4254,7 @@ export class MinecraftWorld implements World {
           const observation = await cognition.request({
             brief: `${description}\n请回答本次想看的问题；没提出具体问题时，概述可见场景、入口、遮挡和附近实体。`
               + '区分画面事实与不确定推断，不编造箱子内容或隐藏物品。'
+              + '现场读数与画面推断有冲突时明确说明；问题所写方向不代表镜头方向，不能据此给画面定向。'
               + '问题中的地点与对象须由本帧证据核对；没有设计或参考图时，不能判定应有而缺失的结构，'
               + '只能描述可见开口、断面和遮挡。蓝图完成度由绑定原点上的方块对账确认。',
             blobs, hint: { context: 'task', rounds: 1 },
