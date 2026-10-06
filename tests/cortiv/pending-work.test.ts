@@ -7,6 +7,15 @@ import { TimerStore } from '../../src/core/timers.ts';
 import { nullLogger } from '../../src/core/util.ts';
 import type { CoreApi, EventEnvelope } from '../../src/core/types.ts';
 
+const fsHooks = vi.hoisted(() => ({ onRename: null as null | ((from: string, to: string) => void) }));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return { ...actual, default: actual, renameSync: (from: string, to: string) => {
+    fsHooks.onRename?.(from, to);
+    return actual.renameSync(from, to);
+  } };
+});
+
 const cleanup: Array<() => void> = [];
 
 function rig(existing?: string) {
@@ -41,11 +50,84 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  fsHooks.onRename = null;
   for (const run of cleanup.splice(0).reverse()) run();
   vi.useRealTimers();
 });
 
 describe('PendingWork', () => {
+  function rejectSave(dir: string) {
+    fsHooks.onRename = (_from, to) => {
+      if (to === join(dir, 'pending-work.json')) throw Object.assign(new Error('file busy'), { code: 'EPERM' });
+    };
+  }
+
+  it.each(['resolve', 'cancel'])('%s 保存失败保留等待和定时器，重试落盘后重启不复活', (operation) => {
+    const r = rig();
+    r.manager.operate({ operation: 'defer', id: 'later', note: '稍后复核', after_seconds: 60 });
+    const stored = readFileSync(join(r.dir, 'pending-work.json'), 'utf8');
+    const timers = [...r.timers.list()];
+    rejectSave(r.dir);
+    expect(() => r.manager.operate({ operation, id: 'later', result: '已经核验' })).toThrow('file busy');
+    expect(r.manager.summary()).toContain('[等待]');
+    expect(readFileSync(join(r.dir, 'pending-work.json'), 'utf8')).toBe(stored);
+    expect(r.timers.list()).toEqual(timers);
+    fsHooks.onRename = null;
+    expect(r.manager.operate({ operation, id: 'later', result: '已经核验' })).toContain('已');
+    expect(r.saved().entries[0].status).toBe(operation === 'resolve' ? 'resolved' : 'cancelled');
+    expect(r.timers.list()).toEqual([]);
+    r.timers.stop();
+    const restarted = rig(r.dir);
+    expect(restarted.manager.summary()).toBe('');
+    expect(restarted.timers.list()).toEqual([]);
+    expect(restarted.injected).toEqual([]);
+  });
+
+  it('更新等待保存失败保留旧条件与旧索引，撤销新索引后可重试', () => {
+    const r = rig();
+    r.manager.operate({ operation: 'defer', id: 'later', note: '旧条件', after_seconds: 60 });
+    const stored = readFileSync(join(r.dir, 'pending-work.json'), 'utf8');
+    const timers = [...r.timers.list()];
+    rejectSave(r.dir);
+    expect(() => r.manager.operate({ operation: 'defer', id: 'later', note: '新条件', after_seconds: 120 })).toThrow('file busy');
+    expect(r.manager.summary()).toContain('旧条件');
+    expect(readFileSync(join(r.dir, 'pending-work.json'), 'utf8')).toBe(stored);
+    expect(r.timers.list()).toEqual(timers);
+    fsHooks.onRename = null;
+    r.manager.operate({ operation: 'defer', id: 'later', note: '新条件', after_seconds: 120 });
+    expect(r.manager.summary()).toContain('新条件');
+    expect(r.timers.list()).toHaveLength(1);
+    expect(r.timers.list()[0].atIso).not.toBe(timers[0].atIso);
+  });
+
+  it('新建等待保存失败不留下内存条目或孤儿定时器', () => {
+    const r = rig();
+    rejectSave(r.dir);
+    expect(() => r.manager.operate({ operation: 'defer', id: 'new', note: '新条件', after_seconds: 60 })).toThrow('file busy');
+    expect(r.manager.summary()).toBe('');
+    expect(r.timers.list()).toEqual([]);
+    fsHooks.onRename = null;
+    r.manager.operate({ operation: 'defer', id: 'new', note: '新条件', after_seconds: 60 });
+    expect(r.saved().entries).toMatchObject([{ id: 'new', status: 'waiting' }]);
+  });
+
+  it('事件转为可复核保存失败不发布提醒，保留旧状态以便再次投递', () => {
+    const r = rig();
+    r.manager.operate({ operation: 'defer', id: 'ask', note: '等回答', after_seconds: 60, wait_for: { sender_key: 'alice' } });
+    const timers = [...r.timers.list()];
+    rejectSave(r.dir);
+    expect(() => r.manager.onDelivery([event()])).toThrow('file busy');
+    expect(r.manager.summary()).toContain('[等待]');
+    expect(r.saved().entries[0].status).toBe('waiting');
+    expect(r.timers.list()).toEqual(timers);
+    expect(r.injected).toEqual([]);
+    fsHooks.onRename = null;
+    r.manager.onDelivery([event()]);
+    expect(r.saved().entries[0].status).toBe('ready');
+    expect(r.timers.list()).toEqual([]);
+    expect(r.injected).toHaveLength(1);
+  });
+
   it('所有展示标明可直接传回的原始 id，登记和只读展示不改变它', () => {
     const r = rig();
     const registered = r.manager.operate({ operation: 'defer', note: '稍后核对', after_seconds: 60 });
