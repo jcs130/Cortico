@@ -227,6 +227,16 @@ describe('persistent Persona activity agenda', () => {
     agenda.operate({ operation: 'focus', id: 'river' });
     expect(agenda.state().items.map(item => item.status)).toEqual(['queued', 'active']);
   });
+  it('pins the active stage record time across restoration without claiming observed world progress', () => {
+    const { dir, agenda } = rig(); adopt(agenda);
+    agenda.operate({ operation: 'focus', id: 'river' });
+    const restored = new ActivityAgenda(dir, () => now() + 30 * 60_000);
+    const before = restored.state();
+    const summary = restored.summary();
+    expect(summary).toContain(`阶段记录更新于 ${stamp}`);
+    expect(summary).toContain('记录时间不证明世界已变化');
+    expect(restored.state()).toEqual(before);
+  });
   it('invalid, duplicate or oversized candidate leaves the accepted agenda and persisted file untouched', () => {
     const { dir, agenda } = rig(); adopt(agenda);
     const before = readFileSync(join(dir, AGENDA_FILE), 'utf8');

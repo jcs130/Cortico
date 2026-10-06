@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { actionEvidence, ACTION_EVIDENCE_MAX_CALLS } from '../../bots/cortiv/persona/action-evidence.ts';
+import { actionEvidence, ACTION_EVIDENCE_MAX_CALLS, ACTION_EVIDENCE_MAX_RECEIPTS } from '../../bots/cortiv/persona/action-evidence.ts';
 import { functionCall, functionResult, message } from '../../src/protocol/open-responses/context.ts';
 
 const tools = { act: new Set(['game_execute']), speak: new Set(['perform']), read: new Set(['inspect']) };
@@ -53,6 +53,20 @@ describe('action evidence', () => {
     const note = actionEvidence(records, tools);
     expect(note).toContain(`最近 ${ACTION_EVIDENCE_MAX_CALLS} 条相关工具请求`);
     expect(note).not.toContain('old completion');
-    expect(actionEvidence(exchange('quiet', 'game_execute', {}, 'queued'), tools)).toBe('');
+    expect(actionEvidence(exchange('quiet', 'game_execute', {}, 'queued'), tools)).toContain('queued');
+  });
+
+  it('retains chronological outcome evidence during silent repeated actions', () => {
+    const records = Array.from({ length: ACTION_EVIDENCE_MAX_CALLS + 2 }, (_, index) =>
+      exchange(`a${index}`, 'game_execute', { open: index % 2 === 0 }, `observed state ${index}`)).flat();
+    const before = structuredClone(records);
+    const note = actionEvidence(records, tools);
+    expect(note).toContain(`行动 ${ACTION_EVIDENCE_MAX_CALLS}、发言 0`);
+    const first = ACTION_EVIDENCE_MAX_CALLS + 2 - ACTION_EVIDENCE_MAX_RECEIPTS;
+    expect(note).not.toContain(`observed state ${first - 1}`);
+    expect(note.indexOf(`observed state ${first}`)).toBeLessThan(note.indexOf(`observed state ${first + 1}`));
+    expect(note).toContain('任务结束不等于目标完成');
+    expect(records).toEqual(before);
+    expect(actionEvidence(exchange('read-only', 'inspect', {}, 'scene'), tools)).toBe('');
   });
 });

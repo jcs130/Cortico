@@ -156,7 +156,7 @@ export class ActivityAgenda {
     const draft = this.ledger.proposal;
     const lines = ['[活动日程；意图与执行结果分别记录]',
       `已完成 ${done} 项，排队 ${next.length} 项，挂起 ${deferred.length} 项；规划时的背景说明仅在 read 中保留，现场以当前观察为准。`,
-      active ? `当前 id=${JSON.stringify(active.id)} ${clip(active.title, 80)}；够了就收尾：${clip(active.doneWhen, 160)}；条件：${clip(active.when, 100)}；受阻：${clip(active.ifBlocked, 100)}${active.note ? '；最近证据：' + clip(active.note, 160) : ''}`
+      active ? `当前 id=${JSON.stringify(active.id)} ${clip(active.title, 80)}；阶段记录更新于 ${active.updatedAt}，记录时间不证明世界已变化；够了就收尾：${clip(active.doneWhen, 160)}；条件：${clip(active.when, 100)}；受阻：${clip(active.ifBlocked, 100)}${active.note ? '；最近证据：' + clip(active.note, 160) : ''}`
         : next.length || deferred.length ? '当前阶段尚未选择；结合现场自行选下一项。'
           : '当前没有未完成阶段；完成记录是历史。结合长期目标和现场选择新阶段，可 review 异步请求候选，期间独立行动可以继续。',
       ...next.map(item => `候选 id=${JSON.stringify(item.id)} ${clip(item.title, 80)}`),

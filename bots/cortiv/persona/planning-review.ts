@@ -154,7 +154,7 @@ export class PeriodicPlanningReview {
     if (this.active) return;
     this.active = true;
     this.generation++;
-    this.schedule();
+    this.schedule(this.options.agenda?.state().proposal?.capturedAt);
   }
 
   stop(): void {
@@ -329,12 +329,14 @@ export class PeriodicPlanningReview {
     return { accepted: true, reason: '已启动只读后台复盘；主意识继续运行' };
   }
 
-  private schedule(): void {
+  private schedule(previousCapture?: string): void {
     const timers = this.options.core.timers;
     for (const entry of timers.list()) {
       if (entry.payload.owner === PLANNING_TIMER_OWNER) timers.cancel(entry.id);
     }
-    timers.set(new Date(this.now() + this.options.config().intervalMinutes * 60_000).toISOString(),
+    const capturedAt = previousCapture ? Date.parse(previousCapture) : NaN;
+    const anchor = Number.isFinite(capturedAt) ? Math.min(this.now(), capturedAt) : this.now();
+    timers.set(new Date(Math.max(this.now(), anchor + this.options.config().intervalMinutes * 60_000)).toISOString(),
       { owner: PLANNING_TIMER_OWNER });
   }
 }

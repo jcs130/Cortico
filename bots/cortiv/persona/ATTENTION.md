@@ -1,4 +1,4 @@
-Owner: `attention-adviser.ts`, `reference-library.ts`, `reference-adviser.ts`, `reference-routing.ts`, `planning-review.ts`, `failure-reflection.ts` and `persona.ts`.
+Owner: `attention-adviser.ts`, `reference-library.ts`, `reference-adviser.ts`, `reference-routing.ts`, `planning-review.ts`, `failure-reflection.ts`, `action-evidence.ts` and `persona.ts`.
 
 # CortiV 的即时观察与长期复盘
 
@@ -42,6 +42,10 @@ flowchart LR
 资料快判断优先读取本批非快照事件；较长事件保留开头的目标与末尾的结果，中间明确标记未展开。调用受理与异步执行终态分开提供。手动查看目录或读取失败不锁定主题；选定 guides/detail 后才保留手动分支，直到关闭或重新选择。
 
 `planning.maxResultAgeMs` 默认5分钟，从本次材料采样开始计时，按请求开始时的配置固定。过期结果不投递，活动仍可供后续复盘；普通前台新行动不会直接作废未过期建议，主意识根据较新的实际回执决定是否采纳。`planning/state` 提供开始、结束时间、结果状态、结果年龄及失败类别，不暴露provider错误正文。
+
+重启后的首次日程复盘按已保存候选的采样时间计算剩余间隔；已经到期则立即异步复核，不因重启再延后一个周期。候选不会自动变成行动。
+
+即时请求保留近期最多四条行动的调用时间、参数与原回执节选，即使近期没有发言仍提供对账。请求计数不代表目标进展；主意识结合当前现场自行核验重复、等待和后续行动。
 
 共用provider时可启用 `planning.yieldToForeground` fallback。前台批次占用该provider期间，复盘等待；正在生成的后台轮被取消后，保留已完成记录，在资源空闲时重试。`generationWaitTimeoutMs` 限制每次等待，`timeoutMs` 仍限制整个复盘。资源按provider实例区分，同一provider的模型别名共用资源；不同provider独立运行。配置多个名称指向同一推理后端时，不会自动识别它们共享硬件。
 

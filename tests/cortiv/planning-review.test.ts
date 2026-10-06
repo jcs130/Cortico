@@ -121,6 +121,30 @@ describe('Persona长期复盘', () => {
     expect(r.gate).not.toHaveBeenCalled();
   });
 
+  it('restarts an overdue read-only review without postponing it for another full interval', async () => {
+    const r = rig({ agendaEnabled: true });
+    const old = new Date(Date.now() - 31 * 60_000).toISOString();
+    r.agenda.propose(candidate, 0, old);
+    r.reply(async () => candidate);
+    r.review.stop(); r.review.start();
+    expect(r.review.state().nextAt).toBe(stamp());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(r.forks).toHaveLength(1);
+    expect(r.forks[0].tools).toEqual([]);
+    expect(r.agenda.state().proposal?.capturedAt).toBe(stamp());
+    expect(r.gate).not.toHaveBeenCalled();
+  });
+
+  it('retains the remaining interval of a recent proposal on restart', async () => {
+    const r = rig({ agendaEnabled: true });
+    const sampled = new Date(Date.now() - 5 * 60_000).toISOString();
+    r.agenda.propose(candidate, 0, sampled);
+    r.review.stop(); r.review.start();
+    expect(r.review.state().nextAt).toBe(new Date(Date.now() + 25 * 60_000).toISOString());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(r.forks).toEqual([]);
+  });
+
   it('即时入口与周期共用单实例；慢模型不中断主活动，重复请求不排队', async () => {
     const r = rig({ timeoutMs: 4_000_000, maxResultAgeMs: 4_000_000 });
     let finish!: (text: string) => void;
