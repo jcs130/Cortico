@@ -24,6 +24,11 @@ function timestamp(value: unknown): value is string {
 export class MemoryNoteProvenance {
   constructor(private readonly memory: GitWorkspaceMemory) {}
 
+  readFile(path: string): string {
+    const body = this.memory.readFile(path);
+    return `${this.describe(path)}\n${body}`;
+  }
+
   private sidecar(path: string): string {
     const rel = relative(this.memory.memoryDir, this.memory.resolveSafe(path)).replace(/\\/g, '/');
     return `${NOTE_PROVENANCE_DIR}/${revision(process.platform === 'win32' ? rel.toLowerCase() : rel)}.json`;

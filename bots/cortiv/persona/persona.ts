@@ -509,7 +509,7 @@ export class CortiV extends Cormini {
       memory: (files) => ({
         constitution: this.memory.readFile('CONSTITUTION.md'),
         memories: [...(this.referenceLibrary.catalog() ? [{ file: 'reference_guide/catalog', text: this.referenceLibrary.catalog() }] : []), ...files.map((file) => {
-          try { return { file, text: this.memory.readFile(file) }; }
+          try { return { file, text: new MemoryNoteProvenance(this.memory).readFile(file) }; }
           catch (error) { return { file, text: `[读取失败: ${String(error)}]` }; }
         })],
         pending: this.pendingWork?.summary() ?? '',

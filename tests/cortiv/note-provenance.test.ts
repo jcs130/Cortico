@@ -32,6 +32,7 @@ describe('Memory note observation provenance', () => {
     expect(header).toContain(`记录观察截止 ${oldAt}`);
     expect(header).toContain(`World 事实另采样于 ${newAt}`);
     expect(header).toContain('修改时间不代表事实发生时间');
+    expect(r.provenance.readFile('./recent.md')).toBe(`${header}\n旧观察里仍在整理物品`);
   });
 
   it('never gives an undated legacy note an observation time and invalidates stale metadata after edits', () => {
