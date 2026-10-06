@@ -251,6 +251,8 @@ interface EscapeDeps {
   /** 托管服 stdin;成功返回 true,否则调用方改走 bot 聊天 */
   sendConsole: (line: string) => boolean;
   chat: (text: string) => void;
+  /** 远程服普通玩家可用的脱困命令，优先于需管理员权限的控制台传送。 */
+  playerCommand?: string;
   hold: (ms: number) => void;
   waitMove: (ms: number) => Promise<boolean>;
   timeoutMs?: number;
@@ -266,6 +268,25 @@ export async function runEscape(deps: EscapeDeps): Promise<string> {
     x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z,
     dimension: dim,
   };
+  const playerCommand = deps.playerCommand?.trim();
+  if (playerCommand) {
+    if (!/^\/[a-z][a-z0-9_:]*(?: [a-z0-9_:.-]+)*$/i.test(playerCommand)) {
+      return '[mc_escape 失败] 普通玩家脱困指令格式无效';
+    }
+    const timeoutMs = deps.timeoutMs ?? ESCAPE_TP_MS;
+    deps.hold(timeoutMs + 500);
+    const cleared = deps.clearQueue();
+    deps.chat(playerCommand);
+    await deps.waitMove(timeoutMs);
+    const current = deps.getBot();
+    const here = current?.entity?.position;
+    const hereDim = normalizeDimension(current?.game?.dimension ?? dim);
+    const distance = here ? Math.hypot(here.x - from.x, here.y - from.y, here.z - from.z) : 0;
+    if (here && (hereDim !== dim || distance >= 8)) {
+      return `已通过玩家指令脱困，当前位置 [${hereDim}] (${Math.floor(here.x)}, ${Math.floor(here.y)}, ${Math.floor(here.z)})。${cleared ?? '队列本来就是空的'}`;
+    }
+    return `[mc_escape 失败] 已发送玩家脱困指令 ${playerCommand}，但位置未确认改变。${cleared ?? '队列本来就是空的'}`;
+  }
   const candidates = escapeCandidates(
     deps.personalSpawn, bot.spawnPoint, deps.safeMarks ?? [], from, dim, deps.dangerAt, deps.landingAt,
   );

@@ -16,7 +16,7 @@ let bot: Bot<CortiVConfig> | null = null;
 
 /**
  * 装配但不启动:激活/停用只改槽位表与 config.json,core 没起时不 start World,
- * 所以这里不会真去拉 MC 服务端。外部扩展不装,所以 `vtuber`、`asr`、`pvz`、`canvas`
+ * 所以这里不会真去拉 MC 服务端。外部扩展不装,所以 `vtuber`、`asr`、`mymc`、`pvz`、`canvas`
  * 只剩 missing 卡。
  */
 function assemble(worlds: Record<string, Record<string, unknown>>) {
@@ -80,9 +80,9 @@ describe('CortiV 的 World 激活开关(热生效)', () => {
 
   it('声明过但没装实现的 World 进 missing,不是激活开关的作用域', async () => {
     const a = assemble({ terminal: { enabled: true }, bilibili: { enabled: false } });
-    // vtuber、asr、pvz、canvas 的实现都是扩展包,这里没装。
+    // vtuber、asr、mymc、pvz、canvas 的实现都是扩展包,这里没装。
     await expect(a.assembly.activate('vtuber')).rejects.toThrow('未知 World');
-    expect(a.assembly.missing.map((m) => m.id)).toEqual(['vtuber', 'asr', 'pvz', 'canvas']);
+    expect(a.assembly.missing.map((m) => m.id)).toEqual(['vtuber', 'asr', 'mymc', 'pvz', 'canvas']);
   });
 
   it('仓内有实现但 Persona 没声明的 World 是部署侧选配:有槽位、默认不挂', () => {

@@ -77,10 +77,10 @@ describe('renderHandoffNote', () => {
     const note = oneNote(snapshot);
     expect(note.text).toContain('# 交接笔记 · 最近的一段');
     expect(note.text).not.toContain('前缀正文');
-    expect(note.text).toContain('[调用] vtuber_act {"script":"老王你那三只猫还好吗"}\n[回执] 已开演(流式)。');
-    expect(note.text).toContain('[调用] bilibili_set_announcement {"text":"今晚八点"}\n[回执] 公告已更新');
+    expect(note.text).toContain('[历史工具请求] vtuber_act {"script":"老王你那三只猫还好吗"}\n[历史回执] 已开演(流式)。');
+    expect(note.text).toContain('[历史工具请求] bilibili_set_announcement {"text":"今晚八点"}\n[历史回执] 公告已更新');
     expect(note.text).not.toContain('external_event_frame');
-    const order = ['session 已开始', '三只猫都还好', '[调用] vtuber_act', '[调用] mc_do {"steps":[{"skill":"goto"}]}', '[回执] [06:24:49] 任务#19 收下了', '[调用] bilibili_set_announcement', '搭高']
+    const order = ['session 已开始', '三只猫都还好', '[历史工具请求] vtuber_act', '[历史工具请求] mc_do {"steps":[{"skill":"goto"}]}', '[历史回执] [06:24:49] 任务#19 收下了', '[历史工具请求] bilibili_set_announcement', '搭高']
       .map((s) => note.text.indexOf(s));
     expect(order.every((i) => i >= 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
@@ -105,8 +105,8 @@ describe('renderHandoffNote', () => {
     const note = oneNote(snapshot);
     expect(note.text).not.toContain('心里话');
     expect(note.text).not.toContain('我该说点什么');
-    expect(note.text).toContain('[调用] vtuber_act {"script":"一"}\n[回执] 已开演');
-    expect(note.text).toContain('[调用] mc_bag\n[回执] [背包] 空');
+    expect(note.text).toContain('[历史工具请求] vtuber_act {"script":"一"}\n[历史回执] 已开演');
+    expect(note.text).toContain('[历史工具请求] mc_bag\n[历史回执] [背包] 空');
   });
 
   it('还没回来的回执写明;合成开头与自消解项跳过', () => {
@@ -118,7 +118,7 @@ describe('renderHandoffNote', () => {
     const note = oneNote(snapshot);
     expect(note.text).not.toContain('合成首轮');
     expect(note.text).not.toContain('自消解');
-    expect(note.text).toContain('[调用] mc_queue\n[回执] (还没回来)');
+    expect(note.text).toContain('[历史工具请求] mc_queue\n[历史回执] (当时尚无回执，不能确认执行结果)');
   });
 
   it('时间按分钟分段,不逐条盖戳', () => {
@@ -278,10 +278,10 @@ describe('renderHandoffNote', () => {
     const [history, current] = note.parts;
     expect(history.text).toContain('早段事件');
     expect(history.text).toContain('迟到的早期事件');
-    expect(history.text).not.toContain('[调用] vtuber_act');
+    expect(history.text).not.toContain('[历史工具请求] vtuber_act');
     expect(note.text).not.toContain('{"script":"旧台词"}');
     expect(note.text).not.toContain('旧调用迟到的实际回执');
-    expect(current.text).toContain('[调用] vtuber_act {"script":"当下的下一步"}\n[回执] 已受理,尚未播放');
+    expect(current.text).toContain('[历史工具请求] vtuber_act {"script":"当下的下一步"}\n[历史回执] 已受理,尚未播放');
     expect(current.text).not.toContain('早期事件');
     expect(current.entries).toBe(1);
   });
@@ -291,7 +291,7 @@ describe('renderHandoffNote', () => {
       call('s', 'vtuber_act', '{"script":"接着把这一段讲完"}'), result('s', '尚未播放'),
     ], { splitAtMs });
     expect(note.parts).toHaveLength(1);
-    expect(note.text).toContain('[调用] vtuber_act {"script":"接着把这一段讲完"}\n[回执] 尚未播放');
+    expect(note.text).toContain('[历史工具请求] vtuber_act {"script":"接着把这一段讲完"}\n[历史回执] 尚未播放');
   });
 
   it('有分界时无时间或时间无效的 speak 不冒充最近段,也不把空最近段改成早段台词', () => {
@@ -306,13 +306,13 @@ describe('renderHandoffNote', () => {
     expect(note.parts).toHaveLength(1);
     expect(note.text).toContain('# 交接笔记 · 更早的一段');
     expect(note.text).toContain('无时间的事件');
-    expect(note.text).not.toContain('[调用]');
+    expect(note.text).not.toContain('[历史工具请求]');
     expect(note.entries).toBe(1);
     const empty = oneNote(snapshot.slice(1), { splitAtMs: Date.parse('2026-09-03T14:20:00+08:00') });
     expect(empty.entries).toBe(0);
     expect(empty.parts).toHaveLength(1);
     expect(empty.text).toContain('# 交接笔记 · 最近的一段');
-    expect(empty.text).not.toContain('[回执]');
+    expect(empty.text).not.toContain('[历史回执]');
   });
 
   it('speak 修订、空台词、坏入参与缺失回执按原记录保留,不按工具名覆盖或改写快照', () => {
@@ -329,8 +329,8 @@ describe('renderHandoffNote', () => {
     expect(note.entries).toBe(6);
     for (let i = 0; i < snapshot.length; i += 2) {
       const args = snapshot[i].tool_calls![0].function.arguments;
-      const receipt = snapshot[i + 1]?.content ?? '(还没回来)';
-      expect(note.text).toContain(`[调用] vtuber_act ${args}\n[回执] ${receipt}`);
+      const receipt = snapshot[i + 1]?.content ?? '(当时尚无回执，不能确认执行结果)';
+      expect(note.text).toContain(`[历史工具请求] vtuber_act ${args}\n[历史回执] ${receipt}`);
     }
     expect(snapshot).toEqual(before);
   });
@@ -343,11 +343,11 @@ describe('renderHandoffNote', () => {
       call('c', 'vtuber_act', '{"script":"等一下"}'), result('c', '已开演'),
     ]);
     expect(note.entries).toBe(3);
-    expect(note.text.match(/\[调用\] vtuber_act/g)).toHaveLength(2);
+    expect(note.text.match(/\[历史工具请求\] vtuber_act/g)).toHaveLength(2);
     expect(note.text).toContain('同样的一条重复了 2 次');
-    expect(note.text.indexOf('重试间隔的事件')).toBeLessThan(note.text.indexOf('[调用]'));
-    expect(note.text).toContain('[回执] [未播出] 合成失败');
-    expect(note.text).toContain('[回执] 已开演');
+    expect(note.text.indexOf('重试间隔的事件')).toBeLessThan(note.text.indexOf('[历史工具请求]'));
+    expect(note.text).toContain('[历史回执] [未播出] 合成失败');
+    expect(note.text).toContain('[历史回执] 已开演');
   });
 
   it('最近段 speak 不随其他条目数量缩短,早段 speak 不占预算', () => {
@@ -385,13 +385,13 @@ describe('renderHandoffNote', () => {
     expect(note.dropped).toBeGreaterThan(0);
     expect(note.entries + note.dropped).toBe(12);
     expect(note.text).toContain('第11次:');
-    expect(note.text).toContain('[回执] 第11次尚未播放');
+    expect(note.text).toContain('[历史回执] 第11次尚未播放');
     expect(note.text).toContain('token 已折叠');
     expect(estimateTokens(note.text)).toBeLessThanOrEqual(900);
     const tiny = oneNote(snapshot, { budgetTokens: 0, foldTokens: 128 });
     expect(tiny.entries).toBe(1);
     expect(tiny.dropped).toBe(11);
-    expect(tiny.text).toContain('[回执] 第11次尚未播放');
+    expect(tiny.text).toContain('[历史回执] 第11次尚未播放');
     expect(tiny.text).not.toContain('第10次:');
   });
 
@@ -405,7 +405,7 @@ describe('renderHandoffNote', () => {
     ], { splitAtMs: Date.parse(ts), budgetTokens: 10 });
     expect(note.parts).toHaveLength(1);
     expect(note.text).toContain('# 交接笔记 · 最近的一段');
-    expect(note.text).toContain('[调用] vtuber_act {"script":"接着当前动作"}\n[回执] 等待播放');
+    expect(note.text).toContain('[历史工具请求] vtuber_act {"script":"接着当前动作"}\n[历史回执] 等待播放');
     expect(note.text).not.toContain('早段口播原文');
     expect(note.entries).toBe(1);
     expect(note.dropped).toBe(1);

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 import {
-  WALL_GAP, installMineflayerFixes, installPathfinderToolSelection, installWallGap,
+  DIG_UNCONFIRMED_EVENT, WALL_GAP, installMineflayerFixes, installPathfinderToolSelection, installWallGap,
 } from '../../../src/worlds/minecraft/mineflayer-fixes.ts';
 import { MinecraftLog } from '../../../src/worlds/minecraft/log.ts';
 import type { Logger } from '../../../src/core/types.ts';
@@ -51,8 +51,8 @@ function fakeWorld(opts: {
       }
       return null;
     },
-    findItemRange(start: number, end: number, type: number) {
-      for (let i = start; i < end; i++) if (slots[i]?.type === type) return { slot: i, ...slots[i]! };
+    findItemRange(start: number, end: number, type: number, _metadata?: number | null, notFull?: boolean) {
+      for (let i = start; i < end; i++) if (slots[i]?.type === type && (!notFull || slots[i]!.count < 64)) return { slot: i, ...slots[i]! };
       return null;
     },
     firstEmptySlotRange(start: number, end: number) {
@@ -98,9 +98,14 @@ function fakeWorld(opts: {
       if (opts.remainderType !== undefined && window.selectedItem) {
         window.selectedItem = { type: opts.remainderType, count: window.selectedItem.count };
       }
-    } else if (window.selectedItem) { // 左键落下
+    } else if (window.selectedItem) { // 左键落下或合并同类
       if (!at) { slots[slot] = window.selectedItem; window.selectedItem = null; }
-      else { const tmp = at; slots[slot] = window.selectedItem; window.selectedItem = tmp; }
+      else if (at.type === window.selectedItem.type && at.count < 64) {
+        const moved = Math.min(64 - at.count, window.selectedItem.count);
+        at.count += moved;
+        window.selectedItem.count -= moved;
+        if (window.selectedItem.count === 0) window.selectedItem = null;
+      } else { const tmp = at; slots[slot] = window.selectedItem; window.selectedItem = tmp; }
     } else if (at) { // 左键拿起
       window.selectedItem = at;
       if (!opts.refillSource || slot <= size) slots[slot] = null;
@@ -314,16 +319,44 @@ describe('合成采用服务端确认的产物', () => {
   /**
    * 光标持物点击产出槽可能只形成客户端预测交换，不能据此认作服务端产物已到账。
    */
-  it('包满了放不回手上剩的材料:当场报错,绝不带着东西去点产出槽', async () => {
+  it('包满但来源格有同类余量:合并回去后继续合成', async () => {
     const bag: Array<[number, number]> = [[1, 20]];
     for (let i = 1; i < 36; i++) bag.push([7, 1]); // 剩下的格子全占着
     const world = fakeWorld({ gridWidth: 2, bag, refillSource: true });
     const bot = fakeBot(world);
     installMineflayerFixes(bot as never, log);
 
-    await expect(
-      (bot as unknown as { craft(r: unknown, n: number): Promise<void> }).craft(STICK, 1),
-    ).rejects.toThrow('手上还攥着');
+    await expect((bot as unknown as { craft(r: unknown, n: number): Promise<void> }).craft(STICK, 1))
+      .rejects.toThrow('包满了,产物没地方放');
+
+    expect(world.clicks.some((c) => c.at === 1 && c.cursor === 1)).toBe(true);
+    expect(world.window.selectedItem?.type).toBe(99); // 余料已回包，产物因满包暂留光标
+    expect(world.clicks.filter((c) => c.slot === 0)).toHaveLength(1);
+  });
+
+  it('来源材料和产物都能合并时,满包也完成合成', async () => {
+    const bag: Array<[number, number]> = [[1, 20], [99, 4]];
+    for (let i = 2; i < 36; i++) bag.push([7, 1]);
+    const world = fakeWorld({ gridWidth: 2, bag, refillSource: true });
+    const bot = fakeBot(world);
+    installMineflayerFixes(bot as never, log);
+
+    await expect((bot as unknown as { craft(r: unknown, n: number): Promise<void> }).craft(STICK, 1))
+      .resolves.toBeUndefined();
+
+    expect(world.window.selectedItem).toBeNull();
+    expect(world.slots[world.window.inventoryStart + 1]?.count).toBe(5);
+  });
+
+  it('同类堆叠也满时,仍不带着余料去点产出槽', async () => {
+    const bag: Array<[number, number]> = [[1, 64]];
+    for (let i = 1; i < 36; i++) bag.push([7, 1]);
+    const world = fakeWorld({ gridWidth: 2, bag, refillSource: true });
+    const bot = fakeBot(world);
+    installMineflayerFixes(bot as never, log);
+
+    await expect((bot as unknown as { craft(r: unknown, n: number): Promise<void> }).craft(STICK, 1))
+      .rejects.toThrow('手上还攥着');
 
     expect(world.clicks.filter((c) => c.slot === 0)).toHaveLength(0);
   });
@@ -417,6 +450,19 @@ describe('放方块:短超时 + 就地重发', () => {
   }
 
   const ref = { position: { plus: () => ({ x: 1, y: 2, z: 3 }) } };
+
+  it('保护回执未到时若寻路已重算，不再执行旧路线的放置', async () => {
+    const bot = placeBot(1, true);
+    let reply!: (value: { status: string; reason: string }) => void;
+    bot.cortiProtectCheck = () => new Promise((resolve) => { reply = resolve; });
+    installMineflayerFixes(bot as never, log);
+    const pending = (bot as unknown as { placeBlock(a: unknown, b: unknown): Promise<void> })
+      .placeBlock(ref, {});
+    bot.emit('path_reset', 'movements_updated');
+    reply({ status: 'allow_likely', reason: 'ok' });
+    await expect(pending).rejects.toThrow('取消旧路线');
+    expect(bot.attempts).toBe(0);
+  });
 
   it('第一次就回读到:不重发', async () => {
     const bot = placeBot(1);
@@ -830,7 +876,7 @@ describe('digging 闩锁:stopDigging 空转那一下补一记中止', () => {
   });
 });
 
-describe('stateId:windowId=-2 的 set_slot 拦在门外', () => {
+describe('stateId:无效的玩家库存直接更新包忽略', () => {
   function guardBot() {
     const bot = new EventEmitter() as unknown as EventEmitter & Record<string, unknown>;
     const client = new EventEmitter() as unknown as EventEmitter & Record<string, unknown>;
@@ -844,10 +890,9 @@ describe('stateId:windowId=-2 的 set_slot 拦在门外', () => {
   }
 
   /**
-   * windowId=-2 的 set_slot 没有对应容器内容，但会覆盖 mineflayer 的全局 stateId。
-   * 拦截后当前容器的 stateId 必须保持不变。
+   * 缺少物品内容的玩家库存直接更新无效,不能覆盖当前容器的 stateId。
    */
-  it('-2 的包被吞掉,别的窗口照常透传', () => {
+  it('缺少物品的 -2 包被忽略,别的窗口照常透传', () => {
     const { bot, client } = guardBot();
     installMineflayerFixes(bot as never, log);
     const seen: number[] = [];
@@ -1236,6 +1281,49 @@ describe('挖掘:以服务端改掉那一格为准', () => {
   const digOf = (bot: unknown) =>
     (bot as { dig(b: unknown): Promise<void> }).dig.bind(bot as object);
 
+  it('服务端保护或区块权限未知时，显式 tunnel/dig 也不发送挖掘包', async () => {
+    const h = digBot({ digMs: 50 });
+    const diag = new MinecraftLog();
+    h.bot.cortiBreakVerdict = () => 'protected';
+    installMineflayerFixes(h.bot as never, log, diag);
+    await expect(digOf(h.bot)(h.blockAt())).rejects.toThrow('受保护');
+    expect(h.digCalls).toBe(0);
+    h.bot.cortiBreakVerdict = () => 'unknown';
+    await expect(digOf(h.bot)(h.blockAt())).rejects.toThrow('尚未同步');
+    expect(h.digCalls).toBe(0);
+    expect(diag.after(0).filter((e) => e.event === 'dig-permission-blocked')).toHaveLength(2);
+  });
+
+  it('保护回执未到时若寻路已重算，不再执行旧路线的挖掘', async () => {
+    const h = digBot({ digMs: 50 });
+    h.bot.pathfinder = { isMining: () => true };
+    let reply!: (value: { status: string; reason: string }) => void;
+    h.bot.cortiProtectCheck = () => new Promise((resolve) => { reply = resolve; });
+    installMineflayerFixes(h.bot as never, log);
+    const pending = digOf(h.bot)(h.blockAt());
+    h.bot.emit('path_reset', 'movements_updated');
+    reply({ status: 'allow_likely', reason: 'ok' });
+    await expect(pending).rejects.toThrow('取消旧路线');
+    expect(h.digCalls).toBe(0);
+  });
+
+  it('挖掘开始后收到服务端拒绝，会在确认等待中立即收工', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = digBot({ digMs: 50 });
+      let permission: 'allowed' | 'protected' = 'allowed';
+      h.bot.cortiBreakVerdict = () => permission;
+      installMineflayerFixes(h.bot as never, log);
+      const done = digOf(h.bot)(h.blockAt()).then(() => null, (err: Error) => err);
+      await vi.advanceTimersByTimeAsync(100);
+      permission = 'protected';
+      await vi.advanceTimersByTimeAsync(40);
+      expect((await done)?.message).toContain('受保护');
+      expect(h.digCalls).toBe(1);
+      expect(h.blockAt().name).toBe('stone');
+    } finally { vi.useRealTimers(); }
+  });
+
   it('本地定时器到点不算数:服务端改掉那一格之前不返回,世界里也不许出现假空气', async () => {
     vi.useFakeTimers();
     try {
@@ -1279,12 +1367,15 @@ describe('挖掘:以服务端改掉那一格为准', () => {
     try {
       const h = digBot({ digMs: 50 });
       installMineflayerFixes(h.bot as never, log);
+      const unconfirmed: unknown[] = [];
+      h.bot.on(DIG_UNCONFIRMED_EVENT, (block: unknown) => unconfirmed.push(block));
       const p = digOf(h.bot)(h.block).then(() => null, (e: Error) => e);
       await vi.advanceTimersByTimeAsync(9_000);
       const err = await p;
       expect(err?.message).toContain('服务端没认这一下');
       expect(err?.message).toContain('(10, 64, 5)');
       expect(h.digCalls).toBe(1); // 重挖会把服务端的破坏进度清零,一次都不许
+      expect(unconfirmed).toEqual([h.block]);
       expect(h.blockAt().name).toBe('stone');
     } finally {
       vi.useRealTimers();

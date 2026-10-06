@@ -4,7 +4,6 @@
  * 落脚、贴面与补光在 placement.ts;这里管的是放什么、放成什么形状、放到第几步。
  */
 import type { Bot } from 'mineflayer';
-import pathfinderPkg from 'mineflayer-pathfinder';
 import {
   Aborted, SkillBlocked, checkAbort, sleep, type BlueprintSite, type BlueprintSurvey,
   type SkillContext,
@@ -12,26 +11,26 @@ import {
 import {
   AIR_NAMES, EXCAVATE_CELL_CAP, FACE_ZH, LIQUIDS, NEIGHBORS6, NO_PLACE_REFERENCE, PLACE_REACH,
   SHAPE_ZH, blockAtCell, cellKeyOf, cellText, dimensionOf, faceText, feetOf, nearLavaAt, refAt,
-  refCellOf, resolveAt, skyBlocked, solidAt,
+  refCellOf, resolveAt, skyVisibleAt, solidAt,
 } from './cell-facts.ts';
 import {
   Upkeep, buildSpots, ensureHolding, footprintOf, footprintScene, gotoPlaceable, hitboxBlocks,
-  inBox, jumpPlaceBelow, matchPlacedMaterialName, materialCollides, occupantOf, occupantText,
-  occupiedByMe, permitPlacement, placeIntoCell, siteAtCellAnywhere, siteBox, stationNotes,
-  stepOffCell, sweepDrops, type BuildSpot,
+  jumpPlaceBelow, matchPlacedMaterialName, materialCollides, occupantOf, occupantText,
+  occupiedByMe, permitPlacement, placeIntoCell, siteAtCellAnywhere, stationNotes,
+  singlePlaceScene, stepOffCell, type BuildSpot,
 } from './placement.ts';
-import { digBlock, gotoGoal, readStamp, settleOnGround } from './travel.ts';
+import { digBlock, readStamp, settleOnGround } from './travel.ts';
 import { zhName } from './names.ts';
 import { equipToolFor } from './tools.ts';
 import { bodyInWater, headInWater } from './terrain.ts';
 import { type BlueprintCall, type PlaceCall } from './receipt.ts';
 import { isBoat, skillUse } from './skills-interact.ts';
 import { invCount, invSnapshot } from './inventory.ts';
-import { matchMaterialName } from './chests.ts';
+import { matchMaterialName, type ChestBook } from './chests.ts';
 import { type BlockFace, type Cell } from './geometry.ts';
 import {
-  billForSteps, blueprintProgress, blueprintStepStateMatches, diffBlueprint,
-  renderBlueprintAdvisories, stepCountThroughLayer, stepToBuildCall, summarizeReadback, toWorld,
+  BLUEPRINT_MATERIAL_NOTE, billForSteps, blueprintProgress, blueprintStepStateMatches, diffBlueprint,
+  remainingPlacementBillSteps, renderBlueprintAdvisories, stepCountThroughLayer, stepToBuildCall, summarizeReadback, toWorld,
   type BlueprintCheckCell, type BlueprintConflict, type BlueprintDiff, type BlueprintStep,
   type ItemTally, type ReadbackEntry,
 } from './blueprint-plan.ts';
@@ -39,21 +38,16 @@ import {
   blockIdOf, normalizeBlockName, renderLayerMap, type NormalizedBlueprint, type PositionXYZ,
 } from './blueprint.ts';
 import { skillExcavate } from './skills-dig.ts';
-import { placedLedgerOf } from './placed-ledger.ts';
-
-const { goals } = pathfinderPkg;
+import { promoteTemporaryScaffold, reclaimPendingTemporaryScaffold } from './temporary-scaffold.ts';
 
 /** 陆上 surface 一次爬升的时限;到点如实报爬到哪 */
 export const SURFACE_CLIMB_MS = 90_000;
 
 /**
- * 陆上 surface:头顶有实心遮盖就挖开头顶两格再垫脚上一格,循环到露天。
+ * 陆上 surface:挖开头顶两格并垫脚上升，直到已知头顶无遮盖且稳定落脚。
  * 头顶压着液体不捅穿;挖不动(基岩)、没垫脚方块、限时到,都带着已爬格数受阻。
  */
 export async function skillSurfaceLand(bot: Bot, ctx: SkillContext): Promise<string> {
-  if (!skyBlocked(bot, feetOf(bot).x, feetOf(bot).y + 2, feetOf(bot).z)) {
-    return `我已经在露天了;${surfaceStateText(bot)}`;
-  }
   ctx.escape.active = true;
   const keep = new Upkeep(bot, ctx);
   const deadline = Date.now() + SURFACE_CLIMB_MS;
@@ -64,7 +58,22 @@ export async function skillSurfaceLand(bot: Bot, ctx: SkillContext): Promise<str
     checkAbort(ctx);
     await settleOnGround(bot, ctx, 1_500);
     const feet = feetOf(bot);
-    if (!skyBlocked(bot, feet.x, feet.y + 2, feet.z)) break;
+    const skyVisible = skyVisibleAt(bot, feet.x, feet.y + 2, feet.z);
+    if (skyVisible === null) {
+      throw new SkillBlocked(`头顶柱有未加载的格子,不能确认天空;本次上升 ${climbed} 格${where()};${surfaceStateText(bot)}`);
+    }
+    if (skyVisible) {
+      if (!(await stableDryFooting(bot, ctx))) {
+        throw new SkillBlocked(`头顶没有实心遮盖,但还没稳定站上干燥落脚格;本次上升 ${climbed} 格${where()};${surfaceStateText(bot)}`);
+      }
+      const settled = feetOf(bot);
+      const settledSky = skyVisibleAt(bot, settled.x, settled.y + 2, settled.z);
+      if (settledSky === null) {
+        throw new SkillBlocked(`落脚后头顶柱读数未知;本次上升 ${climbed} 格${where()};${surfaceStateText(bot)}`);
+      }
+      if (settledSky) break;
+      continue;
+    }
     if (Date.now() > deadline) {
       throw new SkillBlocked(`我往上爬了 ${climbed} 格还没到露天,限时到了${where()}`);
     }
@@ -103,9 +112,9 @@ export async function skillSurfaceLand(bot: Bot, ctx: SkillContext): Promise<str
     if (siteAtCellAnywhere(ctx, feet)) paddedInSite++;
     climbed++;
   }
-  return `我爬到露天了,上来 ${climbed} 格${where()}`
+  return `已站稳,当前头顶没有实心遮盖;本次上升 ${climbed} 格${where()}`
     + (paddedInSite > 0 ? `;为脱困在蓝图工地体积里垫了 ${paddedInSite} 块` : '')
-    + `;${surfaceStateText(bot)}`;
+    + `;可见天空不证明已走出竖井或到达周围地面;${surfaceStateText(bot)}`;
 }
 
 /** 水中 surface 的完成条件：身体已离水，脚下有可站立支撑，并且短时复读不回水。 */
@@ -123,7 +132,7 @@ export function surfaceStateText(bot: Bot): string {
   const feet = feetOf(bot);
   const outOfLiquid = !headInWater(bot) && !bodyInWater(bot);
   const standing = hasDryFooting(bot);
-  const skyVisible = !skyBlocked(bot, feet.x, feet.y + 2, feet.z);
+  const skyVisible = skyVisibleAt(bot, feet.x, feet.y + 2, feet.z) ?? 'unknown';
   const finalY = Number(bot.entity.position.y.toFixed(2));
   return `out_of_liquid=${outOfLiquid},standing=${standing},sky_visible=${skyVisible},final_y=${finalY}`;
 }
@@ -208,7 +217,8 @@ export async function skillBuild(bot: Bot, call: PlaceCall, ctx: SkillContext): 
     // 标出回读时刻，便于区分稍后核验得到的新读数。
     throw new SkillBlocked(
       `一块都没放上:${spanText}没有一格空着(${bits.join(',')};读于 ${readStamp()})`,
-      blockers,
+      one && first.occupied > 0
+        ? [...blockers, ...singlePlaceScene(bot, cells[0], call.material)] : blockers,
     );
   }
   if (stock() === 0) throw new SkillBlocked(`包里没有${label}`);
@@ -279,13 +289,13 @@ export async function skillBuild(bot: Bot, call: PlaceCall, ctx: SkillContext): 
         if (s.face === null || s.face === 'up') {
           // 挪不开的脚下格才跳起来垫;贴的永远是脚下那一块的上面,指名了别的面时这条路不适用
           if (!(await ensureHolding(bot, call.material))) { halt = `${label}用完了`; break; }
-          const permit = permitPlacement(ctx, bot.heldItem?.name ?? item.name);
+          const permit = permitPlacement(ctx, bot.heldItem?.name ?? item.name, false, c);
           if (!permit.ok) { halt = permit.reason; break; }
           let landed = false;
           try {
             landed = await jumpPlaceBelow(bot, ctx, call.material);
           } finally {
-            permit.finish(landed);
+            await permit.finish(landed);
           }
           if (landed) {
             remaining.delete(key);
@@ -304,14 +314,14 @@ export async function skillBuild(bot: Bot, call: PlaceCall, ctx: SkillContext): 
       if (materialCollides(bot, call.material) && hitboxBlocks(bot, c)
         && !(await stepOffCell(bot, ctx, c))) { tried.add(key); continue; }
       if (!(await ensureHolding(bot, call.material))) { halt = `${label}用完了`; break; }
-      const permit = permitPlacement(ctx, bot.heldItem?.name ?? item.name);
+      const permit = permitPlacement(ctx, bot.heldItem?.name ?? item.name, false, c);
       if (!permit.ok) { halt = permit.reason; break; }
       tried.add(key);
       let landed: BlockFace | null = null;
       try {
         landed = await placeIntoCell(bot, c, call.material, ctx, s.face ?? undefined);
       } finally {
-        permit.finish(landed !== null);
+        await permit.finish(landed !== null);
       }
       if (landed) {
         remaining.delete(key);
@@ -324,6 +334,9 @@ export async function skillBuild(bot: Bot, call: PlaceCall, ctx: SkillContext): 
     if (progressed) {
       placed++;
       ctx.progress?.(placed, total);
+      if (remaining.size > 0) {
+        await ctx.checkpoint?.(() => settleOnGround(bot, ctx, 1_500));
+      }
     } else if (headOnly > 0 && headOnly === frontier.length) {
       halt = `剩 ${remaining.size} 格顶在我脑袋上,挪了一步也没挪开`;
       break;
@@ -497,15 +510,29 @@ export function carriedTally(bot: Bot): ItemTally {
   return Object.fromEntries(invSnapshot(bot));
 }
 
-/** 三分账单渲染:缺的排前面,只报前几样 */
-export function blueprintBillText(steps: readonly BlueprintStep[], carried: ItemTally, stored: ItemTally): string {
+/** 材料数量区分随身与历史库存；缺少随身料时附已记录的容器来源。 */
+export function blueprintBillText(steps: readonly BlueprintStep[], carried: ItemTally, stored: ItemTally,
+  sources?: { chests: ChestBook; dimension: string }): string {
   const bill = billForSteps(steps, { carried, stored });
   if (bill.lines.length === 0) return '这一段一块都不用放';
-  const lines = bill.lines.slice(0, 5).map((l) =>
-    `${zhName(l.item)} 要 ${l.need}(随身 ${l.carried}、在箱 ${l.stored}`
-    + `${l.missing > 0 ? `、还缺 ${l.missing}` : '、够了'})`);
+  const lines = bill.lines.slice(0, 5).map((l) => {
+    const heldGap = Math.max(0, l.need - l.carried);
+    const counts = `${zhName(l.item)} 要 ${l.need}(随身 ${l.carried}、容器历史合计 ${l.stored}`
+      + `${l.missing > 0 ? `、按历史账还缺 ${l.missing}` : ''}`
+      + `${heldGap > 0 ? `；随身还需 ${heldGap}，须补入随身` : '；随身数量够'})`;
+    if (heldGap === 0 || l.stored === 0 || !sources) return counts;
+    const records = sources.chests.itemSources(sources.dimension, l.item);
+    const origin = records.slice(0, 3).map((entry) =>
+      `(${entry.x},${entry.y},${entry.z})×${entry.count}（`
+      + (entry.observedAt === undefined ? '观测时间未记录' :
+        `观测距今 ${Math.max(0, Math.floor((Date.now() - entry.observedAt) / 60_000))} 分钟`) + '）');
+    return counts + (origin.length > 0
+      ? `；${l.item} 历史来源：${origin.join('、')}`
+        + `${records.length > origin.length ? `，另 ${records.length - origin.length} 处` : ''}，当前内容待开窗复核`
+      : '；没有可定位的容器来源，库存未核实');
+  });
   const rest = bill.lines.length > 5 ? `;另有 ${bill.lines.length - 5} 样` : '';
-  return `${lines.join(';')}${rest}`;
+  return `${lines.join(';')}${rest}。${BLUEPRINT_MATERIAL_NOTE}`;
 }
 
 /** 「能连着施工到第 k/N 步(到第 y 层)」;层号按那一步所在的层报 */
@@ -582,7 +609,8 @@ export async function clearBlueprintConflicts(
         + zhName(entry.actual.replace('minecraft:', ''))),
     );
   }
-  for (const [from, to] of conflictRuns(conflicts)) {
+  const runs = conflictRuns(conflicts);
+  for (const [index, [from, to]] of runs.entries()) {
     notes.push(await skillExcavate(bot, {
       skill: 'excavate',
       shape: 'box',
@@ -594,7 +622,27 @@ export async function clearBlueprintConflicts(
       batch: undefined,
       noLight: true,
     }));
+    if (index + 1 < runs.length) {
+      await ctx.checkpoint?.(() => settleOnGround(bot, ctx, 1_500));
+    }
   }
+}
+
+/** 只报告原冲突格当前读数，不将空格归因为本次挖掘。 */
+function conflictReadback(bot: Bot, conflicts: readonly BlueprintConflict[]): string {
+  let empty = 0;
+  let occupied = 0;
+  let unknown = 0;
+  for (const conflict of conflicts) {
+    const [x, y, z] = conflict.pos;
+    const block = blockAtCell(bot, { x, y, z });
+    if (!block) unknown++;
+    else if (AIR_NAMES.has(block.name)) empty++;
+    else occupied++;
+  }
+  return `初始 ${conflicts.length} 个冲突格的现场回读：`
+    + `${empty} 格目前为空，${occupied} 格仍有方块`
+    + `${unknown > 0 ? `，${unknown} 格读不到` : ''}`;
 }
 
 export function stepWorldCells(step: BlueprintStep, anchor: PositionXYZ): PositionXYZ[] {
@@ -652,11 +700,15 @@ export async function runBlueprintStep(
   step: BlueprintStep,
   anchor: PositionXYZ,
   ctx: SkillContext,
+  site?: BlueprintSite,
 ): Promise<string | null> {
   const innerCtx: SkillContext = {
     ...ctx,
     progress: undefined,
     batch: undefined,
+    blueprintPlacement: site?.versionId
+      ? { key: site.key, versionId: site.versionId, anchor: [...anchor] }
+      : undefined,
   };
   if (step.method.kind === 'place') {
     let gap: string | null = null;
@@ -721,7 +773,7 @@ export async function withBlueprintGain(
   const site = key !== null && desk ? desk.get(key) : null;
   if (!desk || !site) return run();
   const stored = desk.stored();
-  const rest = site.plan.steps.slice(site.cursor);
+  const rest = desk.remainingBill?.(site.key) ?? site.plan.steps.slice(site.cursor);
   if (rest.length === 0) return run();
   const before = billForSteps(rest, { carried: carriedTally(bot), stored });
   const text = await run();
@@ -741,90 +793,13 @@ export async function withBlueprintGain(
   return bits.length === 0 ? text : `${text}(${site.key} ${bits.join(';')})`;
 }
 
-/**
- * 按已装载的蓝图盖。
- *
- * 每一步都是一条**标准 build 调用**(stepToBuildCall 产出的 box+solid),交给
- * `skillBuild` 原样执行 —— 放置、贴面挑选、垫脚、「本来就是这个方块」这些口径
- * 一份都不重写。受理刻的重生锚闸与重力闸在 `submit` 那一层按整张图的落点算过。
- */
-/**
- * 收工回收本趟垫入工地体积的方块，工地外垫脚保留作路。
- * 台账名称与当前方块不符时不动；先挖远处，脚下支撑最后处理并先移出工地。
- */
-export async function reclaimSiteScaffold(
-  bot: Bot,
-  ctx: SkillContext,
-  box: { min: PositionXYZ; max: PositionXYZ },
-  /** 开工前台账里已有的那些条目(按对象身份) */
-  before: ReadonlySet<object>,
-): Promise<string> {
-  const seen = new Set<string>();
-  const targets = placedLedgerOf(bot).filter((p) => {
-    if (before.has(p) || !inBox(box, p) || ctx.intended?.has(cellKeyOf(p))) return false;
-    const key = cellKeyOf(p);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-  if (targets.length === 0) return '';
-  const me = bot.entity.position;
-  targets.sort((a, b) => Math.hypot(b.x - me.x, b.y - me.y, b.z - me.z)
-    - Math.hypot(a.x - me.x, a.y - me.y, a.z - me.z));
-
-  /** 台账点名的那一块还在原地才挖 */
-  const digOne = async (p: { name: string; x: number; y: number; z: number }): Promise<boolean> => {
-    let b = blockAtCell(bot, p);
-    if (!b || b.name !== p.name) return false;
-    if (!bot.canDigBlock(b)) {
-      try {
-        await gotoGoal(bot, new goals.GoalNear(p.x, p.y, p.z, 2), ctx);
-      } catch (err) {
-        if (err instanceof Aborted) throw err;
-        return false;
-      }
-      b = blockAtCell(bot, p);
-      if (!b || b.name !== p.name || !bot.canDigBlock(b)) return false;
-    }
-    await equipToolFor(bot, b, ctx);
-    await digBlock(bot, b, ctx);
-    return true;
-  };
-  /** 人正站在这一块上吗(它是脚下那一格) */
-  const underfoot = (p: { x: number; y: number; z: number }): boolean => {
-    const feet = feetOf(bot);
-    return p.x === feet.x && p.z === feet.z && p.y === feet.y - 1;
-  };
-
-  let dug = 0;
-  let left: typeof targets[number] | null = null;
-  for (const p of targets) {
-    checkAbort(ctx);
-    if (underfoot(p)) { left = p; continue; }
-    if (await digOne(p)) dug++;
-  }
-  if (left) {
-    if (underfoot(left)) {
-      // 挪出工地再挖:从最近的一面往外三格
-      const feet = feetOf(bot);
-      const out = [
-        { d: feet.x - box.min[0], c: { x: box.min[0] - 3, y: feet.y, z: feet.z } },
-        { d: box.max[0] - feet.x, c: { x: box.max[0] + 3, y: feet.y, z: feet.z } },
-        { d: feet.z - box.min[2], c: { x: feet.x, y: feet.y, z: box.min[2] - 3 } },
-        { d: box.max[2] - feet.z, c: { x: feet.x, y: feet.y, z: box.max[2] + 3 } },
-      ].sort((a, b) => a.d - b.d)[0].c;
-      try {
-        await gotoGoal(bot, new goals.GoalNear(out.x, out.y, out.z, 2), ctx);
-      } catch (err) {
-        if (err instanceof Aborted) throw err;
-      }
-    }
-    if (!underfoot(left) && await digOne(left)) dug++;
-  }
-  if (dug > 0) await sweepDrops(bot, ctx);
-  return dug === 0 ? '' : `顺手清掉了工地里的垫脚 ${dug} 块。`;
+/** Promote intended building cells, then reclaim proven temporary supports from this position. */
+export async function reclaimSiteScaffold(bot: Bot, ctx: SkillContext): Promise<string> {
+  promoteTemporaryScaffold(bot, ctx.intended ?? []);
+  return reclaimPendingTemporaryScaffold(bot, ctx);
 }
 
+/** Build compiled blueprint steps through the ordinary single-cell placement path. */
 export async function skillBuildBlueprint(
   bot: Bot,
   call: BlueprintCall,
@@ -854,6 +829,20 @@ export async function skillBuildBlueprint(
     );
   }
   const moved = site.anchor !== null && site.anchor.some((v, i) => v !== anchor[i]);
+  if (!call.dryRun && (moved || call.rebindFrom !== undefined)
+    && (!site.anchor || !call.rebindFrom
+      || site.anchor.some((value, index) => value !== call.rebindFrom![index]))) {
+    const previous = site.anchor ? `[${site.anchor.join(',')}]` : '未绑定';
+    throw new SkillBlocked(
+      `蓝图「${site.key}」当前绑定锚点 ${previous}，本单锚点 [${anchor.join(',')}]；没有改绑或改动方块`,
+      [
+        '续建可省略 at，沿用当前绑定；at 是蓝图原点，走路站位另用 goto。',
+        site.anchor
+          ? `确实要换工地时，先 dryRun 核对新位置，再给 rebindFrom:${previous} 和新的 at；confirm 只确认清除冲突格。`
+          : '首次施工给 at 即可；当前没有可用于 rebindFrom 的原锚点。',
+      ],
+    );
+  }
   const started = site.startedAt === undefined ? site.anchor !== null : site.startedAt !== null;
   const firstStart = moved || !started;
   const needsSurvey = site.blueprint.site_mode === 'retrofit'
@@ -863,6 +852,11 @@ export async function skillBuildBlueprint(
     ? total
     : stepCountThroughLayer(site.plan.steps, call.stopAfter);
   let diff = readBlueprintWorld(bot, site, anchor);
+  const observeRemaining = (): void => {
+    if (site.versionId) desk.observeRemaining?.(site.key, site.versionId, anchor,
+      diff.remaining.map((step) => step.index), diff.placements);
+  };
+  observeRemaining();
   const head = `「${site.key}」${site.name ? `「${site.name}」` : ''}`
     + `(${site.blueprint.size_xyz.join('×')},共 ${total} 步 / ${site.plan.placeCells} 格,`
     + `锚点 ${cellText({ x: anchor[0], y: anchor[1], z: anchor[2] })})`;
@@ -879,17 +873,18 @@ export async function skillBuildBlueprint(
 
   // ── 试算:不动工,只把账摊开 ────────────────────────────────────────────
   if (call.dryRun) {
-    const todo = diff.remaining.filter((s) => s.index < limit);
+    const todo = remainingPlacementBillSteps(diff.remaining.filter((s) => s.index < limit), diff.placements);
     const carried = carriedTally(bot);
     const stored = desk.stored();
     const bill = billForSteps(todo, { carried, stored });
     const lines = [
       `试算${head}:已经对上 ${diff.matched} 格,还差 ${diff.missing} 格(${todo.length} 步)`
         + `;${conflictNote}${unknownNote}。`,
-      `料:${blueprintBillText(todo, carried, stored)}。`,
+      `料:${blueprintBillText(todo, carried, stored,
+        ctx.chests ? { chests: ctx.chests, dimension: dimensionOf(bot) } : undefined)}。`,
       `${reachText(todo, bill.reachableSteps, total, total - diff.remaining.length)}`
         + `${bill.reachableStepsWithStored > bill.reachableSteps
-          ? `;把箱里那些也取来能到第 ${total - diff.remaining.length + bill.reachableStepsWithStored} 步` : ''}。`,
+          ? `;若容器历史库存仍在且已取到随身，材料试算可到第 ${total - diff.remaining.length + bill.reachableStepsWithStored} 步` : ''}。`,
       call.stopAfter === undefined ? '' : `这一单只施工到第 ${call.stopAfter} 层(前 ${limit} 步)。`,
       site.blueprint.site_mode === 'new'
         ? diff.conflicts.length > 0
@@ -901,7 +896,7 @@ export async function skillBuildBlueprint(
             ? '这是改造工地;冲突须审阅后带 confirm:true 才会清掉并施工。'
             : '这是改造工地;初探已经完成,现场没有需要确认的冲突。',
       firstStart ? '这个世界里还没正式开工,动工时会把这个锚点记进施工绑定。' : '',
-      moved ? '锚点跟上次那次不一样:真下这一单等于换地方重新施工,进度从头算。' : '',
+      moved ? `当前绑定 [${site.anchor!.join(',')}]；正式改绑须给 rebindFrom:[${site.anchor!.join(',')}]，进度重新计算。` : '',
       // 图外现场才决定得了的前提(作物下的耕地、门下的地基):试算是她动工前唯一一次核对的机会
       site.plan.advisories.length > 0
         ? `这几条得靠现场满足(编译期看不见工地):\n${renderBlueprintAdvisories(site.plan.advisories)}`
@@ -942,9 +937,6 @@ export async function skillBuildBlueprint(
   if (diff.unknown > 0) {
     throw new SkillBlocked(`${head}有 ${diff.unknown} 格区块没加载,不能安全清场或施工`);
   }
-  // 回收的账从这里起:清场那一段走路垫进来的也算这一趟的(见 reclaimSiteScaffold)
-  const box = siteBox(site, anchor);
-  const ledgerBefore = new Set<object>(placedLedgerOf(bot));
   const conflictTotal = diff.conflictCounts['wrong-block'] + diff.conflictCounts['should-be-air'];
   // 所有工地模式均对清除既有冲突格执行确认闸。
   /** 她显式要跳过的冲突格:不清场、不拦,放置阶段自然绕过它们 */
@@ -960,8 +952,21 @@ export async function skillBuildBlueprint(
     );
   }
 
+  const intended = ctx.intended ??= new Set<string>();
+  for (const step of site.plan.steps) {
+    if (AIR_NAMES.has(step.item.replace(/^minecraft:/, ''))) continue;
+    for (const [x, y, z] of stepWorldCells(step, anchor)) intended.add(cellKeyOf({ x, y, z }));
+  }
+  promoteTemporaryScaffold(bot, intended);
+
   let cleared = 0;
+  let clearing: readonly BlueprintConflict[] | null = null;
+  ctx.progressDetail = () => clearing
+    ? `蓝图清场阶段，原点 (${anchor.join(', ')})；${conflictReadback(bot, clearing)}；尚未开始放置蓝图`
+    : `蓝图放置阶段，原点 (${anchor.join(', ')})`;
   if (conflictTotal > 0 && skipped.length === 0) {
+    const originalConflicts = [...diff.conflicts];
+    clearing = originalConflicts;
     /** 清场每一段自己说了什么;受阻时并进外层文案,不然「没动它」这类原因就没了 */
     const clearNotes: string[] = [];
     const said = (): string[] => {
@@ -979,13 +984,20 @@ export async function skillBuildBlueprint(
         await clearBlueprintConflicts(bot, targets, ctx, clearNotes);
       } catch (err) {
         if (err instanceof Aborted) throw err;
-        throw new SkillBlocked(`蓝图清场停下了:${(err as Error).message}`, said());
+        const reading = `${conflictReadback(bot, originalConflicts)}；尚未开始放置蓝图。`;
+        throw new SkillBlocked(
+          `蓝图清场尚未完成，当前清理段受阻：${(err as Error).message}`,
+          [reading, ...said(), ...(err instanceof SkillBlocked ? err.scene : [])],
+          err instanceof SkillBlocked ? err.source : 'local',
+          err instanceof SkillBlocked ? err.code : undefined,
+        );
       }
     };
     const before = new Set(diff.conflicts.map((c) => c.pos.join(',')));
     await clear(diff.conflicts);
     cleared = conflictTotal;
     diff = readBlueprintWorld(bot, site, anchor);
+    observeRemaining();
     let left = diff.conflictCounts['wrong-block'] + diff.conflictCounts['should-be-air'];
     // 可容忍的剩余冲突须全部为清场期间新出现的格，数量不超过 CLEAR_RESIDUE_CAP。
     const fresh = diff.conflicts.every((c) => !before.has(c.pos.join(',')));
@@ -993,6 +1005,7 @@ export async function skillBuildBlueprint(
       await clear(diff.conflicts);
       cleared += left;
       diff = readBlueprintWorld(bot, site, anchor);
+      observeRemaining();
       left = diff.conflictCounts['wrong-block'] + diff.conflictCounts['should-be-air'];
     }
     if (diff.unknown > 0 || left > 0) {
@@ -1002,6 +1015,7 @@ export async function skillBuildBlueprint(
       );
     }
   }
+  clearing = null;
 
   /** 她要跳过的那些格:回执点名,别让「跳过了」成为她要自己猜的事 */
   const skipNote = skipped.length === 0
@@ -1011,6 +1025,7 @@ export async function skillBuildBlueprint(
 
   // ── 开工 ────────────────────────────────────────────────────────────────
   if (firstStart) desk.bind(site.key, anchor);
+  observeRemaining();
   const roadmark = firstStart
     ? '我已经把开工位置写入施工绑定；现在我要用 mc_map 的 set 给这处工地登记名字和锚点，免得之后忘了在哪。'
     : '';
@@ -1028,7 +1043,7 @@ export async function skillBuildBlueprint(
       `${head}:${whole ? '整张图' : `到第 ${call.stopAfter} 层这一段`}已经跟世界对上了,`
         + `没有要补的格${cleared > 0 ? `;我这次清掉了 ${cleared} 个冲突格,清场完成` : ';我没有改动方块'}。`,
       skipNote,
-      await reclaimSiteScaffold(bot, ctx, box, ledgerBefore),
+      await reclaimSiteScaffold(bot, ctx),
       roadmark,
     ].filter(Boolean).join('\n');
   }
@@ -1041,11 +1056,11 @@ export async function skillBuildBlueprint(
   /** 没推进的那些步:一步一条,收工时全报出来 */
   const failures: Array<{ index: number; text: string }> = [];
   let streak = 0;
-  for (const step of todo) {
+  for (const [todoIndex, step] of todo.entries()) {
     checkAbort(ctx);
     let why: string | null = null;
     try {
-      const gap = await runBlueprintStep(bot, step, anchor, ctx);
+      const gap = await runBlueprintStep(bot, step, anchor, ctx, site);
       if (gap !== null) why = `只放上一部分:${gap}`;
       else verifyBlueprintStepChecks(bot, step, anchor, site.plan.checks);
     } catch (err) {
@@ -1067,6 +1082,9 @@ export async function skillBuildBlueprint(
     placed++;
     placedSteps.push(step.index);
     ctx.progress?.(placed, todo.length);
+    if (todoIndex + 1 < todo.length) {
+      await ctx.checkpoint?.(() => settleOnGround(bot, ctx, 1_500));
+    }
   }
   const cursor = cursorOf();
   // 进度是**机械变化**:写回缓存,但一个字都不催她去改笔记(PWSR 收紧第二条)
@@ -1117,12 +1135,14 @@ export async function skillBuildBlueprint(
       + `${capped ? `(只回读了前 ${BLUEPRINT_READBACK_CAP} 格)` : ''}。`;
 
   // 回收放在回读之后:回读量的是施工结果,垫脚不该混进那一笔
-  const reclaimed = await reclaimSiteScaffold(bot, ctx, box, ledgerBefore);
+  const reclaimed = await reclaimSiteScaffold(bot, ctx);
 
   const progress = blueprintProgress(site.plan.steps, cursor);
   const stillMissing = blueprintBillText(
-    site.plan.steps.filter((s) => !done.has(s.index)),
+    desk.remainingBill?.(site.key)
+      ?? remainingPlacementBillSteps(site.plan.steps.filter((s) => !done.has(s.index)), diff.placements),
     carriedTally(bot), desk.stored(),
+    ctx.chests ? { chests: ctx.chests, dimension: dimensionOf(bot) } : undefined,
   );
   const left = total - cursor;
   if (failures.length > 0) {

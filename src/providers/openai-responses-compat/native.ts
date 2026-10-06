@@ -44,12 +44,14 @@ export function buildResponsesBody(
     store: false,
     stream: Boolean(options.onEvent),
   };
+
   // 加密形态靠 include 把签名推理块取回来,明文形态用不上它;端点不支持 include 时整条请求被拒,
   // 所以只在用得上的形态带。
   const include = new Set<string>(request.include ?? []);
   if (input.reasoningReplay !== 'plaintext') include.add('reasoning.encrypted_content');
   if (include.size) body.include = [...include];
   else delete body.include;
+
   delete body.previous_response_id;
   if (replay.instructions !== undefined) body.instructions = replay.instructions;
   else delete body.instructions;

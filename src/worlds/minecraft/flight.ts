@@ -1,0 +1,289 @@
+import type { Bot } from 'mineflayer';
+import { Vec3 } from 'vec3';
+import { SkillBlocked, sleep } from './skill-context.ts';
+
+interface FlightAbilities {
+  flags: number;
+  observedAtMs: number;
+  flyingSpeed: number;
+  requestedFlying?: boolean;
+  expiresAtMs?: number;
+  expiryTimer?: ReturnType<typeof setTimeout>;
+}
+interface FlightControl {
+  physicsEnabled: boolean;
+  gravity: number;
+  interrupted?: string;
+}
+export interface FlightState {
+  allowed: boolean;
+  flying: boolean;
+  serverFlying: boolean;
+  observedAtMs?: number;
+  expiresAtMs?: number;
+}
+export interface FlightMoveOptions {
+  /** End flight on a safe supporting surface. Otherwise retain flight for the next action. */
+  land?: boolean;
+}
+const abilities = new WeakMap<Bot, FlightAbilities>();
+const controls = new WeakMap<Bot, FlightControl>();
+const moving = new WeakSet<Bot>();
+export const MAX_FLIGHT_DISTANCE = 12;
+const FLIGHT_TICK_MS = 50;
+const MAX_FLIGHT_MOVE_MS = 10_000;
+const DEFAULT_FLYING_SPEED = 0.05;
+const HALF_WIDTH = 0.3;
+const PLAYER_HEIGHT = 1.8;
+const EPSILON = 0.0001;
+const HAZARDS = /^(lava|water|magma_block|cactus|fire|soul_fire|campfire|soul_campfire)$/;
+
+/** Permission remains valid until the server revokes it or an adapter supplies an expiry. */
+export function watchFlightAbilities(bot: Bot): () => void {
+  const onAbilities = (packet: { flags?: number; flyingSpeed?: number }): void => {
+    const old = abilities.get(bot);
+    const flags = Number(packet.flags ?? 0);
+    const state: FlightAbilities = {
+      flags, observedAtMs: Date.now(),
+      flyingSpeed: packet.flyingSpeed && Number.isFinite(packet.flyingSpeed) && packet.flyingSpeed > 0
+        ? packet.flyingSpeed : old?.flyingSpeed ?? DEFAULT_FLYING_SPEED,
+      expiresAtMs: flags & 4 ? old?.expiresAtMs : undefined,
+      expiryTimer: flags & 4 ? old?.expiryTimer : undefined,
+    };
+    abilities.set(bot, state);
+    if (!(flags & 4)) {
+      if (old?.expiryTimer) clearTimeout(old.expiryTimer);
+      releaseFlight(bot, '服务端已收回飞行权限', false);
+    } else if (controls.has(bot) && !(flags & 2)) {
+      releaseFlight(bot, '服务端已结束当前飞行', false);
+    }
+  };
+  const reset = (): void => {
+    releaseFlight(bot, '连接或维度已变化', false);
+    const state = abilities.get(bot);
+    if (state?.expiryTimer) clearTimeout(state.expiryTimer);
+    abilities.delete(bot);
+  };
+  const forcedMove = (): void => releaseFlight(bot, '服务端修正了位置，已停止飞行移动', true);
+  bot._client.on('abilities', onAbilities);
+  bot.on('forcedMove', forcedMove);
+  bot.on('respawn', reset);
+  bot.on('end', reset);
+  return () => {
+    bot._client.off('abilities', onAbilities);
+    bot.off('forcedMove', forcedMove);
+    bot.off('respawn', reset);
+    bot.off('end', reset);
+    reset();
+  };
+}
+
+/** A server adapter may provide an explicit deadline. No duration is inferred from a spell name. */
+export function setFlightExpiry(bot: Bot, expiresAtMs: number | null): void {
+  if (expiresAtMs !== null && !Number.isFinite(expiresAtMs)) throw new Error('飞行到期时间必须是有限时间戳');
+  const state = abilities.get(bot);
+  if (!state) return;
+  if (state.expiryTimer) clearTimeout(state.expiryTimer);
+  state.expiryTimer = undefined;
+  state.expiresAtMs = expiresAtMs ?? undefined;
+  if (expiresAtMs !== null) {
+    state.expiryTimer = setTimeout(() => {
+      state.expiryTimer = undefined;
+      releaseFlight(bot, '已到服务端声明的飞行期限', true);
+    }, Math.max(0, expiresAtMs - Date.now()));
+    state.expiryTimer.unref?.();
+  }
+}
+
+export function flightFlags(bot: Bot, now = Date.now()): number {
+  const state = abilities.get(bot);
+  if (!state) return 0;
+  return state.expiresAtMs !== undefined && now >= state.expiresAtMs ? state.flags & ~6 : state.flags;
+}
+
+export function flightState(bot: Bot, now = Date.now()): FlightState {
+  const state = abilities.get(bot);
+  const allowed = !!(flightFlags(bot, now) & 4);
+  return {
+    allowed, flying: allowed && (state?.requestedFlying ?? !!(flightFlags(bot, now) & 2)),
+    serverFlying: !!(state?.flags && state.flags & 2),
+    observedAtMs: state?.observedAtMs, expiresAtMs: state?.expiresAtMs,
+  };
+}
+
+function releaseFlight(bot: Bot, reason: string, send: boolean): void {
+  const control = controls.get(bot);
+  if (!control) return;
+  control.interrupted = reason;
+  controls.delete(bot);
+  bot.physics.gravity = control.gravity;
+  bot.physicsEnabled = control.physicsEnabled;
+  const state = abilities.get(bot);
+  if (state) state.requestedFlying = false;
+  if (send && ((abilities.get(bot)?.flags ?? 0) & 4)) bot._client.write('abilities', { flags: 0 });
+}
+
+/** Restore ordinary physics. Call landFlight first when a controlled landing is required. */
+export function stopFlight(bot: Bot): void {
+  if (!controls.has(bot)) {
+    const state = abilities.get(bot);
+    if (flightState(bot).flying) bot._client.write('abilities', { flags: 0 });
+    if (state) state.requestedFlying = false;
+    return;
+  }
+  releaseFlight(bot, '飞行已停止', true);
+}
+
+function collisionShapes(block: NonNullable<ReturnType<Bot['blockAt']>>): number[][] {
+  return block.shapes ?? (block.boundingBox === 'block' ? [[0, 0, 0, 1, 1, 1]] : []);
+}
+
+function openForPlayer(bot: Bot, pos: Vec3): boolean {
+  const min = [pos.x - HALF_WIDTH + EPSILON, pos.y + EPSILON, pos.z - HALF_WIDTH + EPSILON];
+  const max = [pos.x + HALF_WIDTH - EPSILON, pos.y + PLAYER_HEIGHT - EPSILON, pos.z + HALF_WIDTH - EPSILON];
+  // Shapes can extend outside their cell (fences and walls are 1.5 blocks high).
+  for (let x = Math.floor(min[0]); x <= Math.floor(max[0]); x++) {
+    for (let y = Math.floor(min[1]) - 1; y <= Math.floor(max[1]); y++) {
+      for (let z = Math.floor(min[2]); z <= Math.floor(max[2]); z++) {
+        const block = bot.blockAt(new Vec3(x, y, z));
+        if (!block) return false;
+        if (y >= Math.floor(min[1]) && HAZARDS.test(block.name)) return false;
+        for (const shape of collisionShapes(block)) {
+          if (min[0] < x + shape[3] && max[0] > x + shape[0]
+            && min[1] < y + shape[4] && max[1] > y + shape[1]
+            && min[2] < z + shape[5] && max[2] > z + shape[2]) return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
+function hasSupport(bot: Bot, pos: Vec3): boolean {
+  const block = bot.blockAt(new Vec3(Math.floor(pos.x), Math.floor(pos.y - EPSILON), Math.floor(pos.z)));
+  if (!block || HAZARDS.test(block.name)) return false;
+  const x = pos.x - Math.floor(pos.x), z = pos.z - Math.floor(pos.z);
+  const localY = pos.y - Math.floor(pos.y - EPSILON);
+  return collisionShapes(block).some(shape => Math.abs(shape[4] - localY) < 0.01
+    && x >= shape[0] && x <= shape[3] && z >= shape[2] && z <= shape[5]);
+}
+
+function flightPositions(start: Vec3, waypoints: Vec3[], step: number): Vec3[] {
+  let distance = 0;
+  let previous = start;
+  for (const point of waypoints) { distance += previous.distanceTo(point); previous = point; }
+  if (Math.ceil(distance / step) * FLIGHT_TICK_MS > MAX_FLIGHT_MOVE_MS) return [];
+  const out: Vec3[] = [];
+  let from = start;
+  for (const to of waypoints) {
+    const steps = Math.ceil(from.distanceTo(to) / step);
+    for (let i = 1; i <= steps; i++) out.push(from.clone().add(to.minus(from).scaled(i / steps)));
+    from = to;
+  }
+  return out;
+}
+
+function flightRoute(bot: Bot, start: Vec3, target: Vec3): Vec3[] {
+  // Vanilla's non-sprinting creative speed is three times its ability speed per tick.
+  const step = Math.min(0.3, (abilities.get(bot)?.flyingSpeed ?? DEFAULT_FLYING_SPEED) * 3);
+  const direct = flightPositions(start, [target], step);
+  if ((direct.length || start.distanceTo(target) < EPSILON) && direct.every(pos => openForPlayer(bot, pos))) return direct;
+  for (const rise of [0, 0.5, 1, 2]) {
+    const y = Math.max(start.y, target.y) + rise;
+    const route = flightPositions(start, [new Vec3(start.x, y, start.z), new Vec3(target.x, y, target.z), target], step);
+    if (route.length && route.every(pos => openForPlayer(bot, pos))) return route;
+  }
+  throw new SkillBlocked('飞行路径有碰撞、液体或未加载区域；换一个已加载的空中目标');
+}
+
+/** Exact feet coordinates support takeoff, ascent, descent and an airborne building/viewing position. */
+export async function flyToPosition(bot: Bot, targetAt: { x: number; y: number; z: number },
+  aborted: () => boolean, options: FlightMoveOptions = {}): Promise<string> {
+  if (!bot.entity?.position) throw new SkillBlocked('还没进入世界，不能飞行');
+  if (![targetAt.x, targetAt.y, targetAt.z].every(Number.isFinite)) throw new SkillBlocked('飞行目标坐标必须是有限数字');
+  if (moving.has(bot)) throw new SkillBlocked('另一段飞行移动尚未结束');
+  moving.add(bot);
+  let control: FlightControl | undefined;
+  try {
+    const target = new Vec3(targetAt.x, targetAt.y, targetAt.z);
+    let start = bot.entity.position.clone();
+    let distance = start.distanceTo(target);
+    if (distance > MAX_FLIGHT_DISTANCE) throw new SkillBlocked(`飞行单段最多 ${MAX_FLIGHT_DISTANCE} 格；目标相距 ${distance.toFixed(1)} 格`);
+    if (options.land && !hasSupport(bot, target)) throw new SkillBlocked('飞行目标下方没有已加载的安全落脚方块；先选一处可站立的平台');
+    const waitUntil = Date.now() + 2_000;
+    while (!(flightFlags(bot) & 4) && Date.now() < waitUntil) {
+      if (aborted()) throw new SkillBlocked('飞行任务已取消');
+      await sleep(FLIGHT_TICK_MS);
+    }
+    if (!(flightFlags(bot) & 4)) throw new SkillBlocked('服务端尚未授予飞行能力；先取得飞行许可并查看成功回执');
+    start = bot.entity.position.clone();
+    distance = start.distanceTo(target);
+    if (distance > MAX_FLIGHT_DISTANCE) throw new SkillBlocked(`等待飞行许可时位置已变化；目标现在相距 ${distance.toFixed(1)} 格，超过单段 ${MAX_FLIGHT_DISTANCE} 格`);
+    if (!openForPlayer(bot, target)) throw new SkillBlocked('飞行目标空间有碰撞、液体或未加载区域');
+    const route = flightRoute(bot, start, target);
+    const expiresAt = abilities.get(bot)?.expiresAtMs;
+    if (expiresAt !== undefined && expiresAt - Date.now() < route.length * FLIGHT_TICK_MS + 500) {
+      throw new SkillBlocked('服务端声明的飞行剩余时间不足以抵达目标；先就近落地');
+    }
+    if (aborted()) throw new SkillBlocked('飞行任务已取消');
+    control = controls.get(bot);
+    if (!control) {
+      control = { physicsEnabled: bot.physicsEnabled, gravity: bot.physics.gravity };
+      if (!flightState(bot).flying) bot._client.write('abilities', { flags: 2 });
+      const ability = abilities.get(bot)!;
+      ability.requestedFlying = true;
+      controls.set(bot, control);
+      bot.clearControlStates();
+      bot.physicsEnabled = false;
+      bot.physics.gravity = 0;
+    }
+    for (const pos of route) {
+      if (aborted()) throw new SkillBlocked('飞行任务已取消，保持当前位置悬停；可调用落地');
+      if (control.interrupted) throw new SkillBlocked(control.interrupted, [], 'server');
+      if (!(flightFlags(bot) & 4)) throw new SkillBlocked('服务端飞行许可已结束', [], 'server');
+      if (!openForPlayer(bot, pos)) throw new SkillBlocked('途中空间发生变化，已停止移动并悬停');
+      bot.entity.velocity = new Vec3(0, 0, 0);
+      bot.entity.onGround = false;
+      bot.entity.position = pos;
+      await sleep(FLIGHT_TICK_MS);
+    }
+    // Position packets continue through Mineflayer with local gravity simulation disabled.
+    await sleep(150);
+    if (control.interrupted) throw new SkillBlocked(control.interrupted, [], 'server');
+    if (!(flightFlags(bot) & 4)) throw new SkillBlocked('服务端飞行许可已结束', [], 'server');
+    if (bot.entity.position.distanceTo(target) > 0.4) throw new SkillBlocked('服务端未接受飞行目标位置', [], 'server');
+    if (options.land) {
+      if (!hasSupport(bot, bot.entity.position)) throw new SkillBlocked('落脚支撑已变化，保持悬停；请换一个落脚点');
+      stopFlight(bot);
+    }
+    const actual = bot.entity.position;
+    return `${options.land ? '飞到平台并落地' : '飞到目标并悬停'}，实际在 (${actual.x.toFixed(1)},${actual.y.toFixed(1)},${actual.z.toFixed(1)})`;
+  } finally {
+    moving.delete(bot);
+  }
+}
+
+export async function flyToLanding(bot: Bot, cell: { x: number; y: number; z: number }, aborted: () => boolean): Promise<string> {
+  return flyToPosition(bot, { x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 }, aborted, { land: true });
+}
+
+/** Land vertically on the first safe loaded surface below the current flight position. */
+export async function landFlight(bot: Bot, aborted: () => boolean): Promise<string> {
+  if (!bot.entity?.position) throw new SkillBlocked('还没进入世界，不能落地');
+  const start = bot.entity.position;
+  if (hasSupport(bot, start) && openForPlayer(bot, start)) {
+    stopFlight(bot);
+    return `已在安全地面 (${start.x.toFixed(1)},${start.y.toFixed(1)},${start.z.toFixed(1)})`;
+  }
+  for (let y = Math.floor(start.y); y >= Math.floor(start.y - MAX_FLIGHT_DISTANCE); y--) {
+    const block = bot.blockAt(new Vec3(Math.floor(start.x), y, Math.floor(start.z)));
+    if (!block || HAZARDS.test(block.name)) break;
+    const tops = collisionShapes(block).map(shape => y + shape[4]).sort((a, b) => b - a);
+    for (const top of tops) {
+      const target = new Vec3(start.x, top, start.z);
+      if (top > start.y + EPSILON || !hasSupport(bot, target) || !openForPlayer(bot, target)) continue;
+      return flyToPosition(bot, target, aborted, { land: true });
+    }
+  }
+  throw new SkillBlocked('下方没有已加载的安全落点；保持悬停，先移动到附近平台');
+}

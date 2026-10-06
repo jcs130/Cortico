@@ -78,6 +78,8 @@ interface MinecraftLogInput {
   data?: Record<string, unknown>;
   /** 未指定时按日志类别和事件类型选择级别。 */
   level?: LogLevel;
+  /** 异常样本：让 Core 保存最近日志和因果锚点。 */
+  incident?: boolean;
 }
 
 export interface MinecraftLogEntry extends MinecraftLogInput {
@@ -115,6 +117,7 @@ export class MinecraftLog {
       ...(input.taskId !== undefined ? { task: input.taskId } : {}),
       ...(input.durMs !== undefined ? { durMs: input.durMs } : {}),
       ...(input.data !== undefined ? { data: input.data } : {}),
+      ...(input.incident ? { incident: true } : {}),
     });
   }
 

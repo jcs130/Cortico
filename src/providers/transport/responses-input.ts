@@ -3,7 +3,7 @@ import type { Request } from '../../protocol/open-responses/index.ts';
 import { inputItem, itemText, type ContextRecord } from '../../protocol/open-responses/context.ts';
 import type { GenerateOptions } from '../../core/generation.ts';
 import { requestContext } from './native-input.ts';
-import type { CompatMediaOptions } from './history.ts';
+import { imageBlobs, selectContextImageGroups, type CompatMediaOptions } from './history.ts';
 
 type Item = Record<string, unknown>;
 
@@ -23,6 +23,9 @@ export type ReasoningReplay = (typeof REASONING_REPLAYS)[number];
  * The operator replaces it per endpoint.
  */
 export const SYNTHETIC_REASONING_TEXT = '-';
+
+/** Used when omitting historical native images would otherwise leave an empty content array. */
+export const HISTORICAL_IMAGE_TEXT = 'Previously supplied image remains in the session; it is not replayed in this request.';
 
 export interface ResponsesInputOptions {
   media?: CompatMediaOptions;
@@ -47,9 +50,15 @@ export function responsesInput(
   opts: ResponsesInputOptions = {},
 ): { input: Item[]; instructions: string | undefined } {
   const input: Item[] = [];
+  const imageTail: Item[] = [];
   const systems = request.instructions ? [request.instructions] : [];
   const plaintext = opts.reasoningReplay === 'plaintext';
   const entries = requestContext(request, options);
+  const media = opts.media?.enabled() === true ? opts.media : undefined;
+  const imageBoundary = opts.media?.imageReplayScope === 'fresh' ? lastModelOutput(entries) : -1;
+  const imageGroups = selectContextImageGroups(entries.map(({ item, context }, index) => index > imageBoundary && (
+    item.type === 'function_call_output' || (item.type === 'message' && item.role !== 'system' && item.role !== 'developer')
+  ) ? imageBlobs(context.blobs) : []), media?.maxContextImages);
   const roundStart = plaintext ? lastUserMessage(entries) : -1;
   entries.forEach((entry, index) => {
     const item = entry.item;
@@ -80,19 +89,60 @@ export function responsesInput(
         content: [{ type: 'reasoning_text', text: opts.syntheticReasoningText ?? SYNTHETIC_REASONING_TEXT }],
       });
     const wire = inputItem(entry) as Item;
-    if (opts.media?.enabled() && entry.context.blobs?.length && (item.type === 'message' || item.type === 'function_call_output')) {
+    if (index <= imageBoundary) omitHistoricalNativeImages(wire);
+    const images = imageGroups[index];
+    if (media && images.length && (item.type === 'message' || item.type === 'function_call_output')) {
+      if (media.imageReplayPlacement === 'tail') {
+        for (const ref of images) {
+          const bytes = media.read(ref.handle);
+          if (!bytes) continue;
+          imageTail.push({ type: 'message', role: 'user', content: [
+            { type: 'input_text', text: JSON.stringify({ attachment: ref.handle, mime: ref.mime,
+              ...(ref.name ? { name: ref.name } : {}), fallbackText: ref.fallbackText,
+              sourceItem: { type: item.type,
+                ...(item.type === 'function_call_output' ? { callId: item.call_id } : { role: item.role }),
+                ...(entry.context.ts ? { ts: entry.context.ts } : {}),
+              },
+            }) },
+            { type: 'input_image', image_url: `data:${ref.mime};base64,${bytes.toString('base64')}` },
+          ] });
+        }
+        input.push(wire);
+        return;
+      }
       const field = item.type === 'message' ? 'content' : 'output';
       const content = wire[field];
       const parts = typeof content === 'string' ? [{ type: 'input_text', text: content }] : [...(content as Item[])];
-      for (const ref of entry.context.blobs) {
-        const bytes = opts.media.read(ref.handle);
+      for (const ref of images) {
+        const bytes = media.read(ref.handle);
         if (bytes) parts.push({ type: 'input_image', image_url: `data:${ref.mime};base64,${bytes.toString('base64')}` });
       }
       wire[field] = parts;
     }
     input.push(wire);
   });
+  input.push(...imageTail);
   return { input, instructions: systems.length ? systems.join('\n') : undefined };
+}
+
+/** Synthetic head examples do not acknowledge incoming pictures. Origin metadata is optional. */
+function lastModelOutput(entries: readonly ContextRecord[]): number {
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const { item, context } = entries[index];
+    if (context.head) continue;
+    if (item.type === 'reasoning' || item.type === 'function_call'
+      || (item.type === 'message' && item.role === 'assistant')) return index;
+  }
+  return -1;
+}
+
+function omitHistoricalNativeImages(wire: Item): void {
+  const field = wire.type === 'message' ? 'content' : wire.type === 'function_call_output' ? 'output' : undefined;
+  if (!field || !Array.isArray(wire[field])) return;
+  const parts = wire[field] as Item[];
+  const retained = parts.filter(part => part.type !== 'input_image');
+  if (retained.length === parts.length) return;
+  wire[field] = retained.length ? retained : [{ type: 'input_text', text: HISTORICAL_IMAGE_TEXT }];
 }
 
 /** Index of the last user message, -1 when there is none. */

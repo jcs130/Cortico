@@ -157,6 +157,8 @@ function pushStatus(): void {
     kind: 'status' as const,
     decl: { lamps: decl.lamps, badges: decl.badges, links: decl.links },
     storage: storageStats(decl.storage ?? []),
+    promptVars: mod.envPromptRuntimeVars(),
+    requestFacts: mod.requestFacts(),
   };
   const key = JSON.stringify(note);
   if (key === lastStatus) return;
@@ -172,6 +174,7 @@ async function handleRequest(req: EngineRequest): Promise<unknown> {
       cfg,
       timezone: req.init.timezone,
       botName: req.init.botName,
+      agentFriendEnabled: req.init.agentFriendEnabled === true,
       ...(req.init.dataDir ? { dataDir: req.init.dataDir } : {}),
     });
     await mod.start(host);

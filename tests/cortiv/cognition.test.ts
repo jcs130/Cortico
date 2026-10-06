@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { COGNITION, CortiV, balancedSnapshot } from '../../bots/cortiv/persona/persona.ts';
+import { BLUEPRINT_COGNITION_DEFAULTS, COGNITION, CortiV, balancedSnapshot, type BlueprintCognitionConfig } from '../../bots/cortiv/persona/persona.ts';
 import type { ChatMessage } from '../core/fixture-types.ts';
 import type { CognitionContext, CognitionResult, ToolDef } from '../../src/core/types.ts';
 import { makeFakeHarnessApi, makeTool } from '../core/helpers.ts';
@@ -38,11 +38,16 @@ afterEach(() => {
   live = null;
 });
 
-function rig(opts: { enabled?: () => boolean; snapshot?: ChatMessage[] } = {}): Rig {
+function rig(opts: {
+  enabled?: () => boolean; snapshot?: ChatMessage[];
+  historyTokens?: () => number; blueprint?: () => BlueprintCognitionConfig;
+} = {}): Rig {
   const dir = mkdtempSync(join(tmpdir(), 'cortiv-cog-'));
   const persona = new CortiV({
     memoryDir: dir,
     ...(opts.enabled ? { cognitionEnabled: opts.enabled } : {}),
+    ...(opts.historyTokens ? { cognitionHistoryTokens: opts.historyTokens } : {}),
+    ...(opts.blueprint ? { blueprintCognition: opts.blueprint } : {}),
   });
   const state: Rig = {
     persona,
@@ -217,6 +222,89 @@ describe('认知外包受理 · 工具面', () => {
     expect(names).toContain('list_files');
     expect(names).not.toContain('end_turn');
     expect(names.some((n) => n.startsWith('vtuber_'))).toBe(false);
+  });
+});
+
+describe('蓝图构思独立通道', () => {
+  it('显式任务类别选择设计provider，普通构思和定向观察仍使用原通道', async () => {
+    const r = rig({ blueprint: () => ({ ...BLUEPRINT_COGNITION_DEFAULTS, provider: 'design-provider' }) });
+    r.reply = async (fork) => fork.provider ? '设计通道交回图稿' : '当前通道交回观察';
+    expect(await r.persona.cognition.request({ brief: '设计屋顶', hint: { kind: 'blueprint' } }, ctx()))
+      .toEqual({ text: '设计通道交回图稿' });
+    expect(await r.persona.cognition.request({ brief: '普通构思中提到了蓝图' }, ctx()))
+      .toEqual({ text: '当前通道交回观察' });
+    expect(await r.persona.cognition.request({ brief: '核对门口', hint: { context: 'task' } }, ctx()))
+      .toEqual({ text: '当前通道交回观察' });
+    expect(r.forks[0].generationPriority).toBe('background');
+    expect(r.forks[0].maxOutputTokens).toBe(BLUEPRINT_COGNITION_DEFAULTS.maxOutputTokens);
+    for (const fork of r.forks.slice(1)) {
+      expect(fork).not.toHaveProperty('provider');
+      expect(fork).not.toHaveProperty('generationPriority');
+    }
+    expect(r.forks.every((fork) => !('model' in fork))).toBe(true);
+  });
+
+  it('独立历史预算保留更多配平材料，同时完整保留当前设计与环境契约', async () => {
+    const snapshot: ChatMessage[] = [{ role: 'system', content: '完整环境契约' }];
+    for (let index = 0; index < 5; index++) snapshot.push(
+      { role: 'user', content: `设计经历${index}：${'资料'.repeat(1800)}` },
+      { role: 'assistant', content: `已执行的测量${index}`, tool_calls: [
+        { id: `measure${index}`, type: 'function', function: { name: 'measure', arguments: '{}' } },
+      ] },
+      { role: 'tool', content: `测量回执${index}`, tool_call_id: `measure${index}` },
+    );
+    const original = structuredClone(snapshot);
+    const r = rig({ snapshot, historyTokens: () => 1024,
+      blueprint: () => ({ ...BLUEPRINT_COGNITION_DEFAULTS, maxHistoryTokens: 40_000 }) });
+    await r.persona.cognition.request({ brief: '当前设计完整要求', hint: { kind: 'blueprint' } }, ctx());
+    await r.persona.cognition.request({ brief: '普通任务' }, ctx());
+    expect(r.forks[0].messages.length).toBeGreaterThan(r.forks[1].messages.length);
+    expect(r.forks[0].messages[0].content).toBe('完整环境契约');
+    expect(frameOf(r.forks[0])).toContain('当前设计完整要求');
+    for (const fork of r.forks) {
+      const calls = fork.messages.flatMap((entry) => entry.tool_calls?.map((call) => call.id) ?? []);
+      const outputs = fork.messages.filter((entry) => entry.role === 'tool').map((entry) => entry.tool_call_id);
+      expect(outputs).toEqual(calls);
+    }
+    expect(snapshot).toEqual(original);
+  });
+
+  it('热改只影响下一次受理，已开始的fork沿用绑定配置；空provider继承当前通道', async () => {
+    const config = { ...BLUEPRINT_COGNITION_DEFAULTS, provider: 'first-design', maxOutputTokens: 2048 };
+    const r = rig({ blueprint: () => config });
+    let finish!: (text: string) => void;
+    r.reply = async () => new Promise<string>((resolve) => { finish = resolve; });
+    const running = r.persona.cognition.request({ brief: '第一份', hint: { kind: 'blueprint' } }, ctx());
+    Object.assign(config, { provider: 'second-design', maxOutputTokens: 4096 });
+    finish('第一份已完成');
+    expect(await running).toEqual({ text: '第一份已完成' });
+    expect(r.forks[0].provider).toBe('first-design');
+    expect(r.forks[0].maxOutputTokens).toBe(2048);
+    r.reply = async (fork) => fork.provider ?? '当前通道';
+    expect(await r.persona.cognition.request({ brief: '第二份', hint: { kind: 'blueprint' } }, ctx()))
+      .toEqual({ text: 'second-design' });
+    config.provider = '   ';
+    expect(await r.persona.cognition.request({ brief: '第三份', hint: { kind: 'blueprint' } }, ctx()))
+      .toEqual({ text: '当前通道' });
+    expect(r.forks[2]).not.toHaveProperty('provider');
+  });
+
+  it('设计provider失败如实返回，不重发到日常provider', async () => {
+    const r = rig({ blueprint: () => ({ ...BLUEPRINT_COGNITION_DEFAULTS, provider: 'unavailable-design' }) });
+    r.reply = async () => { throw new Error('设计provider不可用'); };
+    const result = await r.persona.cognition.request({ brief: '一份设计', hint: { kind: 'blueprint' } }, ctx());
+    expect(result).toEqual({ error: '后台思考没跑起来:设计provider不可用' });
+    expect(r.forks).toHaveLength(1);
+  });
+
+  it('owner声明和默认值一致，三项配置均支持热改', () => {
+    const values = readGroupValues(definition.defaults(), CORTIV_COGNITION_CONFIG_GROUP);
+    const fields = { blueprintProvider: 'provider', blueprintMaxHistoryTokens: 'maxHistoryTokens',
+      blueprintMaxOutputTokens: 'maxOutputTokens' } as const;
+    for (const [field, key] of Object.entries(fields)) {
+      expect(values[`cognition.${field}`]).toBe(BLUEPRINT_COGNITION_DEFAULTS[key]);
+      expect(CORTIV_COGNITION_CONFIG_GROUP.schema.properties[`cognition.${field}`]['x-hot']).toBe(true);
+    }
   });
 });
 

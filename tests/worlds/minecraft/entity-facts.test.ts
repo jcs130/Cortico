@@ -146,8 +146,15 @@ describe('道具表', () => {
     expect(FEED_ITEMS.pig).not.toContain('wheat');
   });
 
-  it('1.20.5 起狼吃腐肉与生熟鱼类;猫也吃热带鱼/河豚', () => {
-    expect(FEED_ITEMS.wolf).toEqual(expect.arrayContaining(['rotten_flesh', 'cod', 'cooked_salmon', 'tropical_fish', 'pufferfish']));
-    expect(FEED_ITEMS.cat).toEqual(expect.arrayContaining(['tropical_fish', 'pufferfish']));
+  it('1.20.6 狼吃肉与腐肉；猫的食物只有生鳕鱼和生鲑鱼', () => {
+    expect(FEED_ITEMS.wolf).toContain('rotten_flesh');
+    for (const fish of ['cod', 'salmon', 'cooked_cod', 'cooked_salmon', 'tropical_fish', 'pufferfish']) {
+      expect(FEED_ITEMS.wolf).not.toContain(fish);
+    }
+    expect(FEED_ITEMS.cat).toEqual(['cod', 'salmon']);
+  });
+
+  it('马科的普通喂养食物也可用于康复与幼体生长', () => {
+    expect(FEED_ITEMS.horse).toEqual(expect.arrayContaining(['wheat', 'sugar', 'apple', 'hay_block', 'enchanted_golden_apple']));
   });
 });

@@ -7,11 +7,12 @@ import type { Bot } from 'mineflayer';
 import { Vec3 } from 'vec3';
 import {
   CROP_MAX_AGE, DIRECTIONS, DIRECTION_ZH, bearing, biomeAt, canSeeBlockAt, canSeeEntity, cropAgeAt,
-  isNight, type Direction, villagerNote,
+  droppedStackOf, entityObservationNote, headInWater, isNight, type Direction, villagerNote,
 } from './terrain.ts';
 import { Aborted, SkillBlocked, checkAbort, sleep, type SkillContext } from './skill-context.ts';
 import {
-  digBlock, dropGoal, gotoGoal, levelTravelGoal, matchBlockIds, routeNote, withRouteScene,
+  breakPermissionNote, digBlock, dropGoal, gotoGoal, levelTravelGoal, matchBlockIds, routeNote,
+  settleOnGround, walkOnlyPath, withRouteScene,
 } from './travel.ts';
 import {
   INVENTORY_SLOTS, PICKUP_SETTLE_MS, dropNamesOf, invCount, invGains, invSnapshot,
@@ -33,7 +34,11 @@ import {
 import { compositionText, zhErrorText, zhThing } from './receipt.ts';
 import { UNTIL_TRAVEL_RADIUS, type UntilHit, untilBlockIds, untilHit, untilUnknownNote } from './until.ts';
 import { PLAYER_SLOTS } from './precheck.ts';
+import { minecraftTextComponent } from './text-component.ts';
+import { beginTemporaryScaffold, closeTemporaryScaffold, reclaimTemporaryScaffold,
+  type TemporaryScaffoldScope } from './temporary-scaffold.ts';
 import pathfinderPkg from 'mineflayer-pathfinder';
+import { blockIdOf, isAirState, normalizeBlockName } from './blueprint.ts';
 
 const { goals } = pathfinderPkg;
 
@@ -58,6 +63,81 @@ export function collectVisible(bot: Bot, p: { x: number; y: number; z: number })
   return Math.hypot(me.x - (p.x + 0.5), me.y - (p.y + 0.5), me.z - (p.z + 0.5)) <= 4.5;
 }
 
+function knownProtectedBreakTarget(bot: Bot, p: { x: number; y: number; z: number }): boolean {
+  const block = bot.blockAt(new Vec3(p.x, p.y, p.z));
+  return !!block && (bot as Bot & { cortiBreakVerdict?: (value: typeof block) =>
+    'allowed' | 'protected' | 'unknown' }).cortiBreakVerdict?.(block) === 'protected';
+}
+
+/** 首批候选含已知不可采来源时扩大索引查询；每次最多取 128 个候选。 */
+function findPastProtected(
+  bot: Bot, ids: number[], maxDistance: number, count: number,
+  excluded?: (position: Vec3) => boolean,
+): Vec3[] {
+  const first = bot.findBlocks({ matching: ids, maxDistance, count });
+  return first.length === count && first.some((p) => knownProtectedBreakTarget(bot, p) || excluded?.(p))
+    ? bot.findBlocks({ matching: ids, maxDistance, count: 128 }) : first;
+}
+
+/** The desk supplies bindings for the current realm and dimension. Match only intended material cells. */
+function blueprintCollectSource(bot: Bot, position: Vec3, ctx: SkillContext): string | null {
+  const desk = ctx.blueprints?.();
+  const current = bot.blockAt(position);
+  if (!desk || !current) return null;
+  if (CROP_MAX_AGE[current.name] !== undefined) return null;
+  for (const key of desk.keys()) {
+    const site = desk.get(key);
+    // Legacy desks omitted startedAt after binding; explicit null remains a survey-only site.
+    if (!site?.anchor || site.startedAt === null) continue;
+    const [x, y, z] = [position.x - site.anchor[0], position.y - site.anchor[1], position.z - site.anchor[2]];
+    const [width, height, depth] = site.blueprint.size_xyz;
+    if (![x, y, z].every(Number.isInteger) || x < 0 || y < 0 || z < 0 || x >= width || y >= height || z >= depth) continue;
+    const expected = site.blueprint.layers[y][z][x];
+    if (!isAirState(expected) && normalizeBlockName(current.name) === blockIdOf(expected)) return site.key;
+  }
+  return null;
+}
+
+/** 先等自动拾取；仍未入包时只走可见掉落物的现有通路，路线不完整就留在原地。 */
+async function collectDrops(
+  bot: Bot, source: Vec3, drops: Set<string>, countGains: () => number, before: number, ctx: SkillContext,
+): Promise<void> {
+  const settle = async (): Promise<void> => {
+    for (let waited = 0; waited < PICKUP_SETTLE_MS && countGains() === before; waited += 100) {
+      checkAbort(ctx);
+      await sleep(100);
+    }
+  };
+  await settle();
+  if (countGains() > before) return;
+  const release = walkOnlyPath(bot);
+  try {
+    const candidates = Object.values(bot.entities ?? {})
+      .filter((entity) => entity?.position && entity.position.distanceTo(source.offset(0.5, 0.5, 0.5)) <= 6
+        && drops.has(droppedStackOf(entity, bot.registry.items)?.name ?? '') && canSeeEntity(bot, entity))
+      .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position));
+    for (const entity of candidates) {
+      checkAbort(ctx);
+      if (bot.entities[entity.id] !== entity) continue;
+      const at = entity.position.floored();
+      const goal = new goals.GoalNear(at.x, at.y, at.z, 1);
+      // 没有完整步行路线的高处、封闭落点和未加载路线不发移动指令。
+      if (bot.pathfinder.getPathTo(bot.pathfinder.movements, goal, 100).status !== 'success') continue;
+      try {
+        await gotoGoal(bot, goal, ctx);
+      } catch (err) {
+        if (err instanceof Aborted) throw err;
+        continue;
+      }
+      await settle();
+      if (countGains() > before) return;
+    }
+  } finally {
+    if (!ctx.aborted()) dropGoal(bot, 'task', '拾取结束', ctx.diag);
+    release();
+  }
+}
+
 export async function skillCollect(
   bot: Bot,
   block: string,
@@ -67,15 +147,36 @@ export async function skillCollect(
   mature = false,
   tool?: string,
 ): Promise<string> {
+  if (/^stripped_.*_log$/.test(block)) {
+    throw new SkillBlocked('去皮原木是加工过的建筑材料，不能作为自动采木目标；请找天然未去皮原木。若是明确拆除建筑，改用精确坐标的挖掘操作');
+  }
   const ids = matchBlockIds(bot, block);
   if (ids.length === 0) throw new SkillBlocked(categoryScopeText(block) ?? `不认识「${block}」这种方块`);
+  // 作物采集默认只收成熟的。模型省略 mature 时也不能把刚长出的幼苗挖掉；
+  // 要清除未成熟作物应显式使用精确坐标的 dig，而不是批量 collect。
+  const onlyMature = mature || CROP_MAX_AGE[block] !== undefined;
   const sourceHint = DROP_SOURCE_HINT[block];
   const isTarget = (n: string) => ids.some((id) => (bot.registry.blocks as Record<number, { name: string }>)[id]?.name === n);
   const gains = dropNamesOf(bot, ids);
-  const countGains = (): number => invCount(bot, (n) => gains.has(n));
+  // 作物会同时掉种子和食材。委托要的是食材，种子增加不能算作「小麦入包」。
+  const cropProduce: Record<string, string> = {
+    wheat: 'wheat', carrots: 'carrot', potatoes: 'potato', beetroots: 'beetroot',
+  };
+  const countedDrops = cropProduce[block] ? new Set([cropProduce[block]]) : gains;
+  const countGains = (): number => invCount(bot, (n) => countedDrops.has(n));
   const before = countGains();
+  const inventoryBefore = invSnapshot(bot);
   let dug = 0;
   let ranOut = false;
+  let ranOutProtected = 0;
+  let ranOutStructure = 0;
+  const skippedStructures = new Map<string, string>();
+  const rememberStructure = (position: Vec3, key: string): void => {
+    skippedStructures.set(`${position.x},${position.y},${position.z}`, key);
+  };
+  const structureNote = (): string => skippedStructures.size === 0 ? ''
+    : `登记蓝图${[...new Set(skippedStructures.values())].map((key) => `「${key}」`).join('、')}`
+      + '的结构材料已保留，不作为批量采集来源；明确拆改请用精确坐标的 dig';
   /** mature 提前收手时还剩几格没长成的:收工回执照实带上 */
   let ranOutImmature = 0;
   // 挖掘等级:选定目标那一刻(还没起步)就读得出的一句事实,进这一步的每一份回执。
@@ -90,143 +191,220 @@ export async function skillCollect(
     const t = keep.tally();
     return t.length > 0 ? `;${t.join(';')}` : '';
   };
-  for (let i = 0; i < count; i++) {
-    checkAbort(ctx);
-    // 只挖看得见的。扫到多少与看得见多少分开记:前者不进回执(那是穿墙情报),
-    // 后者才是她的感知面。
-    const scanned = bot.findBlocks({ matching: ids, maxDistance: 48, count: mature ? 64 : 16 });
-    const found = scanned.filter((q) => collectVisible(bot, q));
-    let pos: (typeof found)[number] | undefined = found[0];
-    // 只收成熟项时按 age 达上限筛选，未成熟格保留。
-    let immature = 0;
-    let bestAge: { value: number; max: number } | null = null;
-    let noAge = 0;
-    if (mature) {
-      pos = undefined;
-      for (const p of found) {
-        const age = cropAgeAt(bot, p);
-        if (age === null) { noAge++; continue; }
-        if (age.value >= age.max) { pos = p; break; }
-        immature++;
-        if (!bestAge || age.value > bestAge.value) bestAge = age;
+  let scaffold: TemporaryScaffoldScope | undefined;
+  const finish = async (receipt: string): Promise<string> => receipt
+    + (skippedStructures.size > 0 ? `;${structureNote()}` : '') + (scaffold
+    ? await reclaimTemporaryScaffold(bot, ctx, scaffold) : '');
+  try {
+    for (let i = 0; i < count; i++) {
+      checkAbort(ctx);
+      // 只挖看得见的。扫到多少与看得见多少分开记:前者不进回执(那是穿墙情报),
+      // 后者才是她的感知面。
+      const scanned = findPastProtected(bot, ids, 48, onlyMature ? 64 : 16,
+        (position) => blueprintCollectSource(bot, position, ctx) !== null);
+      const found: typeof scanned = [];
+      let protectedVisible = 0;
+      let structureVisible = 0;
+      for (const q of scanned) {
+        if (!collectVisible(bot, q)) continue;
+        const structure = blueprintCollectSource(bot, q, ctx);
+        if (structure !== null) { structureVisible++; rememberStructure(q, structure); }
+        else if (knownProtectedBreakTarget(bot, q)) protectedVisible++;
+        else found.push(q);
       }
-    }
-    if (!pos) {
-      if (dug === 0) {
-        if (immature > 0) {
+      // 已经够得着的目标先动手，避免索引首项位于树冠而地面原木仍未采完。
+      const reachable = new Set(found.filter((p) => {
+        const candidate = bot.blockAt(p);
+        return candidate && bot.canDigBlock(candidate);
+      }));
+      found.sort((a, b) => Number(reachable.has(b)) - Number(reachable.has(a)));
+      let pos: (typeof found)[number] | undefined = found[0];
+      // 只收成熟项时按 age 达上限筛选，未成熟格保留。
+      let immature = 0;
+      let bestAge: { value: number; max: number } | null = null;
+      let noAge = 0;
+      if (onlyMature) {
+        pos = undefined;
+        for (const p of found) {
+          const age = cropAgeAt(bot, p);
+          if (age === null) { noAge++; continue; }
+          if (age.value >= age.max) { pos = p; break; }
+          immature++;
+          if (!bestAge || age.value > bestAge.value) bestAge = age;
+        }
+      }
+      if (!pos) {
+        if (dug === 0) {
+          if (structureVisible > 0) {
+            throw new SkillBlocked(`${structureNote()}；附近没有可用的采集来源`
+              + `${protectedVisible > 0 ? `，另有 ${protectedVisible} 处已知受服务端保护` : ''}`
+              + `${immature > 0 ? `，另有 ${immature} 处未成熟` : ''}`, [], 'local');
+          }
+          if (protectedVisible > 0) {
+            throw new SkillBlocked(`附近看见 ${protectedVisible} 处${zhName(block)}已知受保护，不能作为采集目标` +
+              `${immature > 0 ? `；另有 ${immature} 处未成熟` : ''}；换一处寻找`, [], 'server');
+          }
+          if (immature > 0) {
+            throw new SkillBlocked(
+              `48 格内的${zhName(block)}都还没长成(看得见 ${immature} 格,最高 age ${bestAge!.value}/${bestAge!.max}),没动它们`,
+              [], 'local', 'target-not-ready',
+            );
+          }
+          if (onlyMature && noAge > 0) {
+            throw new SkillBlocked(`${zhName(block)}没有 age 状态,"只收熟的"用不上;去掉 mature 就照常挖`);
+          }
+          const scene: string[] = [];
+          if (lastTunnelKey) scene.push(`已经挖到 (${lastTunnelKey}) 跟前,那儿也没有`);
+          // 「扫得到但一处都看不见」与「压根没有」是两件事,措辞分开;但都不报
+          // 看不见那些的坐标与处数——那正是要收掉的穿墙情报。
           throw new SkillBlocked(
-            `48 格内的${zhName(block)}都还没长成(看得见 ${immature} 格,最高 age ${bestAge!.value}/${bestAge!.max}),没动它们`,
+            `附近看不见${onlyMature ? '熟着的' : ''}${zhName(block)}` +
+            `${sourceHint ? `。${sourceHint}` : ''}。${findEmptyHint(bot, ctx, block, false)}`,
+            scene, 'local', 'target-not-visible',
           );
         }
-        if (mature && noAge > 0) {
-          throw new SkillBlocked(`${zhName(block)}没有 age 状态,"只收熟的"用不上;去掉 mature 就照常挖`);
+        if (immature > 0) ranOutImmature = immature;
+        ranOutProtected = protectedVisible;
+        ranOutStructure = structureVisible;
+        ranOut = true;
+        break;
+      }
+      const chosen = bot.blockAt(pos);
+      if (chosen) {
+        const permission = breakPermissionNote(bot, chosen);
+        if (permission) throw new SkillBlocked(permission);
+      }
+      if (toolFact === undefined) {
+        // 出发前选工具并读取挖掘等级，提前提供掉落条件。
+        const first = bot.blockAt(pos);
+        if (first) {
+          await equipToolFor(bot, first, ctx, miningToolPlan(tool));
+          toolFact = harvestFact(bot, first);
         }
-        const scene: string[] = [];
-        if (lastTunnelKey) scene.push(`已经挖到 (${lastTunnelKey}) 跟前,那儿也没有`);
-        // 「扫得到但一处都看不见」与「压根没有」是两件事,措辞分开;但都不报
-        // 看不见那些的坐标与处数——那正是要收掉的穿墙情报。
-        throw new SkillBlocked(
-          `附近看不见${mature ? '熟着的' : ''}${zhName(block)}` +
-          `${sourceHint ? `。${sourceHint}` : ''}。${findEmptyHint(bot, ctx, block, false)}`,
-          scene,
-        );
       }
-      if (immature > 0) ranOutImmature = immature;
-      ranOut = true;
-      break;
-    }
-    if (toolFact === undefined) {
-      // 出发前选工具并读取挖掘等级，提前提供掉落条件。
-      const first = bot.blockAt(pos);
-      if (first) {
-        await equipToolFor(bot, first, ctx, miningToolPlan(tool));
-        toolFact = harvestFact(bot, first);
-      }
-    }
-    try {
-      // GoalLookAtBlock 的射线无法命中空碰撞形状；这类目标按距离走近，
-      // 由 digBlock 的 canDigBlock 按服务端 5.1 格可及判据决定能否挖掘。
-      const goal = bot.blockAt(pos)?.boundingBox === 'empty'
-        ? new goals.GoalNear(pos.x, pos.y, pos.z, 2)
-        : new goals.GoalLookAtBlock(pos, bot.world, { reach: 4 });
-      await gotoGoal(bot, goal, ctx);
-    } catch (err) {
-      if (err instanceof Aborted) throw err;
-      // "buried":true = 她读过受阻现场之后的显式决定:看得见但走不过去,就挖条路过去。
-      // 它管的是"够不够得着",不是"看不看得见"——目标早在上面过了视线闸。
-      const key = `${pos.x},${pos.y},${pos.z}`;
-      if (buried && tunnels < 4 && lastTunnelKey !== key) {
-        lastTunnelKey = key;
-        tunnels++;
-        routeNote(bot, ctx, pos);
-        await gotoGoal(bot, new goals.GoalNear(pos.x, pos.y, pos.z, 1), ctx).catch(() => undefined);
-        dropGoal(bot, 'task', '挪到位,接着挖', ctx.diag);
-        i--;
-        continue;
-      }
-      if (dug === 0 && sourceHint && err instanceof SkillBlocked) {
-        throw withRouteScene(bot, ctx, new SkillBlocked(`${err.message}。${sourceHint}`, err.scene), pos, [
+      scaffold ??= beginTemporaryScaffold(bot);
+      try {
+        // GoalLookAtBlock 的射线无法命中空碰撞形状；这类目标按距离走近，
+        // 由 digBlock 的 canDigBlock 按服务端 5.1 格可及判据决定能否挖掘。
+        if (!chosen || !bot.canDigBlock(chosen)) {
+          const goal = chosen?.boundingBox === 'empty'
+            ? new goals.GoalNear(pos.x, pos.y, pos.z, 2)
+            : new goals.GoalLookAtBlock(pos, bot.world, { reach: 4 });
+          await gotoGoal(bot, goal, ctx);
+        }
+      } catch (err) {
+        if (err instanceof Aborted) throw err;
+        // "buried":true = 她读过受阻现场之后的显式决定:看得见但走不过去,就挖条路过去。
+        // 它管的是"够不够得着",不是"看不看得见"——目标早在上面过了视线闸。
+        const key = `${pos.x},${pos.y},${pos.z}`;
+        if (buried && tunnels < 4 && lastTunnelKey !== key) {
+          lastTunnelKey = key;
+          tunnels++;
+          routeNote(bot, ctx, pos);
+          await gotoGoal(bot, new goals.GoalNear(pos.x, pos.y, pos.z, 1), ctx).catch(() => undefined);
+          dropGoal(bot, 'task', '挪到位,接着挖', ctx.diag);
+          i--;
+          continue;
+        }
+        if (dug === 0 && sourceHint && err instanceof SkillBlocked) {
+          throw withRouteScene(bot, ctx, new SkillBlocked(`${err.message}。${sourceHint}`, err.scene), pos, [
+            `看得见的${zhName(block)}在 (${pos.x}, ${pos.y}, ${pos.z})`,
+          ]);
+        }
+        // 树冠这类"看得见够不着":带上目标坐标高差与三种走法的试算,她自己决定垫不垫
+        throw withRouteScene(bot, ctx, err, pos, [
           `看得见的${zhName(block)}在 (${pos.x}, ${pos.y}, ${pos.z})`,
         ]);
       }
-      // 树冠这类"看得见够不着":带上目标坐标高差与三种走法的试算,她自己决定垫不垫
-      throw withRouteScene(bot, ctx, err, pos, [
-        `看得见的${zhName(block)}在 (${pos.x}, ${pos.y}, ${pos.z})`,
-      ]);
-    }
-    // 挖掘前撤掉寻路目标，避免 LookAt 随方块变化重算并调用 stopDigging。
-    dropGoal(bot, 'task', '挖掘期间寻路器歇手', ctx.diag);
-    const target = bot.blockAt(pos);
-    if (!target || !isTarget(target.name)) continue; // 移动期间目标方块可能被移除或掉落。
-    checkAbort(ctx);
-    await equipToolFor(bot, target, ctx, miningToolPlan(tool));
-    await digBlock(bot, target, ctx);
-    dug++;
-    ctx.progress?.(dug, count);
-    // 原版掉落物生成后 10 tick 才可拾取；等待实际入包，并设上限以容纳概率无掉落。
-    await gotoGoal(bot, new goals.GoalNear(pos.x, pos.y, pos.z, 1), ctx).catch(() => undefined);
-    const mark = countGains();
-    for (let waited = 0; waited < PICKUP_SETTLE_MS && countGains() === mark; waited += 100) {
+      // 挖掘前撤掉寻路目标，避免 LookAt 随方块变化重算并调用 stopDigging。
+      dropGoal(bot, 'task', '挖掘期间寻路器歇手', ctx.diag);
+      const target = bot.blockAt(pos);
+      if (!target || !isTarget(target.name)) continue; // 移动期间目标方块可能被移除或掉落。
+      const structure = blueprintCollectSource(bot, pos, ctx);
+      if (structure !== null) { rememberStructure(pos, structure); i--; continue; }
+      if (!collectVisible(bot, pos)) throw new SkillBlocked(`现在看不见${zhName(target.name)},没挖它`,
+        [], 'local', 'target-not-visible');
+      // 走近途中目标可能被其他玩家收获后重新播种；执行刻必须再核验。
+      if (onlyMature) {
+        const age = cropAgeAt(bot, pos);
+        if (!age || age.value < age.max) { i--; continue; }
+      }
       checkAbort(ctx);
-      await sleep(100);
+      await equipToolFor(bot, target, ctx, miningToolPlan(tool));
+      const live = bot.blockAt(pos);
+      if (!live || !isTarget(live.name)) continue;
+      const liveStructure = blueprintCollectSource(bot, pos, ctx);
+      if (liveStructure !== null) { rememberStructure(pos, liveStructure); i--; continue; }
+      const mark = countGains();
+      checkAbort(ctx);
+      await digBlock(bot, live, ctx);
+      dug++;
+      ctx.progress?.(dug, count);
+      await collectDrops(bot, pos, countedDrops, countGains, mark, ctx);
+      await keep.light(undefined, 'travel');
+      if (dug < count) {
+        await ctx.checkpoint?.(() => settleOnGround(bot, ctx, 1_500));
+      }
     }
-    await keep.light(undefined, 'travel');
-  }
-  // 挖掘等级不够时它是"入包 0 个"唯一说得出口的解释,凡是回执都带上
-  const toolTail = toolFact ? `。${toolFact}` : '';
-  const gained = countGains() - before;
-  if (gained <= 0) {
-    // 挖掉方块与物品入包分别报告；collect 入包为零时不能算完成。
-    if (dug <= 0) {
-      throw new SkillBlocked(`一块${zhName(block)}都没挖到,入包 0 个`, toolFact ? [toolFact] : [], 'server');
+    // 挖掘等级不够时它是"入包 0 个"唯一说得出口的解释,凡是回执都带上
+    const toolTail = toolFact ? `。${toolFact}` : '';
+    const gained = countGains() - before;
+    if (gained <= 0) {
+      // 挖掉方块与物品入包分别报告；collect 入包为零时不能算完成。
+      if (dug <= 0) {
+        throw new SkillBlocked(`一块${zhName(block)}都没挖到,入包 0 个`, toolFact ? [toolFact] : [], 'server');
+      }
+      // 某些服务端或新版方块的掉落表缺项。不能在背包确有净增时断言「一个都没掉」；
+      // 也不能把顺路拾取的物品冒充为目标掉落，因此只报告本步可观察的库存事实。
+      const unmappedDrop = !cropProduce[block] && gains.size === 1 && gains.has(block);
+      const observed = unmappedDrop ? invGains(inventoryBefore, bot) : [];
+      if (observed.length > 0) {
+        if (dug < count) ctx.partial?.(`要 ${count} 块只挖到 ${dug} 块`);
+        return await finish(`挖了 ${dug} 块${zhName(block)}${dug < count ? `(要 ${count} 块)` : ''};`
+          + `掉落表未列出对应物品,本步背包净增:${observed.join('、')}`
+          + `${dug < count ? ';近处再没有看得见的了' : ''}${toolTail}${litTail()}`);
+      }
+      // 概率掉落方块(drops 简表为空):挖成了没掉东西是正常结局,这一条不动
+      const blocksReg = bot.registry.blocks as unknown as Record<number, { drops?: unknown[] }>;
+      const certain = ids.some((id) => (blocksReg[id]?.drops ?? []).length > 0);
+      if (!certain) {
+        return await finish(`挖了 ${dug} 块${zhName(block)};这东西只按概率掉物品,这次一个都没掉${toolTail}${litTail()}`);
+      }
+      // 入包为零时检查是否包满，明确受阻来源。
+      const full = bot.inventory.items().length >= INVENTORY_SLOTS;
+      throw new SkillBlocked(
+        full
+          ? `挖掉了 ${dug} 块${zhName(block)}${dug < count ? `(要 ${count} 块)` : ''},` +
+            `但背包 ${INVENTORY_SLOTS} 格全满了,掉的东西进不来,都落在挖矿的地方了${toolTail}`
+          : `挖掉了 ${dug} 块${zhName(block)}${dug < count ? `(要 ${count} 块)` : ''},` +
+            `方块已经不在了,但一个都没进包:掉落物没捡到${toolTail}`,
+        toolFact ? [toolFact] : [], 'server',
+      );
     }
-    // 概率掉落方块(drops 简表为空):挖成了没掉东西是正常结局,这一条不动
-    const blocksReg = bot.registry.blocks as unknown as Record<number, { drops?: unknown[] }>;
-    const certain = ids.some((id) => (blocksReg[id]?.drops ?? []).length > 0);
-    if (!certain) {
-      return `挖了 ${dug} 块${zhName(block)};这东西只按概率掉物品,这次一个都没掉${toolTail}${litTail()}`;
+    // 部分完成必须显式报告,防止后续步骤误判所需库存已经到齐。
+    if (dug < count) {
+      const why = ranOutStructure > 0
+        ? `剩下看见的 ${ranOutStructure} 处是登记蓝图结构材料`
+        : ranOutProtected > 0
+        ? `剩下看见的 ${ranOutProtected} 处已知受保护，不能采集`
+        : ranOutImmature > 0
+        ? `熟着的就这些,还有 ${ranOutImmature} 格没长成的留在地里`
+        : ranOut ? '近处再没有看得见的了' : '有几块走到跟前就不在了';
+      const spent = ranOut && ranOutImmature === 0 && ranOutStructure === 0
+        ? exhaustedMarkNote(bot, ctx, block) : '';
+      ctx.partial?.(`要 ${count} 块只挖到 ${dug} 块`);
+      return await finish(`挖了 ${dug} 块${zhName(block)}(要 ${count} 块),入包 ${gained} 个;${why}${spent}${toolTail}${litTail()}`);
     }
-    // 入包为零时检查是否包满，明确受阻来源。
-    const full = bot.inventory.items().length >= INVENTORY_SLOTS;
-    throw new SkillBlocked(
-      full
-        ? `挖掉了 ${dug} 块${zhName(block)}${dug < count ? `(要 ${count} 块)` : ''},` +
-          `但背包 ${INVENTORY_SLOTS} 格全满了,掉的东西进不来,都落在挖矿的地方了${toolTail}`
-        : `挖掉了 ${dug} 块${zhName(block)}${dug < count ? `(要 ${count} 块)` : ''},` +
-          `方块已经不在了,但一个都没进包:掉落物没捡到${toolTail}`,
-      toolFact ? [toolFact] : [], 'server',
-    );
+    return await finish(`挖了 ${dug} 块${zhName(block)},实际入包 ${gained} 个${toolTail}${litTail()}`);
+  } catch (err) {
+    if (scaffold && !scaffold.finished && !ctx.aborted() && err instanceof SkillBlocked) {
+      const cleanup = await reclaimTemporaryScaffold(bot, ctx, scaffold);
+      if (cleanup) err.scene.push(cleanup.replace(/^;/, ''));
+    }
+    throw err;
+  } finally {
+    if (scaffold) closeTemporaryScaffold(scaffold);
   }
-  // 部分完成必须显式报告,防止后续步骤误判所需库存已经到齐。
-  if (dug < count) {
-    const why = ranOutImmature > 0
-      ? `熟着的就这些,还有 ${ranOutImmature} 格没长成的留在地里`
-      : ranOut ? '近处再没有看得见的了' : '有几块走到跟前就不在了';
-    const spent = ranOut && ranOutImmature === 0 ? exhaustedMarkNote(bot, ctx, block) : '';
-    ctx.partial?.(`要 ${count} 块只挖到 ${dug} 块`);
-    return `挖了 ${dug} 块${zhName(block)}(要 ${count} 块),入包 ${gained} 个;${why}${spent}${toolTail}${litTail()}`;
-  }
-  return `挖了 ${dug} 块${zhName(block)},实际入包 ${gained} 个${toolTail}${litTail()}`;
 }
 
 /** 「这里有你登记的路标」按这个半径算:一处资源点的量级,不是一片地区 */
@@ -251,6 +429,20 @@ export const INDOOR_TARGETS = new Set([
   'chest', 'trapped_chest', 'barrel', 'furnace', 'blast_furnace', 'smoker',
   'crafting_table', 'bookshelf', 'brewing_stand', 'lectern', 'smithing_table',
 ]);
+
+const OBSERVATION_BLOCK_SUFFIX = /(?:_door|_trapdoor|_bed|_button|_pressure_plate|_fence_gate|_sign|_wall_sign)$/;
+
+/** 可作为采集物的方块按破坏权限筛选；容器和可交互设施仍按观察目标搜索。 */
+function resourceFindTarget(bot: Bot, ids: number[]): boolean {
+  const matched = new Set(ids);
+  const items = bot.registry.itemsByName as Record<string, unknown>;
+  const blocks = (bot.registry.blocks ?? {}) as Record<number, { drops?: unknown[] }>;
+  return Object.entries(bot.registry.blocksByName).some(([name, def]) => {
+    if (!matched.has(def.id) || INDOOR_TARGETS.has(name) || OBSERVATION_BLOCK_SUFFIX.test(name)) return false;
+    return items[name] !== undefined || (blocks[def.id]?.drops?.length ?? 0) > 0
+      || CROP_MAX_AGE[name] !== undefined;
+  });
+}
 
 /** 找不到可见目标时，按目标类别和当前现场提供探索提示。 */
 export function findEmptyHint(bot: Bot, ctx: SkillContext, target: string, isEntity: boolean): string {
@@ -307,8 +499,10 @@ export function findHitText(bot: Bot, hit: ExploreHit): string {
   const point = `(${hit.x}, ${hit.y}, ${hit.z})`;
   if (hit.entity) return `seenAt=${point}(它会动,这是看见那一刻的位置)`;
   const stand = approachCell(bot, hit);
+  const age = cropAgeAt(bot, new Vec3(hit.x, hit.y, hit.z));
+  const growth = age ? `;生长阶段 ${age.value}/${age.max}${age.value >= age.max ? '，已成熟' : '，未成熟'}` : '';
   return `blockAt=${point}(目标方块占用格,不是可站落点` +
-    `${stand ? `;贴着它站得住的是 ${cellText(stand)},goto 走这一格` : ''})`;
+    `${stand ? `;贴着它站得住的是 ${cellText(stand)},goto 走这一格` : ''}${growth})`;
 }
 
 export function findAgeText(ageMs: number): string {
@@ -344,6 +538,15 @@ export function matchEntityName(bot: Bot, name: string): string | null {
   return entities?.[n] ? n : null;
 }
 
+export function resolveFindTarget(bot: Bot, target: string): { ids: number[]; entityName: string | null } {
+  const entity = matchEntityName(bot, target);
+  // zombie_head / skeleton_skull 之类方块不能把精确实体名抢走；
+  // 若本身也是精确方块名，仍按方块找，避免改变 find tnt 的含义。
+  const exactBlock = (bot.registry.blocksByName as Record<string, unknown>)[target] !== undefined;
+  if (entity && !exactBlock) return { ids: [], entityName: entity };
+  return { ids: matchBlockIds(bot, target), entityName: null };
+}
+
 /**
  * `#logs` 这种写法只在 `until` 名单里认。原文案「不认识「#logs」这种方块或实体」
  * 让她把一个还能用的能力从工具箱里划掉了(笔记原文:「#ores 标签执行器不认」)。
@@ -368,17 +571,57 @@ export async function skillFind(
   /** 行军途中的早停名单:路上碰到这里头任何一样就正常收束(站着扫用不上) */
   until?: readonly string[],
 ): Promise<string> {
-  const ids = matchBlockIds(bot, target);
-  const entityName = ids.length === 0 ? matchEntityName(bot, target) : null;
+  const { ids, entityName } = resolveFindTarget(bot, target);
   if (ids.length === 0 && entityName === null) {
     throw new SkillBlocked(categoryScopeText(target) ?? `不认识「${target}」这种方块或实体`);
   }
+  const resourceSearch = entityName === null && resourceFindTarget(bot, ids);
+  const structureSearch = resourceSearch && direction !== undefined;
+  const deniedSeen = new Set<string>();
+  const structureSeen = new Map<string, string>();
+  const structureSource = (p: { x: number; y: number; z: number }): string | null =>
+    blueprintCollectSource(bot, new Vec3(p.x, p.y, p.z), ctx);
+  const candidate = (p: { x: number; y: number; z: number }): boolean => {
+    if (resourceSearch && knownProtectedBreakTarget(bot, p)) {
+      deniedSeen.add(`${p.x},${p.y},${p.z}`);
+      return false;
+    }
+    const structure = structureSearch ? structureSource(p) : null;
+    if (structure) {
+      structureSeen.set(`${p.x},${p.y},${p.z}`, structure);
+      return false;
+    }
+    return true;
+  };
+  const excludedStructure = (p: Vec3): boolean => structureSearch && structureSource(p) !== null;
+  const deniedNote = (): string => (deniedSeen.size > 0
+    ? `;另看见 ${deniedSeen.size} 处同类方块已知受保护，没有列为采集目标` : '')
+    + (structureSeen.size > 0
+      ? `;另看见 ${structureSeen.size} 处同类方块是登记蓝图${[...new Set(structureSeen.values())]
+        .map((key) => `「${key}」`).join('、')}的结构材料，collect 会保留，没有列为批量采集来源` : '');
+  const historyNote = (kind: FindKind): string => {
+    const past = ctx.search.history.recall(ctx.search.scope(), target, kind);
+    if (past?.kind === 'block') {
+      const point = new Vec3(...past.at);
+      if ((resourceSearch && knownProtectedBreakTarget(bot, point)) || excludedStructure(point)) return '';
+    }
+    return findHistoryNote(ctx, target, kind);
+  };
   ctx.search.history.sync(ctx.search.scope());
   const start = { x: bot.entity.position.x, z: bot.entity.position.z };
   const finish = (text: string, hit: ExploreHit | null): string => {
     if (hit) rememberFindHit(ctx, target, hit);
     return text;
   };
+
+  // 定向找农作物通常是为了收获。幼苗可以由站着 find 查看 age，但不能让
+  // 定向搜索在出发点因一棵未成熟作物立刻宣称找到可采集目标。
+  const harvestSearch = direction !== undefined && CROP_MAX_AGE[target] !== undefined;
+  const searchedName = harvestSearch ? `成熟${zhThing(target)}` : zhThing(target);
+  const noFindText = (): string => structureSeen.size > 0
+    ? `没看见可作为批量采集来源的${searchedName}`
+    : deniedSeen.size > 0 ? `没找到未被标记保护的${searchedName}` : `没看见${searchedName}`;
+  let sawImmature = false;
 
   const scan = (): ExploreHit | null => {
     // 与 collect/世界快照同一条感知规则:看得见才算找到
@@ -392,7 +635,7 @@ export async function skillFind(
         const d = e.position.distanceTo(bot.entity.position);
         if (d < bestD && canSeeEntity(bot, e)) {
           bestD = d;
-          const note = villagerNote(e as never);
+          const note = entityObservationNote(bot as never, e as never);
           best = {
             x: Math.round(e.position.x), y: Math.round(e.position.y), z: Math.round(e.position.z),
             what: `${zhEntity(entityName)}${note ? `(${note})` : ''}`, entity: true,
@@ -401,8 +644,17 @@ export async function skillFind(
       }
       return best;
     }
-    const found = bot.findBlocks({ matching: ids, maxDistance: 48, count: 16 });
-    const p = found.find((q) => canSeeBlockAt(bot, q));
+    const found = resourceSearch ? findPastProtected(bot, ids, 48, 16, excludedStructure)
+      : bot.findBlocks({ matching: ids, maxDistance: 48, count: 16 });
+    const p = found.find((q) => {
+      if (!canSeeBlockAt(bot, q)) return false;
+      if (!candidate(q)) return false;
+      if (!harvestSearch) return true;
+      const age = cropAgeAt(bot, q);
+      if (age && age.value >= age.max) return true;
+      if (age) sawImmature = true;
+      return false;
+    });
     // 回执使用扫描到的实际方块名:target 可能来自不可靠的视觉识别
     return p ? { x: p.x, y: p.y, z: p.z, what: zhName(bot.blockAt(p)?.name ?? target), entity: false } : null;
   };
@@ -418,16 +670,22 @@ export async function skillFind(
         if ((e.name ?? '').toLowerCase() !== entityName) continue;
         if (e.position.distanceTo(bot.entity.position) > radius) continue;
         if (!canSeeEntity(bot, e)) continue;
-        const note = villagerNote(e as never);
+        const note = entityObservationNote(bot as never, e as never);
         out.push({
           x: Math.round(e.position.x), y: Math.round(e.position.y), z: Math.round(e.position.z),
           what: `${zhEntity(entityName)}${note ? `(${note})` : ''}`, entity: true,
         });
       }
     } else {
-      for (const q of bot.findBlocks({ matching: ids, maxDistance: radius, count: 64 })) {
+      const found = resourceSearch ? findPastProtected(bot, ids, radius, 64)
+        : bot.findBlocks({ matching: ids, maxDistance: radius, count: 64 });
+      for (const q of found) {
         if (!canSeeBlockAt(bot, q)) continue;
-        out.push({ x: q.x, y: q.y, z: q.z, what: zhName(bot.blockAt(q)?.name ?? target), entity: false });
+        if (!candidate(q)) continue;
+        const structure = resourceSearch ? structureSource(q) : null;
+        out.push({ x: q.x, y: q.y, z: q.z,
+          what: zhName(bot.blockAt(q)?.name ?? target)
+            + (structure ? `(登记蓝图「${structure}」的结构材料，collect 会保留)` : ''), entity: false });
       }
     }
     const d2 = (h: ExploreHit): number => Math.hypot(h.x - me.x, h.y - me.y, h.z - me.z);
@@ -449,9 +707,9 @@ export async function skillFind(
     if (hits.length === 0) {
       const kind = findKind(null, entityName);
       return finish(
-        `当前观察:在周围 ${radius} 格内没看见${zhThing(target)}${capped};` +
+        `当前观察:在周围 ${radius} 格内没看见${deniedSeen.size > 0 ? '未被标记保护的' : ''}${zhThing(target)}${capped}${deniedNote()};` +
           `这只说明当前已加载且视线可达的观察面没有命中,不表示目标不存在` +
-          `${findHistoryNote(ctx, target, kind)}。${findEmptyHint(bot, ctx, target, entityName !== null)}`,
+          `${historyNote(kind)}。${findEmptyHint(bot, ctx, target, entityName !== null)}`,
         null,
       );
     }
@@ -468,7 +726,7 @@ export async function skillFind(
     const more = hits.length - shown.length;
     return finish(
       `当前观察:在周围 ${radius} 格内看见 ${hits.length} 处${zhThing(target)}${capped}: ` +
-        `${shown.join('、')}${more > 0 ? `,另有 ${more} 处` : ''}`,
+        `${shown.join('、')}${more > 0 ? `,另有 ${more} 处` : ''}${deniedNote()}`,
       hits[0],
     );
   }
@@ -496,7 +754,7 @@ export async function skillFind(
     return finish(
       `还没往${DIRECTION_ZH[direction]}走就看见了;请求的${DIRECTION_ZH[direction]}向行军尚未发生;` +
         `这次命中来自出发点的初始全向观察,` +
-        `不是${DIRECTION_ZH[direction]}向搜索结果:${hitHere.what}${where},${findHitText(bot, hitHere)}`,
+        `不是${DIRECTION_ZH[direction]}向搜索结果:${hitHere.what}${where},${findHitText(bot, hitHere)}${deniedNote()}`,
       hitHere,
     );
   }
@@ -512,7 +770,7 @@ export async function skillFind(
   const stop = until && until.length > 0 ? untilBlockIds(bot, until) : null;
   const stopNote = stop ? untilUnknownNote(stop.unknown) : '';
   const stopHit = (): UntilHit | null =>
-    (stop ? untilHit(bot, stop.ids, UNTIL_TRAVEL_RADIUS, true) : null);
+    (stop ? untilHit(bot, stop.ids, UNTIL_TRAVEL_RADIUS) : null);
   for (let travelled = 0; travelled < distance; travelled += EXPLORE_LEG) {
     checkAbort(ctx);
     await keep.light(undefined, 'travel');
@@ -521,6 +779,7 @@ export async function skillFind(
     const x = Math.round(p.x + (dx / norm) * leg);
     const z = Math.round(p.z + (dz / norm) * leg);
     const legGoal = levelTravelGoal(x, z);
+    const releaseWalkOnly = entityName ? walkOnlyPath(bot) : () => undefined;
     try {
       await gotoGoal(bot, legGoal, ctx);
     } catch (err) {
@@ -530,16 +789,18 @@ export async function skillFind(
         settle();
         const moved = Math.round(walked());
         return finish(
-          `朝${DIRECTION_ZH[direction]}走了 ${moved} 格后走不动了,不过当前看见${hit.what},${findHitText(bot, hit)}`,
+          `朝${DIRECTION_ZH[direction]}走了 ${moved} 格后走不动了,不过当前看见${hit.what},${findHitText(bot, hit)}${deniedNote()}`,
           hit,
         );
       }
       // 试算必须使用本段实际下达的 legGoal。
       throw withRouteScene(bot, ctx, new SkillBlocked(
         `朝${DIRECTION_ZH[direction]}走了 ${Math.round(walked())} 格就走不过去了(` +
-        `${(err as Error).message}),当前沿走过路线的可见面没看见${zhThing(target)},` +
-        `不表示目标不存在${findHistoryNote(ctx, target, findKind(null, entityName))}`,
+        `${(err as Error).message}),当前沿走过路线的可见面${noFindText()},` +
+        `不表示目标不存在${deniedNote()}${historyNote(findKind(null, entityName))}`,
       ), { x, y: feetOf(bot).y, z }, [], legGoal);
+    } finally {
+      releaseWalkOnly();
     }
     const hit = scan();
     if (hit) {
@@ -548,7 +809,7 @@ export async function skillFind(
       const moved = Math.round(walked());
       return finish(
         `朝${DIRECTION_ZH[direction]}走了 ${moved} 格,当前看见了${hit.what},${findHitText(bot, hit)};` +
-          `我现在在 (${Math.round(p2.x)}, ${Math.round(p2.y)}, ${Math.round(p2.z)})${litTail()}`,
+          `我现在在 (${Math.round(p2.x)}, ${Math.round(p2.y)}, ${Math.round(p2.z)})${litTail()}${deniedNote()}`,
         hit,
       );
     }
@@ -560,7 +821,7 @@ export async function skillFind(
       return finish(
         `朝${DIRECTION_ZH[direction]}走了 ${moved} 格,` +
           `在 (${early.x}, ${early.y}, ${early.z}) 碰到了${early.what},停在这` +
-          `(当前观察还没看见${zhThing(target)},不表示目标不存在);` +
+        `(当前观察还${noFindText()},不表示目标不存在);` +
           `我现在在 (${Math.round(p2.x)}, ${Math.round(p2.y)}, ${Math.round(p2.z)})${litTail()}${stopNote}`,
         null,
       );
@@ -575,10 +836,11 @@ export async function skillFind(
   const w = Math.round(walked());
   const how = w === 0
     ? `朝${DIRECTION_ZH[direction]}这一趟没走出去(要走 ${distance} 格,人还在出发点),请求方向尚未实际搜索`
-    : `朝${DIRECTION_ZH[direction]}走满了 ${w} 格,沿走过路线的当前可见面一路没看见${zhThing(target)}`;
+    : `朝${DIRECTION_ZH[direction]}走满了 ${w} 格,沿走过路线的当前可见面一路${noFindText()}`;
   return finish(
     `${how}${stop ? `,也没碰到 until 名单里的东西${stopNote}` : ''};` +
-      `这不表示目标不存在,也不能据此断言整个方向没有目标${findHistoryNote(ctx, target, findKind(null, entityName))};` +
+      `${sawImmature ? '路上看见未成熟作物,没有把它当成可收获目标;' : ''}` +
+      `这不表示目标不存在,也不能据此断言整个方向没有目标${deniedNote()}${historyNote(findKind(null, entityName))};` +
       `我现在在 (${Math.round(p.x)}, ${Math.round(p.y)}, ${Math.round(p.z)})${litTail()}${indoorTail}`,
     null,
   );
@@ -842,6 +1104,42 @@ export function bobberCell(bot: Bot): { name: string; x: number; y: number; z: n
 export const BOBBER_SETTLE_MS = 2_000;
 /** 落点不是水就收竿换仰角重抛,一次 fish 最多抛这么多竿 */
 export const FISH_CAST_TRIES = 3;
+/** 钓点旁搜岸的范围；超过这个范围就换一片水，不为一竿鱼远途绕路。 */
+export const FISH_SHORE_SCAN_R = 8;
+
+/** 船上也能安全钓鱼；船沉到头部入水时不算安全站位。 */
+function inFishingBoat(bot: Bot): boolean {
+  const vehicle = (bot as Bot & { vehicle?: { name?: string } | null }).vehicle;
+  return !!vehicle && /(?:^|_)(?:boat|raft)$/.test(vehicle.name ?? '') && !headInWater(bot);
+}
+
+/** 钓鱼需要露出水面，脚下有支撑或正坐在船上。 */
+export function hasFishingFooting(bot: Bot): boolean {
+  return inFishingBoat(bot) || (bot.entity.onGround && standableCell(bot, feetOf(bot)));
+}
+
+/** 返回目标水格附近已加载、可站人的岸格，优先离当前玩家近的。 */
+export function fishingShoreCandidates(bot: Bot, water: Cell): Cell[] {
+  const here = bot.entity.position;
+  const candidates: Cell[] = [];
+  for (let dx = -FISH_SHORE_SCAN_R; dx <= FISH_SHORE_SCAN_R; dx++) {
+    for (let dz = -FISH_SHORE_SCAN_R; dz <= FISH_SHORE_SCAN_R; dz++) {
+      const horizontal = Math.hypot(dx, dz);
+      if (horizontal < 1 || horizontal > FISH_SHORE_SCAN_R) continue;
+      // 水面旁的岸可比水位高数格；不选水下洞穴作为钓鱼站位。
+      for (let dy = 1; dy <= 6; dy++) {
+        const cell = { x: water.x + dx, y: water.y + dy, z: water.z + dz };
+        if (standableCell(bot, cell)) candidates.push(cell);
+      }
+    }
+  }
+  candidates.sort((a, b) => {
+    const cost = (c: Cell) => Math.hypot(c.x + 0.5 - here.x, c.y - here.y, c.z + 0.5 - here.z)
+      + Math.hypot(c.x - water.x, c.z - water.z) * 0.2;
+    return cost(a) - cost(b);
+  });
+  return candidates;
+}
 
 /**
  * 等浮标停稳并回报它停在哪一格。落进水里立刻回;落在地上要连着几次读数不动才算停。
@@ -880,6 +1178,7 @@ export async function settleBobber(bot: Bot, ctx: SkillContext): Promise<{ name:
  */
 export async function skillFish(bot: Bot, call: Extract<SkillCall, { skill: 'fish' }>, ctx: SkillContext): Promise<string> {
   checkAbort(ctx);
+  const start = feetOf(bot);
   let water: Cell;
   /** 目标格不是开阔水域时跟在回执后面的事实;是开阔水域就没有这一句 */
   let openNote = '';
@@ -901,22 +1200,38 @@ export async function skillFish(bot: Bot, call: Extract<SkillCall, { skill: 'fis
   if (!rod) throw new SkillBlocked('包里没有钓竿');
   await bot.equip(rod, 'hand');
 
-  // 原地有可行抛竿轨迹时不移动；否则走近后重新求抛物线，避免直接走入水面格。
-  let plans = planFishingCasts(bot, water);
+  // 原地是干燥岸格且抛得到时不移动。水中即使能抛到也必须先登岸。
+  let plans = hasFishingFooting(bot) ? planFishingCasts(bot, water) : [];
   if (plans.length === 0) {
-    const me = bot.entity.position;
-    if (Math.hypot(me.x - water.x, me.y - water.y, me.z - water.z) > 3.5) {
+    const shore = fishingShoreCandidates(bot, water);
+    let lastRouteError: unknown = null;
+    let lastTried: Cell | null = null;
+    for (const cell of shore.slice(0, 4)) {
+      checkAbort(ctx);
+      lastTried = cell;
       try {
-        await gotoGoal(bot, new goals.GoalNear(water.x, water.y, water.z, 3), ctx);
+        await gotoGoal(bot, new goals.GoalBlock(cell.x, cell.y, cell.z), ctx);
       } catch (err) {
-        throw withRouteScene(bot, ctx, err, water);
+        if (err instanceof Aborted) throw err;
+        lastRouteError = err;
+        continue;
       }
+      if (!hasFishingFooting(bot)) continue;
       plans = planFishingCasts(bot, water);
+      if (plans.length > 0) break;
+    }
+    if (plans.length === 0 && lastRouteError && lastTried) {
+      throw withRouteScene(bot, ctx, lastRouteError, lastTried, [
+        `钓鱼目标 ${cellText(water)} 是水格，不是安全站位；附近岸格路线失败，换一处可站的岸边再下竿`,
+      ]);
     }
   }
   if (plans.length === 0) {
-    throw new SkillBlocked(`站在这抛不进 ${cellText(water)} 的水里(挡着或够不着),换个站位或换一片开阔水面`);
+    throw new SkillBlocked(`在 ${cellText(water)} 附近找不到能安全站着抛竿的岸格；不要走进水格，换一片有岸可站的水面`);
   }
+  const stand = feetOf(bot);
+  const movedToShore = start.x !== stand.x || start.y !== stand.y || start.z !== stand.z;
+  const standNote = `;${movedToShore ? '已换到' : '原地'}${inFishingBoat(bot) ? '船上' : '岸上'}站位 ${cellText(stand)}`;
   const here = bot.entity.position;
   const yaw = Math.atan2(-(water.x + 0.5 - here.x), -(water.z + 0.5 - here.z));
 
@@ -929,6 +1244,7 @@ export async function skillFish(bot: Bot, call: Extract<SkillCall, { skill: 'fis
   let casts = 0;
   for (const plan of plans.slice(0, FISH_CAST_TRIES)) {
     checkAbort(ctx);
+    if (!hasFishingFooting(bot)) throw new SkillBlocked('抛竿前脚下已入水，先站到脚下有实心支撑、头在空气中的岸上');
     casts++;
     await bot.look(yaw, plan.elev, true);
     const cast = bot.fish().then(() => 'caught' as const, (e: Error) => `失败:${e.message}`);
@@ -949,6 +1265,10 @@ export async function skillFish(bot: Bot, call: Extract<SkillCall, { skill: 'fis
     for (;;) {
       const r = await Promise.race([cast, sleep(250).then(() => null)]);
       if (r !== null) { outcome = r; break; }
+      if (!hasFishingFooting(bot)) {
+        bot.activateItem();
+        throw new SkillBlocked('等鱼时离开了岸边、脚下入水，已收竿；先换干燥岸格再抛');
+      }
       if (ctx.aborted() || Date.now() >= deadline) {
         bot.activateItem(); // 收竿;浮标销毁让还挂着的 fish() 取消掉
         if (ctx.aborted()) throw new Aborted(ctx.abortedBy?.() ?? null);
@@ -964,7 +1284,7 @@ export async function skillFish(bot: Bot, call: Extract<SkillCall, { skill: 'fis
       '换个站位或指一片更开阔的水面',
     );
   }
-  const notes = `${covered ? ';这里浮标头顶看不到天,咬钩慢' : ''}${openNote}`;
+  const notes = `${standNote}${covered ? ';这里浮标头顶看不到天,咬钩慢' : ''}${openNote}`;
   if (outcome === 'caught') {
     await sleep(FISH_LOOT_SETTLE_MS);
     const gains = invGains(before, bot);
@@ -1024,7 +1344,7 @@ export function tradeLine(t: NonNullable<VillagerWindow['trades']>[number], i: n
  */
 export async function skillTrade(
   bot: Bot,
-  call: { target: string; index?: number; times?: number },
+  call: { target: string; entityId?: number; index?: number; times?: number },
   ctx: SkillContext,
 ): Promise<string> {
   checkAbort(ctx);
@@ -1034,15 +1354,24 @@ export async function skillTrade(
   for (const id of Object.keys(bot.entities)) {
     const e = bot.entities[id];
     if (!e?.position || e.name !== call.target) continue;
+    if (e.isValid === false || (call.entityId !== undefined && e.id !== call.entityId)) continue;
     if (!canSeeEntity(bot, e)) continue;
     const d = e.position.distanceTo(me);
     if (d <= TRADE_FIND_R && d < bestD) { bestD = d; entity = e; }
   }
-  if (!entity) throw new SkillBlocked(`附近 ${TRADE_FIND_R} 格内没看见${zhEntity(call.target)}`);
+  if (!entity) throw new SkillBlocked(call.entityId === undefined
+    ? `附近 ${TRADE_FIND_R} 格内没看见${zhEntity(call.target)}`
+    : `${zhEntity(call.target)} entityId=${call.entityId} 当前不可见、超出范围或编号已失效；重新观察后再选择`);
   if (bestD > 3.5) await gotoGoal(bot, new goals.GoalFollow(entity, 2), ctx).catch(() => undefined);
   checkAbort(ctx);
+  if (entity.isValid === false || (call.entityId !== undefined && bot.entities[String(call.entityId)] !== entity)) {
+    throw new SkillBlocked(`${zhEntity(call.target)} entityId=${entity.id} 已失效；重新观察后再选择`);
+  }
   if (entity.position.distanceTo(bot.entity.position) > 4.5) {
     throw new SkillBlocked(`走不到${zhEntity(call.target)}身边(它在 ${Math.round(entity.position.distanceTo(bot.entity.position))} 格外)`);
+  }
+  if (!canSeeEntity(bot, entity)) {
+    throw new SkillBlocked(`${zhEntity(call.target)} entityId=${entity.id} 当前被遮挡；重新观察后再交易`);
   }
 
   const before = invSnapshot(bot);
@@ -1058,21 +1387,38 @@ export async function skillTrade(
   // 它就地抛出,而 EventEmitter 不接返回值 —— 无人认领的 rejection 会掀掉整个引擎子进程。
   const client = (bot as unknown as { _client: PacketEmitter })._client;
   const kept = new Map(TRADE_LIST_PACKETS.map((name) => [name, new Set(client.listeners(name))]));
+  const clearTradeListeners = (): void => {
+    for (const name of TRADE_LIST_PACKETS) {
+      for (const fn of client.listeners(name)) {
+        if (!kept.get(name)!.has(fn)) client.removeListener(name, fn);
+      }
+    }
+  };
   let win: VillagerWindow | null;
+  let openError: Error | null = null;
   try {
     if (villagerId !== undefined) eAny.entityType = villagerId;
     const opening = (bot as unknown as { openVillager(e: unknown): Promise<VillagerWindow> })
       .openVillager(entity);
     opening.catch(() => undefined);
     win = await Promise.race([opening, sleep(TRADE_OPEN_MS).then(() => null)]);
+  } catch (err) {
+    win = null;
+    openError = err instanceof Error ? err : new Error(String(err));
   } finally {
     eAny.entityType = origType;
   }
   if (!win) {
-    for (const name of TRADE_LIST_PACKETS) {
-      for (const fn of client.listeners(name)) {
-        if (!kept.get(name)!.has(fn)) client.removeListener(name, fn);
-      }
+    clearTradeListeners();
+    const opened = bot.currentWindow;
+    if (opened) {
+      const title = minecraftTextComponent(opened.title);
+      const kind = String(opened.type ?? '未知类型');
+      bot.closeWindow(opened);
+      throw new SkillBlocked(`右键${who}打开了${title ? `「${title}」` : '一个窗口'}(${kind})，不是原版村民报价窗口；不能按交易 index 成交。先查该菜单或服务端命令的操作方法`);
+    }
+    if (openError) {
+      throw new SkillBlocked(`右键${who}没打开原版村民报价窗口:${zhErrorText(openError.message)}`);
     }
     // 开不出窗按身份分开说:无业/傻子/小孩是原版规则,照实说;有职业的开不出来
     // 不编理由,报事实并点名右键的是哪一只,免得她把锅扣到镜头里另一只村民头上
@@ -1173,7 +1519,10 @@ export function probeWhereText(
   const body = lines.length > 0 ? `: ${lines.join(';')}` : ':一样都没有';
   const miss = names.size === 0 ? '(点名的这几样一个都认不出来)' : '';
   const tail = unloaded > 0 ? `。${unloaded} 格区块没加载,那几格没读到` : '';
-  return `${head}${miss}${body}${untilUnknownNote(want.unknown)}${tail}。这一档直接读区块,不受遮挡与视线限制`;
+  const oreNote = lines.length === 0 && where.some((id) => /(?:^|:)\w+_ore$/.test(id))
+    ? '；零命中只代表客户端收到的区块数据没有目标，服务器可能隐藏未暴露的矿石'
+    : '';
+  return `${head}${miss}${body}${untilUnknownNote(want.unknown)}${tail}。这一档直接读区块,不受遮挡与视线限制${oreNote}`;
 }
 
 /**
@@ -1191,18 +1540,32 @@ export async function skillProbe(bot: Bot, call: Extract<SkillCall, { skill: 'pr
     return { c, name: b?.name ?? null };
   });
   const unloaded = pre.filter((e) => e.name === null).length;
-  if (call.where !== undefined && locating) return probeWhereText(bot, call, call.where, pre, unloaded);
-
   const memo = ctx.probeMemo;
-  const geoKey = fnv32(`${call.shape}|${cells.map((c) => `${c.x},${c.y},${c.z}`).join(';')}`);
+  const geoKey = fnv32(`${locating ? `where:${call.where!.join('|')}` : 'all'}|${call.shape}|${cells.map((c) => `${c.x},${c.y},${c.z}`).join(';')}`);
   // 作物的 age 进指纹:名字没变、龄期跳档也是新读数,不然「熟了没」永远回「与上次相同」
   const readHash = fnv32(pre.map((e) => {
     if (e.name === null) return '?';
     return e.name in CROP_MAX_AGE ? `${e.name}@${cropAgeOfCell(bot, e.c)?.value ?? '?'}` : e.name;
   }).join(','));
-  if (memo?.last && memo.last.key === geoKey && memo.last.hash === readHash) {
-    memo.last.count += 1;
-    return `与上次探查相同(第 ${memo.last.count} 次)。上次: ${memo.last.summary}`;
+  const previous = memo?.entries?.get(geoKey) ?? memo?.last;
+  if (previous && previous.key === geoKey && previous.hash === readHash) {
+    previous.count += 1;
+    if (memo) memo.last = previous;
+    return `与上次探查相同(第 ${previous.count} 次)。上次: ${previous.summary}`;
+  }
+
+  const remember = (summary: string): void => {
+    if (!memo) return;
+    const value = { key: geoKey, hash: readHash, count: 1, summary };
+    memo.last = value;
+    memo.entries?.set(geoKey, value);
+    if (memo.entries && memo.entries.size > 128) memo.entries.delete(memo.entries.keys().next().value!);
+  };
+
+  if (call.where !== undefined && locating) {
+    const text = probeWhereText(bot, call, call.where, pre, unloaded);
+    remember(text);
+    return text;
   }
 
   const head = `探查${SHAPE_ZH[call.shape]}(共 ${cells.length} 格)`;
@@ -1219,12 +1582,12 @@ export async function skillProbe(bot: Bot, call: Extract<SkillCall, { skill: 'pr
     pushPocketLine(bot, lines, cells, airCells);
   } else {
     const reading = readRegion(bot, cells);
-    lines.push(`${head}: ${compositionText(reading)}。`);
+    lines.push(`${head}: ${compositionText(reading, true)}。坐标是各材质的最近样本，样本上方空间仍需逐格核对。`);
     pushPocketLine(bot, lines, cells, reading.air);
   }
   if (unloaded > 0) lines.push(`${unloaded} 格区块没加载,没读到。`);
   const text = lines.join('');
-  if (memo) memo.last = { key: geoKey, hash: readHash, count: 1, summary: lines[0] };
+  remember(lines[0]);
   return text;
 }
 

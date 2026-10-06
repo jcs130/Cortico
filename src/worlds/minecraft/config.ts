@@ -14,8 +14,14 @@ export const MINECRAFT_DEFAULTS = {
    * HUD/手臂/手持)客户端模组支持的 1.20.x 最高版;1.20.5+ 需要 Java 21。
    */
   version: '1.20.6',
-  /** prismarine-viewer 网页端口(OBS 浏览器源 + 画面源之一);0=不开 */
+  /** 网页画面端口(OBS 浏览器源 + 画面源之一);0=不开 */
   viewerPort: 7792,
+  /** 现代画面资源包根目录；空 = 使用自带 prismarine-viewer */
+  viewerAssetsDir: '',
+  /** 网页画面中语音气泡显示的称呼；空 = 游戏内用户名 */
+  viewerSpeakerName: '',
+  /** 普通玩家可用的脱困传送指令；空值沿用受管服务器的控制台传送。 */
+  escapeCommand: '',
   /** 控制台一键启停的本地服务器(空 = 未配置,按钮会提示去配置) */
   local: {
     /** 受管本地服务器与 bot 连接的持久化总开关。 */
@@ -52,6 +58,28 @@ export const MINECRAFT_DEFAULTS = {
   precheck: true,
   /** 受理回执附上相同任务的上次终态。 */
   priorOutcome: true,
+  /** 反复成功任务的可选模型失效 fallback；只作用于列出的目标技能。 */
+  repeatSuccessFallback: { enabled: false, skillsCsv: '', maxSuccesses: 3, windowMinutes: 15 },
+  /** 任务受阻后可选的快速辅助判断；只给建议，不执行动作。 */
+  decision: {
+    enabled: false,
+    endpoint: '',
+    timeoutMs: 500,
+    minIntervalMs: 5_000,
+  },
+  /** 空闲时授权的小动作；占用身体的任务与事件可随时取消。 */
+  idle: {
+    enabled: false,
+    selector: 'random' as 'random' | 'decision',
+    decisionPolicy: 'choice' as 'choice' | 'sample',
+    endpoint: '',
+    timeoutMs: 350,
+    minIdleMs: 6_000,
+    minIntervalMs: 12_000,
+    maxIntervalMs: 28_000,
+    afterArrival: false,
+    allowMovement: false,
+  },
   reflex: {
     /** 受击反击 */
     fightBack: true,
@@ -164,6 +192,9 @@ export interface MinecraftConfigSection {
   username: string;
   version: string;
   viewerPort: number;
+  viewerAssetsDir: string;
+  viewerSpeakerName: string;
+  escapeCommand: string;
   local: {
     serverEnabled: boolean;
     serverDir: string;
@@ -178,6 +209,18 @@ export interface MinecraftConfigSection {
   precheck: boolean;
   /** 受理回执附相同任务的上次终态；默认开启。 */
   priorOutcome: boolean;
+  /** 达到窗口内成功次数后，暂缓同目标技能的新 mc_do；默认关闭。 */
+  repeatSuccessFallback: {
+    enabled: boolean; skillsCsv: string; maxSuccesses: number; windowMinutes: number;
+  };
+  /** 受阻任务的异步辅助判断。 */
+  decision: { enabled: boolean; endpoint: string; timeoutMs: number; minIntervalMs: number };
+  idle: {
+    enabled: boolean; selector: 'random' | 'decision'; endpoint: string; timeoutMs: number;
+    decisionPolicy?: 'choice' | 'sample';
+    afterArrival?: boolean;
+    minIdleMs: number; minIntervalMs: number; maxIntervalMs: number; allowMovement: boolean;
+  };
   reflex: {
     fightBack: boolean; fleeHealth: number;
     reactCooldownSec: number; antiDrown: boolean; antiLava: boolean;
@@ -229,7 +272,20 @@ export const MINECRAFT_CONFIG_GROUP: ConfigGroup = {
       },
       'worlds.minecraft.viewerPort': {
         type: 'integer', title: 'viewer 端口', minimum: 0, maximum: 65535, 'x-hot': false,
-        description: '0=不开。prismarine-viewer 的网页:OBS 浏览器源与"viewer"帧源都吃它。',
+        description: '0=不开。OBS 浏览器源与"viewer"帧源都使用这个端口。',
+      },
+      'worlds.minecraft.viewerAssetsDir': {
+        type: 'string', title: '现代画面资源目录', 'x-hot': false,
+        description: '空=自带网页画面；填写由对应游戏版本导出的现代画面资源包根目录。',
+        'x-path': { kind: 'directory' },
+      },
+      'worlds.minecraft.viewerSpeakerName': {
+        type: 'string', title: '网页语音气泡称呼', 'x-hot': false,
+        description: '空=游戏内用户名；在现代画面中随实际语音播放显示。',
+      },
+      'worlds.minecraft.escapeCommand': {
+        type: 'string', title: '普通玩家脱困指令', 'x-hot': false,
+        description: '远程服务器可填普通玩家有权限使用的传送命令，例如 /spawn。空值使用受管服务器控制台。',
       },
       'worlds.minecraft.local.serverDir': {
         type: 'string', title: '本地服务器目录', 'x-hot': false,
@@ -288,6 +344,73 @@ export const MINECRAFT_RHYTHM_CONFIG_GROUP: ConfigGroup = {
       'worlds.minecraft.priorOutcome': {
         type: 'boolean', title: '受理回执带上次下场', 'x-hot': true,
         description: '下同一件事(技能+目标相同,不看坐标数量)时,受理回执捎一句 15 分钟内上次是什么下场;上次成了就不出声。补的是已经被上下文交接压掉的那一段。关掉则受理回执只说这一单。',
+      },
+      'worlds.minecraft.repeatSuccessFallback.enabled': {
+        type: 'boolean', title: '同类成功任务暂缓', 'x-hot': true,
+        description: '模型失效时的可选 fallback。窗口内同一目标技能成功达到次数后，只暂缓该类新 mc_do；不撤当前任务或队列，其他技能与聊天照常可用。默认关闭。',
+      },
+      'worlds.minecraft.repeatSuccessFallback.skillsCsv': {
+        type: 'string',
+        title: '暂缓目标技能', 'x-hot': true,
+        description: '英文技能名用逗号分隔，例如 fish,collect。任务任一步包含名单内技能都会检查；赶路或装备步骤不能绕过额度。留空时不暂缓任何任务。',
+      },
+      'worlds.minecraft.repeatSuccessFallback.maxSuccesses': {
+        type: 'integer', title: '窗口内允许成功次数', minimum: 2, maximum: 20, 'x-hot': true,
+        description: '同一目标技能在窗口内成功达到此数后，后续同类新单暂缓到最早一次成功过期。',
+      },
+      'worlds.minecraft.repeatSuccessFallback.windowMinutes': {
+        type: 'integer', title: '成功计数窗口', minimum: 1, maximum: 60,
+        'x-suffix': '分钟', 'x-hot': true,
+      },
+      'worlds.minecraft.decision.enabled': {
+        type: 'boolean', title: '受阻辅助判断', 'x-hot': true,
+        description: '任务受阻后异步询问外部判断服务；建议随事件投递，不执行动作，不延迟原任务回执。',
+      },
+      'worlds.minecraft.decision.endpoint': {
+        type: 'string', title: '辅助判断接口', 'x-hot': true,
+        description: '接收 state 与 questions 的 JSON POST 地址；空值不发请求。',
+      },
+      'worlds.minecraft.decision.timeoutMs': {
+        type: 'integer', title: '辅助判断超时', minimum: 50, maximum: 5000, 'x-suffix': 'ms', 'x-hot': true,
+      },
+      'worlds.minecraft.decision.minIntervalMs': {
+        type: 'integer', title: '辅助判断最短间隔', minimum: 0, maximum: 60000, 'x-suffix': 'ms', 'x-hot': true,
+      },
+      'worlds.minecraft.idle.enabled': {
+        type: 'boolean', title: '空闲小动作', 'x-hot': true,
+        description: '空闲时穿插转头、姿态与只读背包预览；任务、战斗和交互开始时取消。默认关闭。',
+      },
+      'worlds.minecraft.idle.selector': {
+        type: 'string', enum: ['random', 'decision'], title: '小动作选择', 'x-hot': true,
+        description: 'random 随机轮换；decision 异步调用选择服务，失败时明确记录并回退随机。',
+      },
+      'worlds.minecraft.idle.afterArrival': {
+        type: 'boolean', title: '到达后观察四周', 'x-hot': true,
+        description: '导航完成且队列空闲后立即随机选择一次转头观察，之后沿用小动作间隔。',
+      },
+      'worlds.minecraft.idle.endpoint': {
+        type: 'string', title: '小动作选择接口', 'x-hot': true,
+        description: '接收 state 字典与 questions.action 选择题的 JSON POST 地址。',
+      },
+      'worlds.minecraft.idle.decisionPolicy': {
+        type: 'string', enum: ['choice', 'sample'], title: '快模型选择方式', 'x-hot': true,
+        description: 'choice 使用模型首选；sample 按模型给出的概率选择，保留场景偏好并增加变化。两者都允许静止。',
+      },
+      'worlds.minecraft.idle.timeoutMs': {
+        type: 'integer', title: '小动作选择超时', minimum: 50, maximum: 2000, 'x-suffix': 'ms', 'x-hot': true,
+      },
+      'worlds.minecraft.idle.minIdleMs': {
+        type: 'integer', title: '开始小动作前空闲时间', minimum: 1000, maximum: 60000, 'x-suffix': 'ms', 'x-hot': true,
+      },
+      'worlds.minecraft.idle.minIntervalMs': {
+        type: 'integer', title: '小动作最短间隔', minimum: 5000, maximum: 120000, 'x-suffix': 'ms', 'x-hot': true,
+      },
+      'worlds.minecraft.idle.maxIntervalMs': {
+        type: 'integer', title: '小动作最长间隔', minimum: 5000, maximum: 300000, 'x-suffix': 'ms', 'x-hot': true,
+      },
+      'worlds.minecraft.idle.allowMovement': {
+        type: 'boolean', title: '允许空闲短步', 'x-hot': true,
+        description: '只走已加载、连续实心平地上的短步，不挖掘、搭路或进入水中。',
       },
       'worlds.minecraft.reflex.fightBack': {
         type: 'boolean', title: '受击反击', 'x-hot': true,

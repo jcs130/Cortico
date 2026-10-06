@@ -4,7 +4,7 @@
  * (进程内);这里只验证跨进程语义。不连接 Minecraft 服务器，工具与面板按未连接
  * 状态的既定契约响应。
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,7 +12,7 @@ import type { EventEnvelope, WorldHost, PushOptions } from '../../../src/core/ty
 import { renderWorldEnvPrompt } from '../../../src/core/prefix.ts';
 import { MinecraftWorldProxy } from '../../../src/worlds/minecraft/proxy.ts';
 import { MINECRAFT_DEFAULTS, type MinecraftConfigSection } from '../../../src/worlds/minecraft/config.ts';
-import { MINECRAFT_TOOL_DECLS } from '../../../src/worlds/minecraft/world.ts';
+import { minecraftToolDecls } from '../../../src/worlds/minecraft/world.ts';
 
 class FakeHost implements WorldHost {
   events: Array<{ e: EventEnvelope; opts?: PushOptions }> = [];
@@ -114,7 +114,7 @@ describe('MinecraftWorldProxy(引擎子进程)', () => {
 
   it('工具面与真 World 逐字节一致(共用同一份声明)', () => {
     const names = proxy.tools().map((t) => t.name);
-    expect(names).toEqual(MINECRAFT_TOOL_DECLS.map((d) => d.name));
+    expect(names).toEqual(minecraftToolDecls(false).map((d) => d.name));
   });
 
   it('工具调用过界:mc_stop 回队列文本', async () => {
@@ -158,6 +158,11 @@ describe('MinecraftWorldProxy(引擎子进程)', () => {
     expect(typeof chests!.stat()).toBe('string');
     const cleared = await chests!.clear();
     expect(typeof cleared).toBe('string');
+    // 前缀渲染在主进程；任务与目标状态从引擎状态帧同步过来。
+    await waitFor(() => proxy.envPromptVars()['minecraft.current_task'] === '(手上没有在做的事)');
+    const { text } = await renderWorldEnvPrompt(proxy);
+    expect(text).toContain('**正在做**：(手上没有在做的事)');
+    expect(text).not.toContain('{{minecraft.current_task}}');
   });
 
   it('子进程日志转发回主进程宿主', async () => {
@@ -186,7 +191,7 @@ describe('MinecraftWorldProxy(引擎子进程)', () => {
     (host as unknown as { cognition?: unknown }).cognition = {
       request: async (req: { brief: string; tools?: string[] }) => {
         briefs.push(req.brief);
-        expect(req.tools).toEqual(['mc_blueprint']);
+        expect(req.tools).toEqual(['mc_blueprint', 'mc_visual']);
         const jobId = req.brief.match(/job_id 是「([^」]+)」/)?.[1];
         expect(jobId).toMatch(/^bpj_/);
         const revision = briefs.length > 1;
@@ -275,6 +280,50 @@ describe('MinecraftWorldProxy(前缀变量)', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('MinecraftWorldProxy 请求事实缓存', () => {
+  function cachedProxy() {
+    const proxy = new MinecraftWorldProxy({ cfg: structuredClone(MINECRAFT_DEFAULTS) });
+    const internal = proxy as any;
+    internal.host = new FakeHost();
+    internal.child = { connected: true };
+    internal.ready = true;
+    const rpc = vi.spyOn(internal, 'rpc');
+    const note = (requestFacts: { text: string; snapshotTypes: readonly string[] } | null) => internal.onNote({
+      kind: 'status', decl: {}, storage: [],
+      promptVars: { 'minecraft.current_task': '空闲', 'minecraft.goals': '空表' },
+      requestFacts,
+    });
+    return { proxy, internal, rpc, note };
+  }
+
+  it('同步读取状态帧里的事实，无额外 RPC；未知和断线状态返回 null', () => {
+    const { proxy, internal, rpc, note } = cachedProxy();
+    expect(proxy.requestFacts()).toBeNull();
+    const facts = { text: '[Minecraft 当前读数；采样 2026-10-04T15:00:00+08:00]\n完整背包',
+      snapshotTypes: ['minecraft.world.snapshot', 'minecraft.task.queue'] };
+    note(facts);
+    expect(proxy.requestFacts()).toEqual(facts);
+    expect(proxy.requestFacts()).not.toBe(facts);
+    expect(rpc).not.toHaveBeenCalled();
+    note(null); // 引擎仍在，但 Minecraft 已断线。
+    expect(proxy.requestFacts()).toBeNull();
+    note(facts);
+    internal.child.connected = false;
+    expect(proxy.requestFacts()).toBeNull();
+  });
+
+  it('子进程退出清空读数，下一代引擎在新状态帧前不使用旧缓存', () => {
+    const { proxy, internal, note } = cachedProxy();
+    note({ text: '上一代采样', snapshotTypes: ['minecraft.world.snapshot'] });
+    expect(proxy.requestFacts()).not.toBeNull();
+    internal.teardownChild();
+    expect(proxy.requestFacts()).toBeNull();
+    internal.child = { connected: true };
+    internal.ready = true;
+    expect(proxy.requestFacts()).toBeNull();
   });
 });
 

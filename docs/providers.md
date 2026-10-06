@@ -2,8 +2,8 @@
 
 # Provider
 
-Provider 适配模型服务的通信协议。仓库内建 `openai-responses-compat`（原生 Responses API）与
-`llamacpp`（本机 llama-server，支持下载和进程托管）；其他实现通过扩展包安装，如
+Provider 适配模型服务的通信协议。仓库内建 `openai-responses-compat`（原生 Responses API）、
+`openai-chat-compat`（兼容 Chat Completions 的服务）与 `llamacpp`（本机 llama-server，支持下载和进程托管）；其他实现通过扩展包安装，如
 `cortico-provider-grok`。模型在端点配置中选择，Persona 不指定模型。
 
 ## 端点表
@@ -62,6 +62,23 @@ provider 模块不预设任何模型名;端点
 
 ## 内建 openai-responses-compat
 
+`options.maxContextImages` 可选地限制保存的图像附件重放；默认未设置，不限数量。
+设置为 N 时只展开最新 N 个不同的附件句柄，每个仅在最后一次引用处展开；0 只保留附件文字。
+超出预算的旧图不读取字节，原文字说明、时间与工具调用配对保留，运行记录和 Memory 不变。
+该预算不限制请求中已有的原生 `input_image` 分片，也不会自动应用到其他 provider。
+
+`options.imageReplayPlacement` 默认为 `inline`；选择 `tail` 后，保存的附件图像在文字
+历史末尾展开，并附带句柄、原说明、来源及可用的时间戳。图像预算滚动时，前部文字
+与工具配对不会随之改写，可继续命中前缀缓存。原生 `input_image` 分片保留原位。
+
+`options.imageReplayScope` 默认 `history`，按预算回放历史图像。`fresh` 只回放最近一次
+真实模型输出（assistant 消息、工具调用或推理项）之后新增的图像，合成 head 示例不计。
+两个并行工具返回的图像可一起分析；模型随后回复或调用其他工具时，不再展开这些旧图。
+同一请求失败或取消后重试，图像范围不变。该范围同时约束附件和原生 `input_image`；
+旧的原生图片从本次请求副本移除，同项文字和其他内容保留，纯图片项改为未回放的事实占位。
+原记录、附件句柄和 Memory 保留；需要再次查看时可重新提交图像。文字历史继续原样回放。
+该选项适用于不复用多模态缓存的端点；前缀是否实际命中由上游决定。
+
 `POST <baseUrl>/responses`,每次请求重放完整上下文。历史推理按 `options.reasoningReplay` 回传:
 `encrypted`(默认)只回 `encrypted_content`,且只回来源实例、模块、兼容域与模型均匹配的项,受
 `keepPastThinking` 控制;`plaintext` 把推理文字以 `reasoning_text` 回传,最后一条 user 消息之后的
@@ -75,6 +92,20 @@ provider 模块不预设任何模型名;端点
 
 模型上下文上限取服务探测值与配置的 `contextWindow` 中的较小者；Core 根据该上限限制请求
 容量，阶段预算由 Persona 决定（见 [sessions.md](sessions.md)）。
+
+## 内建 openai-chat-compat
+
+`POST <baseUrl>/chat/completions`，通过通用 Chat 传输层处理流式文字、工具调用、取消和用量。
+地址、密钥和模型由用户在端点页填写；模块不预设供应商或模型。
+
+`options.reasoningMode` 默认 `reasoning_effort`，按模型配置发送推理档位；`extra_body` 则由
+端点的 `options.extraBody` 提供上游需要的开关，不发送通用推理档位。
+`options.replayReasoning` 默认关闭；开启后按思维链保留策略回传 `reasoning_content`。
+路径、附加请求头、附加请求体分别使用 `endpointPath`、`extraHeaders`、`extraBody`，模型目录走
+`GET <baseUrl>/models`。供应商特有参数放在端点配置中。
+
+Persona 的后台规划与总结可选择独立端点，主 session 继续使用 `activeProvider`；后台端点失败
+不会自动改用前台端点。配置方式与生命周期见 [bots/cortiv/README.md](../bots/cortiv/README.md)。
 
 ## 内建 llamacpp
 

@@ -43,6 +43,7 @@ import { openRun, writeRunJson, type RunInfo } from './run.ts';
 import { currentAnchors } from './log-context.ts';
 import { MainLoop, type ContextFacts } from './loop.ts';
 import type { ResponseClient } from './generation.ts';
+import { GenerationScheduler } from './generation-scheduler.ts';
 
 /** 单个 World 的停止期限；失败或超时写入结果，其他停止操作继续。 */
 const MODULE_STOP_MS = 20_000;
@@ -106,6 +107,7 @@ export class Core<C extends CoreConfig = CoreConfig> {
   private readonly hiddenPushes = new Map<string, { count: number; notedAtMs: number }>();
   readonly providers: ProviderRegistry;
   private readonly moduleHostLeases = new Map<World, { active: boolean }>();
+  private readonly generationScheduler = new GenerationScheduler();
 
   constructor(loaded: LoadedConfig<C>, deps: CoreDeps) {
     this.loaded = loaded;
@@ -171,7 +173,13 @@ export class Core<C extends CoreConfig = CoreConfig> {
     this.loop = new MainLoop({
       cfg,
 
-      llm: this.llm,
+      llm: {
+        respond: async (request, options) => {
+          const release = this.generationScheduler.foreground(this.config.activeProvider);
+          try { return await this.llm.respond(request, options); }
+          finally { release(); }
+        },
+      },
       persona: deps.persona,
       decl: main[0],
       spec: () => this.activeSpec(),
@@ -191,6 +199,7 @@ export class Core<C extends CoreConfig = CoreConfig> {
       toolLog: this.toolLog,
       transcript: this.transcript,
       toolOwner: (name) => this.worlds.find((m) => m.tools().some((t) => t.name === name))?.id,
+      beginForeground: () => this.generationScheduler.foreground(this.config.activeProvider),
     });
     this.bus.setPreemptHandler(() => {
       this.loop.abortCurrentRound();
@@ -306,12 +315,18 @@ export class Core<C extends CoreConfig = CoreConfig> {
   }
 
   /**
-   * 创建临时 session；在创建时绑定当前活跃端点与模型，工具和轮数来自声明或调用参数。
+   * 创建临时 session；在创建时绑定所选 provider 的端点与模型，工具和轮数来自声明或调用参数。
    * 记录并发数与用量；并发限制由 Persona 决定。
    */
   async spawnFork(opts: ForkOptions): Promise<string> {
     const decl = this.sessionDecls.get(opts.id);
     if (!decl) throw new Error(`未声明的session: ${opts.id}`);
+    opts.signal?.throwIfAborted();
+    this.generationScheduler.signal.throwIfAborted();
+    const { name, entry } = opts.provider === undefined ? this.activeProviderEntry() : this.providerEntry(opts.provider);
+    if (!entry.spec) throw new Error(`LLM provider ${name} 还没选模型`);
+    const spec = { ...entry.spec, ...(opts.model ? { model: opts.model } : {}), ...(opts.maxOutputTokens !== undefined ? { maxTokens: opts.maxOutputTokens } : {}) };
+    const llm = opts.provider === undefined ? this.llm.bind?.() ?? this.llm : this.providers.bind(name);
     let observedMessages = opts.messages;
     const track = this.sessions.open(decl.id, decl.label, {
       messagesRef: () => observedMessages,
@@ -320,21 +335,30 @@ export class Core<C extends CoreConfig = CoreConfig> {
     try {
       return await runForkLoop({
         id: decl.id,
-        llm: this.llm.bind?.() ?? this.llm,
-        spec: this.activeSpec(),
+        llm,
+        spec,
         messages: opts.messages,
         tools: opts.tools ?? decl.tools(),
         maxRounds: decl.rounds().hard,
         softRounds: decl.rounds().soft,
         log: this.log.child(`fork.${decl.id}`),
         stopWhen: opts.stopWhen,
+        signal: opts.signal ? AbortSignal.any([opts.signal, this.generationScheduler.signal]) : this.generationScheduler.signal,
+        ...(opts.generationPriority === 'background' ? {
+          generationScheduler: this.generationScheduler,
+          generationResource: name,
+          generationWaitTimeoutMs: opts.generationWaitTimeoutMs,
+        } : {}),
+        prepareRequest: opts.prepareRequest,
         wrapUpHint: opts.wrapUpHint,
+        incompleteHint: opts.incompleteHint,
         capNote: opts.capNote,
         nudge: opts.nudge,
         track,
         observeMessages: (messages) => {
           observedMessages = messages;
         },
+        onToolOutcome: this.persona.onToolOutcome?.bind(this.persona),
       });
     } finally {
       this.forkRunning.set(decl.id, Math.max(0, (this.forkRunning.get(decl.id) ?? 1) - 1));
@@ -372,7 +396,13 @@ export class Core<C extends CoreConfig = CoreConfig> {
         const running = (this.cognitionRunning.get(mod.id) ?? 0) + 1;
         this.cognitionRunning.set(mod.id, running);
         try {
-          return await impl.request({ ...req, brief }, { worldId: mod.id, tools, running });
+          const blobs = this.internBlobs(req.blobs);
+          const unsupported = blobs?.filter((blob) => !this.modelFacts().accepts(blob.mime));
+          if (unsupported?.length) {
+            return { error: `当前模型通道不支持本次附件格式：${[...new Set(unsupported.map((blob) => blob.mime))].join(' / ')}` };
+          }
+          const { blobs: _input, ...task } = req;
+          return await impl.request({ ...task, brief }, { worldId: mod.id, tools, running, ...(blobs ? { blobs } : {}) });
         } catch (e) {
           // Persona 异常转换为请求错误，返回 World。
           log.warn('认知请求受理失败', { err: e });
@@ -446,8 +476,11 @@ export class Core<C extends CoreConfig = CoreConfig> {
   }
 
   activeProviderEntry(): { name: string; entry: LLMProviderEntry } {
+    return this.providerEntry(this.loaded.config.activeProvider);
+  }
+
+  private providerEntry(name: string): { name: string; entry: LLMProviderEntry } {
     const cfg = this.loaded.config;
-    const name = cfg.activeProvider;
     const entry = cfg.providers?.[name];
     if (!entry) {
       const known = Object.keys(cfg.providers ?? {}).join(' / ') || '(空)';
@@ -671,6 +704,7 @@ export class Core<C extends CoreConfig = CoreConfig> {
 
   async stop(): Promise<WorldStopFailure[]> {
     this.started = false;
+    this.generationScheduler.stop();
     this.loop.stop();
     this.timers.stop();
     const failures: WorldStopFailure[] = [];

@@ -15,6 +15,7 @@ Core 管理 session、事件流与模型调用的生命周期，包括事件投�
 | `loop.ts` | 主 session 的模型调用循环、事件投递、上下文交接执行 |
 | `bus.ts` | `WakeBus`：合批事件总线、四种触发模式、FIFO 顺序、暂停与投递闸门 |
 | `fork.ts` | 临时 session 的工具循环 |
+| `tool-outcome.ts` | Persona 对完成工具结果的同步补充，保留原日志与控制字段 |
 | `session.ts`、`sessions.ts` | 常驻 session 的追加式上下文；各 session 的状态与用量记录 |
 | `event-store.ts` | 按 run 分片的 JSONL 事件库,cursor 跨 run 全局单调 |
 | `state.ts`、`run.ts`、`timers.ts` | `core-state.json`;run 目录;通用持久定时器 |
@@ -68,6 +69,19 @@ piggyback 只入队，随后续唤醒一起投递。
 一批正文归档后，Core 调用 `Persona.onDelivery` 并等待它返回的 Promise,不设期限。完成前
 `injectInternal` 的内容排在这批的内部行末尾、外部正文之前;完成后的注入进入总线。
 
+模型请求经过可选的 `Persona.prepareRequest` 同步钩子。该视图只用于本轮模型调用；持久 Session、投递水位、
+交接和 fork 快照保留完整记录。投影视图的上游用量记入 `lastUsage`，不作为完整 Session 的 token 计数 anchor。
+轮次日志的 `requestContext` 记录完整与实际请求的条数、是否投影及估算输入量。
+
+`ForkOptions.prepareRequest` 可按轮次生成临时请求视图，默认发送完整上下文；Core 深拷贝输入并校验记录与工具配对，
+无效投影回退到完整上下文。工具执行、归档和重试沿用完整的已完成记录。
+
+`ForkOptions.generationPriority = 'background'` 使该 fork 的模型调用让出同 provider 实例的前台批次，模型别名共享资源。
+后台请求在等待中按先后顺序取用资源，前台到来时取消在途生成；已执行工具与回执保留，未提交的输出被移除，
+同一轮等待前台全部模型和工具轮结束后重新生成，取消用量照常记录。不同 provider 实例各自调度。
+每次资源等待默认最多 60 秒，可用 `generationWaitTimeoutMs` 指定；调用方取消或 `Core.stop()` 同时释放等待和在途请求。
+未设置优先级的 fork 保留并发行为。Persona 只应把独立后台任务声明为 background，前台工具直接等待的 fork 使用默认行为。
+
 状态 0、429 或 5xx 的模型调用失败，可保留已记录的输出和工具回执，按 `ResubmitPolicy` 重试。
 默认允许连续重试 2 次、每批最多 4 次，退避为 2 秒、10 秒；上下文超限、抢占、关机或轮数
 达到硬上限时不重试。
@@ -75,6 +89,10 @@ piggyback 只入队，随后续唤醒一起投递。
 参数不是合法 JSON 时返回 `TOOL_FAILED_BAD_ARGS`，不执行工具；未知工具返回 `UNKNOWN_TOOL`；
 handler 异常转为失败回执。流式生成时 `EagerDispatch` 可提前执行完整的工具调用，遵守
 `barrierAfter` 顺序，并按 call id 配对结果。回执超过 8000 字符时记录 warn。
+
+主会话和 fork 在 handler 正常返回结果（包括失败回执）后调用可选的 `Persona.onToolOutcome`；其返回文本只追加到
+上下文正文。Core 保留原工具日志、`failed`、`endsTurn` 和附件，钩子异常不影响工具结果。
+未执行或没有正常返回结果的调用不保证经过该钩子。
 
 ## 上下文
 

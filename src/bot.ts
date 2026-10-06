@@ -1204,6 +1204,7 @@ export function createBot<C extends CoreConfig>(
           await core.loop.reloadSystemPrefix();
           return botText(language).visibility.prefixReloaded(Math.max(0, core.session.records.length - 1));
         },
+        handoff: () => core.loop.handoffContext(),
       },
       run: {
         pause: () => core.bus.setPaused(true),

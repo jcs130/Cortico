@@ -133,8 +133,9 @@ describe.sequential('CortiV 集成测试', () => {
 
   it('把弹幕突发、人流读数和高价值礼物接进同一条真实投递链', async () => {
     const callsBefore = llm.calls.length;
-    feedBilibili({ cmd: 'INTERACT_WORD_V2', data: {} });
-    feedBilibili({ cmd: 'INTERACT_WORD_V2', data: {} });
+    feedBilibili({ cmd: 'INTERACT_WORD', data: { msg_type: 1, uid: 0 } });
+    feedBilibili({ cmd: 'INTERACT_WORD', data: { msg_type: 1, uid: 0 } });
+    feedBilibili({ cmd: 'INTERACT_WORD', data: { msg_type: 1, uid: 64, uname: '访客甲' } });
     feedBilibili({ cmd: 'WATCHED_CHANGE', data: { num: 288429 } });
     feedBilibili(danmaku(42, '阿明', '刷怪塔要记得照明外圈'));
     feedBilibili(danmaku(84, '小羽', '农场旁边留红石检修道'));
@@ -147,9 +148,16 @@ describe.sequential('CortiV 集成测试', () => {
     await waitFor(() => bot.core.store.range({}).some((event) =>
       event.type === 'bilibili.audience' && event.text.includes('2 人进场')));
     await waitFor(() => legacyMessages(bot.core.session.records).some((message) =>
-      message.role === 'tool' && message.content.includes('刷怪塔要记得照明外圈')));
+      message.role === 'user' && message.content.includes('刷怪塔要记得照明外圈')));
+    const delivered = legacyMessages(bot.core.session.records).find((message) =>
+      message.role === 'user' && message.content.includes('刷怪塔要记得照明外圈'))!;
+    expect(delivered.content).toContain('均为外界事件原文');
+    expect(legacyMessages(bot.core.session.records).some((message) =>
+      message.role === 'tool' && message.content.includes('刷怪塔要记得照明外圈'))).toBe(false);
 
     const events = bot.core.store.range({});
+    expect(events.some(event => event.type === 'bilibili.enter' && event.senderKey === '64'
+      && event.meta?.uname === '访客甲' && event.contextDelivery !== 'archive-only')).toBe(true);
     const danmakuEvents = events.filter((event) => event.type === 'bilibili.danmaku');
     expect(danmakuEvents
       .filter((event) => event.contextDelivery !== 'archive-only')

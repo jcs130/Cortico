@@ -337,7 +337,7 @@ describe('mc_check · 蓝图 {blueprint}', () => {
     const world = fakeWorld({ cells: { '0,0,0': 'oak_planks', '1,0,0': 'oak_planks' } });
     const said = blueprintCheckText(site([0, 0, 0]), 'home-useful-v2', world);
     expect(said.verdict).toBe('ok');
-    expect(said.text).toBe('蓝图「home-useful-v2」对上 2/2 格,整张图都到位了');
+    expect(said.text).toBe('蓝图「home-useful-v2」对上 2/2 格,绑定原点 (0, 0, 0),整张图都到位了');
   });
 
   it('缺格点名:什么方块在哪', () => {
@@ -369,6 +369,18 @@ describe('mc_check · 蓝图 {blueprint}', () => {
     expect(said.verdict).toBe('unknown');
     expect(said.text).toContain('1 格没加载,没对全');
     expect(said.text).not.toContain('缺 ');
+  });
+
+  it('异地工地全部未加载时保留绑定原点和未知语义', () => {
+    const world = fakeWorld({ fill: null });
+    world.position = () => [97, 70, -204];
+    const said = blueprintCheckText(site([100, 70, -200]), 'home-useful-v2', world);
+    expect(said.verdict).toBe('unknown');
+    expect(said.text).toContain('绑定原点 (100, 70, -200)');
+    expect(said.text).toContain('距当前位置直线 5.0 格');
+    expect(said.text).toContain('这些格的现状未知');
+    expect(said.text).not.toContain('缺 ');
+    expect(said.text).not.toContain('冲突 ');
   });
 
   it('走 {blueprint:key} 这条断言进来是同一份账', () => {

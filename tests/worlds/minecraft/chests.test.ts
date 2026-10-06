@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -24,6 +24,26 @@ describe('ChestBook', () => {
     expect(raw['overworld:1,64,2'].items[0].name).toBe('coal');
     const b = new ChestBook(file);
     expect(b.get('overworld', { x: 1, y: 64, z: 2 })?.items).toEqual([{ name: 'coal', count: 16 }]);
+    expect(b.get('overworld', { x: 1, y: 64, z: 2 })?.observedAt)
+      .toBe(a.get('overworld', { x: 1, y: 64, z: 2 })!.observedAt);
+  });
+
+  it('物品来源只列本维度的精确物品，累加同箱栈并保留旧记录的未知时间', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mc-chests-'));
+    dirs.push(dir);
+    const file = join(dir, 'minecraft-chests.json');
+    writeFileSync(file, JSON.stringify({
+      'overworld:1,64,2': { x: 1, y: 64, z: 2, dimension: 'overworld', usedSlots: 3, slots: 27,
+        items: [{ name: 'coal', count: 3 }, { name: 'coal', count: 4 }, { name: 'coal_block', count: 9 }] },
+    }));
+    const book = new ChestBook(file);
+    book.remember('the_nether', { x: 1, y: 64, z: 2 }, [{ name: 'coal', count: 20 }], 1, 27);
+    expect(book.itemSources('overworld', 'coal')).toEqual([
+      { x: 1, y: 64, z: 2, count: 7, observedAt: undefined },
+    ]);
+    expect(book.itemSources('overworld', 'co')).toEqual([]);
+    book.remember('overworld', { x: 1, y: 64, z: 2 }, [], 0, 27);
+    expect(book.itemSources('overworld', 'coal')).toEqual([]);
   });
 
   it('clear 清空内存和文件', () => {

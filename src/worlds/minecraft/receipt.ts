@@ -16,6 +16,7 @@ import { equipDestOf } from './tools.ts';
 import { type Anchor, type BoxFill, type ShapeName } from './geometry.ts';
 import { LIQUIDS, type RegionReading } from './cell-facts.ts';
 import { minHarvestTool } from './tools.ts';
+import { inventoryReadConfirmed } from './inventory-window-sync.ts';
 
 /**
  * mineflayer/pathfinder 的英文报错翻成中文再进事件:上下文里除方块/物品 id 之外
@@ -77,6 +78,9 @@ export function describeSkill(c: SkillCall, heldItem?: string | null): string {
       : `在周围 ${c.distance} 格内找${zhThing(c.target)}`;
     case 'flee': return `远离敌对生物(拉开 ${c.distance} 格)`;
     case 'surface': return '脱离水体或向上到露天';
+    case 'look': return `原地看向 ${anchorsText([c.at])}`;
+    case 'flight': return `${c.land === false ? '飞至空中悬停' : '飞到安全落脚点'} ${anchorsText([c.at])}`;
+    case 'land': return '从空中安全落地';
     case 'collect': return `采集 ${c.count} 个${zhName(c.block)}${c.buried ? '(可挖过去)' : ''}${tool}`;
     case 'fish': return `钓一竿${c.at ? `(在 ${anchorsText([c.at])})` : ''}`;
     case 'build': {
@@ -99,12 +103,16 @@ export function describeSkill(c: SkillCall, heldItem?: string | null): string {
       return `${head}沿${SHAPE_ZH[c.shape]}搭${fillText(c)}${zhName(c.material)} ${anchorsText(c.anchors)}`;
     }
     case 'excavate': return `${c.dryRun ? '试算:' : ''}挖开${fillText(c)}${SHAPE_ZH[c.shape]} ${anchorsText(c.anchors)}${tool}`;
-    case 'tunnel':
-      return `${c.dryRun ? '试算:' : ''}挖${c.spiral ? '螺旋楼梯' : '通道'}到 ${anchorsText([c.at])}` +
+    case 'tunnel': {
+      const y = c.at[1];
+      const delta = typeof y === 'string' && /^~[+-]?\d+$/.test(y) ? Number(y.slice(1)) : 0;
+      const vertical = delta > 0 ? `（向上 ${delta} 格）` : delta < 0 ? `（向下 ${-delta} 格）` : '';
+      return `${c.dryRun ? '试算:' : ''}挖${c.spiral ? '螺旋楼梯' : '通道'}到 ${anchorsText([c.at])}${vertical}` +
         `${c.until && c.until.length > 0 ? `(${untilText(c.until).replace(/^,/, '')})` : ''}${tool}`;
+    }
     case 'probe': return `探查${fillText(c)}${SHAPE_ZH[c.shape]} ${anchorsText(c.anchors)}`;
     case 'use': {
-      const what = c.item ? `用${zhName(c.item)}` : heldItem ? `用${zhName(heldItem)}` : '空手';
+      const what = c.item ? `用${zhName(c.item)}` : c.at ? '空手' : heldItem ? `用${zhName(heldItem)}` : '空手';
       const n = (c.times ?? 1) > 1 ? ` ${c.times} 次` : '';
       if (c.target) {
         if (c.index === undefined) return `${what}右键${zhEntity(c.target)}${n}`;
@@ -148,7 +156,7 @@ export function describeSkill(c: SkillCall, heldItem?: string | null): string {
     }
     case 'pickup': return c.item ? `捡起附近的${zhName(c.item)}` : '捡起附近的掉落物';
     case 'toss':
-      return `扔掉 ${c.count} 个${zhName(c.item)}${c.at ? `,朝 ${anchorsText([c.at])}` : ''}`;
+      return `抛出 ${c.count} 个${zhName(c.item)}${c.at ? `,朝 ${anchorsText([c.at])}` : ''}`;
     case 'lead': {
       if (c.off) return '松开牵着的活物';
       const who = c.target ? zhEntity(c.target) : '牵着的活物';
@@ -156,13 +164,16 @@ export function describeSkill(c: SkillCall, heldItem?: string | null): string {
       if (c.to) return `用拴绳把${who}牵去 ${anchorsText([c.to])}${tie}`;
       return c.tie ? `把${who}${tie.slice(1)}` : `用拴绳拴住${who}`;
     }
-    case 'stow': return `把 ${c.count} 个${zhName(c.item)}存进箱子`;
+    case 'stow': return `把 ${c.count} 个${zhName(c.item)}存进${c.into === 'open' ? '当前打开的容器' : '箱子'}`;
+    case 'compact': return '整理当前打开的容器';
+    case 'server_travel': return `使用服务端命令抵达 ${c.at.join(',')}`;
     case 'take': {
       if (!c.at) return `从箱子取出 ${c.count ?? 1} 个${zhName(c.item!)}`;
       const spot = anchorsText([c.at]);
       return c.item ? `从 ${spot} 的容器取出 ${c.count ?? 1} 个${zhName(c.item)}` : `掏空 ${spot} 的容器`;
     }
     case 'chat': return `说: ${c.text}`;
+    case 'gesture': return `向 ${c.name}${c.motion === 'wave' ? '挥手' : c.motion === 'bow' ? '鞠躬' : '点头'}`;
   }
 }
 
@@ -268,6 +279,7 @@ export function blockedOnItems(why: string): boolean {
 
 /** 物品类受阻时附当前全量背包，与快照共用渲染，只报告事实。 */
 export function bagNow(bot: Bot): string {
+  if (!inventoryReadConfirmed(bot)) return '\n[背包] 当前清单未完整同步，不能确认物品数量。';
   const items: ItemStack[] = bot.inventory.items().map((it) => {
     const ench = readEnchants(it as never, bot.registry as never);
     return { name: it.name, count: it.count, ...(ench.length > 0 ? { enchantments: ench } : {}) };
@@ -297,12 +309,12 @@ export function fmtDur(ms: number): string {
   return `${Math.floor(s / 60)}m${s % 60 > 0 ? `${s % 60}s` : ''}`;
 }
 
-export function contentsText(items: ItemStack[]): string {
+export function contentsText(items: ItemStack[], includeIds = false): string {
   if (items.length === 0) return '空的';
   return items
     .slice()
     .sort((a, b) => b.count - a.count)
-    .map((i) => `${zhName(i.name)}×${i.count}`)
+    .map((i) => `${zhName(i.name)}${includeIds && zhName(i.name) !== i.name ? `(${i.name})` : ''}×${i.count}`)
     .join('、');
 }
 
@@ -323,13 +335,14 @@ export function noDropMaterials(bot: Bot, reading: RegionReading): string[] {
   return out;
 }
 
-/** 材质构成一句话:量大在前,矿石带最近坐标 */
-export function compositionText(reading: RegionReading): string {
+/** 材质构成按数量排序；探查可附每种材质的最近样本坐标。 */
+export function compositionText(reading: RegionReading, includeSamples = false): string {
   const parts = [...reading.counts.entries()]
     .sort((a, b) => b[1].n - a[1].n)
     .slice(0, 10)
     .map(([name, e]) => {
-      const spot = name.endsWith('_ore') ? `(最近的在 (${e.nearest.x}, ${e.nearest.y}, ${e.nearest.z}))` : '';
+      const spot = includeSamples || name.endsWith('_ore')
+        ? `(最近的在 (${e.nearest.x}, ${e.nearest.y}, ${e.nearest.z}))` : '';
       return `${zhName(name)}×${e.n}${spot}`;
     });
   const rest = reading.counts.size - Math.min(reading.counts.size, 10);

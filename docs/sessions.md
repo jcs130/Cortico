@@ -35,9 +35,13 @@ Cormini 一系的默认:64000 / 0.85 / 1/3;终端页上下文圈的分母与黄�
 
 ## fork
 
-`ForkOptions { id, messages, tools?, stopWhen?, wrapUpHint?, capNote?, nudge? }` 创建临时 session，
+`ForkOptions { id, messages, provider?, maxOutputTokens?, signal?, tools?, stopWhen?, wrapUpHint?, capNote?, nudge? }` 创建临时 session，
 运行独立的工具循环。World 发起的认知任务（cognition）及 Persona 的梦、潜意识任务使用此接口。
 Core 记录并发数，控制台「运行诊断 → 会话统计」显示各 session 的用量。
+
+`provider` 引用已注册的端点；缺省使用当前端点。创建时复制该端点的模型配置并绑定客户端，
+后续轮次沿用该绑定，端点缺失或未选模型时抛错。`maxOutputTokens` 只覆盖这条 fork 的输出上限。
+`signal` 取消模型请求；正在执行的工具完成后停止后续工具及轮次，并关闭会话、释放并发计数。
 
 ## 持久化
 

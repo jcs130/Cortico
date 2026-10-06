@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { message, record, functionCall, functionResult, responseRecords, itemText, withText, type ContextRecord, type Item } from '../protocol/open-responses/context.ts';
 import { hasRole, textOf, withoutPastReasoning, responseRequest, usageCounters } from '../protocol/open-responses/context-helpers.ts';
 import type { Response, StreamEvent } from '../protocol/open-responses/index.ts';
@@ -43,6 +44,7 @@ import type { CoreState } from './state.ts';
 import type { SessionHandle, SessionTracker } from './sessions.ts';
 import { assembleSystem, type EnvPromptDirs } from './prefix.ts';
 import { recordToolCall, type ToolCallLog } from './tool-log.ts';
+import { explainToolOutcome } from './tool-outcome.ts';
 import type { Transcript } from './transcript.ts';
 import { setAnchors, withAnchors } from './log-context.ts';
 import { withBlobLines } from './blobs.ts';
@@ -58,7 +60,8 @@ import {
   eventFrameHeader,
   toolFailed,
 } from './markers.ts';
-import { fixPairing, rebuildTail } from './truncate.ts';
+import { fixPairing, rebuildTail, validatePairing } from './truncate.ts';
+import { validateRequestContext } from './request-context.ts';
 
 import { nowIso, prefixFingerprint, renderEventLines } from './util.ts';
 
@@ -122,6 +125,8 @@ export interface MainLoopDeps {
   toolOwner?: (name: string) => string | undefined;
   /** 同一批内模型失败后重新请求的预算，缺省使用 DEFAULT_RESUBMIT。 */
   resubmit?: ResubmitPolicy;
+  /** Holds a provider resource through all model and tool rounds in the current event batch. */
+  beginForeground?: () => () => void;
 }
 
 /**
@@ -139,8 +144,10 @@ export interface ResubmitPolicy {
 }
 export const DEFAULT_RESUBMIT: ResubmitPolicy = { maxConsecutive: 2, maxPerBatch: 4, backoffMs: [2_000, 10_000] };
 
-/** 单条工具回执超过此长度记 warn。体积归 World 管,core 只观测,不截断。 */
+/** 单条工具回执超过此长度记 warn。 */
 const LARGE_RESULT_WARN_CHARS = 8_000;
+/** 工具回执的最后体积上限；工具自身可以设更紧的上限。 */
+const RECEIPT_HARD_CAP_CHARS = 20_000;
 
 export interface LoopStatus {
   running: boolean;
@@ -415,6 +422,20 @@ export class MainLoop {
     return [...msgs.slice(0, at), ...head, ...msgs.slice(at)];
   }
 
+  private requestMessages(outbound: ContextRecord[], round: number): ContextRecord[] {
+    const { persona, decl, log } = this.d;
+    if (!persona.prepareRequest) return outbound;
+    try {
+      const prepared = persona.prepareRequest({ sessionId: decl.id, round, messages: structuredClone(outbound) });
+      if (prepared == null) return outbound;
+      validateRequestContext(prepared);
+      return prepared;
+    } catch (error) {
+      log.warn('prepareRequest 失败,本轮使用完整上下文', { error: String(error) });
+      return outbound;
+    }
+  }
+
   /**
    * Persona 的合成开头,每次现取:system 与 developer 项丢弃,工具配对补齐,全部带不落盘标记。
    * Persona 没提供或抛错时为空。
@@ -455,7 +476,12 @@ export class MainLoop {
   /** 工具回执落库:附件内部化,每份的文本形态接在正文后。 */
   private toolResult(callId: string, out: ToolOutcome): ContextRecord {
     const blobs = this.d.blobs.intern(out.blobs);
-    return functionResult(callId, withBlobLines(out.text, blobs), blobs ? { blobs } : {});
+    let text = withBlobLines(out.text, blobs);
+    if (text.length > RECEIPT_HARD_CAP_CHARS) {
+      text = text.slice(0, RECEIPT_HARD_CAP_CHARS)
+        + `\n…[回执 ${text.length} 字符,截断至 ${RECEIPT_HARD_CAP_CHARS};完整内容请重调工具或查 World 账本]`;
+    }
+    return functionResult(callId, text, blobs ? { blobs } : {});
   }
 
   /** 一轮结束时先通知 Persona，再通知可见 World。 */
@@ -571,11 +597,13 @@ export class MainLoop {
     if (lines.length > 0) {
       const msg: ContextRecord = message('user', lines.join('\n'));
       if (ephemeral) msg.context.ephemeral = true;
-      // user 模式下事件块接在内部行后面:sidecar 的位置从那一段之后起算
+      const refs = frameEventRefs(internals, 0);
+      // user 模式下外部事件块接在内部行后面，正文顺序保持不变。
       if (events.length > 0 && inUser) {
         const base = lines.slice(0, -1).reduce((n, l) => n + l.length + 1, 0);
-        msg.context.frame = { events: frameEventRefs(events, base) };
+        refs.push(...frameEventRefs(events, base));
       }
+      if (refs.length > 0) msg.context.frame = { events: refs };
       const blobs = eventBlobs(inUser ? [...internals, ...events] : internals);
       if (blobs.length > 0) msg.context.blobs = blobs;
       session.append(msg);
@@ -920,12 +948,14 @@ export class MainLoop {
 
   /** 本批模型调用共享 sess 关联字段；每轮更新 round、resp 和 call。 */
   private rounds(generation: number): Promise<void> {
-    return withAnchors({ sess: this.d.decl.id }, () => this.roundsInScope(generation));
+    const release = this.d.beginForeground?.();
+    return withAnchors({ sess: this.d.decl.id }, () => this.roundsInScope(generation)).finally(() => release?.());
   }
 
   private async roundsInScope(generation: number): Promise<void> {
     if (!this.active(generation)) return;
     const { llm, session, log, bus, decl } = this.d;
+    const modelTools = this.toolDefs;
     const schemas = this.getToolSchemas();
     const caps = decl.rounds();
     this.roundsLastBatch = 0;
@@ -975,7 +1005,7 @@ export class MainLoop {
       // barrierAfter 阻止之后的调用提前执行。
       const eager = tap
         ? new EagerDispatch(
-            () => this.toolDefs, ctx, log, decl.id, this.d.toolLog,
+            () => modelTools, ctx, log, decl.id, this.d.toolLog,
             () => this.active(generation) && !flight.controller.signal.aborted,
             (name) => this.d.toolOwner?.(name),
           )
@@ -987,7 +1017,7 @@ export class MainLoop {
       let toolMs = 0;
       const noteRound = (outcome: string, extra: Record<string, unknown> = {}): void => {
         log.emit('debug', '一轮收束', { event: 'round', data: {
-          round: roundNo, outcome, llmMs, ttftMs, outputTokens: meters?.output ?? null, toolMs, ...extra,
+          round: roundNo, outcome, llmMs, ttftMs, outputTokens: meters?.output ?? null, toolMs, requestContext, ...extra,
         } });
       };
       const tapEvents = tap ? {
@@ -1005,7 +1035,17 @@ export class MainLoop {
       } : undefined;
       let assistant: ContextRecord[];
       let meters: TokenMeters | null = null;
-      const outbound = this.outboundMessages();
+      const completeOutbound = this.outboundMessages();
+      const outbound = this.requestMessages(completeOutbound, roundNo);
+      const projected = !isDeepStrictEqual(outbound, completeOutbound);
+      const requestContext = {
+        storedRecords: session.records.length,
+        completeRecords: completeOutbound.length,
+        requestRecords: outbound.length,
+        projected,
+        estimatedInputTokens: this.estimateOutbound(outbound),
+      };
+      if (projected) this.anchor = null;
       const prefixHash = prefixFingerprint(outbound);
       try {
         // role 仅用于故障分类，不写入请求体。
@@ -1123,7 +1163,7 @@ export class MainLoop {
       const calls = assistant.flatMap(entry => entry.item.type === 'function_call' ? [entry.item] : []);
       this.pendingToolCalls = new Set(calls.map((call) => call.call_id));
       for (const entry of assistant) session.append(entry);
-      if (meters && meters.input !== null && meters.output !== null) {
+      if (!projected && meters && meters.input !== null && meters.output !== null) {
         this.anchor = { records: session.records.length, tokens: meters.input + meters.output, reasoningTokens: meters.reasoning ?? 0 };
       }
       if (!this.active(generation)) return;
@@ -1160,7 +1200,7 @@ export class MainLoop {
         }
 
         let out: ToolOutcome;
-        const def = this.toolDefs.find((t) => t.name === call.name);
+        const def = modelTools.find((t) => t.name === call.name);
         if (!def) {
           out = { text: UNKNOWN_TOOL };
           withAnchors({ call: call.call_id }, () => recordToolCall(this.d.toolLog, decl.id, call.name, null, Date.now(), out));
@@ -1186,7 +1226,10 @@ export class MainLoop {
             if (!this.active(generation)) return;
           }
           if (def.barrierAfter) barrierHit = true;
-          if (def.endsTurn) turnEnded = true;
+          if (def.endsTurn || out.endsTurn) turnEnded = true;
+          const completedArgs = parseToolArgs(call.arguments);
+          if (completedArgs) out = explainToolOutcome(this.d.persona.onToolOutcome?.bind(this.d.persona),
+            { role: decl.id, tool: call.name, args: completedArgs, outcome: out }, log);
         }
         if (out.text.length > LARGE_RESULT_WARN_CHARS) {
           log.warn('工具回执过长,体积归 World 管', { tool: call.name, chars: out.text.length, limit: LARGE_RESULT_WARN_CHARS });

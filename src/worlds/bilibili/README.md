@@ -17,6 +17,7 @@ B 站直播间协议只读接入。观众的弹幕、礼物、醒目留言、上
 | [`normalize.ts`](normalize.ts) | 原始 cmd → 归一化产物(事件 / 计数 / 读数 / 不推)。纯函数 |
 | [`protobuf.ts`](protobuf.ts) | 按字段号与 wire type 读取 protobuf；无法解析时返回 null |
 | [`gift-frame.ts`](gift-frame.ts) | `SEND_GIFT_V2` 的 pb blob → V1 字段形状。两种帧共用下游 |
+| [`interaction-frame.ts`](interaction-frame.ts) | `INTERACT_WORD_V2` 的 pb → UID、昵称和交互类型；保留 V1 JSON 路径 |
 | [`coalescing-buffer.ts`](coalescing-buffer.ts) | 相同弹幕与常规礼物进入事件总线前的固定窗归并 |
 | [`audience-admission.ts`](audience-admission.ts) | 按 UID 记录优先资格，以高能榜和批次预算决定是否筛选，并分配三类事件的上下文额度 |
 | [`world.ts`](world.ts) | 投递分档、人流聚合、公告工具、控制台数据面与 Overlay 接线 |
@@ -28,6 +29,8 @@ B 站直播间协议只读接入。观众的弹幕、礼物、醒目留言、上
 ## 接入协议
 
 本 World 使用 B 站 web 直播协议，按返回的 uid 识别观众。该接口非官方开放平台接口，字段可能变化，接入也可能受风控限制。
+
+开播、下播的 `bilibili.room` 事件附带 `meta.liveRoomState`：`schemaVersion: 1`、布尔值 `living`，以及来源 `via: 'websocket' | 'poll'`。它只描述平台状态，供 Persona 选择场次整理等行为；普通弹幕、改标题和禁言事件没有此字段。聊天正文不会产生开播、下播事实。
 
 ## 送礼帧:V1 与 V2 并存
 
@@ -52,6 +55,8 @@ B 站直播间协议只读接入。观众的弹幕、礼物、醒目留言、上
 
 登录态以服务端返回的 `LiveStatus.selfUid` 为准，0 表示匿名。已配置 `sessdata` 但仍为匿名时，每次接入至多记录一次 error。
 
+`INTERACT_WORD` 与 `INTERACT_WORD_V2` 的 `msg_type=1` 表示进场；有正整数 UID 时投递 `bilibili.enter`，附 `senderKey`、`meta.uid`、`meta.uname`。已确认进场但没有 UID 时只累计人数。类型2、3分别投递关注与分享，未知类型或坏帧不推断为进场。平台推送一次进场不证明观众一直在线，也不是完整的在线观众名单。
+
 ## 接入日志
 
 - **归并统计**：`info 直播间归并折叠` 按分钟汇总 `folds`、`sourceItems` 和 `windowMs`，停机时记录剩余不足一分钟的统计。
@@ -69,7 +74,9 @@ B 站直播间协议只读接入。观众的弹幕、礼物、醒目留言、上
 | `bilibili.gift` | flush / debounce | 金额 ≥ `worlds.bilibili.giftFlushYuan` 走 flush,低于它先过短窗归并再排常规合批 |
 | `bilibili.guard-renew` | debounce | 续费 |
 | `bilibili.danmaku` | debounce | 弹幕 |
-| `bilibili.enter-guard` | debounce | 舰长进场(普通进场只计数) |
+| `bilibili.enter` | debounce | 带平台 UID 的普通进场 |
+| `bilibili.enter-guard` | debounce | 舰长进场 |
+| `bilibili.follow` / `bilibili.share` | debounce | 关注或分享，不计为进场 |
 | `bilibili.block` | debounce | 观众被禁言 |
 | `bilibili.room` | flush / debounce | 开播、下播、全员禁言走 flush;标题变更 debounce |
 | `bilibili.feed` | flush / debounce | 弹幕接入中断超过 60 秒成文一次(flush),恢复时补一条带中断时长(debounce);60 秒内的抖动不推 |
@@ -77,7 +84,7 @@ B 站直播间协议只读接入。观众的弹幕、礼物、醒目留言、上
 | `bilibili.superchat-del` | piggyback | |
 | `bilibili.audience` | piggyback + **投递成文** | 人流读数 |
 
-进场、点赞和免费礼物累计次数；看过、在线、人气与粉丝数记录接收时的读数。它们在 World 内累积，经 `pushDeferred` 随下一批事件投递，并在渲染正文后清零。待投递期间不重复登记；超过 5 分钟未渲染时允许重新登记。
+匿名进场、点赞和免费礼物累计次数；看过、在线、人气与粉丝数记录接收时的读数。它们在 World 内累积，经 `pushDeferred` 随下一批事件投递，并在渲染正文后清零。待投递期间不重复登记；超过 5 分钟未渲染时允许重新登记。
 
 `normalize.ts` 的 `IGNORED` 列出不投递的 cmd，包括运营挂件、连麦玩法、全站广播及自身语音转写。未识别的 cmd 仍按原名称计数，并显示在控制台。
 
@@ -167,7 +174,7 @@ WebP 与 GIF，单文件上限 8 MiB。Agent 公告单独原子保存到
 已用接收帧核对的 cmd 包括 `DANMU_MSG`、`USER_TOAST_MSG_V2`、`INTERACT_WORD_V2`、`LIKE_INFO_V3_*`、`WATCHED_CHANGE`、
 `ONLINE_RANK_COUNT`、`ROOM_REAL_TIME_MESSAGE_UPDATE`、`STOP_LIVE_ROOM_LIST`。
 
-`INTERACT_WORD_V2` 使用 protobuf；当前解析未区分进场、关注和分享，均计为进场。
+`INTERACT_WORD_V2` 使用 protobuf；[`interaction-frame.ts`](interaction-frame.ts) 按接入实现的字段布局解码。布局与坏帧分支有离线回放测试，具体身份是否提供以本连接实际收到的帧为准。
 
 ## 接入限制
 

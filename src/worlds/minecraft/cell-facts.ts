@@ -71,7 +71,7 @@ export function blockAtCell(bot: Bot, c: Cell): ReturnType<Bot['blockAt']> {
 
 export const cellKeyOf = (c: Cell): string => `${c.x},${c.y},${c.z}`;
 
-/** goto [x,z] 的落脚格:从世界顶往下第一块实心的上一格。区块未加载照实受阻,不猜 */
+/** goto [x,z] 的地面落脚格；树冠与树干不作为地面。区块未加载照实受阻。 */
 export function surfaceFeetAt(bot: Bot, at: Anchor): Cell {
   const c = resolveAt(bot, at);
   const game = bot.game as { minY?: number; height?: number } | undefined;
@@ -84,9 +84,12 @@ export function surfaceFeetAt(bot: Bot, at: Anchor): Cell {
         `(${c.x}, ${c.z}) 那里还没加载,先走近些再用 [x,z];或者直接给 y`,
       );
     }
-    if (b.boundingBox === 'block') return { x: c.x, y: y + 1, z: c.z };
+    if (b.boundingBox === 'block'
+      && !b.name.endsWith('_leaves')
+      && !b.name.endsWith('_log')
+      && !b.name.endsWith('_wood')) return { x: c.x, y: y + 1, z: c.z };
   }
-  throw new SkillBlocked(`(${c.x}, ${c.z}) 整柱都没有实心方块,落不了脚`);
+  throw new SkillBlocked(`(${c.x}, ${c.z}) 整柱都没有可作为地面的实心方块,落不了脚`);
 }
 
 export function solidAt(bot: Bot, c: Cell): boolean {
@@ -171,16 +174,21 @@ export function blockNamesOf(bot: Bot, ids: number[]): Set<string> {
   return names;
 }
 
-/** (x,z) 柱在 yFrom 以上有没有实心遮盖;未加载的一律按露天算(宁可少说不说错) */
-export function skyBlocked(bot: Bot, x: number, yFrom: number, z: number): boolean {
+/** 已加载的竖直柱是否无遮盖；未加载格使天空读数未知。 */
+export function skyVisibleAt(bot: Bot, x: number, yFrom: number, z: number): boolean | null {
   const game = bot.game as { minY?: number; height?: number } | undefined;
   const top = (game?.minY ?? -64) + (game?.height ?? 384);
   for (let y = yFrom; y < top; y++) {
     const b = bot.blockAt(new Vec3(x, y, z));
-    if (!b) return false;
-    if (b.boundingBox === 'block') return true;
+    if (!b) return null;
+    if (b.boundingBox === 'block') return false;
   }
-  return false;
+  return true;
+}
+
+/** 只在实际读到实心遮盖时为 true；false 不证明天空可见。 */
+export function skyBlocked(bot: Bot, x: number, yFrom: number, z: number): boolean {
+  return skyVisibleAt(bot, x, yFrom, z) === false;
 }
 
 /** 读取作物 age 前构造 Vec3；真实 Mineflayer 的 blockAt 需要坐标的 floored()。 */

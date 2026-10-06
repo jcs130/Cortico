@@ -9,6 +9,8 @@ import { matchItemName } from './chests.ts';
 import { type ItemLike } from './item-facts.ts';
 import { SkillBlocked, checkAbort, sleep, type SkillContext } from './skill-context.ts';
 import { zhName } from './names.ts';
+import { itemCustomName } from './item-display.ts';
+import { inventoryReadConfirmed } from './inventory-window-sync.ts';
 
 
 /** 原版背包格数:9 快捷栏 + 27 主仓。盔甲 4 格与副手 1 格不在其中 */
@@ -19,6 +21,7 @@ export function invItemNamed(bot: Bot, want: string, pick?: string) {
   const items = (bot.inventory?.items?.() ?? [])
     .filter((i) => itemMatchesPick(pick, i, bot.registry as never));
   return items.find((i) => i.name === want)
+    ?? items.find((i) => itemCustomName(i) === want)
     ?? items.find((i) => i.name.endsWith(`_${want}`))
     ?? items.find((i) => i.name.startsWith(`${want}_`));
 }
@@ -68,6 +71,17 @@ export function itemPredOf(bot: Bot, item: string, pick?: string): InvPred {
   return (n, it) => matchItemName(item, n) && itemMatchesPick(pick, it, bot.registry as never);
 }
 
+/** 显示名未命中工具选择器时，报告实际库存中对应的注册表 ID，不自动改写选择器。 */
+export function itemIdHint(bot: Bot, query: string, candidates: readonly { name: string }[]): string {
+  const label = query.trim().toLowerCase();
+  const ids = [...new Set(candidates.map(item => item.name))].filter(name =>
+    !matchItemName(query, name) && (zhName(name).toLowerCase() === label
+      || bot.registry?.itemsByName?.[name]?.displayName?.toLowerCase() === label));
+  return ids.length > 0
+    ? `;显示名「${query}」对应当前物品 ID:${ids.join('、')}。普通物品参数请使用这些 ID；显示名不自动改写成 ID`
+    : '';
+}
+
 /**
  * 包里没有这一步要的东西。两句话分开:连 id 都没有,还是有 id 而挑选词一件都没命中 ——
  * 后者要把同 id 的那几件各自是什么摆出来,她下一步要么改挑选词要么改主意。
@@ -75,12 +89,16 @@ export function itemPredOf(bot: Bot, item: string, pick?: string): InvPred {
 export function noSuchItem(
   bot: Bot, item: string, pick?: string, candidates?: readonly ItemLike[],
 ): SkillBlocked {
+  if (!inventoryReadConfirmed(bot)) {
+    return new SkillBlocked(`背包玩家槽还没完整同步，无法确认有没有${zhName(item)}`);
+  }
   const same = candidates ?? bot.inventory.items().filter((i) => matchItemName(item, i.name));
   if (pick && same.length > 0) {
     const targets = same.map((i) => pickTargetOf(i, bot.registry as never));
     return new SkillBlocked(pickMissText('包里', item, pick, targets));
   }
-  return new SkillBlocked(`包里没有${zhName(item)}`);
+  const available = [...new Set(bot.inventory.items().map((i) => i.name))];
+  return new SkillBlocked(`包里没有${zhName(item)}${itemIdHint(bot, item, bot.inventory.items())}${available.length > 0 ? `；可用工具物品名: ${available.join('、')}` : ''}`);
 }
 
 /** 「附魔书(带「无限」的)」:点名到具体一件时,受阻话里也要带上挑选词 */
@@ -105,8 +123,9 @@ export async function moveExactSlot(bot: Bot, from: number, to: number): Promise
   await bot.moveSlotItem(from, to);
 }
 
-/** minecraft-data 的 drops 简表不含概率掉落；补充表同时用于入包对账和按掉落物反查方块。 */
+/** minecraft-data 的 drops 简表不含概率或依方块状态变化的掉落；补充表用于入包对账。 */
 export function probabilisticDropsOf(name: string): string[] {
+  if (name === 'sweet_berry_bush') return ['sweet_berries'];
   if (['short_grass', 'tall_grass', 'grass', 'fern', 'large_fern'].includes(name)) return ['wheat_seeds'];
   if (name === 'dead_bush') return ['stick'];
   if (name.endsWith('_leaves')) {
@@ -168,8 +187,8 @@ export type InvConfirm =
  *
  * `settleMs > 0` 时增量还得在这段窗口里持续存在才算数——合成走这一条:
  * 服务端可能先把产物塞进来再撤回,单次读取会把临时产物误报成功。
- * 容器搬运不需要这段:`close()` 里的 `copyInventory()` 是一次确定的灌回,
- * 见到就是准的,白等只会让每次存取多花半秒。
+ * 容器关闭后读 window 0 的回灌；同窗连续存取则读该窗口的玩家槽并等待稳定，
+ * 关闭或替换的窗口不能继续用于对账。
  */
 export async function awaitInvConfirm(
   read: () => number,
@@ -265,4 +284,3 @@ export function invLosses(before: Map<string, number>, bot: Bot): string[] {
 
 /** 窗口/背包里的一摞。`slot` 是**它所在那扇窗**的槽位号,点名搬运只认它 */
 export type InvItem = ReturnType<Bot['inventory']['items']>[number];
-

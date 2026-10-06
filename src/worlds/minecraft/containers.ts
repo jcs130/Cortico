@@ -4,11 +4,10 @@
  * 只管开窗与读写槽位,存什么取什么由技能族决定。
  */
 import type { Bot } from 'mineflayer';
-import pathfinderPkg from 'mineflayer-pathfinder';
 import { Vec3 } from 'vec3';
 import { type Cell } from './geometry.ts';
 import { SkillBlocked, checkAbort, sleep, type SkillContext } from './skill-context.ts';
-import { gotoGoal, reachCell } from './travel.ts';
+import { reachCell } from './travel.ts';
 import { blockAtCell, cellText, dimensionOf } from './cell-facts.ts';
 import { zhName } from './names.ts';
 import { moveExactSlot, playerInvIn, type InvPred } from './inventory.ts';
@@ -18,8 +17,8 @@ import {
 } from './chests.ts';
 import { type ItemStack } from './terrain.ts';
 import { contentsText } from './receipt.ts';
+import { selectionMenuTitle } from './window-semantics.ts';
 
-const { goals } = pathfinderPkg;
 
 /** 三种磨损态的铁砧都认 */
 export const ANVIL_BLOCKS = ['anvil', 'chipped_anvil', 'damaged_anvil'] as const;
@@ -55,7 +54,23 @@ export async function openStationWindow(
   if (!blockNames.includes(block.name)) {
     throw new SkillBlocked(`${cellText(cell)} 那一格是${zhName(block.name)},不是${zhStation}`);
   }
-  const win = await (bot as unknown as { openBlock(b: unknown): Promise<StationWindow> }).openBlock(block);
+  const open = () => (bot as unknown as { openBlock(b: unknown): Promise<StationWindow> }).openBlock(block);
+  const expectedType = blockNames.some((name) => name.endsWith('anvil')) ? 'anvil' : 'grindstone';
+  const matches = (win: StationWindow) => String(win.type).replace(/^minecraft:/, '') === expectedType;
+  let win = await openWindowGuarded(bot, ctx, open);
+  if (!matches(win)) {
+    ctx.diag?.write({ lane: 'skill', event: 'station-window-mismatch', incident: true,
+      msg: `打开${zhStation}却收到${win.type}窗口，关闭后重开一次`,
+      data: { expectedType, actualType: String(win.type), windowId: win.id } });
+    bot.closeWindow(win as Parameters<Bot['closeWindow']>[0]);
+    await sleep(300);
+    checkAbort(ctx);
+    win = await open();
+    if (!matches(win)) {
+      bot.closeWindow(win as Parameters<Bot['closeWindow']>[0]);
+      throw new SkillBlocked(`打开${zhStation}却连续收到${win.type}窗口；已关闭错窗，没有移动物品。等服务端窗口同步后再试`, [], 'server');
+    }
+  }
   return { win, blockName: block.name };
 }
 
@@ -69,17 +84,33 @@ export async function openStationWindow(
 export async function putIntoStation(
   bot: Bot, win: StationWindow, pred: InvPred, destSlot: number, asked: string,
 ): Promise<void> {
+  const occupying = win.slots[destSlot];
+  if (occupying) {
+    throw new SkillBlocked(`工作站输入格 ${destSlot + 1} 已有${zhName(occupying.name)}，不能再放${asked}；先关窗等物品回包并核对窗口，不要为此丢背包物品`, [], 'server');
+  }
   const item = playerInvIn(bot, win).items().find((i) => pred(i.name, i));
   if (!item) throw new SkillBlocked(`包里没有${asked}`);
-  if (item.count === 1) {
-    await moveExactSlot(bot, item.slot, destSlot);
-    return;
+  try {
+    if (item.count === 1) {
+      await moveExactSlot(bot, item.slot, destSlot);
+      return;
+    }
+    await (bot as unknown as { transfer(o: Record<string, unknown>): Promise<void> }).transfer({
+      window: win, itemType: item.type, metadata: null, count: 1,
+      sourceStart: win.inventoryStart, sourceEnd: win.inventoryEnd,
+      destStart: destSlot, destEnd: destSlot + 1,
+    });
+  } catch (err) {
+    const message = (err as Error).message;
+    if (!/destination full|invalid operation/i.test(message)) throw err;
+    const now = win.slots[destSlot];
+    throw new SkillBlocked(
+      `工作站输入格 ${destSlot + 1} 放不进${asked}`
+      + (now ? `，格里现在是${zhName(now.name)}` : '，窗口槽位状态可能还没同步')
+      + '；这不是背包空位的判据，不要丢物品腾格。先关窗等服务端回灌再核对',
+      [], 'server',
+    );
   }
-  await (bot as unknown as { transfer(o: Record<string, unknown>): Promise<void> }).transfer({
-    window: win, itemType: item.type, metadata: null, count: 1,
-    sourceStart: win.inventoryStart, sourceEnd: win.inventoryEnd,
-    destStart: destSlot, destEnd: destSlot + 1,
-  });
 }
 
 /** 一件东西的读数:耐久 + 附魔,回执格式统一 */
@@ -94,8 +125,10 @@ export function stationItemFacts(bot: Bot, item: { name: string } | null): strin
 }
 
 export function findContainers(bot: Bot, range: number): Array<{ x: number; y: number; z: number; name: string; d: number }> {
+  const registry = bot.registry?.blocksByName as Record<string, { id: number } | undefined> | undefined;
+  if (!registry || !bot.entity?.position || typeof bot.findBlocks !== 'function' || typeof bot.blockAt !== 'function') return [];
   const ids = CONTAINER_FIND
-    .map((n) => (bot.registry.blocksByName as Record<string, { id: number } | undefined>)[n]?.id)
+    .map((n) => registry[n]?.id)
     .filter((id): id is number => id !== undefined);
   if (ids.length === 0) return [];
   const me = bot.entity.position;
@@ -168,6 +201,18 @@ export function rememberChest(
   win: Parameters<typeof containerStacks>[0],
 ): { items: ItemStack[]; usedSlots: number; slots: number } {
   const snap = containerStacks(win, bot.registry as never);
+  const route = storageObservations.get(bot)?.get(containerKey(bot, pos));
+  if (route) {
+    route.access = undefined;
+    route.routeFail = undefined;
+    // A later window observation supersedes an earlier no-room refusal. Keep
+    // protection and other server refusals until a successful write confirms them.
+    if (route.write && snap.usedSlots < snap.slots) {
+      for (const [item, failure] of route.write) {
+        if (/没空位|已满|full/i.test(failure.why)) route.write.delete(item);
+      }
+    }
+  }
   ctx.chests?.remember(dimensionOf(bot), pos, snap.items, snap.usedSlots, snap.slots);
   return snap;
 }
@@ -208,7 +253,13 @@ export function rememberWindow(
   blockName: string,
   win: NonNullable<Bot['currentWindow']>,
 ): string {
+  const menu = selectionMenuTitle(win.title);
+  if (menu) {
+    if (CONTAINER_FIND.includes(blockName)) rememberNonStorageMenu(bot, cell);
+    return `。打开的是${menu}选择菜单，不能当储物箱存东西`;
+  }
   if (CONTAINER_FIND.includes(blockName)) {
+    clearStorageMenu(bot, cell);
     const snap = rememberChest(ctx, bot, cell, win as Parameters<typeof containerStacks>[0]);
     return `。箱里:${contentsText(snap.items)}`;
   }
@@ -218,7 +269,10 @@ export function rememberWindow(
     const expected = furnaceDoneAt(win, state.input, blockName, now);
     ctx.chests?.rememberFurnace(dimensionOf(bot), cell, blockName, state, now, expected);
     const slot = (s: ItemStack | null): string => (s ? `${zhName(s.name)}×${s.count}` : '空');
-    return `。炉里:输入${slot(state.input)},燃料${slot(state.fuel)},输出${slot(state.output)}`;
+    return `。炉里:输入${slot(state.input)},燃料${slot(state.fuel)},输出${slot(state.output)}`
+      + `。装料点火用 smelt 的 input、fuel 和 at:[${cell.x},${cell.y},${cell.z}]；`
+      + '手持材料右键是打开窗口，不是写入输入槽或燃料槽。'
+      + `取货用 take 的 at:[${cell.x},${cell.y},${cell.z}]。烧炼是否启动以炉火与进度读数为准，产物以输出槽为准`;
   }
   return '';
 }
@@ -230,19 +284,121 @@ export function orderForStow(
   item: string,
 ): typeof found {
   const dim = dimensionOf(bot);
-  const withRoom: typeof found = [];
-  const unseen: typeof found = [];
-  const rest: typeof found = [];
+  const nearWithRoom: typeof found = [];
+  const nearUnseen: typeof found = [];
+  const farWithRoom: typeof found = [];
+  const farUnseen: typeof found = [];
+  const full: typeof found = [];
   // 堆叠上限是物品自带的属性(原版:大多 64,鸡蛋/雪球 16,工具/桶 1),registry 里就有
   const stackMax = (bot.registry.itemsByName as Record<string, { stackSize?: number } | undefined>)
     ?.[item]?.stackSize ?? 64;
   for (const s of found) {
+    if (storageSkipReason(bot, s, item)) continue;
     const rec = ctx.chests?.get(dim, s);
-    if (rec && hasRoom(rec, item, stackMax)) withRoom.push(s);
-    else if (!rec) unseen.push(s);
-    else rest.push(s);
+    if (rec && !hasRoom(rec, item, stackMax)) full.push(s);
+    else if (s.d <= 8) (rec ? nearWithRoom : nearUnseen).push(s);
+    else (rec ? farWithRoom : farUnseen).push(s);
   }
-  return [...withRoom, ...unseen, ...rest];
+  return [...nearWithRoom, ...nearUnseen, ...farWithRoom, ...farUnseen, ...full];
+}
+
+interface StorageObservation {
+  menu?: { name: string | null; stateId: number | null };
+  access?: { from: { x: number; y: number; z: number }; atMs: number; why: string };
+  routeFail?: { atMs: number; why: string };
+  write?: Map<string, { atMs: number; why: string }>;
+}
+
+/** Access failure is local to the failed stand position; another approach may work. */
+export const STORAGE_ACCESS_RETRY_MS = 120_000;
+export const STORAGE_ACCESS_RETRY_DISTANCE = 8;
+export const AUTO_CONTAINER_OPEN_LIMIT = 3;
+const storageObservations = new WeakMap<Bot, Map<string, StorageObservation>>();
+
+function containerKey(bot: Bot, spot: { x: number; y: number; z: number }): string {
+  return `${dimensionOf(bot)}:${spot.x},${spot.y},${spot.z}`;
+}
+
+function storageRecord(bot: Bot, spot: { x: number; y: number; z: number }): StorageObservation {
+  let map = storageObservations.get(bot);
+  if (!map) {
+    map = new Map();
+    storageObservations.set(bot, map);
+  }
+  const key = containerKey(bot, spot);
+  let rec = map.get(key);
+  if (!rec) {
+    rec = {};
+    map.set(key, rec);
+  }
+  return rec;
+}
+
+function blockIdentity(bot: Bot, spot: { x: number; y: number; z: number }): { name: string | null; stateId: number | null } {
+  const block = bot.blockAt?.(new Vec3(spot.x, spot.y, spot.z));
+  return { name: block?.name ?? null, stateId: block?.stateId ?? null };
+}
+
+export function storageSkipReason(bot: Bot, spot: { x: number; y: number; z: number }, item?: string): string | null {
+  const rec = storageObservations.get(bot)?.get(containerKey(bot, spot));
+  if (!rec) return null;
+  if (rec.menu) {
+    const current = blockIdentity(bot, spot);
+    if ((rec.menu.name && current.name && rec.menu.name !== current.name)
+      || (rec.menu.stateId !== null && current.stateId !== null && rec.menu.stateId !== current.stateId)) {
+      rec.menu = undefined;
+    } else return '上次打开的是选择菜单';
+  }
+  if (rec.access) {
+    const pos = bot.entity.position;
+    const moved = Math.hypot(pos.x - rec.access.from.x, pos.y - rec.access.from.y, pos.z - rec.access.from.z);
+    if (Date.now() - rec.access.atMs < STORAGE_ACCESS_RETRY_MS && moved < STORAGE_ACCESS_RETRY_DISTANCE) {
+      return `从当前站位上次没走到:${rec.access.why}`;
+    }
+    rec.access = undefined;
+  }
+  if (item) {
+    const write = rec.write?.get(item);
+    if (write && Date.now() - write.atMs < STORAGE_ACCESS_RETRY_MS) return `上次存${zhName(item)}被拒绝:${write.why}`;
+    if (write) rec.write?.delete(item);
+  }
+  return null;
+}
+
+/** 直达一口刚刚寻路失败的箱子同样会重走失败路线；短暂冷却后再试。 */
+export function recentStorageRouteFailure(bot: Bot, spot: { x: number; y: number; z: number }): string | null {
+  const access = storageObservations.get(bot)?.get(containerKey(bot, spot))?.routeFail;
+  if (!access || Date.now() - access.atMs >= STORAGE_ACCESS_RETRY_MS) return null;
+  if (bot.entity.position.distanceTo(new Vec3(spot.x, spot.y, spot.z)) <= 4) return null;
+  return access.why;
+}
+
+export function rememberNonStorageMenu(bot: Bot, spot: { x: number; y: number; z: number }): void {
+  const rec = storageRecord(bot, spot);
+  rec.menu = blockIdentity(bot, spot);
+  rec.access = undefined;
+}
+
+export function clearStorageMenu(bot: Bot, spot: { x: number; y: number; z: number }): void {
+  const rec = storageObservations.get(bot)?.get(containerKey(bot, spot));
+  if (rec) rec.menu = undefined;
+}
+
+export function rememberStorageAccessFailure(bot: Bot, spot: { x: number; y: number; z: number }, why: string): void {
+  const pos = bot.entity.position;
+  const record = storageRecord(bot, spot);
+  record.access = { from: { x: pos.x, y: pos.y, z: pos.z }, atMs: Date.now(), why: why.slice(0, 180) };
+  record.routeFail = { atMs: Date.now(), why: why.slice(0, 180) };
+}
+
+export function rememberStorageWriteFailure(bot: Bot, spot: { x: number; y: number; z: number }, item: string, why: string): void {
+  const rec = storageRecord(bot, spot);
+  rec.write ??= new Map();
+  rec.write.set(item, { atMs: Date.now(), why: why.slice(0, 180) });
+}
+
+export function clearStorageWriteFailure(bot: Bot, spot: { x: number; y: number; z: number }, item: string): void {
+  storageObservations.get(bot)?.get(containerKey(bot, spot))?.write?.delete(item);
 }
 
 export function orderForTake(
@@ -252,14 +408,19 @@ export function orderForTake(
   item: string,
 ): typeof found {
   const dim = dimensionOf(bot);
-  const withItem: typeof found = [];
-  const rest: typeof found = [];
+  const nearbyStocked: typeof found = [];
+  const nearbyUnseen: typeof found = [];
+  const fartherStocked: typeof found = [];
+  const fartherUnseen: typeof found = [];
+  const knownEmpty: typeof found = [];
   for (const s of found) {
+    if (storageSkipReason(bot, s)) continue;
     const rec = ctx.chests?.get(dim, s);
-    if (rec && hasItem(rec, item)) withItem.push(s);
-    else rest.push(s);
+    if (rec && hasItem(rec, item)) (s.d <= 8 ? nearbyStocked : fartherStocked).push(s);
+    else if (!rec) (s.d <= 8 ? nearbyUnseen : fartherUnseen).push(s);
+    else knownEmpty.push(s);
   }
-  return [...withItem, ...rest];
+  return [...nearbyStocked, ...nearbyUnseen, ...fartherStocked, ...fartherUnseen, ...knownEmpty];
 }
 
 /** mineflayer 拿错窗口身份时抛的话:「Non-container window used as a container」一族 */
@@ -311,7 +472,9 @@ export async function openNearbyContainer(
   spot: { x: number; y: number; z: number; name: string },
   ctx: SkillContext,
 ): Promise<Awaited<ReturnType<Bot['openContainer']>>> {
-  await gotoGoal(bot, new goals.GoalNear(spot.x, spot.y, spot.z, 2), ctx);
+  // 已够得到时直接开窗。近处强制寻路可能把人从箱边挪开甚至超时，
+  // 令「先取大背包、再存箱」只做成前半步，反而重新塞满随身栏。
+  await reachCell(bot, spot, ctx);
   const block = bot.blockAt(new Vec3(spot.x, spot.y, spot.z));
   if (!block) throw new SkillBlocked(`${zhName(spot.name)}不见了`);
   return openWindowGuarded(bot, ctx, () => bot.openContainer(block));

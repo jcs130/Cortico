@@ -19,6 +19,16 @@ const STONE = registry.blocksByName.stone.defaultState as number;
 const GRASS = registry.blocksByName.grass_block.defaultState as number;
 const SLAB = registry.blocksByName.oak_slab.defaultState as number;
 const WATER = registry.blocksByName.water.defaultState as number;
+const Block = req('prismarine-block')(registry);
+
+function doorState(half: 'lower' | 'upper', open: boolean): number {
+  const door = registry.blocksByName.spruce_door;
+  for (let id = door.minStateId; id <= door.maxStateId; id++) {
+    const p = Block.fromStateId(id, 0).getProperties();
+    if (p.half === half && p.open === open) return id;
+  }
+  throw new Error('1.20.6 spruce_door state missing');
+}
 
 /** 16x16 平地 y=63 封顶,(x=8) 立一堵 3 格高石墙:走/挖都有戏。
  *  掺半砖(状态级高度 0.5)与水(液体位),给特征表上语义压力。 */
@@ -71,7 +81,7 @@ function makeBot(world: unknown) {
   return bot;
 }
 
-interface SearchOut { status: string; cost: number; pathLen: number }
+interface SearchOut { status: string; cost: number; pathLen: number; breaks: Array<{ x: number; y: number; z: number }> }
 
 function search(
   bot: unknown, from: [number, number, number], to: [number, number, number], zones?: SiteZone[],
@@ -90,7 +100,9 @@ function search(
   );
   let res = astar.compute();
   while (res.status === 'partial') res = astar.compute();
-  return { status: res.status, cost: Math.round(res.cost * 100) / 100, pathLen: res.path.length };
+  return { status: res.status, cost: Math.round(res.cost * 100) / 100, pathLen: res.path.length,
+    breaks: res.path.flatMap((move) => (move as { toBreak?: Array<{ x: number; y: number; z: number }> }).toBreak ?? []),
+  };
 }
 
 /**
@@ -156,6 +168,16 @@ function forwardNeighbors(world: unknown, at: [number, number, number]): Array<{
   return neighbors;
 }
 
+function diagonalNeighbors(world: unknown, at: [number, number, number], dx: number, dz: number): unknown[] {
+  const m = new Movements(makeBot(world) as never) as unknown as {
+    getMoveDiagonal(node: { x: number; y: number; z: number; remainingBlocks: number },
+      dir: { x: number; z: number }, neighbors: unknown[]): void;
+  };
+  const neighbors: unknown[] = [];
+  m.getMoveDiagonal({ x: at[0], y: at[1], z: at[2], remainingBlocks: 8 }, { x: dx, z: dz }, neighbors);
+  return neighbors;
+}
+
 /** 直接问 getMoveJumpUp:在给定节点朝 +x 生成了什么 */
 function jumpUpNeighbors(world: unknown, at: [number, number, number]): Array<{ toPlace?: unknown[] }> {
   const m = new Movements(makeBot(world) as never) as unknown as {
@@ -209,6 +231,42 @@ const baseWall = search(baseBot, [0, 64, 0], [14, 64, 0]); // 穿墙(必须挖)
 const baseFlat = search(baseBot, [0, 64, 0], [5, 64, 5]); // 平地(纯走)
 
 describe('pathfinder 性能补丁', () => {
+  it('1.20.6 木门上半扇不能成为跳跃或搭路的落脚节点', () => {
+    installPathfinderPerf();
+    const world = makeWorld();
+    world.setBlockStateId(new Vec3(-1, 64, 0), doorState('lower', true));
+    world.setBlockStateId(new Vec3(-1, 65, 0), doorState('upper', true));
+    world.setBlockStateId(new Vec3(0, 64, 1), STONE);
+    world.setBlockStateId(new Vec3(0, 65, 1), STONE);
+    const m = new Movements(makeBot(world) as never);
+    m.canOpenDoors = true;
+    const from = new (Move as never as new (...a: unknown[]) => { x: number; y: number; z: number })(0, 64, 0, 8, 0);
+    let neighbors: Array<{ x: number; y: number; z: number }> = [];
+    const original = m.getNeighbors.bind(m);
+    m.getNeighbors = (node) => {
+      const out = original(node);
+      if (node.x === 0 && node.y === 64 && node.z === 0) neighbors = out;
+      return out;
+    };
+    const astar = new (AStar as never as new (...a: unknown[]) => { compute(): { status: string } })(
+      from, m, new goals.GoalNear(-1, 64, 3, 1), 5000, 60, -1,
+    );
+    let result = astar.compute();
+    while (result.status === 'partial') result = astar.compute();
+    expect(neighbors.some((mv) => mv.x === -1 && mv.y === 65 && mv.z === 0)).toBe(false);
+    expect(neighbors.some((mv) => mv.x === -1 && mv.y === 64 && mv.z === 0)).toBe(true);
+  });
+
+  it('门外墙角不能斜穿实体碰撞：先走正交空格再转弯', () => {
+    installPathfinderPerf();
+    const world = makeWorld();
+    // 从 (0,64,0) 斜向 (-1,64,1)，正北侧 (0,64,1) 是实墙，西侧畅通。
+    (world as { setBlockStateId(p: unknown, id: number): void })
+      .setBlockStateId(new Vec3(0, 64, 1), STONE);
+    expect(diagonalNeighbors(world, [0, 64, 0], -1, 1)).toHaveLength(0);
+    expect(diagonalNeighbors(world, [-2, 64, 0], 1, 1)).toHaveLength(1);
+  });
+
   it('脚在一格水里、岸高 4 格:上游一步都迈不出去,补丁后垫塔上岸', () => {
     // 未修补的 getMoveUp 遇液体即返回，水中没有垫塔动作；forward/diagonal 又受 1.2 格台阶限制，因此仅展开起点，visitedNodes=1。
     expect(pitBeforePatch.status).toBe('noPath');
@@ -262,7 +320,7 @@ describe('pathfinder 性能补丁', () => {
     expect(searchOutOfPit(changed).status).toBe('success');
   });
 
-  it('不沾液体的场景,装补丁前后搜索结果逐位一致(状态/代价/路径长),且幂等可重复安装', () => {
+  it('补丁后墙与平地仍可达，角落绕行稳定且重复安装幂等', () => {
     expect(baseWall.status).toBe('success');
     expect(baseFlat.status).toBe('success');
 
@@ -271,7 +329,10 @@ describe('pathfinder 性能补丁', () => {
 
     const bot = makeBot(makeWorld());
     expect(search(bot, [0, 64, 0], [14, 64, 0])).toEqual(baseWall);
-    expect(search(bot, [0, 64, 0], [5, 64, 5])).toEqual(baseFlat);
+    const safeFlat = search(bot, [0, 64, 0], [5, 64, 5]);
+    expect(safeFlat.status).toBe('success');
+    expect(safeFlat.cost).toBeGreaterThanOrEqual(baseFlat.cost);
+    expect(search(makeBot(makeWorld()), [0, 64, 0], [5, 64, 5])).toEqual(safeFlat);
   });
 
   it('缓存随搜索生灭:世界变了,新搜索看得见新世界', () => {
@@ -300,7 +361,7 @@ describe('pathfinder 性能补丁', () => {
     expect(m.getBlock(p, 0, -1, 0).name).toBe('stone');
   });
 
-  it('禁垫区:落点在区内的放置动作一律不生成,走与挖照旧', () => {
+  it('工地不生成搭路动作，现有通路仍可走', () => {
     installPathfinderPerf();
     // 井底 (0,63,0) 垫塔上岸:不设区时有这一步,把井口整段圈成工地就没有了
     expect(searchOutOfPit(makeBot(makeWaterPitWorld())).place).toBeGreaterThan(0);
@@ -317,7 +378,36 @@ describe('pathfinder 性能补丁', () => {
     const zoned = search(flat, [0, 64, 0], [5, 64, 5], [{
       key: 'yard', min: [0, 60, 0], max: [6, 70, 6], materials: [],
     }]);
-    expect(zoned).toEqual(baseFlat);
+    expect(zoned).toEqual(search(makeBot(makeWorld()), [0, 64, 0], [5, 64, 5]));
+  });
+
+  it('自动寻路绕开工地墙体，范围外仍可挖掘', () => {
+    installPathfinderPerf();
+    const zone: SiteZone = { key: 'wall', min: [8, 64, -8], max: [8, 66, 15], materials: [] };
+    const unbound = search(makeBot(makeWorld()), [0, 64, 0], [14, 64, 0]);
+    expect(unbound.status).toBe('success');
+    expect(unbound.breaks.some((p) => p.x === 8)).toBe(true);
+    const protectedRoute = search(makeBot(makeWorld()), [0, 64, 0], [14, 64, 0], [zone]);
+    expect(protectedRoute.status).toBe('success');
+    expect(protectedRoute.breaks.some((p) => p.x === 8 && p.z >= -8 && p.z <= 15)).toBe(false);
+    expect(protectedRoute.pathLen).toBeGreaterThan(unbound.pathLen);
+    expect(search(makeBot(makeWorld()), [0, 64, 0], [14, 64, 0], [{ ...zone, min: [0, 80, 0], max: [1, 81, 1] }]))
+      .toEqual(unbound);
+  });
+
+  it('搜索外的破坏检查现读绑定；卸载和迁移不会沿用旧工地', () => {
+    installPathfinderPerf();
+    const bot = makeBot(makeWorld());
+    const m = new Movements(bot as never);
+    let zones: SiteZone[] = [{ key: 'wall', min: [8, 64, -8], max: [8, 66, 15], materials: [] }];
+    setSiteZones(m, () => zones);
+    const readBlock = bot.blockAt as (p: InstanceType<typeof Vec3>) => Parameters<typeof m.safeToBreak>[0];
+    const block = readBlock(new Vec3(8, 64, 0));
+    expect(m.safeToBreak(block)).toBe(false);
+    zones = [{ ...zones[0]!, min: [12, 64, -8], max: [12, 66, 15] }];
+    expect(m.safeToBreak(block)).toBe(true);
+    zones = [];
+    expect(m.safeToBreak(block)).toBe(true);
   });
 
   it('成果登记:不往登记格自己、也不往它头顶垫;走与挖照旧', () => {
@@ -333,7 +423,8 @@ describe('pathfinder 性能补丁', () => {
     expect(onWork.status).toBe('noPath');
 
     // 平地纯走的那条路不受影响:禁的是"垫",不是"走"
-    expect(search(makeBot(makeWorld()), [0, 64, 0], [5, 64, 5], undefined, () => true)).toEqual(baseFlat);
+    expect(search(makeBot(makeWorld()), [0, 64, 0], [5, 64, 5], undefined, () => true))
+      .toEqual(search(makeBot(makeWorld()), [0, 64, 0], [5, 64, 5]));
   });
 
   it('工地建材垫脚排到最后:包里有泥土就先用泥土,只剩建材时照旧可用', () => {

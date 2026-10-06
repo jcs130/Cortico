@@ -101,7 +101,7 @@ function renderEntry(e: Entry, cap: number): string {
   const repeat = e.repeats && e.repeats > 1 ? `(同样的一条重复了 ${e.repeats} 次,只留这一次)\n` : '';
   if (!e.call) return `${repeat}${foldToBudget(e.body, cap)}`;
   const args = e.call.args && e.call.args !== '{}' ? ` ${foldToBudget(e.call.args, cap)}` : '';
-  return `${repeat}[调用] ${e.call.name}${args}\n[回执] ${foldToBudget(e.body, cap)}`;
+  return `${repeat}[历史工具请求] ${e.call.name}${args}\n[历史回执] ${foldToBudget(e.body, cap)}`;
 }
 
 /**
@@ -185,7 +185,7 @@ export function renderHandoffNote(snapshot: readonly ContextRecord[], opts: Hand
       const entry: Entry = {
         ts: m.context.ts,
         call: { name, args: call.arguments.trim() },
-        body: receipt === undefined ? '(还没回来)' : textOf(receipt),
+        body: receipt === undefined ? '(当时尚无回执，不能确认执行结果)' : textOf(receipt),
       };
       // 先按原始时间筛选台词,预算裁剪不能把早段重新解释成最近段。
       if (opts.speechTools.has(name)) {
@@ -247,6 +247,7 @@ export function renderHandoffNote(snapshot: readonly ContextRecord[], opts: Hand
   // 「现在」的钟点跟着条目自己的时间走(config 时区),不用本机时区重新算一遍。
   const lastClock = [...current].reverse().map((e) => minuteOf(e.ts)).find((m) => m !== null) ?? null;
   const common = '同一项状态读数只留了最后一次,更早的长回执只留了个头。';
+  const archiveNotice = '工具行是过去请求与回执的文字摘要；新行动使用当前原生工具接口，执行结果以实际回执为准。';
   const omitted = dropped > 0 ? `更早的 ${dropped} 条没进这份笔记。` : '';
   // 衔接规则由 handoffNoteLines 提供；段标题只描述时间、收录内容和省略项。
   const parts: HandoffNotePart[] = [];
@@ -256,7 +257,7 @@ export function renderHandoffNote(snapshot: readonly ContextRecord[], opts: Hand
       text:
         `# 交接笔记 · 更早的一段${range ? `(${range})` : ''}\n\n` +
         '这一段已经过去了,只作参考。里面是外来事件和工具调用与回执,对外发言类调用已整条省略。' +
-        `${common}\n` +
+        `${common}${archiveNotice}\n` +
         (omitted ? `${omitted}\n` : '') +
         `\n${renderSection(history, historyCaps)}\n`,
       entries: history.length,
@@ -268,7 +269,7 @@ export function renderHandoffNote(snapshot: readonly ContextRecord[], opts: Hand
       `# 交接笔记 · 最近的一段${curRange ? `(${curRange})` : ''}\n\n` +
       `这一段紧接着现在${lastClock ? `,最后一条是 ${lastClock} 的事` : ''}。` +
       '这里保留对外发言类调用的具体入参与实际回执。' +
-      `${common}\n` +
+      `${common}${archiveNotice}\n` +
       (history.length === 0 && omitted ? `${omitted}\n` : '') +
       `\n${renderSection(current, currentCaps)}\n`,
     entries: current.length,

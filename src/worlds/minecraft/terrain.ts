@@ -15,6 +15,10 @@ import {
   roman, VILLAGER_PROFESSION_ZH, zhBiome, zhDimension, zhEffect, zhEnchant, zhEntity, zhName,
 } from './names.ts';
 import { piglinIsHostile } from './piglin.ts';
+import { itemCustomName } from './item-display.ts';
+import { animalStateNote, type FactBot, type FactEntity } from './animal-state.ts';
+import { BURNING_BLOCKS, SCORCHING_FLOOR, hazardBodyBounds } from './hazard-geometry.ts';
+export { BURNING_BLOCKS, SCORCHING_FLOOR } from './hazard-geometry.ts';
 
 /** 八方位罗盘。北=-z 南=+z 东=+x 西=-x,与 move 技能同一套词。 */
 export type Direction =
@@ -72,6 +76,8 @@ export function pitchPhrase(pitch: number): string | null {
 type Motion = 'still' | 'walking' | 'sprinting' | 'swimming' | 'falling' | 'rising';
 
 interface EntityInfo {
+  /** 当前连接中可见实体的选择编号；实体离开加载范围后须重新观察。 */
+  entityId?: number;
   name: string;
   kind: 'player' | 'hostile' | 'animal' | 'other';
   distance: number;
@@ -83,13 +89,15 @@ interface EntityInfo {
   visible: boolean;
   /** 掉落物实体上读到的物品;没有元数据时缺省 */
   item?: ItemStack;
-  /** 一眼可见的身份注(村民职业/小孩);没有就缺省 */
+  /** 可见实体的身份与当前元数据读数；听声实体不带此字段。 */
   note?: string;
 }
 
 export interface ItemStack {
   name: string;
   count: number;
+  displayName?: string;
+  durability?: Durability;
   /** 这一摞身上的附魔;没附魔的物品不填。附魔件不可堆叠,每件占一格 */
   enchantments?: ItemEnchant[];
 }
@@ -117,8 +125,9 @@ interface StatusEffect {
 export interface WorldSnapshot {
   position: { x: number; y: number; z: number };
   dimension: string;
-  health: number;
-  food: number;
+  /** 未收到生命或饥饿读数时为 null；0 是有效读数。 */
+  health: number | null;
+  food: number | null;
   oxygen: number;
   /** 头部在水中(氧气只有此时才有意义,元数据在旱地上会残留旧值) */
   inWater: boolean;
@@ -134,9 +143,10 @@ export interface WorldSnapshot {
   biome: string;
   gameMode: string;
   heldItem: string | null;
+  heldItemDisplayName?: string | null;
   inventory: ItemStack[];
-  /** 经验条上那个整数;附魔的门槛按它算 */
-  xpLevel: number;
+  /** 经验条上的整数；未收到经验读数时为 null。 */
+  xpLevel: number | null;
   /** 穿在身上的与副手,空槽不占条目 */
   equipment: GearPiece[];
   /** 身上的状态效果,空着就没有条目 */
@@ -157,6 +167,8 @@ export interface WorldSnapshot {
     age?: { value: number; max: number };
     /** 耕地水分:原版 moisture 方块状态的原值与满值(0–7),不折成布尔;仅耕地填 */
     moisture?: { value: number; max: number };
+    /** 门/栅栏门的原版 open 状态；读取不到时不猜。 */
+    open?: boolean;
   }>;
   players: string[];
   /** 8 向 8 格外的地形起伏采样;平地和未加载方向不占条目 */
@@ -308,14 +320,16 @@ export function snapshotFingerprint(s: WorldSnapshot): string {
     : null;
   return [
     s.dimension, s.gameMode,
-    `hp${Math.ceil(s.health)}`, `fd${Math.round(s.food)}`,
+    s.health === null ? 'hp?' : `hp${Math.ceil(s.health)}`,
+    s.food === null ? 'fd?' : `fd${Math.round(s.food)}`,
+    s.xpLevel === null ? 'xp?' : 'xp',
     s.inWater ? `o${Math.round(s.oxygen)}` : 'dry',
     timePhrase(s.timeOfDay), isNight(s.timeOfDay) ? 'night' : 'day',
     s.raining ? 'rain' : 'clear',
     s.light === null ? 'l?' : `l${s.light}`,
     s.invSynced ? 'inv' : 'nosync',
-    s.heldItem ?? 'bare',
-    s.inventory.map((i) => `${i.name}x${i.count}`).sort().join(','),
+    `${s.heldItem ?? 'bare'}:${s.heldItemDisplayName ?? ''}`,
+    s.inventory.map((i) => `${i.name}:${i.displayName ?? ''}x${i.count}`).sort().join(','),
     // 穿着什么、身上有什么效果:一件盔甲耗尽消失、中毒开始与抗火到期都不是她下的令,
     // 快照不报她就无从知道。耐久与剩余秒不进(每秒都在动,进了这道闸就等于没有)
     s.equipment.map((p) => `${p.slot}:${p.name}`).sort().join(','),
@@ -368,9 +382,11 @@ export function narrateWorldSegments(
   segs.push({ key: 'realclock', text: real, cmp: real });
 
   const oxygen = s.inWater && s.oxygen < 20 ? `，泡在水里，氧气还剩 ${Math.round(s.oxygen)}/20` : '';
-  const body =
-    `${healthPhrase(s.health)}（生命 ${Math.ceil(s.health)}/20），` +
-    `${foodPhrase(s.food)}（饥饿 ${Math.round(s.food)}/20）${oxygen}。`;
+  const health = s.health === null ? '生命正在从服务器同步'
+    : `${healthPhrase(s.health)}（生命 ${Math.ceil(s.health)}/20）`;
+  const food = s.food === null ? '饥饿正在从服务器同步'
+    : `${foodPhrase(s.food)}（饥饿 ${Math.round(s.food)}/20）`;
+  const body = `${health}，${food}${oxygen}。`;
   segs.push({ key: 'body', text: body, cmp: body });
 
   const bagFull = s.inventory.length > 0
@@ -378,7 +394,7 @@ export function narrateWorldSegments(
     : '包里什么都没有。';
   let gear: string;
   if (s.invSynced) {
-    const held = s.heldItem ? `手里拿着${zhName(s.heldItem)}` : '两手空空';
+    const held = s.heldItem ? `手里拿着${s.heldItemDisplayName ?? zhName(s.heldItem)}` : '两手空空';
     gear = `${held}。${prevBag ? narrateBagChange(prevBag, s.inventory) : bagFull}`;
   } else {
     gear = '背包还在从服务器同步，这份清单还没到。';
@@ -403,7 +419,8 @@ export function narrateWorldSegments(
       '看得见的：' +
         seenMobs
           .map((e) => {
-            const tag = e.kind === 'hostile' ? '（会打我）' : e.kind === 'player' ? '（玩家）' : e.note ? `（${e.note}）` : '';
+            const notes = [e.kind === 'hostile' ? '会打我' : e.kind === 'player' ? '玩家' : '', e.note].filter(Boolean);
+            const tag = notes.length > 0 ? `（${notes.join('，')}）` : '';
             return `${whereIs(e.direction, e.distance, e.dy)}有${zhEntity(e.name)}${tag}`;
           })
           .join('、') +
@@ -439,14 +456,14 @@ export function narrateWorldSegments(
       s.nearbyBlocks.length > 0
         ? '看得见的：' +
             s.nearbyBlocks
-              .map((b) => `${whereIs(b.direction, b.distance, b.dy)}是${zhName(b.name)}${blockSuffix(b)}`)
+              .map((b) => `${whereIs(b.direction, b.distance, b.dy)}是${zhName(b.name)}${blockSuffix(b)}${blockCoordinateSuffix(b)}`)
               .join('、') +
             '。'
         : '16 格内露出来的只有天然地形。',
     );
   }
   const structCmp = s.nearbyBlocks.map((b) =>
-    `块:${b.name}|${b.direction ?? '脚边'}|${distBucket(b.distance)}|${dyBand(b.dy)}|${contentsCmp(b.contents)}|${stateCmpOf(b)}`,
+    `块:${b.name}|${b.x},${b.y},${b.z}|${isDoorOrGate(b.name) ? '' : `${b.direction ?? '脚边'}|${distBucket(b.distance)}|${dyBand(b.dy)}`}|${contentsCmp(b.contents)}|${stateCmpOf(b)}`,
   ).sort().join(';');
   segs.push({ key: 'structure', text: structLines.join('\n'), cmp: structCmp });
 
@@ -547,6 +564,10 @@ function narrateDrops(drops: EntityInfo[]): string[] {
  * 小麦 age 6 差一档就熟,不知道"约9成熟"是什么,中间那次翻译只能由它自己编。
  */
 function blockSuffix(b: WorldSnapshot['nearbyBlocks'][number]): string {
+  if (isDoorOrGate(b.name)) {
+    const state = b.open === undefined ? '开合状态未读到' : b.open ? '开着' : '关着';
+    return `（${state}，坐标 ${b.x}, ${b.y}, ${b.z}）`;
+  }
   if (b.age) return `（age ${b.age.value}/${b.age.max}）`;
   if (b.moisture) return `（moisture ${b.moisture.value}/${b.moisture.max}）`;
   return containerSuffix(b.contents);
@@ -558,9 +579,20 @@ function blockSuffix(b: WorldSnapshot['nearbyBlocks'][number]): string {
  * 递减；降到 0 且无作物时耕地退回泥土，生长判据取水合与否。
  */
 function stateCmpOf(b: WorldSnapshot['nearbyBlocks'][number]): string {
+  if (isDoorOrGate(b.name)) return b.open === undefined ? '?' : b.open ? 'open' : 'closed';
   if (b.age) return blockSuffix(b);
   if (b.moisture) return b.moisture.value > 0 ? '湿' : '干';
   return '';
+}
+
+/** 方位和距离用于描述，交互锚点使用已读到的绝对方块坐标。 */
+function blockCoordinateSuffix(b: WorldSnapshot['nearbyBlocks'][number]): string {
+  // 门的状态括注已经带坐标，避免重复。
+  return isDoorOrGate(b.name) ? '' : `（坐标 ${b.x}, ${b.y}, ${b.z}）`;
+}
+
+function isDoorOrGate(name: string): boolean {
+  return name.endsWith('_door') || name.endsWith('_fence_gate');
 }
 
 function containerSuffix(contents: ItemStack[] | null | undefined): string {
@@ -603,7 +635,7 @@ function narrateEquip(s: WorldSnapshot): string {
     .map((slot) => s.equipment.find((p) => p.slot === slot))
     .filter((p): p is GearPiece => p !== undefined);
   const off = s.equipment.find((p) => p.slot === 'offhand');
-  const bits = [`经验 ${s.xpLevel} 级。`];
+  const bits = [s.xpLevel === null ? '经验正在从服务器同步。' : `经验 ${s.xpLevel} 级。`];
   bits.push(worn.length > 0 ? `穿着：${worn.map(gearPhrase).join('、')}。` : '身上没穿护甲。');
   if (off) bits.push(`${gearPhrase(off)}。`);
   if (s.effects.length > 0) bits.push(`状态：${s.effects.map(effectPhrase).join('、')}。`);
@@ -626,7 +658,7 @@ function equipCmp(s: WorldSnapshot): string {
     .map((e) => `${e.name}${e.level}${e.seconds <= 30 ? '!' : ''}`)
     .sort()
     .join(',');
-  return `xp${s.xpLevel}|${gear}|${eff}`;
+  return `xp${s.xpLevel ?? '?'}|${gear}|${eff}`;
 }
 
 /**
@@ -639,15 +671,16 @@ export function narrateInventory(items: ItemStack[]): string {
   return listStacks([...mergedStacks(items).values()]);
 }
 
-/** 按「名字 + 附魔后缀」并栈:这个键就是原版里能不能堆在一起的那条线 */
+/** 按实例属性并栈，耐久不同的装备不能合并成同一条读数。 */
 function mergedStacks(items: ItemStack[]): Map<string, { count: number; label: string }> {
   const merged = new Map<string, { count: number; label: string }>();
   for (const it of items) {
     const suffix = enchantSuffix(it.enchantments);
-    const key = `${it.name}${suffix}`;
+    const wear = it.durability ? ` 耐久${it.durability.left}/${it.durability.max}` : '';
+    const key = `${it.name}:${it.displayName ?? ''}${suffix}${wear}`;
     const cur = merged.get(key);
     if (cur) cur.count += it.count;
-    else merged.set(key, { count: it.count, label: `${zhName(it.name)}${suffix}` });
+    else merged.set(key, { count: it.count, label: `${it.displayName ?? zhName(it.name)}${suffix}${wear}` });
   }
   return merged;
 }
@@ -746,7 +779,7 @@ export function worldDelta(
     }
   }
   // 此处只报告饥饿变化;伤害事件由包含攻击者信息和反射去重的 World 播报处理。
-  if (foodPhrase(cur.food) !== foodPhrase(prev.food)) {
+  if (prev.food !== null && cur.food !== null && foodPhrase(cur.food) !== foodPhrase(prev.food)) {
     notes.push(`${foodPhrase(cur.food)}(饥饿 ${Math.round(cur.food)}/20)`);
   }
 
@@ -895,7 +928,7 @@ function blocksSight(name: string | null | undefined): boolean {
  * 也不必替换那条久经考验的判据。
  */
 export function canSeeBlockAt(bot: any, p: { x: number; y: number; z: number }): boolean {
-  const block = bot.blockAt(p as never);
+  const block = bot.blockAt(new Vec3(p.x, p.y, p.z));
   if (block == null) return false;
   if (bot.canSeeBlock(block) === true) return true;
   const me = bot.entity;
@@ -954,6 +987,13 @@ export function villagerNote(e: { name?: string; metadata?: unknown[] }): string
     }
   }
   return null;
+}
+
+/** 调用方仅在视线可达时使用；编号供当次连接选择目标，动物状态保持元数据原读数。 */
+export function entityObservationNote(bot: FactBot, entity: FactEntity): string {
+  const animal = animalStateNote(bot, entity);
+  const identity = animal || (Number.isInteger(entity.id) ? `entityId=${entity.id}` : '');
+  return [villagerNote(entity), identity].filter(Boolean).join('，');
 }
 
 /** 地形采样距离(格)与扫描的纵向范围 */
@@ -1086,14 +1126,21 @@ export function sampleLight(bot: any, night: boolean): WorldSnapshot['light'] {
   return mode;
 }
 
-/**
- * 使用 rainState 判断降雨。Mineflayer 的 isRaining 按 game_state_change reason 1/2
- * 的常量名更新布尔值，与原版实际行为极性相反。
- * reason 7 的 rain_level_change 提供 0–1 雨量，存入 rainState；进服和重生时会重发。
- */
+/** 雨量是全局状态；当前位置群系禁止降水时不显示雨。 */
 export function isRaining(bot: any): boolean {
   const level = (bot as { rainState?: unknown }).rainState;
-  return typeof level === 'number' && Number.isFinite(level) && level > 0;
+  if (typeof level !== 'number' || !Number.isFinite(level) || level <= 0) return false;
+  try {
+    const position = bot.entity?.position;
+    const biome = position && bot.blockAt?.(position.floored?.() ?? position)?.biome;
+    const registryBiome = Number.isInteger(biome?.id) ? bot.registry?.biomes?.[biome.id] : null;
+    const value = biome?.has_precipitation ?? biome?.hasPrecipitation
+      ?? registryBiome?.has_precipitation ?? registryBiome?.hasPrecipitation
+      ?? registryBiome?.precipitation;
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'string') return value !== 'none';
+  } catch { /* 未加载区块时仅能依据全局雨量。 */ }
+  return true;
 }
 
 /** 脚**所在**那一格是这些时,快照的「脚下是X」报它而不是脚下那一格(见 standingOn) */
@@ -1151,14 +1198,6 @@ export function findBankCell(
   return null;
 }
 
-/** 碰上就烧人的方块:碰撞箱压上去即掉血(combat 的 standable 与这里共用一份口径) */
-export const BURNING_BLOCKS = new Set(['lava', 'fire', 'soul_fire']);
-/** 只有站在上面才烧的:单独查脚下那一格 */
-export const SCORCHING_FLOOR = new Set(['magma_block']);
-/** 玩家碰撞箱:半径 0.3、高 1.8。0.1 是余量——贴着岩浆边缘走就已经在挨烧了 */
-const HITBOX_R = 0.3;
-const TOUCH_MARGIN = 0.1;
-const PLAYER_HEIGHT = 1.8;
 /** 实体共享元数据第 0 字节的第 0 位 = 身上着火 */
 const FIRE_FLAG = 0x01;
 
@@ -1192,14 +1231,13 @@ function cellOf(from: { x: number; y: number; z: number }, x: number, y: number,
 export function hazardTouch(bot: any): HazardTouch {
   const p = bot.entity.position;
   const base = p.floored();
-  const reach = HITBOX_R + TOUCH_MARGIN;
-  // 脚往上抬 0.05 格再取整:站在方块顶面时坐标常是整数,直接 floor 会读到脚下的实心方块
-  const dy0 = Math.floor(p.y + 0.05) - base.y;
-  const dy1 = Math.floor(p.y + PLAYER_HEIGHT - 0.1) - base.y;
+  const bounds = hazardBodyBounds(p);
+  const dy0 = bounds.min.y - base.y;
+  const dy1 = bounds.max.y - base.y;
   let touching: HazardCell | null = null;
   let submerged = false;
-  for (let dx = Math.floor(p.x - reach) - base.x; dx <= Math.floor(p.x + reach) - base.x; dx++) {
-    for (let dz = Math.floor(p.z - reach) - base.z; dz <= Math.floor(p.z + reach) - base.z; dz++) {
+  for (let dx = bounds.min.x - base.x; dx <= bounds.max.x - base.x; dx++) {
+    for (let dz = bounds.min.z - base.z; dz <= bounds.max.z - base.z; dz++) {
       for (let dy = dy0; dy <= dy1; dy++) {
         const b = bot.blockAt(base.offset(dx, dy, dz));
         if (b == null || !BURNING_BLOCKS.has(b.name)) continue;
@@ -1341,33 +1379,42 @@ function standableFor(
   return true;
 }
 
-/** 探路分诊用的最小方块读数;null = 区块未加载 */
-interface ProbeBlockInfo { name: string; solid: boolean }
+/** 诊断只用整格碰撞证明阻塞；部分碰撞或缺失形状不能证明不可站。 */
+export interface ProbeBlockInfo { name: string; solid: boolean; uncertain?: true }
 export type BlockReader = (x: number, y: number, z: number) => ProbeBlockInfo | null;
 
+export function probeBlockInfo(block: {
+  name: string; boundingBox: string; shapes?: readonly (readonly number[])[];
+}): ProbeBlockInfo {
+  const solid = block.boundingBox === 'block';
+  const fullCube = block.shapes?.some((shape) => shape.length === 6
+    && shape[0] === 0 && shape[1] === 0 && shape[2] === 0
+    && shape[3] === 1 && shape[4] === 1 && shape[5] === 1);
+  return { name: block.name, solid, ...(solid && !fullCube ? { uncertain: true } : {}) };
+}
+
 /**
- * GoalNear(range=1) 的候选落脚格:目标格自身 + 六个正邻格里,能站人的那些。
- * 能站 = 脚与头两格都不是实心,且脚下实心(或脚泡在水里,浮着也算到了)。
- * 一格都没有 = 这个目标在当前地形下根本没处落脚(树冠/墙里的典型形态)——
- * A* 对这种目标只会以 timeout 收场,报不出这句真话,而预检 O(27) 就能报。
- * 任何一格读数缺失(未加载)时把那格当能站,宁可不下结论也不误诊。
+ * GoalNear(range=1) 同时接受脚下取整及其上方一格；候选落脚格采用同一范围。
+ * 整格碰撞才排除候选，缺失读数或部分形状保留为未确认；这里只诊断，不生成移动路径。
  */
 export function standCellsAround(
   read: BlockReader,
   t: { x: number; y: number; z: number },
 ): Array<{ x: number; y: number; z: number }> {
-  const candidates = [
+  const goalCells = [
     { x: t.x, y: t.y, z: t.z },
     { x: t.x + 1, y: t.y, z: t.z }, { x: t.x - 1, y: t.y, z: t.z },
     { x: t.x, y: t.y + 1, z: t.z }, { x: t.x, y: t.y - 1, z: t.z },
     { x: t.x, y: t.y, z: t.z + 1 }, { x: t.x, y: t.y, z: t.z - 1 },
   ];
+  const candidates = [...new Map(goalCells.flatMap((cell) => [cell, { ...cell, y: cell.y - 1 }])
+    .map((cell) => [`${cell.x},${cell.y},${cell.z}`, cell] as const)).values()];
   const out: Array<{ x: number; y: number; z: number }> = [];
   for (const c of candidates) {
     const feet = read(c.x, c.y, c.z);
     const head = read(c.x, c.y + 1, c.z);
     const below = read(c.x, c.y - 1, c.z);
-    if (!feet || !head || !below) { out.push(c); continue; }
+    if (!feet || !head || !below || feet.uncertain || head.uncertain || below.uncertain) { out.push(c); continue; }
     const passable = !feet.solid && !head.solid;
     const support = below.solid || WATER_BLOCKS.has(feet.name);
     if (passable && support) out.push(c);
@@ -1399,7 +1446,7 @@ export function pocketScan(
       const key = `${n.x},${n.y},${n.z}`;
       if (visited.has(key)) continue;
       const b = read(n.x, n.y, n.z);
-      if (!b) return null;
+      if (!b || b.uncertain) return null;
       if (b.solid) continue;
       visited.add(key);
       queue.push(n);
@@ -1453,11 +1500,16 @@ function blockState(
   bot: any,
   name: string,
   p: { x: number; y: number; z: number },
-): { age?: { value: number; max: number }; moisture?: { value: number; max: number } } {
+): { age?: { value: number; max: number }; moisture?: { value: number; max: number }; open?: boolean } {
   const max = CROP_MAX_AGE[name];
-  if (max === undefined && name !== 'farmland') return {};
+  if (max === undefined && name !== 'farmland' && !isDoorOrGate(name)) return {};
   const b = bot.blockAt(p as never);
   const props = typeof b?.getProperties === 'function' ? b.getProperties() : undefined;
+  if (isDoorOrGate(name)) {
+    if (props?.open === true || props?.open === 'true') return { open: true };
+    if (props?.open === false || props?.open === 'false') return { open: false };
+    return {};
+  }
   if (name === 'farmland') {
     const moisture = Number(props?.moisture);
     return Number.isFinite(moisture) ? { moisture: { value: moisture, max: FARMLAND_MAX_MOISTURE } } : {};
@@ -1591,8 +1643,9 @@ export function snapshotFromBot(
     // 与不发闲置音的水生动物都不进
     if (!visible && (kind === 'other' || SILENT_ENTITIES.has(name))) continue;
     const stack = droppedStackOf(e, bot.registry?.items);
-    const note = villagerNote(e);
+    const note = visible ? entityObservationNote(bot, e) : null;
     entities.push({
+      ...(visible && Number.isInteger(e.id) ? { entityId: e.id } : {}),
       name,
       kind,
       distance: d,
@@ -1645,7 +1698,8 @@ export function snapshotFromBot(
       // 拿到要的那几块就收手——射线不便宜,不能对着上千格逐个打
       group.sort((a, b) => a.distanceTo(pos) - b.distanceTo(pos));
       const container = CONTAINER_BLOCKS.has(blockName);
-      const want = container ? CONTAINER_NEARBY_CAP : 1;
+      // 同材质的门常并排；只报一扇会让 Agent 点到旁边那扇甚至点空。
+      const want = container ? CONTAINER_NEARBY_CAP : isDoorOrGate(blockName) ? 4 : 1;
       const visible: typeof group = [];
       for (const p of group) {
         if (!canSeeBlockAt(bot, p)) continue;
@@ -1699,8 +1753,8 @@ export function snapshotFromBot(
   return {
     position: { x: pos.x, y: pos.y, z: pos.z },
     dimension: String(bot.game.dimension ?? 'overworld'),
-    health: bot.health ?? 20,
-    food: bot.food ?? 20,
+    health: typeof bot.health === 'number' && Number.isFinite(bot.health) ? bot.health : null,
+    food: typeof bot.food === 'number' && Number.isFinite(bot.food) ? bot.food : null,
     // 旱地上的氧气读数是残留旧值,一律按满算;水下才用真实值(截到 0–20)
     oxygen: inWater ? Math.max(0, Math.min(20, bot.oxygenLevel ?? 20)) : 20,
     inWater,
@@ -1712,11 +1766,18 @@ export function snapshotFromBot(
     biome,
     gameMode: String(bot.game.gameMode ?? 'survival'),
     heldItem: bot.heldItem ? bot.heldItem.name : null,
+    heldItemDisplayName: bot.heldItem ? itemCustomName(bot.heldItem) : null,
     inventory: (bot.inventory?.items() ?? []).map((it: any) => {
       const ench = readEnchants(it, bot.registry);
-      return { name: it.name, count: it.count, ...(ench.length > 0 ? { enchantments: ench } : {}) };
+      const displayName = itemCustomName(it);
+      const durability = readDurability(it);
+      return { name: it.name, count: it.count,
+        ...(displayName ? { displayName } : {}),
+        ...(durability ? { durability } : {}),
+        ...(ench.length > 0 ? { enchantments: ench } : {}) };
     }),
-    xpLevel: bot.experience?.level ?? 0,
+    xpLevel: typeof bot.experience?.level === 'number' && Number.isFinite(bot.experience.level)
+      ? bot.experience.level : null,
     equipment: readEquipment(bot),
     effects: readEffects(bot),
     entities: entities.slice(0, maxEntities),

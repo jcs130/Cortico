@@ -9,12 +9,21 @@
  */
 import type { Bot } from 'mineflayer';
 import type { SkillCall } from './skills.ts';
-import type { Cell } from './geometry.ts';
-import { matchItemName } from './chests.ts';
+import type { BlockFace, Cell } from './geometry.ts';
+import { matchItemName, type ChestBook } from './chests.ts';
 import { DRINKABLES } from './item-facts.ts';
+import { RISKY_FOODS } from './nutrition.ts';
 import { itemMatchesPick, pickMissText, pickTargetOf } from './item-pick.ts';
 import { zhDimension, zhEntity, zhName } from './names.ts';
+import { invItemNamed } from './inventory.ts';
+import { itemCustomName } from './item-display.ts';
 import { bestRangedWeapon, hasRangedLos, hasUsableArrows, type RangedTarget } from './ranged.ts';
+import { taggedCraftChoice } from './tagged-crafting.ts';
+import { inventoryReadConfirmed } from './inventory-window-sync.ts';
+import { HOE_TILLED } from './blueprint-registry.ts';
+import { farmingClickCell, isHoeUseItem } from './farming-target.ts';
+import { SEED_CROP } from './placed-ledger.ts';
+import { AIR_NAMES, LIQUIDS, PLACE_REACH, cellText } from './cell-facts.ts';
 
 type PrecheckLevel = 'hard' | 'soft';
 
@@ -46,7 +55,7 @@ type BlockLike = { name: string; boundingBox?: string } | null | undefined;
 const CRAFT_TIED_MAX = 3;
 
 /**
- * craft:配方齐不齐。与 skillCraft 问的是同一份数据(bot.recipesAll + 背包),
+ * craft:配方齐不齐。与 skillCraft 问的是同一份数据(标签配方或 recipesAll + 背包),
  * 所以它说凑不齐,真跑也一定凑不齐 —— 台架 `bench-precheck.ts` 锁死这条蕴含。
  */
 function precheckCraft(bot: Bot, call: Extract<SkillCall, { skill: 'craft' }>): PrecheckNote | null {
@@ -54,7 +63,17 @@ function precheckCraft(bot: Bot, call: Extract<SkillCall, { skill: 'craft' }>): 
   const item = call.item ?? '';
   const def = bot.registry?.itemsByName?.[item];
   if (!def) return { level: 'hard', text: `不认识「${item}」这种物品`, rule: 'craft.unknownItem' };
+  if (!inventoryReadConfirmed(bot) || (bot.currentWindow ?? bot.inventory).selectedItem) {
+    return { level: 'soft', text: '库存同步或游标归位尚未完成，暂不能判断合成材料缺口；执行前先核对并归还游标', rule: 'craft.inventorySync' };
+  }
   const label = zhName(def.name);
+  const tagged = taggedCraftChoice(bot, def.name);
+  if (tagged) {
+    if (tagged.recipe) return null;
+    if (bot.inventory.items().filter((stack) => stack.type === def.id)
+      .reduce((sum, stack) => sum + stack.count, 0) >= call.count) return null;
+    return { level: 'hard', text: `做${label}需要 ${tagged.needs},包里凑不齐`, rule: 'craft.short' };
+  }
   let all: Array<{ delta?: Array<{ id: number; count: number }> }> = [];
   try {
     all = (bot.recipesAll?.(def.id, null, true as never) ?? []) as never;
@@ -106,6 +125,13 @@ function precheckEat(
   }
   // 吃饱了是这一步的正常结局,执行器不会调用 consume()。
   if (bot.food >= 20) return null;
+  if (RISKY_FOODS.has(call.item)) {
+    const safer = bot.inventory.items().find((item) => item.count > 0 && foods[item.name]
+      && !RISKY_FOODS.has(item.name) && item.name !== 'golden_apple'
+      && item.name !== 'enchanted_golden_apple');
+    if (safer) return { level: 'soft', rule: 'eat.riskyWithSafe',
+      text: `${zhName(call.item)}可能带来不利效果，包里还有${zhName(safer.name)}；仍会按点名物品进食，事后核对状态效果` };
+  }
   return null;
 }
 
@@ -205,10 +231,10 @@ function precheckSlots(bot: Bot, call: SkillCall): PrecheckNote | null {
  * 提示语也照抄技能的模糊命中那一句 —— 同一件事只有一个说法。
  */
 function precheckHasItem(
-  bot: Bot, item: string, verb: string, rule: string, pick?: string,
+  bot: Bot, item: string, verb: string, rule: string, pick?: string, allowCustomName = false,
 ): PrecheckNote | null {
   if (!item) return null;
-  if (hasItem(bot, item, pick) > 0) return null;
+  if (hasItem(bot, item, pick) > 0 || (allowCustomName && invItemNamed(bot, item, pick))) return null;
   // 有同 id 的几件而挑选词一件没中:那几件各自是什么,当场摆出来
   if (pick && hasItem(bot, item) > 0) {
     const same = bot.inventory.items()
@@ -218,13 +244,34 @@ function precheckHasItem(
   }
   const near = bot.inventory.items().filter((i) => i.name.includes(item)).map((i) => zhName(i.name));
   const hint = near.length > 0 ? `;名字带这几个字的有:${near.join('、')}` : '';
-  return { level: 'hard', text: `包里没有${zhName(item)},${verb}不了${hint}`, rule };
+  const custom = allowCustomName ? [...new Set(bot.inventory.items().map((i) => itemCustomName(i)).filter(Boolean))].slice(0, 4) : [];
+  const customHint = custom.length > 0 ? `;自定义物品请用背包显示名:${custom.join('、')}` : '';
+  return { level: 'hard', text: `包里没有${zhName(item)},${verb}不了${hint}${customHint}`, rule };
 }
 
 /** 五个「从包里拿东西下手」的技能:判据同一条,只有动词不同 */
 function precheckItemStep(bot: Bot, call: SkillCall, verb: string): PrecheckNote | null {
   const c = call as { item?: string; pick?: string };
-  return precheckHasItem(bot, c.item ?? '', verb, `${call.skill}.noStock`, c.pick);
+  return precheckHasItem(bot, c.item ?? '', verb, `${call.skill}.noStock`, c.pick, call.skill === 'equip');
+}
+
+/** An empty hand cannot activate nearby air or liquid; item-directed uses remain uncovered. */
+export function precheckEmptyUseTarget(
+  bot: Bot, call: Extract<SkillCall, { skill: 'use' }>, deps: PrecheckDeps,
+): PrecheckNote | null {
+  if (call.at === undefined || call.item || call.target) return null;
+  if (!Array.isArray(call.at) || call.at.length !== 3
+    || !call.at.every((axis) => typeof axis === 'number' && Number.isFinite(axis))) return null;
+  const position = bot.entity?.position;
+  if (!position) return null;
+  const cell = deps.resolve(call.at);
+  if (!cell || Math.hypot(position.x - cell.x - 0.5,
+    position.y - cell.y - 0.5, position.z - cell.z - 0.5) > PLACE_REACH) return null;
+  const target = deps.blockAt(cell);
+  if (!target || (!AIR_NAMES.has(target.name) && !LIQUIDS.has(target.name))) return null;
+  return { level: 'hard', rule: 'use.emptyTarget',
+    text: `${cellText(cell)} 是${AIR_NAMES.has(target.name) ? '空气' : zhName(target.name)}，空手右键不产生动作。`
+      + '先探查目标格，确认可交互方块及坐标；不要靠相邻坐标试点来定位。' };
 }
 
 /** 点名物品缺货但目标格已是该方块时，受阻文案与执行器一致。 */
@@ -234,7 +281,7 @@ function precheckUseItemAt(
   deps: PrecheckDeps,
 ): PrecheckNote | null {
   const item = String(call.item ?? '');
-  if (!item || hasItem(bot, item) > 0) return null;
+  if (!item || invItemNamed(bot, item)) return null;
   const cell = call.at === undefined ? null : deps.resolve(call.at);
   const b = (cell ? deps.blockAt(cell) : null) as BlockLike;
   if (b && cell && matchItemName(item, b.name)) {
@@ -244,7 +291,9 @@ function precheckUseItemAt(
       rule: 'use.itemIsTheBlock',
     };
   }
-  return precheckHasItem(bot, item, '用', 'use.noStock');
+  const note = precheckHasItem(bot, item, '用', 'use.noStock', undefined, true);
+  if (note) note.text += ';item 指背包里拿在手上使用的物品，不是世界里的点击对象。点击已有方块用现场确认的 at，不填同名 item；缺货不代表附近没有该方块';
+  return note;
 }
 
 /** 人在哪个维度。与执行器 dimensionOf 同一条读法;一行属性读,不为它牵一条跨文件的线 */
@@ -299,32 +348,72 @@ const SEEDS = new Set([
   'torchflower_seeds', 'pitcher_pod', 'nether_wart',
 ]);
 
-/** 锄地、种地应指向土格；目标偏到上方空气时只报告可能偏差，不修改坐标。 */
+/** 已加载且适用的下方土格沿用执行器的点击口径。 */
 function precheckSoilCell(
   bot: Bot,
-  call: { item?: string; at?: unknown },
+  call: { item?: string; at?: unknown; face?: BlockFace },
   deps: PrecheckDeps,
 ): PrecheckNote | null {
   const item = String(call.item ?? '');
   if (call.at === undefined) return null;
-  if (!item.endsWith('_hoe') && !SEEDS.has(item)) return null;
+  const hoe = isHoeUseItem(item);
+  if (!hoe && !SEEDS.has(item)) return null;
   const cell = deps.resolve(call.at);
   if (!cell) return null;
   const b = deps.blockAt(cell) as BlockLike;
-  if (!b || b.name !== 'air') return null;
-  const what = item.endsWith('_hoe') ? '锄头' : '种子';
+  if (!b) return null;
+  if (hoe && !AIR_NAMES.has(b.name) && HOE_TILLED[b.name] === undefined) {
+    const below = deps.blockAt({ x: cell.x, y: cell.y - 1, z: cell.z }) as BlockLike | null;
+    const soilHint = below && HOE_TILLED[below.name] !== undefined
+      ? `下方 (${cell.x},${cell.y - 1},${cell.z}) 是${zhName(below.name)}；先清空当前格的遮挡物，再对下方土格用锄头`
+      : '先探查下方或相邻土格';
+    return {
+      level: 'hard',
+      text: `(${cell.x},${cell.y},${cell.z}) 是${zhName(b.name)}，不是锄头能翻的土格；${soilHint}`,
+      rule: 'use.hoeWrongBlock',
+    };
+  }
+  if (hoe && HOE_TILLED[b.name] !== undefined
+    && b.name !== 'rooted_dirt' && b.name !== 'farmland') {
+    const above = deps.blockAt({ x: cell.x, y: cell.y + 1, z: cell.z }) as BlockLike | null;
+    if (above && !AIR_NAMES.has(above.name)) return {
+      level: 'hard',
+      text: `(${cell.x},${cell.y},${cell.z}) 上方 (${cell.x},${cell.y + 1},${cell.z}) 是${zhName(above.name)}，当前不能锄地；先清除遮挡或换一格`,
+      rule: 'use.hoeCovered',
+    };
+  }
+  if (SEEDS.has(item) && !AIR_NAMES.has(b.name)) {
+    const soil = item === 'nether_wart' ? 'soul_sand' : 'farmland';
+    if (b.name !== soil) return {
+      level: 'hard',
+      text: `(${cell.x},${cell.y},${cell.z}) 是${zhName(b.name)}，${zhName(item)}要对${zhName(soil)}使用；先探查正确土格与上方空间`,
+      rule: 'use.seedWrongBlock',
+    };
+  }
+  if (!AIR_NAMES.has(b.name)) return null;
+  if (farmingClickCell(bot, cell, item, call.face)) return null;
+  const what = hoe ? '锄头' : '种子';
+  const belowCell = { x: cell.x, y: cell.y - 1, z: cell.z };
+  const below = deps.blockAt(belowCell) as BlockLike;
+  const reading = below
+    ? `下方 (${belowCell.x},${belowCell.y},${belowCell.z}) 是${zhName(below.name)}`
+    : `下方 (${belowCell.x},${belowCell.y},${belowCell.z}) 未加载，无法确认`;
   return {
     level: 'soft',
-    text: `(${cell.x},${cell.y},${cell.z}) 是空气;${what}要指着土那一格(可能是 (${cell.x},${cell.y - 1},${cell.z}))`,
-    rule: 'use.soilCell',
+    text: `(${cell.x},${cell.y},${cell.z}) 是空气；${reading}；${what}当前没有可用的点击面，先探查可用土格再修正目标和点击面`,
+    rule: below ? 'use.soilCell' : 'use.soilUnloaded',
   };
 }
 
 /** tunnel 坡度判据与 skillTunnel 一致：Math.abs(rise) > run 表示超过 45°。 */
-function precheckTunnel(bot: Bot, call: Extract<SkillCall, { skill: 'tunnel' }>, resolve: (a: unknown) => Cell | null): PrecheckNote | null {
+function precheckTunnel(bot: Bot, call: Extract<SkillCall, { skill: 'tunnel' }>, resolve: (a: unknown) => Cell | null,
+  projectedStart?: Cell | null): PrecheckNote | null {
+  // A preceding movement step has not run yet. With an unknown landing cell,
+  // checking slope from the *current* position would falsely reject the plan.
+  if (projectedStart === null) return null;
   const p = bot.entity?.position;
   if (!p) return null;
-  const start = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) };
+  const start = projectedStart ?? { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) };
   const target = resolve(call.at);
   if (!target) return null;
   const run = Math.max(Math.abs(target.x - start.x), Math.abs(target.z - start.z));
@@ -493,6 +582,21 @@ export interface PrecheckDeps {
   blockAt: (cell: Cell) => { name: string; boundingBox?: string } | null | undefined;
   /** 这一场上次吃东西的时刻(epoch ms);这一场还没吃过为 null。`[口粮]` 那行的四个数之一 */
   lastAte?: () => number | null;
+  /** 容器上次开窗读数；只用于提示可能已满，不能代替这次开窗确认。 */
+  chests?: ChestBook;
+}
+
+function precheckStow(bot: Bot, call: Extract<SkillCall, { skill: 'stow' }>, deps: PrecheckDeps): PrecheckNote | null {
+  const stock = precheckItemStep(bot, call, '存');
+  if (stock || !call.at || !deps.chests) return stock;
+  const cell = deps.resolve(call.at);
+  if (!cell) return null;
+  const rec = deps.chests.get(dimensionOf(bot), cell);
+  if (!rec || rec.usedSlots < rec.slots || rec.items.some((it) => matchItemName(call.item, it.name))) return null;
+  return {
+    level: 'soft', rule: 'stow.lastSeenFull',
+    text: `指定箱子 (${cell.x},${cell.y},${cell.z}) 上次开窗已占满 ${rec.usedSlots}/${rec.slots} 格，且没有${zhName(call.item)}可并堆；出发前考虑别的仓库，到场仍以重新开箱为准`,
+  };
 }
 
 type MiningCall = Extract<SkillCall, { skill: 'collect' | 'excavate' | 'tunnel' }>;
@@ -581,7 +685,8 @@ function precheckMiningTool(bot: Bot, call: SkillCall, deps: PrecheckDeps): Prec
  * 单步试算；全部通过或未覆盖时返回 null。goto 路线试算由 dryRun 单独处理。
  * 每步至多返回一条，hard 优先于 soft。
  */
-export function precheckStep(bot: Bot, call: SkillCall, deps: PrecheckDeps): PrecheckNote | null {
+export function precheckStep(bot: Bot, call: SkillCall, deps: PrecheckDeps,
+  projectedStart?: Cell | null): PrecheckNote | null {
   if (!bot?.inventory) return null;
   if ((call as { dryRun?: boolean }).dryRun) return null; // 试算本身不用再试算
   try {
@@ -591,11 +696,11 @@ export function precheckStep(bot: Bot, call: SkillCall, deps: PrecheckDeps): Pre
       case 'craft': return precheckCraft(bot, call as never) ?? precheckSlots(bot, call);
       case 'eat': return precheckEat(bot, call, deps);
       case 'build': return precheckBuild(bot, call as never, deps);
-      case 'tunnel': return precheckTunnel(bot, call as never, deps.resolve) ?? precheckDeepKit(bot, call, deps);
+      case 'tunnel': return precheckTunnel(bot, call as never, deps.resolve, projectedStart) ?? precheckDeepKit(bot, call, deps);
       case 'excavate': return precheckDeepKit(bot, call, deps);
       case 'equip': return precheckItemStep(bot, call, '拿');
       case 'toss': return precheckItemStep(bot, call, '扔');
-      case 'stow': return precheckItemStep(bot, call, '存');
+      case 'stow': return precheckStow(bot, call, deps);
       case 'anvil': return precheckItemStep(bot, call, '用');
       case 'grindstone': return precheckItemStep(bot, call, '磨');
       case 'take': return precheckSlots(bot, call);
@@ -604,6 +709,8 @@ export function precheckStep(bot: Bot, call: SkillCall, deps: PrecheckDeps): Pre
       case 'surface': return precheckSurfaceHere(bot);
       case 'lead': return precheckLead(bot, call as never, deps);
       case 'use': {
+        const empty = precheckEmptyUseTarget(bot, call, deps);
+        if (empty) return empty;
         const item = (call as { item?: string }).item;
         if (item) {
           return precheckUseItemAt(bot, call as { item?: string; at?: unknown }, deps)
@@ -628,9 +735,49 @@ export function precheckStep(bot: Bot, call: SkillCall, deps: PrecheckDeps): Pre
  */
 export function precheckSteps(bot: Bot, steps: SkillCall[], deps: PrecheckDeps): Array<{ index: number; note: PrecheckNote }> {
   const out: Array<{ index: number; note: PrecheckNote }> = [];
+  let projectedStart: Cell | null | undefined;
   for (let i = 0; i < steps.length; i++) {
-    const note = precheckStep(bot, steps[i], deps);
-    if (note) out.push({ index: i, note });
+    const current = steps[i];
+    const relativeTunnelAfterMove = current.skill === 'tunnel' && projectedStart !== undefined
+      && (!Array.isArray(current.at) || !current.at.every((n) => typeof n === 'number'));
+    const note = precheckStep(bot, current, deps, relativeTunnelAfterMove ? null : projectedStart);
+    if (note?.rule === 'use.emptyTarget' && i > 0) continue; // Earlier steps may change hand or cell.
+    if (current.skill === 'goto' || current.skill === 'tunnel') {
+      const at = current.at;
+      projectedStart = Array.isArray(at) && at.length === 3 && at.every((n) => Number.isInteger(n))
+        ? deps.resolve(at) : null;
+    }
+    if (!note) continue;
+    // 受理刻只看得见当前背包；同单前面的取物/制作成功后才会有的材料，
+    // 不能在这里误报「手里没有」。执行时的因果闸仍会处理上游落空。
+    const neededItem = 'item' in current && typeof current.item === 'string' ? current.item : null;
+    if (note.rule.endsWith('.noStock') && neededItem !== null
+      && steps.slice(0, i).some((earlier) =>
+        (earlier.skill === 'take' || earlier.skill === 'pickup' || earlier.skill === 'craft')
+        && 'item' in earlier && typeof earlier.item === 'string'
+        && (matchItemName(neededItem, earlier.item) || matchItemName(earlier.item, neededItem)))) continue;
+    // 同单先锄后种时，受理刻看见的是锄地前的草方块；种子的执行刻会重读耕地。
+    // 相对落点前面若还有 goto，也不能把当前站位误当作将来的目标格。
+    if (current.skill === 'use' && ['use.seedWrongBlock', 'use.hoeWrongBlock', 'use.hoeCovered', 'use.soilCell'].includes(note.rule)
+      && current.at !== undefined) {
+      const relative = Array.isArray(current.at) && current.at.some((n) => typeof n !== 'number');
+      if (relative && steps.slice(0, i).some((earlier) => earlier.skill === 'goto')) continue;
+      if (['use.seedWrongBlock', 'use.soilCell'].includes(note.rule) && current.item && SEED_CROP[current.item]
+        && (!current.face || current.face === 'up')) {
+        const requested = deps.resolve(current.at);
+        const currentBlock = requested ? deps.blockAt(requested) : null;
+        const soil = requested && currentBlock && AIR_NAMES.has(currentBlock.name)
+          ? { x: requested.x, y: requested.y - 1, z: requested.z } : requested;
+        if (soil && steps.slice(0, i).some((earlier) => {
+          if (earlier.skill !== 'use' || !earlier.item || !isHoeUseItem(earlier.item) || earlier.at === undefined) return false;
+          const target = deps.resolve(earlier.at);
+          if (!target) return false;
+          const aligned = farmingClickCell(bot, target, earlier.item, earlier.face) ?? target;
+          return aligned.x === soil.x && aligned.y === soil.y && aligned.z === soil.z;
+        })) continue;
+      }
+    }
+    out.push({ index: i, note });
   }
   return out;
 }

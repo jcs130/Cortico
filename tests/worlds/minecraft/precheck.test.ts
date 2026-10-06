@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest';
 import { precheckStep, precheckSteps, renderPrecheckNotes, type PrecheckDeps } from '../../../src/worlds/minecraft/precheck.ts';
 import { parseSteps, type SkillCall } from '../../../src/worlds/minecraft/executor.ts';
 import { resolveAnchors, type Anchor } from '../../../src/worlds/minecraft/geometry.ts';
+import { ChestBook } from '../../../src/worlds/minecraft/chests.ts';
 
 interface FakeItem { type: number; count: number; name: string }
 
@@ -79,7 +80,7 @@ function fakeBot(opts: {
     registry: {
       items: NAMES,
       itemsByName: BY_NAME,
-      foodsByName: { cooked_beef: {}, golden_apple: {}, pufferfish: {} },
+      foodsByName: { cooked_beef: {}, golden_apple: {}, pufferfish: {}, bread: {}, rotten_flesh: {} },
       blocksByName: {
         stone: { harvestTools: { 13: true, 3: true, 9: true } },
         iron_ore: { harvestTools: { 3: true, 9: true } },
@@ -128,6 +129,20 @@ function makeDeps(bot: ReturnType<typeof fakeBot>): PrecheckDeps {
 const call = (c: unknown): SkillCall => c as SkillCall;
 
 describe('前置试算 · 判死的必须真的做不成', () => {
+  it('方块容器和手持容器打开后都可接 take from:open', () => {
+    const bot = fakeBot({ blocks: { '3,64,0': 'furnace' } });
+    const block = precheckSteps(bot, [
+      call({ skill: 'use', at: [3, 64, 0] }),
+      call({ skill: 'take', item: 'iron_ingot', count: 1, from: 'open' }),
+    ], makeDeps(bot));
+    expect(block.some((hit) => hit.note.rule === 'take.closedAfterBlockUse')).toBe(false);
+    const custom = precheckSteps(bot, [
+      call({ skill: 'use', item: '大背包' }),
+      call({ skill: 'take', item: 'iron_ingot', count: 1, from: 'open' }),
+    ], makeDeps(bot));
+    expect(custom.some((hit) => hit.note.rule === 'take.closedAfterBlockUse')).toBe(false);
+  });
+
   it('craft 缺料:说清还差什么,不只说「凑不齐」', () => {
     const bot = fakeBot({ bag: [['stick', 1]] });
     const n = precheckStep(bot, call({ skill: 'craft', item: 'stone_pickaxe', count: 1 }), makeDeps(bot));
@@ -183,6 +198,14 @@ describe('前置试算 · 判死的必须真的做不成', () => {
   it('eat 显式点名河豚且有库存:与执行技能一致放行', () => {
     const bot = fakeBot({ bag: [['pufferfish', 1]], food: 10 });
     expect(precheckStep(bot, call({ skill: 'eat', item: 'pufferfish' }), makeDeps(bot))).toBeNull();
+  });
+
+  it('eat 选择腐肉而包里有面包时只提醒风险，不阻止行动', () => {
+    const bot = fakeBot({ bag: [['rotten_flesh', 1], ['bread', 2]], food: 12 });
+    const n = precheckStep(bot, call({ skill: 'eat', item: 'rotten_flesh' }), makeDeps(bot));
+    expect(n?.level).toBe('soft');
+    expect(n?.rule).toBe('eat.riskyWithSafe');
+    expect(n?.text).toContain('面包');
   });
 
   it('eat 背包顺序不影响点名食物:与执行技能一致放行', () => {
@@ -299,6 +322,16 @@ describe('前置试算 · 判死的必须真的做不成', () => {
     expect(precheckStep(bot, call({ skill: 'tunnel', at: [20, 96, 0] }), makeDeps(bot))).toBeNull();
   });
 
+  it('整单先 goto 再下井时按预计落点试算坡度，不按提交时的旧站位误报', () => {
+    const bot = fakeBot({ at: [0, 64, 0] });
+    const steps = [
+      call({ skill: 'goto', at: [7, 64, 0] }),
+      call({ skill: 'tunnel', at: [7, 49, 0], spiral: true }),
+    ];
+    expect(precheckSteps(bot, [steps[1]], makeDeps(bot)).some((hit) => hit.note.rule === 'tunnel.slope')).toBe(true);
+    expect(precheckSteps(bot, steps, makeDeps(bot)).some((hit) => hit.note.rule === 'tunnel.slope')).toBe(false);
+  });
+
   it('equip 包里没有:带上技能自己的模糊命中提示', () => {
     const bot = fakeBot({ bag: [['stone_pickaxe', 1]] });
     const n = precheckStep(bot, call({ skill: 'equip', item: 'iron_pickaxe' }), makeDeps(bot));
@@ -312,6 +345,19 @@ describe('前置试算 · 判死的必须真的做不成', () => {
     expect(n?.level).toBe('hard');
     expect(n?.text).toContain('那一格本身就是');
     expect(n?.text).toContain('不用带 item');
+  });
+
+  it('use 缺货且未指定目标时只说明库存与点击契约，不推断世界里没有该对象', () => {
+    const bot = fakeBot({ bag: [], blocks: { '3,64,0': 'white_bed' } });
+    const n = precheckStep(bot, call({ skill: 'use', item: 'bed' }), makeDeps(bot));
+    expect(n?.rule).toBe('use.noStock');
+    expect(n?.level).toBe('hard');
+    expect(n?.text).toContain('item 指背包里');
+    expect(n?.text).toContain('现场确认的 at');
+    expect(n?.text).toContain('缺货不代表附近没有');
+    expect(n?.text).not.toContain('3,64,0');
+    expect(precheckStep(bot, call({ skill: 'use', at: [3, 64, 0] }), makeDeps(bot)))
+      .toBeNull();
   });
 
   it('attack 目标不在身边:只算 soft(它会自己走过来),不判死', () => {
@@ -357,6 +403,17 @@ describe('前置试算 · 判死的必须真的做不成', () => {
     expect(n?.text).not.toContain('扔');
   });
 
+  it('出发前提示指定仓库上次已满，保留到场重新开箱的余地', () => {
+    const bot = fakeBot({ bag: [['bow', 2]] });
+    const chests = new ChestBook(null);
+    chests.remember('overworld', { x: 20, y: 64, z: 0 }, [{ name: 'dirt', count: 64 }], 27, 27);
+    const deps = { ...makeDeps(bot), chests };
+    const note = precheckStep(bot, call({ skill: 'stow', item: 'bow', count: 2, at: [20, 64, 0] }), deps);
+    expect(note).toMatchObject({ level: 'soft', rule: 'stow.lastSeenFull' });
+    expect(note?.text).toContain('上次开窗已占满 27/27 格');
+    expect(note?.text).toContain('以重新开箱为准');
+  });
+
   it('空格按槽位数,不按名字合并:三把镐是三格不是一格', () => {
     const bag: Array<[string, number]> = [
       ...Array.from({ length: 33 }, () => ['dirt', 64] as [string, number]),
@@ -395,22 +452,105 @@ describe('前置试算 · 判死的必须真的做不成', () => {
       .toMatchObject({ rule: 'craft.slots' });
   });
 
-  it('锄头指着空气:报读数与一个可能,不改她的坐标', () => {
+  it('锄头指着土格上方的空气:执行时可安全对准下方，不再误报', () => {
     const bot = fakeBot({ bag: [['iron_hoe', 1]], blocks: { '3,64,0': 'dirt' } });
     const n = precheckStep(bot, call({ skill: 'use', item: 'iron_hoe', at: [3, 65, 0] }), makeDeps(bot));
-    expect(n?.level).toBe('soft');
-    expect(n?.text).toBe('(3,65,0) 是空气;锄头要指着土那一格(可能是 (3,64,0))');
+    expect(n).toBeNull();
   });
 
-  it('种子指着空气:同一条判据,措辞换成种子', () => {
+  it('种子指着耕地上方的空气:执行时可安全对准下方', () => {
     const bot = fakeBot({ bag: [['wheat_seeds', 8]], blocks: { '3,64,0': 'farmland' } });
     const n = precheckStep(bot, call({ skill: 'use', item: 'wheat_seeds', at: [3, 65, 0] }), makeDeps(bot));
-    expect(n?.text).toContain('种子要指着土那一格');
+    expect(n).toBeNull();
+  });
+
+  it('空气目标指定侧面时保留原始点击面的土格提示', () => {
+    const bot = fakeBot({ bag: [['iron_hoe', 1], ['wheat_seeds', 8]], blocks: { '3,64,0': 'farmland' } });
+    expect(precheckStep(bot, call({ skill: 'use', item: 'wheat_seeds', at: [3, 65, 0], face: 'north' }), makeDeps(bot)))
+      .toMatchObject({ rule: 'use.soilCell' });
+    expect(precheckSteps(bot, [
+      call({ skill: 'use', item: 'hoe', at: [3, 64, 0] }),
+      call({ skill: 'use', item: 'wheat_seeds', at: [3, 65, 0], face: 'north' }),
+    ], makeDeps(bot))).toMatchObject([{ index: 1, note: { rule: 'use.soilCell' } }]);
+  });
+
+  it('种子上方是空气但下方仍是草方块时继续提示先耕地', () => {
+    const bot = fakeBot({ bag: [['wheat_seeds', 8]], blocks: { '3,64,0': 'grass_block' } });
+    const n = precheckStep(bot, call({ skill: 'use', item: 'wheat_seeds', at: [3, 65, 0] }), makeDeps(bot));
+    expect(n?.rule).toBe('use.soilCell');
+    expect(n?.text).toContain('下方 (3,64,0) 是草方块');
+    expect(n?.text).not.toContain('可能');
+  });
+
+  it('only offers loaded block facts for air targets; unknown support is not a proven soil refusal', () => {
+    const bot = fakeBot({ bag: [['iron_hoe', 1]], blocks: { '3,64,0': null } });
+    const note = precheckStep(bot, call({ skill: 'use', item: 'iron_hoe', at: [3, 65, 0] }), makeDeps(bot));
+    expect(note).toMatchObject({ level: 'soft', rule: 'use.soilUnloaded' });
+    expect(note?.text).toContain('未加载，无法确认');
+    expect(note?.text).not.toContain('可能');
+  });
+
+  it('hoe 类别名和洞穴空气使用与具体锄头、普通空气一致的土格判据', () => {
+    const invalid = fakeBot({ bag: [['iron_hoe', 1]], blocks: { '3,64,0': 'stone' } });
+    expect(precheckStep(invalid, call({ skill: 'use', item: 'hoe', at: [3, 64, 0] }), makeDeps(invalid)))
+      .toMatchObject({ rule: 'use.hoeWrongBlock' });
+    const air = fakeBot({ bag: [['iron_hoe', 1], ['wheat_seeds', 8]], blocks: { '3,64,0': 'farmland', '3,65,0': 'cave_air' } });
+    for (const item of ['hoe', 'wheat_seeds']) {
+      expect(precheckStep(air, call({ skill: 'use', item, at: [3, 65, 0] }), makeDeps(air))).toBeNull();
+    }
+  });
+
+  it('种子直接点草方块是硬受阻；同单先锄同格后种时不误报锄前状态', () => {
+    const bot = fakeBot({ bag: [['iron_hoe', 1], ['wheat_seeds', 8]], blocks: { '3,64,0': 'grass_block' } });
+    const seed = call({ skill: 'use', item: 'wheat_seeds', at: [3, 64, 0] });
+    expect(precheckStep(bot, seed, makeDeps(bot))).toMatchObject({ level: 'hard', rule: 'use.seedWrongBlock' });
+    expect(precheckSteps(bot, [
+      call({ skill: 'use', item: 'iron_hoe', at: [3, 64, 0] }), seed,
+    ], makeDeps(bot))).toEqual([]);
+  });
+
+  it('先对土格上方空气锄地再种植时，按同一土格延后种子预检', () => {
+    const bot = fakeBot({ bag: [['iron_hoe', 1], ['wheat_seeds', 8]], blocks: { '3,64,0': 'grass_block' } });
+    for (const seedY of [64, 65]) {
+      expect(precheckSteps(bot, [
+        call({ skill: 'use', item: 'iron_hoe', at: [3, 65, 0] }),
+        call({ skill: 'use', item: 'wheat_seeds', at: [3, seedY, 0] }),
+      ], makeDeps(bot))).toEqual([]);
+    }
+  });
+
+  it('goto 后的相对锄地格不沿用当前位置的遮挡状态', () => {
+    const bot = fakeBot({ bag: [['iron_hoe', 1]], blocks: { '1,64,0': 'dirt', '1,65,0': 'stone' } });
+    const hoe = call({ skill: 'use', item: 'iron_hoe', at: ['~1', '~', '~'] });
+    expect(precheckStep(bot, hoe, makeDeps(bot))).toMatchObject({ rule: 'use.hoeCovered' });
+    expect(precheckSteps(bot, [call({ skill: 'goto', at: [8, 64, 0] }), hoe], makeDeps(bot))).toEqual([]);
+  });
+
+  it('锄过别的土格不消除当前种植目标的错误状态', () => {
+    const bot = fakeBot({ bag: [['iron_hoe', 1], ['wheat_seeds', 8]], blocks: { '3,64,0': 'grass_block', '4,64,0': 'dirt' } });
+    expect(precheckSteps(bot, [
+      call({ skill: 'use', item: 'iron_hoe', at: [3, 65, 0] }),
+      call({ skill: 'use', item: 'wheat_seeds', at: [4, 64, 0] }),
+    ], makeDeps(bot))).toMatchObject([{ index: 1, note: { rule: 'use.seedWrongBlock' } }]);
   });
 
   it('指着土那一格就不出声', () => {
     const bot = fakeBot({ bag: [['iron_hoe', 1]], blocks: { '3,64,0': 'dirt' } });
     expect(precheckStep(bot, call({ skill: 'use', item: 'iron_hoe', at: [3, 64, 0] }), makeDeps(bot))).toBeNull();
+  });
+
+  it('锄头点到草植株而非草方块:提前指出目标格不会变耕地', () => {
+    const bot = fakeBot({ bag: [['iron_hoe', 1]], blocks: { '3,64,0': 'grass_block', '3,65,0': 'grass' } });
+    const n = precheckStep(bot, call({ skill: 'use', item: 'iron_hoe', at: [3, 65, 0] }), makeDeps(bot));
+    expect(n).toMatchObject({ level: 'hard', rule: 'use.hoeWrongBlock' });
+    expect(n?.text).toContain('grass');
+  });
+
+  it('土格上方已有工作台时，提前指出锄地必败', () => {
+    const bot = fakeBot({ bag: [['iron_hoe', 1]], blocks: { '3,64,0': 'grass_block', '3,65,0': 'crafting_table' } });
+    const n = precheckStep(bot, call({ skill: 'use', item: 'iron_hoe', at: [3, 64, 0] }), makeDeps(bot));
+    expect(n).toMatchObject({ level: 'hard', rule: 'use.hoeCovered' });
+    expect(n?.text).toContain('工作台');
   });
 
   it('包里根本没有那把锄头:先说没有,差一格那句让位', () => {
@@ -432,6 +572,17 @@ describe('前置试算 · 判死的必须真的做不成', () => {
 });
 
 describe('前置试算 · 受理回执的那一句', () => {
+  it('同一单先取物再存放，不误报后一步手里没货', () => {
+    const bot = fakeBot({ bag: [] });
+    const deps = makeDeps(bot);
+    const steps = [
+      call({ skill: 'take', item: 'iron_ingot', count: 2, from: 'open' }),
+      call({ skill: 'stow', item: 'iron_ingot', count: 2, at: [1, 64, 0] }),
+    ];
+    expect(precheckSteps(bot, steps, deps).some((hit) => hit.note.rule === 'stow.noStock')).toBe(false);
+    expect(precheckSteps(bot, [steps[1]], deps).some((hit) => hit.note.rule === 'stow.noStock')).toBe(true);
+  });
+
   it('全通就静默 —— 1418 次受理都挂一段话等于噪声', () => {
     expect(renderPrecheckNotes([])).toBeNull();
   });

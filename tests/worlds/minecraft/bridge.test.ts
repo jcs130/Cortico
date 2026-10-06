@@ -12,8 +12,12 @@ import AStar from 'mineflayer-pathfinder/lib/astar.js';
 import Move from 'mineflayer-pathfinder/lib/move.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Bridge } from '../../../src/worlds/minecraft/bridge.ts';
+import { BREAK_ACL_CHANNEL } from '../../../src/worlds/minecraft/break-permissions.ts';
+import { VIEWER_STATE_CHANNEL } from '../../../src/worlds/minecraft/viewer-state.ts';
+import { DIG_UNCONFIRMED_EVENT } from '../../../src/worlds/minecraft/mineflayer-fixes.ts';
 import { installPathfinderPerf, type SiteZone } from '../../../src/worlds/minecraft/pathfinder-perf.ts';
 import { MinecraftLog } from '../../../src/worlds/minecraft/log.ts';
+import { walkOnlyPath } from '../../../src/worlds/minecraft/travel.ts';
 import { nullLogger } from '../../../src/core/util.ts';
 
 // 禁垫区判在补丁装上的 getNeighbors 里;bridge 真跑时由 connect() 装
@@ -99,6 +103,38 @@ function searchUp(bot: unknown, movements: Movements): { status: string; place: 
 }
 
 describe('bridge 垫脚名单', () => {
+  it('partial support materials do not become one-block tower nodes or a hidden default', () => {
+    const warns: string[] = [];
+    const bot = makeBot(makeWorld());
+    const m = new Movements(bot as never);
+    tune(makeBridge(['cherry_stairs', 'spruce_stairs', 'oak_slab', 'sand'], warns), bot, m);
+    expect(m.scafoldingBlocks).toEqual([]);
+    expect(warns.join('\n')).toContain('完整稳定立方支撑');
+    tune(makeBridge(['cherry_stairs', 'cobblestone'], warns), bot, m);
+    expect(m.scafoldingBlocks).toEqual([COBBLE_ITEM]);
+    expect(searchUp(bot, m).status).toBe('success');
+  });
+  it('调参时把服务端逐格权限接到寻路器，邻近野外方块不受牵连', () => {
+    const bot = makeBot(makeWorld());
+    (bot.game as { dimension?: string }).dimension = 'minecraft:overworld';
+    const bridge = makeBridge(['cobblestone'], []);
+    const m = new Movements(bot as never);
+    tune(bridge, bot, m);
+    const blocked = new Vec3(1, 63, 1);
+    const free = new Vec3(2, 63, 1);
+    const safe = (pos: unknown): boolean => (m as unknown as { safeToBreak(b: unknown): boolean })
+      .safeToBreak((bot.blockAt as (p: unknown) => unknown)(pos));
+    expect(safe(blocked)).toBe(true);
+    expect(safe(free)).toBe(true);
+    const acl = (bridge as unknown as { protection: { applyPacket(ch: string, data: Buffer): unknown } }).protection;
+    expect(acl.applyPacket(BREAK_ACL_CHANNEL, Buffer.from(JSON.stringify({
+      v: 1, complete: true, dimension: 'minecraft:overworld', chunkX: 0, chunkZ: 0,
+      revision: 1, ttlSec: 300, denyCells: [[1, 63, 1]], denyBoxes: [],
+    })))).toBe('changed');
+    expect(safe(blocked)).toBe(false);
+    expect(safe(free)).toBe(true);
+  });
+
   it('1.20.6 里圆石的方块 id 与物品 id 不同(错配的前提)', () => {
     expect(registry.blocksByName.cobblestone.id).not.toBe(COBBLE_ITEM);
   });
@@ -636,6 +672,34 @@ describe('bridge 挖掘失败退避', () => {
       .toContain('(3, 60, 3) 连挖 3 次没挖动');
   });
 
+  it('本地挖完但服务端不确认:一次即退避该坐标', () => {
+    const { bridge, bot, diag } = digBridge();
+    const canBreak = breakProbe(bridge);
+    expect(canBreak()).toBe(true);
+    at(bot, 'diggingCompleted');
+    at(bot, DIG_UNCONFIRMED_EVENT);
+    expect(canBreak()).toBe(false);
+    expect(diag.after(0).find((e) => e.event === 'dig-backoff')?.data)
+      .toMatchObject({ unconfirmed: true });
+  });
+
+  it('战斗与找生物的禁挖租约重叠时，最后一方退出才恢复寻路挖掘', () => {
+    const bot = makeBot(makeWorld());
+    const movements = new Movements(bot as never);
+    movements.canDig = true;
+    (bot.pathfinder as unknown as { movements: Movements }).movements = movements;
+    const stone = { type: registry.blocksByName.stone.id as number, position: new Vec3(3, 60, 3) };
+    const canBreak = () => (movements as unknown as { safeToBreak(b: unknown): boolean }).safeToBreak(stone);
+    expect(canBreak()).toBe(true);
+    const releaseSearch = walkOnlyPath(bot as never);
+    const releaseCombat = walkOnlyPath(bot as never);
+    expect(canBreak()).toBe(false);
+    releaseSearch();
+    expect(canBreak()).toBe(false);
+    releaseCombat();
+    expect(canBreak()).toBe(true);
+  });
+
   it('中间挖成过一次:连续计数清零,不进退避', () => {
     const { bridge, bot } = digBridge();
     const canBreak = breakProbe(bridge);
@@ -705,6 +769,7 @@ describe('bridge viewer 端口生命周期', () => {
   interface Inner {
     generation?: number;
     _bot: unknown;
+    liveMovements?: Movements | null;
     loadViewer(): Promise<unknown>;
     startViewer(bot: unknown, gen?: number): void;
   }
@@ -812,6 +877,64 @@ describe('bridge viewer 端口生命周期', () => {
     for (const b of bridges.splice(0)) await b.stop().catch(() => {});
     for (const c of cleanups.splice(0)) c();
     createBotSpy.mockRestore();
+  });
+
+  it('出生前缓存本人魔力，死亡清除旧值，重连不沿用上一连接', () => {
+    const bridge = viewerBridge(0);
+    bridge.start();
+    const bot = botOf(bridge);
+    (bot._client as EventEmitter).emit('custom_payload', {
+      channel: VIEWER_STATE_CHANNEL,
+      data: Buffer.from(JSON.stringify({ schemaVersion: 1, mana: { current: 23, max: 32 } })),
+    });
+    expect(bridge.agentManaState).toEqual({ current: 23, max: 32 });
+    bot.emit('death');
+    expect(bridge.agentManaState).toBeNull();
+    (bot._client as EventEmitter).emit('custom_payload', {
+      channel: VIEWER_STATE_CHANNEL,
+      data: Buffer.from(JSON.stringify({ schemaVersion: 1, mana: { current: 32, max: 32 } })),
+    });
+    expect(bridge.agentManaState).toEqual({ current: 32, max: 32 });
+    bot.emit('end', 'disconnect');
+    expect(bridge.agentManaState).toBeUndefined();
+  });
+
+  it('custom_payload 完整更新会批量重新算路，定期续租不会打断路线', async () => {
+    const bridge = viewerBridge(0);
+    bridge.start();
+    const bot = botOf(bridge);
+    const setMovements = vi.fn();
+    bot.pathfinder = { setMovements };
+    inner(bridge).liveMovements = {} as Movements;
+    const send = (revision: number): void => {
+      (bot._client as EventEmitter).emit('custom_payload', {
+        channel: BREAK_ACL_CHANNEL,
+        data: Buffer.from(JSON.stringify({ v: 1, complete: true, dimension: 'minecraft:overworld',
+          chunkX: 0, chunkZ: 0, revision, ttlSec: 300, denyCells: [[1, 63, 1]], denyBoxes: [] })),
+      });
+    };
+    send(1);
+    send(1);
+    send(2);
+    await vi.waitFor(() => expect(setMovements).toHaveBeenCalledTimes(1));
+    expect(setMovements).toHaveBeenCalledTimes(1);
+    send(3);
+    await vi.waitFor(() => expect(setMovements).toHaveBeenCalledTimes(2));
+  });
+
+  it('服务端明确拒绝破坏时记住目标格，避免下一次路线再次选择它', () => {
+    const bridge = viewerBridge(0);
+    bridge.start();
+    const bot = botOf(bridge);
+    bot.game = { dimension: 'minecraft:overworld' };
+    const stopDigging = vi.fn();
+    bot.stopDigging = stopDigging;
+    bot.targetDigBlock = { position: new Vec3(1, 63, 1), type: registry.blocksByName.stone.id };
+    bridge.noteServerBreakDenied('这块属于村庄原有建筑');
+    expect(stopDigging).toHaveBeenCalledTimes(1);
+    const acl = (bridge as unknown as { protection: { denied(dim: string, x: number, y: number, z: number, type: number): boolean } }).protection;
+    expect(acl.denied('overworld', 1, 63, 1, registry.blocksByName.stone.id)).toBe(true);
+    expect(acl.denied('overworld', 2, 63, 1, registry.blocksByName.stone.id)).toBe(false);
   });
 
   it('断线之后 viewer 端口必须让出:否则下一代的探测撞的是自己的旧 server', async () => {
@@ -953,6 +1076,20 @@ describe('bridge 死亡重生通知', () => {
     bridge.start();
     return { bridge, events, bot: inner(bridge)._bot as EventEmitter };
   }
+
+  it('握手中的 Bot 不交给执行器；实体到达后可用，断线后再次不可用', () => {
+    const { bridge, bot } = rig();
+    expect(inner(bridge)._bot).toBe(bot);
+    expect(bridge.connected).toBe(false);
+    expect(bridge.bot).toBeNull();
+    (bot as EventEmitter & { entity?: unknown }).entity = { position: new Vec3(0.5, 64, 0.5) };
+    bot.emit('spawn');
+    expect(bridge.connected).toBe(true);
+    expect(bridge.bot).toBe(bot);
+    bot.emit('end', '测试断线');
+    expect(bridge.connected).toBe(false);
+    expect(bridge.bot).toBeNull();
+  });
 
   it('第二次及以后的 spawn 走 onRespawn,首次仍只走 onSpawn', () => {
     const { bridge, events, bot } = rig();

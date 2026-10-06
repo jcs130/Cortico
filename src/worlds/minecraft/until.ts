@@ -52,13 +52,13 @@ export interface UntilHit { x: number; y: number; z: number; what: string }
 /**
  * 周身有没有碰到早停名单里的东西。
  *
- * `visible` = 只认看得见的:行军途中用这一档(与 find 自己的感知规则同源)。
- * 挖通道那一档不设视线闸 —— 铲子下去露出来的那一面本来就贴着脸,视线判据在坑里没意义。
+ * 只认看得见的目标，与 find/collect 共用同一条感知规则。findBlocks 可查到埋在墙后的目标，
+ * 但未露出的目标不能成为 tunnel 的终点，否则后续 collect 无法接手。
  */
-export function untilHit(bot: Bot, ids: readonly number[], radius: number, visible: boolean): UntilHit | null {
+export function untilHit(bot: Bot, ids: readonly number[], radius: number): UntilHit | null {
   if (ids.length === 0) return null;
   const found = bot.findBlocks({ matching: [...ids], maxDistance: radius, count: 16 });
-  const p = found.find((q) => !visible || canSeeBlockAt(bot, q));
+  const p = found.find((q) => canSeeBlockAt(bot, q));
   if (!p) return null;
   return { x: p.x, y: p.y, z: p.z, what: zhName(bot.blockAt(p)?.name ?? 'unknown') };
 }

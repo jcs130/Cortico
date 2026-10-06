@@ -3,6 +3,12 @@ import { normalize } from '../../../src/worlds/bilibili/normalize.ts';
 
 const OPTS = { giftFlushYuan: 1 };
 
+/** 此文件的交互样本仅使用单字节 uid/type 与短昵称。 */
+function interactionPb(fields: { uid: number; type: number; uname?: string }): string {
+  const name = Buffer.from(fields.uname ?? '');
+  return Buffer.concat([Buffer.from([8, fields.uid, 18, name.length]), name, Buffer.from([40, fields.type])]).toString('base64');
+}
+
 /** 实测抓到的弹幕形状(裁到用得上的位置) */
 function danmakuMsg(opts: { uid: number; uname: string; text: string; guard?: number }): Record<string, unknown> {
   const info: unknown[] = [];
@@ -202,7 +208,8 @@ describe('归一化', () => {
   });
 
   it('人流类只给计数与读数', () => {
-    expect(normalize({ cmd: 'INTERACT_WORD_V2', data: {} }, OPTS)).toEqual({ kind: 'count', field: 'enter', by: 1 });
+    expect(normalize({ cmd: 'INTERACT_WORD_V2', data: { pb: interactionPb({ type: 1, uid: 0 }) } }, OPTS))
+      .toEqual({ kind: 'count', field: 'enter', by: 1 });
     expect(normalize({ cmd: 'LIKE_INFO_V3_CLICK', data: {} }, OPTS)).toEqual({ kind: 'count', field: 'like', by: 1 });
     expect(normalize({ cmd: 'WATCHED_CHANGE', data: { num: 288429 } }, OPTS)).toEqual({
       kind: 'gauge',
@@ -214,6 +221,48 @@ describe('归一化', () => {
       field: 'online',
       value: 12,
     });
+  });
+
+  it.each([
+    [1, 'bilibili.enter', '[进场|访客甲] 进入了直播间'],
+    [2, 'bilibili.follow', '[关注|访客甲] 关注了主播'],
+    [3, 'bilibili.share', '[分享|访客甲] 分享了直播间'],
+  ])('识别 V1/V2 类型 %s 与稳定观众身份', (msgType, type, text) => {
+    for (const msg of [
+      { cmd: 'INTERACT_WORD', data: { uid: 42, uname: '访客甲', msg_type: msgType } },
+      { cmd: 'INTERACT_WORD_V2', data: { pb: interactionPb({ uid: 42, uname: '访客甲', type: msgType as number }) } },
+    ]) {
+      expect(normalize(msg, OPTS)).toMatchObject({
+        kind: 'event', type, text, trigger: 'debounce', senderKey: '42',
+        meta: { uid: 42, uname: '访客甲', msgType },
+      });
+    }
+  });
+
+  it('匿名关注/分享不充当进场，不用昵称冒充稳定身份', () => {
+    for (const msgType of [2, 3]) {
+      const got = normalize({ cmd: 'INTERACT_WORD_V2', data: { pb: interactionPb({ uid: 0, uname: '访***', type: msgType }) } }, OPTS);
+      expect(got).toMatchObject({ kind: 'event', type: msgType === 2 ? 'bilibili.follow' : 'bilibili.share' });
+      expect(got).not.toHaveProperty('field');
+      expect((got as { senderKey?: string }).senderKey).toBeUndefined();
+    }
+  });
+
+  it('坏帧和未知类型不计为进场', () => {
+    expect(normalize({ cmd: 'INTERACT_WORD_V2', data: {} }, OPTS)).toBeNull();
+    expect(normalize({ cmd: 'INTERACT_WORD', data: { uid: 42, msg_type: 7 } }, OPTS)).toBeNull();
+  });
+
+  it('缺昵称仍显示中性文案，元数据保留空名供既有身份资料继续使用', () => {
+    for (const msg of [
+      { cmd: 'INTERACT_WORD', data: { uid: 42, msg_type: 1 } },
+      { cmd: 'INTERACT_WORD_V2', data: { pb: interactionPb({ uid: 42, type: 1 }) } },
+    ]) {
+      expect(normalize(msg, OPTS)).toMatchObject({
+        type: 'bilibili.enter', senderKey: '42', text: '[进场|某位观众] 进入了直播间',
+        meta: { uid: 42, uname: '' },
+      });
+    }
   });
 
   it('运营挂件与她自己的语音转写不推;没见过的 cmd 也不推', () => {
@@ -229,6 +278,7 @@ describe('归一化', () => {
       type: 'bilibili.room',
       trigger: 'flush',
       text: expect.stringContaining('平台已推送开播指令'),
+      meta: { liveRoomState: { schemaVersion: 1, living: true, via: 'websocket' } },
     });
     const preparing = normalize({ cmd: 'PREPARING' }, OPTS);
     expect(preparing).toMatchObject({
@@ -237,6 +287,7 @@ describe('归一化', () => {
       trigger: 'flush',
     });
     const text = (preparing as { text: string }).text;
+    expect(preparing).toMatchObject({ meta: { liveRoomState: { schemaVersion: 1, living: false, via: 'websocket' } } });
     expect(text).toContain('平台已推送下播指令');
     expect(text).toContain('看不到直播画面');
     // 反向证据要提前说破:留场弹幕不代表还在播

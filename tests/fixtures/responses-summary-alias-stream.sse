@@ -1,0 +1,32 @@
+data: {"type":"response.created","sequence_number":0,"response":{"id":"r-compact","model":"test","status":"in_progress","output":[]}}
+
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"r-compact","model":"test","status":"in_progress","output":[]}}
+
+data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"rs-compact","type":"reasoning","summary":[]}}
+
+data: {"type":"response.reasoning_text.delta","sequence_number":3,"output_index":0,"item_id":"rs-compact","content_index":0,"delta":"checked"}
+
+data: {"type":"response.reasoning_text.delta","sequence_number":4,"output_index":0,"item_id":"rs-compact","content_index":0,"delta":""}
+
+data: {"type":"response.reasoning_text.done","sequence_number":5,"output_index":0,"item_id":"rs-compact","content_index":0,"text":"checked"}
+
+data: {"type":"response.output_item.done","sequence_number":6,"output_index":0,"item":{"id":"rs-compact","type":"reasoning","summary":[{"type":"summary_text","text":"checked"}]}}
+
+data: {"type":"response.output_item.added","sequence_number":7,"output_index":1,"item":{"id":"msg-compact","type":"message","role":"assistant","status":"in_progress","content":[]}}
+
+data: {"type":"response.content_part.added","sequence_number":8,"output_index":1,"item_id":"msg-compact","content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}
+
+data: {"type":"response.output_text.delta","sequence_number":9,"output_index":1,"item_id":"msg-compact","content_index":0,"delta":"hello"}
+
+data: {"type":"response.output_text.delta","sequence_number":10,"output_index":1,"item_id":"msg-compact","content_index":0,"delta":""}
+
+data: {"type":"response.output_text.done","sequence_number":11,"output_index":1,"item_id":"msg-compact","content_index":0,"text":"hello"}
+
+data: {"type":"response.content_part.done","sequence_number":12,"output_index":1,"item_id":"msg-compact","content_index":0,"part":{"type":"output_text","text":"hello","annotations":[]}}
+
+data: {"type":"response.output_item.done","sequence_number":13,"output_index":1,"item":{"id":"msg-compact","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello","annotations":[]}]}}
+
+data: {"type":"response.completed","sequence_number":14,"response":{"id":"r-compact","model":"test","status":"completed","output":[{"id":"rs-compact","type":"reasoning","summary":[{"type":"summary_text","text":"checked"}]},{"id":"msg-compact","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello","annotations":[]}]}],"usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":2}}}}
+
+data: [DONE]
+

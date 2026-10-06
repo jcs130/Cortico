@@ -39,6 +39,31 @@ function rig(config: Partial<ReferenceLibraryConfig> = {}) {
 }
 
 describe('Persona reference library', () => {
+  it('detail accepts a unique activity id without requiring the caller to remember its topic key', () => {
+    const r = rig();
+    const text = r.library.detail('', 'animal');
+    expect(text).toContain('[完整活动 animal]');
+    expect(r.library.selected()?.activityId).toBe('animal');
+    expect(r.library.context()).toContain('[完整活动 animal]');
+    expect(r.reads).not.toContain('references/example/sources.json');
+  });
+  it('ambiguous activity ids require an explicit topic and never choose a previously opened direction', () => {
+    const r = rig(); const [life, build] = r.library.descriptors();
+    r.put('references/example/build.json', { activities: [activity('animal', { title: '另一个同名活动' })] });
+    r.library.guides(life.key);
+    const result = r.library.detail('', 'animal');
+    expect(result).toContain('多个方向'); expect(result).toContain(life.key); expect(result).toContain(build.key);
+    expect(r.library.selected()).toBeNull();
+    expect(r.library.detail(build.key, 'animal')).toContain('另一个同名活动');
+  });
+  it('missing and unknown ids give actionable errors; disabled library does not scan activity documents', () => {
+    const r = rig();
+    expect(r.library.detail('', '')).toContain('需要 activity_id');
+    expect(r.library.detail('', 'missing')).toContain('没有活动 id');
+    expect(r.library.detail('wrong-topic', 'animal')).toContain('没有 topic_key');
+    r.cfg.enabled = false; const count = r.reads.length;
+    expect(r.library.detail('', 'animal')).toContain('未启用'); expect(r.reads).toHaveLength(count);
+  });
   it('exposes directions from explicit indexes without preloading activity or source documents', () => {
     const r = rig();
     const topics = r.library.descriptors();

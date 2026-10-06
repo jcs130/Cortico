@@ -18,8 +18,38 @@ import { fmtDur, zhErrorText } from './receipt.ts';
 import { type Cell } from './geometry.ts';
 import { probabilisticDropsOf } from './inventory.ts';
 import { PLACE_REACH } from './cell-facts.ts';
+import { flightState } from './flight.ts';
 
 export const { goals } = pathfinderPkg;
+
+/**
+ * 追敌和找生物只走现有通路。挖墙会让寻路器换上镐，竞技场等受保护区域还会原地空挖。
+ * 按 Movements 实例计数，任务被战斗挂起时两边的禁挖租约不会互相提前释放。
+ */
+const noDigLeases = new WeakMap<object, { count: number; previous: boolean; scaffolding: number[] }>();
+export function walkOnlyPath(bot: Bot): () => void {
+  const movements = bot.pathfinder?.movements;
+  if (!movements) return () => undefined;
+  let lease = noDigLeases.get(movements);
+  if (!lease) {
+    lease = { count: 0, previous: movements.canDig, scaffolding: movements.scafoldingBlocks };
+    noDigLeases.set(movements, lease);
+  }
+  lease.count += 1;
+  movements.canDig = false;
+  movements.scafoldingBlocks = [];
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    lease!.count -= 1;
+    if (lease!.count === 0) {
+      movements.canDig = lease!.previous;
+      movements.scafoldingBlocks = lease!.scaffolding;
+      noDigLeases.delete(movements);
+    }
+  };
+}
 
 /** 单次寻路上限；超时按不可达处理。 */
 export const GOTO_DEADLINE_MS = 120_000;
@@ -54,6 +84,19 @@ export function levelTravelGoal(x: number, z: number): InstanceType<typeof goals
   return new goals.GoalNearXZ(x, z, 2);
 }
 
+/** 长途只把已加载的近处交给寻路器；终点进入本地视野后再精确寻路。 */
+export function nextLongTravelLeg(
+  from: { x: number; z: number }, target: { x: number; z: number },
+  legBlocks = 48, directBlocks = 96,
+): { x: number; z: number } | null {
+  const dx = target.x - from.x;
+  const dz = target.z - from.z;
+  const distance = Math.hypot(dx, dz);
+  if (!Number.isFinite(distance) || distance <= directBlocks) return null;
+  return { x: Math.round(from.x + dx / distance * legBlocks),
+    z: Math.round(from.z + dz / distance * legBlocks) };
+}
+
 /** 超过这些数就把试算附进回执(只管啰不啰嗦,不管走不走) */
 export const ROUTE_PLACE_LIMIT = 12;
 export const ROUTE_BREAK_LIMIT = 20;
@@ -79,8 +122,7 @@ export function fmtDist(d: number): string {
 /**
  * 目标格分诊的一句话;`open` 与缺席都返回 null。
  *
- * 这是当场读得出的世界读数(落脚预检 O(27) + 死角灌水),比寻路器的
- * "限时内没算完"硬——超时只说明 A* 没搜完,分诊说明搜什么都没用。
+ * 诊断只陈述已加载整格碰撞的结果；完整路线试算可以推翻阻塞定性。
  */
 export function diagText(diag: TargetDiag | null | undefined): string | null {
   if (diag?.kind === 'noStand') return '目标那一格站不进人:它和四周都被方块占着';
@@ -95,7 +137,7 @@ export function renderRouteMenu(
   opts?: { startDist?: number; diag?: TargetDiag | null; head?: string },
 ): string {
   const head = [opts?.head ?? `探路到 (${target.x}, ${target.y}, ${target.z}):`];
-  const diagLine = diagText(opts?.diag);
+  const diagLine = diagText(probes.some((probe) => probe.status === 'complete') ? null : opts?.diag);
   if (diagLine) head.push(diagLine);
   // 已有目标格分诊结论时省略出发距离；超时不解释为距离过远或绕路。
   const near = diagLine || opts?.startDist === undefined ? null
@@ -146,14 +188,17 @@ export function withRouteScene(
   const me = bot.entity.position;
   // 目标格分诊问的是"那一格站不站得进人",只对精确坐标目标成立。水平行军的 target.y
   // 是脚下高度凑出来的、根本不是目标的一部分,拿它去分诊会凭空造出「站不进人」。
-  const diag = goal ? null : ctx.probeTarget?.(target) ?? null;
+  const probes = ctx.probeRoutes?.(target, goal);
+  const diag = goal || probes?.some((probe) => probe.status === 'complete')
+    ? null : ctx.probeTarget?.(target) ?? null;
   const scene = [
     ...extra,
     `我在 (${Math.round(me.x)}, ${Math.round(me.y)}, ${Math.round(me.z)}),目标在${whereFromMe(bot, target)}`,
   ];
-  const probes = ctx.probeRoutes?.(target, goal);
   if (probes && probes.length > 0) {
-    const startDist = Math.hypot(me.x - target.x, me.y - target.y, me.z - target.z);
+    const startDist = goal instanceof goals.GoalNearXZ
+      ? Math.hypot(me.x - target.x, me.z - target.z)
+      : Math.hypot(me.x - target.x, me.y - target.y, me.z - target.z);
     scene.push(renderRouteMenu(probes, target, { startDist, diag }));
   }
   const lead = diagText(diag);
@@ -184,19 +229,23 @@ export function routeCostly(p: RouteProbe, startDist: number): boolean {
 /**
  * 出发前试算一次。
  *
- * **目标本身进不去**(站不进人、封在死角)是事实,拦下——确认一万次也走不到。
+ * 已知碰撞确认无落脚点或空间封闭，且没有完整路线时，拒绝该次执行。
  * **路贵不贵**是权衡,不拦:三种走法的数字附进回执,要不要换归 agent(她有 mc_stop)。
  * 旧版在这里设阈值代她判"这条路太贵不许走",每触发一次烧一整轮,还误杀过有完整路的目标。
  *
  * 返回值是要附进回执的试算文本;代价平常时为 null(不啰嗦)。
  */
-export function routeNote(bot: Bot, ctx: SkillContext, target: { x: number; y: number; z: number }): string | null {
-  const probes = ctx.probeRoutes?.(target);
+export function routeNote(bot: Bot, ctx: SkillContext, target: { x: number; y: number; z: number },
+  goal?: InstanceType<typeof goals.Goal>): string | null {
+  const probes = ctx.probeRoutes?.(target, goal);
   if (!probes || probes.length === 0) return null;
   const style = probes.find((p) => p.profile === 'style') ?? probes[0];
   const me = bot.entity.position;
-  const startDist = Math.hypot(me.x - target.x, me.y - target.y, me.z - target.z);
-  const diag = style.status !== 'complete' ? ctx.probeTarget?.(target) ?? null : null;
+  const startDist = goal instanceof goals.GoalNearXZ
+    ? Math.hypot(me.x - target.x, me.z - target.z)
+    : Math.hypot(me.x - target.x, me.y - target.y, me.z - target.z);
+  const diag = !goal && !probes.some((probe) => probe.status === 'complete')
+    ? ctx.probeTarget?.(target) ?? null : null;
   if (diag && diag.kind !== 'open') {
     throw new SkillBlocked(renderRouteMenu(probes, target, { startDist, diag }));
   }
@@ -434,6 +483,45 @@ export async function unwedgeBody(bot: Bot, ctx: SkillContext): Promise<number> 
 /** 解卡挪不到这么多 = 身体是冻着的,同一个目标再等一轮静止档是白等 */
 export const UNWEDGE_MOVED = 0.2;
 
+/** 贴着实体墙边缘起步时，先回到当前落脚格中心，避免首个门洞节点的直线碰撞判为不可走。 */
+export function wallEdgeRecenterTarget(bot: Pick<Bot, 'entity' | 'blockAt'>): Vec3 | null {
+  const p = bot.entity?.position;
+  if (!p) return null;
+  const x = Math.floor(p.x), y = Math.floor(p.y), z = Math.floor(p.z);
+  const below = bot.blockAt(new Vec3(x, y - 1, z));
+  if (below?.boundingBox !== 'block') return null;
+  const solid = (dx: number, dz: number): boolean =>
+    bot.blockAt(new Vec3(x + dx, y, z + dz))?.boundingBox === 'block';
+  const fx = p.x - x, fz = p.z - z;
+  const nearWall = (fx < 0.34 && solid(-1, 0)) || (fx > 0.66 && solid(1, 0))
+    || (fz < 0.34 && solid(0, -1)) || (fz > 0.66 && solid(0, 1));
+  return nearWall ? new Vec3(x + 0.5, p.y, z + 0.5) : null;
+}
+
+async function recenterBeforePath(bot: Bot, ctx: SkillContext): Promise<void> {
+  if (typeof bot.blockAt !== 'function' || typeof bot.lookAt !== 'function'
+    || typeof bot.setControlState !== 'function') return;
+  const target = wallEdgeRecenterTarget(bot);
+  if (!target) return;
+  const before = bot.entity.position.clone();
+  await bot.lookAt(target.offset(0, 1.5, 0));
+  try {
+    bot.setControlState('forward', true);
+    const until = Date.now() + 800;
+    while (Date.now() < until && Math.hypot(bot.entity.position.x - target.x,
+      bot.entity.position.z - target.z) > 0.1) {
+      checkAbort(ctx);
+      await sleep(50);
+    }
+  } finally {
+    bot.setControlState('forward', false);
+  }
+  const moved = Math.hypot(bot.entity.position.x - before.x, bot.entity.position.z - before.z);
+  if (moved > 0.05) ctx.diag?.write({ lane: 'path', event: 'recenter', taskId: ctx.taskId,
+    msg: `贴墙起步先回格心,挪了 ${moved.toFixed(2)} 格`,
+    data: { from: { x: before.x, z: before.z }, to: { x: bot.entity.position.x, z: bot.entity.position.z } } });
+}
+
 /**
  * 寻路一段。钉在原地跳闸时先解卡:解卡挪动了就再来一遍,一动没动就直接受阻。
  *
@@ -441,9 +529,14 @@ export const UNWEDGE_MOVED = 0.2;
  * 逃生路上尤其不许白等 —— 那 10 秒静止档是 flee 三十秒时限里的三分之一。
  */
 export async function gotoGoal(bot: Bot, goal: InstanceType<typeof goals.Goal>, ctx: SkillContext): Promise<void> {
+  if (flightState(bot).flying) {
+    if (goal.isEnd(bot.entity.position.floored() as unknown as Parameters<typeof goal.isEnd>[0])) return;
+    throw new SkillBlocked('当前正在空中悬停；先用 land 安全落地，或用 flight 改变空中位置，再进行地面寻路');
+  }
   let unwedged: number | null = null;
   for (let attempt = 0; ; attempt++) {
     try {
+      await recenterBeforePath(bot, ctx);
       await gotoGoalOnce(bot, goal, ctx);
       return;
     } catch (err) {
@@ -552,14 +645,17 @@ export async function gotoGoalOnce(bot: Bot, goal: InstanceType<typeof goals.Goa
   }
   // 撤目标之后 goto 也可能是 resolve 而不是 reject,两条路都要认这份卡住
   if (stalled) throw stallError(stalled);
-  // 半砖等位置需同时检查 floored 坐标及其上方一格，与寻路库判据一致。
-  // isEnd 类型声明为 Move，但实现只读取 x/y/z。
-  const p = bot.entity.position.floored();
-  const at = (v: typeof p): boolean => goal.isEnd(v as never);
-  if (!at(p) && !at(p.offset(0, 1, 0))) {
+  if (!travelGoalReached(bot, goal)) {
     dropGoal(bot, 'task', '收尾校验没到目标格', ctx.diag);
     throw new SkillBlocked('走不过去: 找不到可行路线(目标被封住,或者中间没有能走的路)');
   }
+}
+
+/** 半砖等位置同时检查脚下取整坐标及其上方一格，与寻路库到达判据一致。 */
+export function travelGoalReached(bot: Bot, goal: InstanceType<typeof goals.Goal>): boolean {
+  const at = bot.entity.position;
+  const p = new Vec3(at.x, at.y, at.z).floored();
+  return goal.isEnd(p as never) || goal.isEnd(p.offset(0, 1, 0) as never);
 }
 
 /** 看门狗跳闸时记录控制、寻路与持有权的结构化快照；只进诊断日志，不进回执。 */
@@ -584,6 +680,21 @@ export function writeStallProbe(
     pathPlacementActive?: number;
     pathSupportFailure?: { seq: number };
   };
+  // Sample the actual collision geometry around the feet while the failure is
+  // still present. A route can claim a door is passable while another nearby
+  // block (or the rotated panel itself) prevents the body's 0.6-wide hitbox
+  // from entering its first step. Names alone cannot distinguish those cases.
+  const nearbyBlocks: Array<{ x: number; y: number; z: number; name: string; shapes: number[][] }> = [];
+  if (e?.position && typeof bot.blockAt === 'function') {
+    const cx = Math.floor(e.position.x), cy = Math.floor(e.position.y), cz = Math.floor(e.position.z);
+    for (let y = cy; y <= cy + 1; y++) for (let z = cz - 2; z <= cz + 2; z++) {
+      for (let x = cx - 2; x <= cx + 2; x++) {
+        const block = bot.blockAt(new Vec3(x, y, z));
+        if (!block || block.name === 'air' || block.name === 'cave_air') continue;
+        nearbyBlocks.push({ x, y, z, name: block.name, shapes: block.shapes });
+      }
+    }
+  }
   diag.write({
     lane: 'path', event: 'goto-stall-probe', taskId: ctx.taskId,
     msg: `零位移探针(${trip === 'stall' ? '原地打转跳闸' : '走满 deadline'}):` +
@@ -614,6 +725,7 @@ export function writeStallProbe(
       frozenTaskId: body?.frozenTaskId ?? null,
       pathPlacementActive: patched.pathPlacementActive ?? 0,
       pathSupportSeq: patched.pathSupportFailure?.seq ?? 0,
+      nearbyBlocks,
     },
   });
 }
@@ -678,7 +790,19 @@ export function stallBlocked(bot: Bot, s: Stall, unwedged: number | null = null)
 }
 
 /** 挖掘在不可达时立即失败，并以 deadline 限制服务端无响应。 */
+export function breakPermissionNote(bot: Bot, block: NonNullable<ReturnType<Bot['blockAt']>>): string | null {
+  const verdict = (bot as Bot & { cortiBreakVerdict?: (value: typeof block) => 'allowed' | 'protected' | 'unknown' })
+    .cortiBreakVerdict?.(block);
+  if (verdict !== 'protected' && verdict !== 'unknown') return null;
+  const { x, y, z } = block.position;
+  return verdict === 'protected'
+    ? `服务端标记 (${x}, ${y}, ${z}) 的${zhName(block.name)}受保护，不能挖`
+    : `(${x}, ${y}, ${z}) 的破坏权限尚未从服务端同步，先不挖`;
+}
+
 export async function digBlock(bot: Bot, target: NonNullable<ReturnType<Bot['blockAt']>>, ctx: SkillContext): Promise<void> {
+  const permission = breakPermissionNote(bot, target);
+  if (permission) throw new SkillBlocked(permission);
   // canDigBlock 与服务端使用相同的可挖掘性和 5.1 格距离约束。
   if (!bot.canDigBlock(target)) {
     throw new SkillBlocked(`够不到${zhName(target.name)}(离得太远或者隔着方块),没挖成`);
@@ -705,14 +829,17 @@ export async function digBlock(bot: Bot, target: NonNullable<ReturnType<Bot['blo
   ctx.chests?.forget(dimensionOf(bot), target.position);
 }
 
-export function findEntity(bot: Bot, nameOrType: string, range = 24) {
+export function findEntity(
+  bot: Bot, nameOrType: string, range = 24,
+  accept: (entity: NonNullable<Bot['entities'][string]>) => boolean = () => true,
+) {
   const me = bot.entity.position;
   let best: { e: NonNullable<Bot['entities'][string]>; d: number } | null = null;
   for (const id of Object.keys(bot.entities)) {
     const e = bot.entities[id];
     if (!e || e === bot.entity || !e.position) continue;
     const label = e.type === 'player' ? e.username : (e.name ?? '');
-    if (label?.toLowerCase() !== nameOrType.toLowerCase()) continue;
+    if (label?.toLowerCase() !== nameOrType.toLowerCase() || !accept(e)) continue;
     const d = e.position.distanceTo(me);
     if (d <= range && (!best || d < best.d)) best = { e, d };
   }
@@ -728,8 +855,13 @@ export function matchBlockIds(bot: Bot, name: string): number[] {
   const ids = new Set<number>();
   if (byName[name]) ids.add(byName[name].id);
   const suffix = `_${name}`;
-  for (const b of Object.values(byName)) {
-    if (b.name.endsWith(suffix) || b.name.startsWith(`${name}_`)) ids.add(b.id);
+  // A full registry ID is an exact target. Treating spruce_log as a suffix
+  // category also selects stripped_spruce_log from player-built structures.
+  if (!byName[name]) {
+    for (const b of Object.values(byName)) {
+      if (name === 'log' && /^stripped_.*_log$/.test(b.name)) continue;
+      if (b.name.endsWith(suffix) || b.name.startsWith(`${name}_`)) ids.add(b.id);
+    }
   }
   const item = (bot.registry.itemsByName as Record<string, { id: number } | undefined>)[name];
   if (item) {
@@ -760,4 +892,3 @@ export async function reachCell(bot: Bot, c: Cell, ctx: SkillContext): Promise<v
   if (d <= PLACE_REACH) return;
   await gotoGoal(bot, new goals.GoalNear(c.x, c.y, c.z, 2), ctx);
 }
-

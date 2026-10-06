@@ -50,10 +50,10 @@ function carriesContent(event: StreamEvent): boolean {
   return 'delta' in event || event.type === 'response.output_item.added' || event.type === 'response.output_item.done';
 }
 
-/** 首包等待上限：流式 300 秒，非流式 120 秒。 */
-const FIRST_RESPONSE_MS = { streaming: 300_000, unary: 120_000 } as const;
-/** 帧空闲:连续这么久一个字节都没来。 */
-const FRAME_IDLE_MS = 120_000;
+/** 首包等待上限：流式 420 秒（思考档静默推理期+拥塞 TTFT），非流式 180 秒。 */
+const FIRST_RESPONSE_MS = { streaming: 420_000, unary: 180_000 } as const;
+/** 帧空闲:连续这么久一个字节都没来。思考档推理期可能长时间无字节，120s 会误杀（09-29 实证）。 */
+const FRAME_IDLE_MS = 300_000;
 /**
  * 内容事件的空闲期限；keepalive 和空 delta 不重置它。
  * 该计时器独立于字节接收计时，以覆盖持续收到空帧的响应。

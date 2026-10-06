@@ -12,6 +12,17 @@ export function protocolConfig(name: string, entry: LLMProviderEntry, language: 
     schema: {
       type: 'object', title: name,
       properties: {
+        [`providers.${name}.options.maxContextImages`]: {
+          type: 'integer', minimum: 0, title: S.maxContextImages, description: S.maxContextImagesDescription, 'x-hot': true,
+        },
+        [`providers.${name}.options.imageReplayPlacement`]: {
+          type: 'string', enum: ['inline', 'tail'], title: S.imageReplayPlacement,
+          description: S.imageReplayPlacementDescription, 'x-hot': true,
+        },
+        [`providers.${name}.options.imageReplayScope`]: {
+          type: 'string', enum: ['history', 'fresh'], title: S.imageReplayScope,
+          description: S.imageReplayScopeDescription, 'x-hot': true,
+        },
         [`providers.${name}.options.extraHeaders`]: {
           type: 'object', title: language === 'zh' ? '附加请求头（JSON object）' : 'Extra headers (JSON object)',
         },

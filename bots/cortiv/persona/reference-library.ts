@@ -254,7 +254,20 @@ export class ReferenceLibrary {
 
   topics(offset = 0, limit = 8): string { return this.open({ kind: 'topics', offset, limit }); }
   guides(topicKey: string, offset = 0, limit = 3): string { return this.open({ kind: 'guides', topicKey, offset, limit }); }
-  detail(topicKey: string, activityId: string): string { return this.open({ kind: 'detail', topicKey, activityId }); }
+  detail(topicKey: string, activityId: string): string {
+    if (!this.config().enabled) { this.clear(); return '[资料库] 当前未启用。'; }
+    if (!topicKey) {
+      try {
+        if (!activityId.trim()) throw new Error('detail 需要 activity_id；用 guides 查看活动编号。');
+        const matches = this.indexes().flatMap(index => index.topics)
+          .filter(topic => this.activities(topic).some(activity => activity.id === activityId));
+        if (!matches.length) throw new Error(`当前索引中没有活动 id：${activityId}；用 catalog / guides 核对。`);
+        if (matches.length > 1) throw new Error(`活动 ${activityId} 在多个方向存在；提供 topic_key：${matches.map(topic => topic.key).join('、')}。`);
+        topicKey = matches[0].key;
+      } catch (error) { this.clear(); return bounded(this.error(error), this.config().maxContextTokens); }
+    }
+    return this.open({ kind: 'detail', topicKey, activityId });
+  }
 
   selected(): { topicKey: string; activityId?: string } | null {
     if (!this.config().enabled) { this.clear(); return null; }

@@ -3,7 +3,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  matchesPick, pickLabel, pickMissText, pickedText,
+  matchesPick, pickLabel, pickMissText, pickedText, pickTargetOf,
 } from '../../../src/worlds/minecraft/item-pick.ts';
 import { parseSteps } from '../../../src/worlds/minecraft/executor.ts';
 import { precheckStep } from '../../../src/worlds/minecraft/precheck.ts';
@@ -58,6 +58,16 @@ describe('挑选词的匹配面', () => {
 
   it('回执点名挑中的是哪几件,重样的只说一遍', () => {
     expect(pickedText([SILK, SILK])).toBe('附魔书（精准采集I）');
+  });
+
+  it('同 ID 的备用剑按原始耐久与自定义名称点名，不误选另一把', () => {
+    const spare = pickTargetOf({ name: 'diamond_sword',
+      componentMap: new Map([['damage', { data: 11 }], ['custom_name', { data: { text: '共享剑' } }]]) });
+    const worn = pickTargetOf({ name: 'diamond_sword', componentMap: new Map([['damage', { data: 900 }]]) });
+    expect(pickLabel(spare)).toContain('共享剑 耐久1550/1561');
+    expect(matchesPick('耐久1550/1561', spare)).toBe(true);
+    expect(matchesPick('耐久1550/1561', worn)).toBe(false);
+    expect(matchesPick('共享剑', worn)).toBe(false);
   });
 });
 
@@ -158,10 +168,10 @@ describe('挑选词落到搬运上:点名的是哪一件,走的就是哪一件',
   it('stow:挑选词一件没中就受阻,一本也不动', async () => {
     const rig = slotChestBot({ inv: threeBooks, enchants: ENCHANTS });
     const { exec, reports } = makeExecutorOn(rig.bot);
-    exec.submit([{ skill: 'stow', item: 'enchanted_book', count: 1, pick: '击退' }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('没有一件带「击退」');
+    const receipt = exec.submit([{ skill: 'stow', item: 'enchanted_book', count: 1, pick: '击退' }]);
+    expect(receipt).toContain('这一单我没接');
+    expect(receipt).toContain('没有一件带「击退」');
+    expect(reports).toEqual([]);
     expect(rig.boxed()).toEqual([]);
   });
 });

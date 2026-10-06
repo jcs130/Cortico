@@ -3,6 +3,9 @@
  * 分份只为并行,按实测耗时配平;哪个 describe 落在哪一份没有语义。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmdirSync, unlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   dangerNoteText, describeSkill, Executor, Reflexes, parseScoutSteps, parseSteps,
   type MarkDesk, type MarkLookup, type RouteProbe, type SkillCall, type TargetDiag,
@@ -13,6 +16,7 @@ import {
 } from '../../../src/worlds/minecraft/world.ts';
 import type { Anchor } from '../../../src/worlds/minecraft/geometry.ts';
 import { ChestBook } from '../../../src/worlds/minecraft/chests.ts';
+import { DirectionalSweepBook } from '../../../src/worlds/minecraft/directional-sweeps.ts';
 import { MinecraftLog } from '../../../src/worlds/minecraft/log.ts';
 import {
   log,
@@ -40,8 +44,70 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
 });
 
+it('服务端拒绝破坏时终止当前任务，并把原文记为受阻', async () => {
+  let finishGoto: (() => void) | undefined;
+  const bot = combatBot({ goto: () => new Promise<void>((resolve) => { finishGoto = resolve; }) });
+  const { exec, reports } = makeExecutorOn(bot);
+  exec.submit([{ skill: 'goto', at: [10, 64, 10] }]);
+  await waitUntil(() => exec.currentTask !== null && finishGoto !== undefined);
+  const denial = "Hey! Sorry, but you can't break that block here.";
+  expect(exec.blockCurrentFromServer(denial)).toBe(true);
+  expect(reports).toHaveLength(1);
+  expect(reports[0]).toMatchObject({ kind: 'blocked' });
+  expect(reports[0].text).toContain(denial);
+  expect(exec.blockedLog()[0]?.why).toBe(denial);
+  expect(exec.currentTask).toBeNull();
+  finishGoto?.();
+  await sleep(0);
+  expect(reports).toHaveLength(1);
+  expect(exec.blockCurrentFromServer(denial)).toBe(false);
+});
+
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe('take 入队前核验容器证据', () => {
+  it('已加载的非容器目标直接拒收，并给决策循环退避时间', () => {
+    const bot = combatBot({}) as any;
+    bot.blockAt = () => ({ name: 'oak_leaves' });
+    const { exec } = makeExecutorOn(bot);
+    const result = exec.submitDetailed([
+      { skill: 'take', item: 'bread', count: 2, at: [2, 64, 0] },
+      { skill: 'eat', item: 'bread' },
+    ]);
+    expect(result).toMatchObject({ accepted: false, retryAfterMs: 8_000 });
+    expect(result.receipt).toContain('不是可取物容器');
+    expect(exec.status().running).toBeNull();
+    expect(exec.status().waiting).toEqual([]);
+  });
+
+  it('刚开窗确认缺货的箱子拒收；有货、旧读数与未知区块仍可重新核验', () => {
+    const bot = combatBot({}) as any;
+    let loaded = true;
+    bot.blockAt = () => loaded ? { name: 'chest' } : null;
+    const book = new ChestBook(null);
+    const target = { x: 2, y: 64, z: 0 };
+    book.remember('overworld', target, [{ name: 'rotten_flesh', count: 2 }], 1, 27);
+    const step: SkillCall = { skill: 'take', item: 'bread', count: 2, at: [2, 64, 0] };
+    const check = () => new Executor({
+      getBot: () => bot as never,
+      report: () => {},
+      log,
+      nextId: nextTaskId(),
+      chests: book,
+      busyWith: () => 'test',
+    }).submitDetailed([step]);
+    expect(check()).toMatchObject({ accepted: false, retryAfterMs: 8_000 });
+    book.remember('overworld', target, [{ name: 'bread', count: 2 }], 1, 27);
+    expect(check().accepted).toBe(true);
+    book.remember('overworld', target, [{ name: 'rotten_flesh', count: 2 }], 1, 27);
+    const old = book.get('overworld', target)!;
+    old.observedAt = Date.now() - 31_000;
+    expect(check().accepted).toBe(true);
+    loaded = false;
+    expect(check().accepted).toBe(true);
+  });
 });
 
 describe('parseScoutSteps:同一套校验,只留下试算', () => {
@@ -645,6 +711,123 @@ describe('find:站着扫与边走边找', () => {
     expect(reports[0].text).not.toContain('radius');
   });
 
+  it('走满未命中的定向路线按起点记账，短期返回相同起点暂缓重复', async () => {
+    const bot = scoutBot(Infinity);
+    bot.pathfinder.goto = async (goal: FakeGoal) => {
+      bot.entity.position = new V(goal.x ?? bot.entity.position.x, 64, goal.z ?? 0.5);
+    };
+    const { exec, reports } = makeExecutorOn(bot);
+    const find: SkillCall = { skill: 'find', target: 'acacia_log', direction: 'east', distance: 96 };
+    exec.submit([find]);
+    await waitUntil(() => reports.length === 1, 8000);
+    expect(reports[0].text).toContain('一路没看见');
+    bot.entity.position = new V(0.5, 64, 0.5);
+    const repeated = exec.submitDetailed([find]);
+    expect(repeated.accepted).toBe(false);
+    expect(repeated.receipt).toContain('同起点、同方向且声明距离未扩大');
+    const guard = exec as unknown as {
+      directionalSweepNote(steps: SkillCall[], at: number): { text: string; refuse: boolean } | null;
+    };
+    expect(guard.directionalSweepNote([{ ...find, direction: 'west' }], Date.now())?.refuse).toBe(false);
+    bot.entity.position = new V(11.5, 64, 27.5);
+    expect(guard.directionalSweepNote([find], Date.now())?.refuse).toBe(false);
+    bot.entity.position = new V(48.5, 64, 0.5);
+    expect(guard.directionalSweepNote([find], Date.now())?.refuse).toBe(false);
+  });
+
+  it('空路线账跨执行器重启仍可读，过期后自动失效', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'corti-sweep-'));
+    const file = join(directory, 'sweeps.json');
+    try {
+      const now = Date.now();
+      const book = new DirectionalSweepBook(file);
+      book.record({ at: now, dimension: 'overworld', target: 'poppy', direction: 'south',
+        from: { x: -560, y: 67, z: -459 }, distance: 64 }, now, 600_000);
+      book.record({ at: now + 1, dimension: 'overworld', target: 'poppy', direction: 'west',
+        from: { x: -560, y: 67, z: -459 }, distance: 64 }, now + 1, 600_000);
+      const reloaded = new DirectionalSweepBook(file);
+      expect(reloaded.recent(now + 1_000, 600_000)).toHaveLength(2);
+      expect(reloaded.recent(now + 600_001, 600_000)).toHaveLength(0);
+    } finally {
+      unlinkSync(file);
+      rmdirSync(directory);
+    }
+  });
+
+  it('四个方向未命中只报告实际搜索历史，新方向和原地观察仍可受理', () => {
+    const bot = scoutBot(Infinity);
+    const book = new DirectionalSweepBook(null);
+    const now = Date.now();
+    for (const direction of ['north', 'south', 'west', 'east'] as const) {
+      book.record({ at: now, dimension: 'overworld', target: 'poppy', direction,
+        from: { x: 0, y: 64, z: 0 }, distance: 100 }, now, 600_000);
+    }
+    const submit = (steps: SkillCall[]) => new Executor({ getBot: () => bot as never, report: () => {}, log,
+      nextId: nextTaskId(), directionalSweeps: book, busyWith: () => 'test' }).submitDetailed(steps);
+    const find: SkillCall = { skill: 'find', target: 'poppy', direction: 'northwest', distance: 100 };
+    const result = submit([find]);
+    expect(result.accepted).toBe(true);
+    expect(result.receipt).toContain('计划起点 (0, 64, 0)');
+    expect(result.receipt).toContain('附近 4 条记录');
+    expect(result.receipt).toContain('从 (0, 64, 0) 朝东走满 100 格，未命中虞美人');
+    expect(result.receipt).toContain(new Date(now).getFullYear().toString());
+    expect(result.receipt).not.toContain('本区域搜索已结束');
+    expect(submit([{ skill: 'find', target: 'poppy', distance: 48 }]).accepted).toBe(true);
+    const unrelated = submit([{ skill: 'find', target: 'dandelion', distance: 48 }]);
+    expect(unrelated.accepted).toBe(true);
+    expect(unrelated.receipt).not.toContain('搜索历史');
+    bot.entity.position = new V(70.5, 64, 0.5);
+    expect(submit([find]).accepted).toBe(true);
+  });
+
+  it('明确重复的路线暂缓两分钟，换起点、层高、方向或延长路线均可受理', () => {
+    const bot = scoutBot(Infinity);
+    const book = new DirectionalSweepBook(null);
+    const now = Date.now();
+    book.record({ at: now, dimension: 'overworld', target: 'poppy', direction: 'south',
+      from: { x: 0, y: 64, z: 0 }, distance: 64 }, now, 600_000);
+    const submit = (steps: SkillCall[]) => new Executor({ getBot: () => bot as never, report: () => {}, log,
+      nextId: nextTaskId(), directionalSweeps: book, busyWith: () => 'test' }).submitDetailed(steps);
+    const find: SkillCall = { skill: 'find', target: 'poppy', direction: 'south', distance: 64 };
+    const repeated = submit([find]);
+    expect(repeated.accepted).toBe(false);
+    expect(repeated.receipt).toContain('朝南走满 64 格');
+    expect(repeated.receipt).toContain('暂缓相同路线至');
+    expect(submit([{ ...find, distance: 65 }]).accepted).toBe(true);
+    expect(submit([{ ...find, direction: 'east' }]).accepted).toBe(true);
+    bot.entity.position = new V(1.5, 64, 0.5);
+    expect(submit([find]).accepted).toBe(true);
+    bot.entity.position = new V(0.5, 65, 0.5);
+    expect(submit([find]).accepted).toBe(true);
+    bot.entity.position = new V(0.5, 64, 0.5);
+    vi.setSystemTime(now + 120_000);
+    const later = submit([find]);
+    expect(later.accepted).toBe(true);
+    expect(later.receipt).toContain('搜索历史');
+  });
+
+  it('搜索预算采用 find 前的计划起点，不把当前位置历史套给未确定的后续锚点', () => {
+    const bot = scoutBot(Infinity);
+    const book = new DirectionalSweepBook(null);
+    const now = Date.now();
+    book.record({ at: now, dimension: 'overworld', target: 'poppy', direction: 'south',
+      from: { x: 10, y: 64, z: 0 }, distance: 64 }, now, 600_000);
+    const submit = (steps: SkillCall[]) => new Executor({ getBot: () => bot as never, report: () => {}, log,
+      nextId: nextTaskId(), directionalSweeps: book, busyWith: () => 'test' }).submitDetailed(steps);
+    const find: SkillCall = { skill: 'find', target: 'poppy', direction: 'south', distance: 64 };
+    const repeated = submit([{ skill: 'goto', at: [10, 64, 0] }, find]);
+    expect(repeated.accepted).toBe(false);
+    expect(repeated.receipt).toContain('计划起点 (10, 64, 0)');
+    expect(submit([{ skill: 'goto', at: [11, 64, 0] }, find]).accepted).toBe(true);
+    expect(submit([{ skill: 'goto', at: [10, 64, 0], groundY: true }, find]).accepted).toBe(true);
+    expect(submit([{ skill: 'goto', at: [10, 64, 0] },
+      { skill: 'goto', at: ['~1', '~', '~'] }, find]).accepted).toBe(true);
+    vi.setSystemTime(now + 86_400_000);
+    const expired = submit([{ skill: 'goto', at: [10, 64, 0] }, find]);
+    expect(expired.accepted).toBe(true);
+    expect(expired.receipt).not.toContain('搜索历史');
+  });
+
   // 结束时回到出发点可能源于水流或重生；净位移为零不能声称完成了声明距离的搜索。
   it('一趟走完净位移 0:说的是没走出去,不说"走满了 0 格"', async () => {
     const bot = scoutBot(Infinity);
@@ -752,6 +935,36 @@ describe('find:站着扫与边走边找', () => {
     expect(reports[0].text).toContain('在我北边 35 格');
     expect(reports[0].text).toContain('请求的南向行军尚未发生');
     expect(reports[0].text).toContain('不是南向搜索结果');
+  });
+
+  it('定向找作物不会把起点幼苗当作已找到的收获目标', async () => {
+    const bot = scoutBot(Infinity);
+    bot.registry.blocksByName = { wheat: { id: 15, name: 'wheat' } } as never;
+    bot.registry.blocks = { 15: { name: 'wheat' } } as never;
+    bot.findBlocks = () => bot.entity.position.x < 20
+      ? [new V(1, 64, 0)] : [new V(1, 64, 0), new V(30, 64, 0)];
+    bot.blockAt = ((p: V) => ({ name: 'wheat', getProperties: () => ({ age: p.x === 1 ? 3 : 7 }) })) as never;
+    bot.pathfinder.goto = async (goal: FakeGoal) => {
+      bot.entity.position = new V(goal.x ?? bot.entity.position.x, 64, goal.z ?? 0.5);
+    };
+    const { exec, reports } = makeExecutorOn(bot);
+    exec.submit([{ skill: 'find', target: 'wheat', direction: 'east', distance: 64 }]);
+    await waitUntil(() => reports.length === 1, 8000);
+    expect(bot.entity.position.x).toBeGreaterThanOrEqual(20);
+    expect(reports[0].text).toContain('当前看见了小麦');
+    expect(reports[0].text).not.toContain('行军尚未发生');
+  });
+
+  it('定向寻找在起点命中后，拒绝同地重复观测，但允许先走远再找', async () => {
+    const bot = scoutBot(0);
+    bot.findBlocks = () => [new V(0, 64, -34)];
+    const { exec, reports } = makeExecutorOn(bot);
+    const find: SkillCall = { skill: 'find', target: 'acacia_log', direction: 'south', distance: 64 };
+    exec.submit([find]);
+    await waitUntil(() => reports.length === 1, 5000);
+    expect(exec.submit([find])).toContain('原地重找不会产生新信息');
+    expect(exec.submit([{ skill: 'goto', at: [0, 64, 0] }, find])).toContain('原地重找不会产生新信息');
+    expect(exec.submit([{ skill: 'goto', at: [0, 64, 8] }, find])).toContain('收下了');
   });
 
   it('未命中时只引用本执行器真实见过的带年龄线索', async () => {
@@ -888,12 +1101,37 @@ describe('toss / pickup 过滤 / 箱子', () => {
     exec.submit([{ skill: 'toss', item: 'cobblestone', count: 8 }]);
     await waitUntil(() => reports.length === 1);
     expect(reports[0].kind).toBe('done');
-    expect(reports[0].text).toContain('扔掉了圆石×8');
+    expect(reports[0].text).toContain('从背包抛出了圆石×8');
+    expect(reports[0].text).toContain('之后走近仍可能自动捡回');
+    expect(reports[0].text).toContain('背包同类物品净少8/8');
     expect(counts.get('cobblestone')).toBe(12);
     exec.submit([{ skill: 'toss', item: 'coal', count: 1 }]);
     await waitUntil(() => reports.length === 2);
     expect(reports[1].kind).toBe('blocked');
     expect(reports[1].text).toContain('包里没有');
+  });
+
+  it('toss 后同类物品自动回包时受阻,不能把瞬时离包当成腾格成功', async () => {
+    let count = 8;
+    const bot = {
+      entity: { id: 1, position: new V(0.5, 64, 0.5) },
+      entities: {},
+      game: { dimension: 'overworld' },
+      registry: { itemsByName: {}, blocksByName: {} },
+      inventory: { items: () => count > 0 ? [{ type: 1, metadata: 0, name: 'cobblestone', count }] : [] },
+      toss: async (_type: number, _meta: number | null, n: number) => {
+        count -= n;
+        setTimeout(() => { count += n; }, 500);
+      },
+      pathfinder: { stop() {}, setGoal() {}, goto: async () => {} },
+    };
+    const { exec, reports } = makeExecutorOn(bot);
+    exec.submit([{ skill: 'toss', item: 'cobblestone', count: 4 }]);
+    await waitUntil(() => reports.length === 1);
+    expect(reports[0].kind).toBe('blocked');
+    expect(reports[0].text).toContain('背包同类物品没有净减少');
+    expect(reports[0].text).toContain('改用 stow');
+    expect(count).toBe(8);
   });
 
   /**
@@ -1920,7 +2158,7 @@ describe('放置 =(参照方块, 面):她指名贴哪一面,执行器不再猜',
       report: (report) => reports.push(report),
       log,
       nextId: nextTaskId(),
-      permitResourcePlacement: () => ({ ok: true, finish: (placed) => settled.push(placed) }),
+      permitResourcePlacement: () => ({ ok: true, finish: (placed) => { settled.push(placed); } }),
     });
 
     exec.submit([{ skill: 'build', material: 'dirt', anchors: [[1, 64, 0]] } as never]);
@@ -2093,7 +2331,7 @@ describe('终态四分与受理刻回顾', () => {
     const bot = combatBot({});
     const { exec, reports } = makeExecutorOn(bot);
     // 地上没煤可捡,第 2 步要扔的正是该捡回来的煤
-    exec.submit([{ skill: 'pickup', item: 'coal' }, { skill: 'toss', item: 'coal', count: 1 }]);
+    exec.submit([{ skill: 'pickup', item: 'coal' }, { skill: 'toss', item: 'coal', count: 1, at: [1, 64, 0] }]);
     await waitUntil(() => reports.length === 1, 5000);
     expect(reports[0].kind).toBe('blocked'); // 有步被跳过,这一单没做完
     expect(reports[0].text).toContain('跳过');
@@ -2127,9 +2365,9 @@ describe('终态四分与受理刻回顾', () => {
   it('上次成了就不出声:旧账当场抹掉,不拿过期事实提醒她', async () => {
     const bot = combatBot({});
     const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'pickup', item: 'coal' }, { skill: 'toss', item: 'coal', count: 1 }]);
+    exec.submit([{ skill: 'pickup', item: 'coal' }, { skill: 'toss', item: 'coal', count: 1, at: [1, 64, 0] }]);
     await waitUntil(() => reports.length === 1, 5000);
-    expect(exec.submit([{ skill: 'pickup', item: 'coal' }, { skill: 'toss', item: 'coal', count: 1 }]))
+    expect(exec.submit([{ skill: 'pickup', item: 'coal' }, { skill: 'toss', item: 'coal', count: 1, at: [1, 64, 0] }]))
       .toContain('下过同类的单');
     // 这一单只有一步且能成:同签名的旧账不该再被翻出来
     exec.submit([{ skill: 'chat', text: '一' }]);
@@ -2160,6 +2398,8 @@ describe('终态四分与受理刻回顾', () => {
   it('打转计数:同签名反复下单时回执报这是第几次、前几次跑没跑过第 1 步', async () => {
     const bot = combatBot({});
     const { exec, reports } = makeExecutorOn(bot);
+    const incidents: Array<Record<string, unknown>> = [];
+    (exec as any).opts.diag = { write: (entry: Record<string, unknown>) => incidents.push(entry) };
     exec.submit([{ skill: 'pickup', item: 'coal' }]);
     await waitUntil(() => reports.length === 1, 5000);
     exec.submit([{ skill: 'pickup', item: 'coal' }]);
@@ -2167,6 +2407,29 @@ describe('终态四分与受理刻回顾', () => {
     const third = exec.submit([{ skill: 'pickup', item: 'coal' }]);
     expect(third).toContain('第 3 次下同形状的单');
     expect(third).toContain('前 2 次里有 2 次跑过第 1 步');
+    expect(incidents.filter((entry) => entry.event === 'repeated-intent')).toEqual([
+      expect.objectContaining({ incident: true, data: expect.objectContaining({ times: 3, ranBefore: 2 }) }),
+    ]);
+    exec.clear();
+  });
+
+  it('成功的同类任务第三次提交时也向模型报告重复次数', async () => {
+    const { exec, reports } = makeExecutorOn(combatBot({}));
+    const steps: SkillCall[] = [{ skill: 'chat', text: '一' }];
+    for (let i = 1; i <= 2; i++) {
+      const receipt = exec.submit(steps);
+      expect(receipt).not.toContain('次提交同类任务');
+      await waitUntil(() => reports.length === i, 5000);
+      expect(reports[i - 1].kind).toBe('done');
+    }
+
+    const third = exec.submit(steps);
+    expect(third).toContain('第 3 次提交同类任务');
+    expect(third).not.toContain('下过同类的单');
+    expect(third).not.toContain('这一单我没接');
+    await waitUntil(() => reports.length === 3, 5000);
+
+    expect(exec.submit(steps)).toContain('第 4 次提交同类任务');
     exec.clear();
   });
 
@@ -2241,22 +2504,21 @@ describe('终态四分与受理刻回顾', () => {
     bot.findBlocks = () => [];
     const { exec, reports } = makeExecutorOn(bot);
     for (let i = 1; i <= 5; i++) {
-      exec.submit([{ skill: 'stow', item: 'cobblestone', count: 1 }]);
+      exec.submit([{ skill: 'stow', item: 'cobblestone', count: i }]);
       await waitUntil(() => reports.length === i, 8000);
     }
     expect(reports[4].kind).toBe('blocked');
     expect(reports[4].text).toContain('⚠ 这一类受阻在过去 60 分钟里已经是第 5 次');
     // 换一类受阻:窗口里那 5 次没有一次是这一单的事,回执第一行不许说别处
-    exec.submit([{ skill: 'stow', item: 'coal', count: 1 }]);
-    await waitUntil(() => reports.length === 6, 8000);
-    expect(reports[5].kind).toBe('blocked');
-    expect(reports[5].text).toContain('包里没有煤炭');
-    expect(reports[5].text).not.toContain('⚠');
-    expect(reports[5].text).not.toContain('32 格内没有箱子');
+    const missing = exec.submit([{ skill: 'stow', item: 'coal', count: 1 }]);
+    expect(missing).toContain('包里没有煤炭');
+    expect(missing).not.toContain('⚠');
+    expect(missing).not.toContain('32 格内没有箱子');
+    expect(reports).toHaveLength(5);
     // 再撞回同一类:照浮不误,次数接着数
-    exec.submit([{ skill: 'stow', item: 'cobblestone', count: 1 }]);
-    await waitUntil(() => reports.length === 7, 8000);
-    expect(reports[6].text).toContain('已经是第 6 次');
+    exec.submit([{ skill: 'stow', item: 'cobblestone', count: 6 }]);
+    await waitUntil(() => reports.length === 6, 8000);
+    expect(reports[5].text).toContain('已经是第 6 次');
     exec.shutdown();
   });
 
@@ -2280,7 +2542,7 @@ describe('终态四分与受理刻回顾', () => {
 
 
 describe('文案批:主语、指路、候选菜单', () => {
-  /** use 台架:手里拿着泥土,空手 use 打在一格床上 */
+  /** use 台架:手里拿着泥土,明确持物 use 打在一格床上 */
   function useBot() {
     return {
       entity: { id: 9, position: new V(0.5, 64, 0.5), yaw: 0, pitch: 0 },
@@ -2292,11 +2554,11 @@ describe('文案批:主语、指路、候选菜单', () => {
       registry: {
         blocks: { 26: { name: 'white_bed' } },
         blocksByName: { white_bed: { id: 26, name: 'white_bed' } },
-        items: {},
-        itemsByName: { white_bed: { id: 26, name: 'white_bed' } },
+        items: { 3: { name: 'dirt' } },
+        itemsByName: { white_bed: { id: 26, name: 'white_bed' }, dirt: { id: 3, name: 'dirt' } },
         entitiesByName: { cow: {} },
       },
-      inventory: { items: () => [] as never[] },
+      inventory: { items: () => [{ name: 'dirt', count: 1, type: 3, metadata: 0 }] },
       equip: async () => {},
       lookAt: async () => {},
       setControlState: () => {},
@@ -2313,8 +2575,8 @@ describe('文案批:主语、指路、候选菜单', () => {
   it('(b) use 受阻文案的主语是真实手持,不再无条件写「空手」', async () => {
     const bot = useBot();
     const { exec, reports } = makeExecutorOn(bot);
-    // 空手右键床:白天点不躺下,探针落空 → 受阻。头部主语该是「用泥土」
-    exec.submit([{ skill: 'use', at: [3, 64, 0] }]);
+    // 明确持泥土右键床:白天点不躺下,探针落空 → 受阻。头部主语该是「用泥土」
+    exec.submit([{ skill: 'use', item: 'dirt', at: [3, 64, 0] }]);
     await waitUntil(() => reports.length === 1, 8000);
     expect(reports[0].text).toContain('用泥土右键 (3,64,0)没做成');
     expect(reports[0].text).not.toContain('空手右键 (3,64,0)没做成');
@@ -2450,12 +2712,12 @@ describe('受理刻的危险区陈述与行军相对化', () => {
  */
 
 
-describe('eat:毒食确认门、可吃物清单、一单三连的回执', () => {
+describe('eat:自主选择、实际效果与可吃物清单', () => {
   const ITEMS: Record<number, string> = { 1: 'wheat', 2: 'wheat_seeds', 3: 'bread', 4: 'pufferfish', 5: 'cooked_beef' };
   function eatBot(bag: Array<{ name: string; count: number }>, opts: { wheatNearby?: boolean } = {}) {
     const itemsByName = Object.fromEntries(Object.entries(ITEMS).map(([id, n]) => [n, { id: Number(id), name: n }]));
     const bot = {
-      entity: { id: 9, position: new V(0.5, 64, 0.5) },
+      entity: { id: 9, position: new V(0.5, 64, 0.5), effects: {} as Record<number, { id: number; amplifier: number; duration: number }> },
       entities: {},
       health: 20,
       food: 10,
@@ -2465,6 +2727,7 @@ describe('eat:毒食确认门、可吃物清单、一单三连的回执', () => 
       registry: {
         entitiesByName: {},
         foodsByName: { bread: {}, pufferfish: {}, cooked_beef: {} },
+        effects: { 19: { name: 'Poison' } },
         blocks: { 100: { name: 'wheat', drops: [1, 2] } },
         blocksByName: { wheat: { id: 100, name: 'wheat', drops: [1, 2] } },
         items: Object.fromEntries(Object.entries(ITEMS).map(([id, name]) => [id, { name }])),
@@ -2481,42 +2744,26 @@ describe('eat:毒食确认门、可吃物清单、一单三连的回执', () => 
       consume: async () => {
         const hit = bag.find((e) => e.name === bot.eaten);
         if (hit) hit.count -= 1;
+        if (bot.eaten === 'pufferfish') bot.entity.effects[19] = { id: 19, amplifier: 0, duration: 1200 };
       },
       pathfinder: { stop() {}, setGoal() {}, goto: async () => {} },
     };
     return bot;
   }
 
-  it('河豚:第一次只报后果不接单,同样的单再下一次才吃', async () => {
+  it('河豚可直接吃,回执记录实际出现的中毒状态', async () => {
     const bag = [{ name: 'pufferfish', count: 2 }];
     const bot = eatBot(bag);
     const { exec, reports } = makeExecutorOn(bot);
     const first = exec.submit([{ skill: 'eat', item: 'pufferfish' }]);
-    expect(first).toContain('我没接');
-    expect(first).toContain('中毒 60 秒');
-    expect(first).toContain('没吃');
-    expect(first).toContain('再下一次一模一样的单');
-    expect(exec.current).toBeNull();
-    expect(bag[0].count).toBe(2);
-
-    const second = exec.submit([{ skill: 'eat', item: 'pufferfish' }]);
-    expect(second).toContain('收下了');
+    expect(first).toContain('收下了');
     await waitUntil(() => reports.length === 1, 5000);
     expect(reports[0].kind).toBe('done');
     expect(bag[0].count).toBe(1);
-    // 确认只顶一次:再吃一个还得再确认
-    expect(exec.submit([{ skill: 'eat', item: 'pufferfish' }])).toContain('我没接');
+    expect(reports[0].text).toContain('进食后观察到状态:中毒约 60 秒');
   });
 
-  it('多步单里点名河豚:点明是第几步;换了单就换槽', () => {
-    const { exec } = makeExecutorOn(eatBot([{ name: 'pufferfish', count: 1 }]));
-    const steps: SkillCall[] = [{ skill: 'chat', text: '先说一句' }, { skill: 'eat', item: 'spider_eye' }];
-    expect(exec.submit(steps)).toContain('第 2 步要吃的是蜘蛛眼');
-    expect(exec.submit([{ skill: 'eat', item: 'pufferfish' }])).toContain('我没接');
-    expect(exec.submit(steps)).toContain('我没接'); // 单槽被换掉了,不是确认
-  });
-
-  it('普通食物不经这道门', async () => {
+  it('普通食物也可直接吃', async () => {
     const bag = [{ name: 'bread', count: 1 }];
     const { exec, reports } = makeExecutorOn(eatBot(bag));
     expect(exec.submit([{ skill: 'eat', item: 'bread' }])).toContain('收下了');

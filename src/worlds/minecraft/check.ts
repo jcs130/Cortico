@@ -49,6 +49,8 @@ export interface CheckMarkProbe {
 }
 
 export interface CheckWorld {
+  /** 当前玩家位置；可供工地核验标注直线距离，不代表可行路线。 */
+  position?: () => readonly [number, number, number] | null;
   /** 世界坐标一格;区块没加载、读不到 → null */
   cell(x: number, y: number, z: number): CheckCell | null;
   /** 背包现有:物品名 → 个数 */
@@ -569,7 +571,10 @@ export function blueprintCheckText(site: CheckSite | null, key: string, world: C
     { checkAir: true, sampleLimit: CHECK_SAMPLE_CAP },
   );
   const conflicts = diff.conflictCounts['wrong-block'] + diff.conflictCounts['should-be-air'];
-  const head = `蓝图「${site.key}」对上 ${diff.matched}/${diff.total} 格`;
+  const position = world.position?.();
+  const distance = position ? Math.hypot(...anchor.map((v, i) => v - position[i])) : null;
+  const head = `蓝图「${site.key}」对上 ${diff.matched}/${diff.total} 格,绑定原点 ${posText(anchor)}`
+    + (distance === null ? '' : `(距当前位置直线 ${distance.toFixed(1)} 格)`);
   if (diff.missing === 0 && conflicts === 0 && diff.unknown === 0) {
     return { verdict: 'ok', text: `${head},整张图都到位了` };
   }
@@ -579,7 +584,7 @@ export function blueprintCheckText(site: CheckSite | null, key: string, world: C
     bits.push(`缺 ${diff.missing} 格${samples.length > 0 ? `(${samples.join('、')}${diff.missing > samples.length ? ' 等' : ''})` : ''}`);
   }
   if (conflicts > 0) bits.push(`冲突 ${conflicts} 格`);
-  if (diff.unknown > 0) bits.push(`${diff.unknown} 格没加载,没对全`);
+  if (diff.unknown > 0) bits.push(`${diff.unknown} 格没加载,没对全(这些格的现状未知)`);
   return {
     verdict: diff.missing > 0 || conflicts > 0 ? 'bad' : 'unknown',
     text: `${head};${bits.join(';')}`,

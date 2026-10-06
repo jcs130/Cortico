@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { loadDeployment } from '../../src/deploy.ts';
 import corminiDefinition from '../../bots/cormini/index.ts';
 import realtimeDefinition from '../../bots/cortiv/index.ts';
+import { makeFakeHarnessApi } from '../core/helpers.ts';
 
 const repoRoot = join(import.meta.dirname, '../..');
 
@@ -68,10 +69,17 @@ describe('Persona卡:只有 ORIENTATION 与宪法', () => {
     }
   });
 
-  it('CortiV 的 Memory 页是工作区/记忆/历史三块,工作区不进清除清单,promptDocs 比 Cormini 多一份 MEMORY', () => {
+  it('CortiV 的 Memory 页不带清除项,复盘与后台整理声明只读状态', async () => {
     const { parts } = buildOf(realtimeDefinition);
+    parts.persona.attach?.(makeFakeHarnessApi());
     const decl = parts.persona.console?.();
-    expect(decl?.panels).toBeUndefined();
+    expect(decl?.panels?.map((panel) => ({ id: panel.id, getMethods: panel.getMethods })))
+      .toEqual([{ id: 'planning', getMethods: ['state'] }, { id: 'dream', getMethods: ['state'] }]);
+    expect(await decl?.invoke?.('planning', 'state', [])).toMatchObject({ enabled: false, running: false });
+    const dream = await decl?.invoke?.('dream', 'state', []);
+    expect(dream).toMatchObject({ currentTask: null, queuedTasks: [], lastOutcome: null,
+      social: { pendingEntries: 0, committedSeq: 0, lastSeq: 0, scheduled: false } });
+    expect(await decl?.invoke?.('dream', 'state', [])).toEqual(dream);
     expect(decl?.memory?.panels?.map((p) => p.id)).toEqual(['workspace', 'memory', 'history']);
     expect(decl?.invoke).toEqual(expect.any(Function));
     expect(decl?.storage).toBeUndefined();

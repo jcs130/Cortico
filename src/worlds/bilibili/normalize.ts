@@ -1,6 +1,7 @@
 /** 将原始 cmd 转换为事件、累加计数或最新读数；不处理的命令返回 null。计数与读数由 World 聚合后随批次投递。 */
 import type { TriggerMode } from '../../core/types.ts';
 import { giftFrameData } from './gift-frame.ts';
+import { interactionFrameData } from './interaction-frame.ts';
 
 export interface LiveEvent {
   kind: 'event';
@@ -240,9 +241,29 @@ export function normalize(msg: Record<string, unknown>, opts: NormalizeOptions):
     }
 
     case 'INTERACT_WORD':
-    case 'INTERACT_WORD_V2':
-      // V2 是 protobuf,分不出进场/关注/分享,一律按进场计数
-      return { kind: 'count', field: 'enter', by: 1 };
+    case 'INTERACT_WORD_V2': {
+      const frame = interactionFrameData(cmd, data, opts.warn);
+      if (!frame) return null;
+      if (frame.messageType === 1 && frame.uid === 0) return { kind: 'count', field: 'enter', by: 1 };
+      const uname = frame.uname || '某位观众';
+      const action = frame.messageType === 1 ? 'enter' : frame.messageType === 2 ? 'follow' : 'share';
+      const label = frame.messageType === 1 ? '进场' : frame.messageType === 2 ? '关注' : '分享';
+      const detail = frame.messageType === 1 ? '进入了直播间' : frame.messageType === 2 ? '关注了主播' : '分享了直播间';
+      return {
+        kind: 'event',
+        type: `bilibili.${action}`,
+        trigger: 'debounce',
+        text: `[${label}|${uname}] ${detail}`,
+        senderKey: senderKeyOf(frame.uid),
+        meta: {
+          uid: frame.uid,
+          uname: frame.uname,
+          msgType: frame.messageType,
+          avatarUrl: frame.avatarUrl,
+          ...(frame.timestampSec === undefined ? {} : { platformTimestampSec: frame.timestampSec }),
+        },
+      };
+    }
 
     case 'LIKE_INFO_V3_CLICK':
       return { kind: 'count', field: 'like', by: 1 };
@@ -268,6 +289,7 @@ export function normalize(msg: Record<string, unknown>, opts: NormalizeOptions):
         type: 'bilibili.room',
         trigger: 'flush',
         text: '[直播间] 平台已推送开播指令:直播画面已对观众可见',
+        meta: { liveRoomState: { schemaVersion: 1, living: true, via: 'websocket' } },
       };
 
     case 'PREPARING':
@@ -277,6 +299,7 @@ export function normalize(msg: Record<string, unknown>, opts: NormalizeOptions):
         trigger: 'flush',
         text: '[直播间] 平台已推送下播指令:直播已结束,观众已经看不到直播画面;'
           + '此后的弹幕来自仍留在房间页的人,不代表直播还在进行',
+        meta: { liveRoomState: { schemaVersion: 1, living: false, via: 'websocket' } },
       };
 
     case 'ROOM_CHANGE':

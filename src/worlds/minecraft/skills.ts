@@ -15,6 +15,7 @@ import {
 } from './geometry.ts';
 import { DIRECTIONS, type Direction } from './terrain.ts';
 import { normalizeDimension } from './escape.ts';
+import type { PositionXYZ } from './blueprint.ts';
 
 /** 步骤依赖与验收的可选覆写；省略时使用执行器推导的因果依赖和验收规则。 */
 export interface StepBounds {
@@ -45,13 +46,11 @@ export type Expectation =
 export const NEAR_DEFAULT = 2;
 
 /**
- * 新任务与队列的关系。三态各对应她的一句话:
- * `replace`「后面排的不算数了,改做这个」、`append`「手上和排着的做完再做这个」、
- * `now`「别挖了,先插火把」。mc_do 与 mc_scout 是同一条队列,同一套三态。
+ * 新任务与队列的关系；afterCheckpoint 在当前任务的安全检查点先做新任务，再续做原任务。
  */
-export type QueueMode = 'replace' | 'append' | 'now';
+export type QueueMode = 'replace' | 'append' | 'now' | 'afterCheckpoint';
 
-export const QUEUE_MODES: readonly QueueMode[] = ['replace', 'append', 'now'];
+export const QUEUE_MODES: readonly QueueMode[] = ['replace', 'append', 'now', 'afterCheckpoint'];
 
 /** mc_do / mc_scout 顶层的 queue 字段 */
 export const QUEUE_SCHEMA: Record<string, unknown> = {
@@ -60,7 +59,8 @@ export const QUEUE_SCHEMA: Record<string, unknown> = {
   description:
     '这一单跟队列的关系。不写 = replace:撤掉排着的那些,接在正在做的那件后面(回执点名撤了谁);' +
     'append:排到队尾,排着的都保留;now:中断正在做的那件、插到队头立刻开做,排着的保留' +
-    '(正在逃命时不抢,排队头等它逃完)',
+    '(正在逃命时不抢,排队头等它逃完);' +
+    'afterCheckpoint:当前任务到安全检查点后先做这一单,再续做原任务;容器存取、交易等完整操作段结束前等待,不抢救命动作',
 };
 
 /** queue 字段的校验;不写 = replace */
@@ -81,12 +81,15 @@ export type AttackMode = 'auto' | 'melee' | 'ranged' | 'kite';
 /** 一步技能:动作参数,外加边界声明(StepBounds)。 */
 export type SkillCall = StepBounds & (
   | { skill: 'goto'; at: Anchor; dimension?: string; groundY?: true; dryRun?: boolean }
+  | { skill: 'look'; at: Anchor }
   | { skill: 'transit'; at: Anchor }
   | { skill: 'goto_player'; name: string }
   | { skill: 'follow'; name: string }
   | { skill: 'find'; target: string; distance: number; direction?: Direction; until?: string[] }
   | { skill: 'flee'; distance: number }
   | { skill: 'surface' }
+  | { skill: 'flight'; at: Anchor; land?: boolean }
+  | { skill: 'land' }
   | { skill: 'collect'; block: string; count: number; buried?: boolean; mature?: boolean; tool?: string }
   | { skill: 'fish'; at?: Anchor }
   | { skill: 'build'; on: PlaceOnFace[]; material: string; dryRun?: boolean }
@@ -100,6 +103,8 @@ export type SkillCall = StepBounds & (
       skill: 'build';
       blueprint: string;
       at?: Anchor;
+      /** 改绑工地时给出当前绑定的绝对锚点；执行时核对，防止旧调用改写新绑定。 */
+      rebindFrom?: PositionXYZ;
       stopAfter?: number;
       /** retrofit 现场有冲突时，明确同意清掉冲突格后施工。 */
       confirm?: boolean;
@@ -119,14 +124,19 @@ export type SkillCall = StepBounds & (
   | { skill: 'equip'; item?: string; pick?: string }
   | { skill: 'pickup'; item?: string }
   | { skill: 'toss'; item: string; count: number; at?: Anchor; pick?: string }
-  | { skill: 'stow'; item: string; count: number; pick?: string }
-  | { skill: 'take'; item?: string; count?: number; at?: Anchor; all?: true; pick?: string }
+  | { skill: 'stow'; item: string; count: number; pick?: string; at?: Anchor; into?: 'open' }
+  | { skill: 'compact' }
+  | { skill: 'take'; item?: string; count?: number; at?: Anchor; all?: true; pick?: string; from?: 'open' }
+  | { skill: 'server_travel'; command: string; at: Anchor; within: number }
   | { skill: 'chat'; text: string }
+  | { skill: 'gesture'; name: string; motion: 'wave' | 'bow' | 'nod' | 'beckon' | 'shake_head' }
   | {
       skill: 'use';
       item?: string;
       at?: Anchor;
       target?: string;
+      /** 本连接里已观察到的实体 ID；不填时选择最近的同类实体。 */
+      entityId?: number;
       index?: number;
       times?: number;
       /** 只对告示牌:右键打开编辑框之后把这几行字写上去(\n 分行,最多 4 行) */
@@ -168,6 +178,19 @@ export type SkillCall = StepBounds & (
 
 function str(v: unknown): string | null {
   return typeof v === 'string' && v.trim() ? v.trim() : null;
+}
+
+const CHAT_LENGTH_LIMIT = 256;
+const CHAT_SPLIT_HINT = '长消息请拆成多条单行 chat 步骤；/msg 私聊每条重复完整命令和收件人，其他命令须缩短参数并保持完整';
+
+export function chatInputError(text: string): string | null {
+  if (/[\u0000-\u001f\u007f-\u009f\u00a7\u2028\u2029]/u.test(text)) {
+    return `没有发送：聊天文本含换行或游戏不允许的字符；请去掉这些字符。${CHAT_SPLIT_HINT}`;
+  }
+  if (text.length > CHAT_LENGTH_LIMIT) {
+    return `没有发送：聊天文本长 ${text.length} 个字符，单条最多 ${CHAT_LENGTH_LIMIT} 个（含 / 和命令参数）；${CHAT_SPLIT_HINT}`;
+  }
+  return null;
 }
 
 /** 返回 [lo,hi] 内的整数;缺省时用 fallback,越界时返回 null。 */
@@ -241,6 +264,7 @@ function gridOf(raw: unknown): string[][] | null {
     for (const cell of row) {
       if (cell === null || cell === undefined || cell === '') { cells.push(''); continue; }
       if (typeof cell !== 'string') return null;
+      if (cell.trim().toLowerCase() === 'null') return null;
       cells.push(cell.trim());
     }
     out.push(cells);
@@ -327,7 +351,7 @@ type FieldSpec = {
   | { kind: 'names'; hint?: string }
   | { kind: 'int'; lo: number; hi: number; def: number; unit?: string }
   | { kind: 'anchor'; required?: true; error: string }
-  | { kind: 'flag' }
+  | { kind: 'flag'; retainFalse?: true }
   | { kind: 'enum'; values: readonly string[]; required?: true; error: string }
   | { kind: 'opaque'; required?: true; schema: Record<string, unknown> }
 );
@@ -353,7 +377,7 @@ type ParseResult = { step: SkillCall; notes?: StepNote[] } | { error: string };
 
 interface SkillSpec {
   name: SkillCall['skill'];
-  /** SKILL_DOC 里这一技能的段落:示例行 + 语义,完全手写 */
+  /** 完整示例与执行条件，供按需帮助与解析错误引用。 */
   doc: string;
   fields: FieldSpec[];
   /** 横向规则钩子:接管整步校验与规范化;没给钩子的技能走表驱动 */
@@ -378,7 +402,7 @@ const USE_TIMES_MAX = 16;
 const LEAD_TOL = { lo: 1, hi: 16, def: 3 } as const;
 
 function parseGoto(c: Record<string, unknown>, at: string, marks?: MarkLookup): ParseResult {
-  // [x,z] 两分量 = 按地表落脚;y 在执行那一刻按 (x,z) 的最高实心块解
+  // [x,z] 两分量 = 在对应水平位置找可达落脚点；不强制站上屋顶。
   const flat = Array.isArray(c.at) && c.at.length === 2;
   const to = anchorOf(flat ? [(c.at as unknown[])[0], 0, (c.at as unknown[])[1]] : c.at, marks);
   if (!to) {
@@ -471,6 +495,15 @@ function parseBuildBlueprint(c: Record<string, unknown>, at: string): ParseResul
     anchor = a;
   }
   let stopAfter: number | undefined;
+  let rebindFrom: PositionXYZ | undefined;
+  if (c.rebindFrom !== undefined && c.rebindFrom !== null) {
+    if (!Array.isArray(c.rebindFrom) || c.rebindFrom.length !== 3
+      || !c.rebindFrom.every((value) => typeof value === 'number' && Number.isSafeInteger(value))) {
+      return { error: `${at} build 的 rebindFrom 要原绑定的绝对整数坐标 [x,y,z]` };
+    }
+    if (!anchor) return { error: `${at} build 改绑工地还要给新锚点 at` };
+    rebindFrom = [...c.rebindFrom] as PositionXYZ;
+  }
   if (c.stopAfter !== undefined && c.stopAfter !== null) {
     if (typeof c.stopAfter !== 'number' || !Number.isSafeInteger(c.stopAfter) || c.stopAfter < 0) {
       return { error: `${at} build 的 stopAfter 要一个非负整数 y 层号(0 是最低层)` };
@@ -480,6 +513,7 @@ function parseBuildBlueprint(c: Record<string, unknown>, at: string): ParseResul
   const step: SkillCall = {
     skill: 'build', blueprint: key,
     ...(anchor ? { at: anchor } : {}),
+    ...(rebindFrom ? { rebindFrom } : {}),
     ...(stopAfter !== undefined ? { stopAfter } : {}),
     ...(c.confirm === true ? { confirm: true } : {}),
     ...(c.skipConflicts === true ? { skipConflicts: true } : {}),
@@ -615,8 +649,16 @@ function parseUse(c: Record<string, unknown>, at: string, marks?: MarkLookup): P
     return { error: `${at} use 的 at 要 [x,y,z](${RELATIVE_HINT})${markMissNote(c.at, marks)}` };
   }
   const target = str(c.target);
+  let entityId: number | undefined;
+  if (c.entityId !== undefined) {
+    if (!target || useAt) return { error: `${at} use 的 entityId 要与 target 一起给` };
+    if (typeof c.entityId !== 'number' || !Number.isInteger(c.entityId) || c.entityId < 0 || c.entityId > 2_147_483_647) {
+      return { error: `${at} use 的 entityId 要是本连接里观察到的非负整数实体 ID` };
+    }
+    entityId = c.entityId;
+  }
   if (useAt && target) {
-    return { error: `${at} use 的 at 与 target 只能给一个` };
+    return { error: `${at} use 的 at 与 target 只能给一个：at 点击方块，target 点击活物；点击方块只给 at，不填 target` };
   }
   // 空手又不说对哪儿使,右键不出任何东西
   if (!item && !useAt && !target) {
@@ -678,6 +720,7 @@ function parseUse(c: Record<string, unknown>, at: string, marks?: MarkLookup): P
       ...(item ? { item } : {}),
       ...(useAt ? { at: useAt } : {}),
       ...(target ? { target } : {}),
+      ...(entityId !== undefined ? { entityId } : {}),
       ...(index !== undefined ? { index } : {}),
       ...(times > 1 ? { times } : {}),
       ...(text !== undefined ? { text } : {}),
@@ -857,28 +900,35 @@ function parseGrindstone(c: Record<string, unknown>, at: string, marks?: MarkLoo
   };
 }
 
-/** `take` 的两种操作必须显式区分：定量取物，或清空指定容器。 */
+/** `take` 的两种操作必须显式区分：定量取物，或取指定容器的可取物。 */
 function parseTake(c: Record<string, unknown>, at: string, marks?: MarkLookup): ParseResult {
   const item = str(c.item);
+  if (c.from !== undefined && c.from !== 'open') {
+    return { error: `${at} take 的 from 只认 open(当前打开的容器窗口)` };
+  }
+  const fromOpen = c.from === 'open';
   const takeAt = c.at === undefined || c.at === null ? null : anchorOf(c.at, marks);
   if (c.at !== undefined && c.at !== null && !takeAt) {
     return { error: `${at} take 的 at 要 [x,y,z](${RELATIVE_HINT})${markMissNote(c.at, marks)}` };
   }
   const all = c.all === true;
+  if (fromOpen && (takeAt || all)) {
+    return { error: `${at} take 的 from:open 不能与 at 或 all:true 一起用` };
+  }
   if (c.all !== undefined && c.all !== true) {
-    return { error: `${at} take 的 all 只认 true;清空指定容器写 all:true` };
+    return { error: `${at} take 的 all 只认 true;取指定容器的可取物写 all:true` };
   }
   if (all) {
     if (!takeAt) return { error: `${at} take 的 all:true 必须同时给 at:[x,y,z]` };
     if (item || c.count !== undefined || c.pick !== undefined) {
-      return { error: `${at} take 的 all:true 是清空指定容器,不能再给 item、count 或 pick` };
+      return { error: `${at} take 的 all:true 不能再给 item、count 或 pick` };
     }
     return { step: { skill: 'take', at: takeAt, all: true } };
   }
   if (!item) {
     return { error: takeAt
-      ? `${at} take 点名容器后还要说明操作:定量取物写 item+count;清空写 all:true`
-      : `${at} take 要 item+count(定量取物),或 at+all:true(清空指定容器)` };
+      ? `${at} take 点名容器后还要说明操作:定量取物写 item+count;取当前可取物写 all:true`
+      : `${at} take 要 item+count(定量取物),或 at+all:true(取指定容器的可取物)` };
   }
   if (c.count === undefined || c.count === null) {
     return { error: `${at} take 定量取物必须写 count(1-64),不再默认成 1` };
@@ -893,6 +943,7 @@ function parseTake(c: Record<string, unknown>, at: string, marks?: MarkLookup): 
       count,
       ...(takeAt ? { at: takeAt } : {}),
       ...(pick ? { pick } : {}),
+      ...(fromOpen ? { from: 'open' as const } : {}),
     },
   };
 }
@@ -917,6 +968,10 @@ function parseEnchant(c: Record<string, unknown>, at: string, marks?: MarkLookup
 function parseCraft(c: Record<string, unknown>, at: string): ParseResult {
   const count = intIn(c.count, 1, 64, 1);
   if (count === null) return { error: `${at} craft 的 count 要在 1-64 之间` };
+  const item = str(c.item);
+  if (item && c.grid !== undefined) {
+    return { error: `${at} craft 的 item 和 grid 只能选一个；做${item}只写 item 走配方表，自摆配方只写 grid` };
+  }
   if (c.grid !== undefined) {
     const grid = gridOf(c.grid);
     if (!grid) {
@@ -924,16 +979,8 @@ function parseCraft(c: Record<string, unknown>, at: string): ParseResult {
         error: `${at} craft 的 grid 要是按行写的名字二维数组(空位写 null),最多 3 行 3 列`,
       };
     }
-    // 格子摆好了就按格子做,产出槽出什么算什么;同时写的 item 没有用武之地
-    const spare = str(c.item);
-    return {
-      step: { skill: 'craft', grid, count },
-      ...(spare
-        ? { notes: [{ field: 'item', given: c.item, kind: 'dropped' as const, why: 'grid 在场,按格子做' }] }
-        : {}),
-    };
+    return { step: { skill: 'craft', grid, count } };
   }
-  const item = str(c.item);
   if (!item) return { error: `${at} craft 要 item(物品英文 id)或 grid(自己摆的格子)` };
   return { step: { skill: 'craft', item, count } };
 }
@@ -946,18 +993,30 @@ const ANCHOR_SCHEMA = {
 /** 注册表本体。顺序即 SKILL_NAMES 与 SKILL_DOC 的出场顺序 */
 const SKILLS: readonly SkillSpec[] = [
   {
+    name: 'look',
+    doc: `{"skill":"look","at":[100,68,-20]} 原地转头看向目标格中心，不移动、不右键或挖掘。换观察方向后可用 mc_visual 拍摄。
+                                                 朝向目标不证明目标可见；墙和遮挡仍须由实际画面核对。`,
+    fields: [{ key: 'at', kind: 'anchor', required: true,
+      error: `look 要 at:[x,y,z](${RELATIVE_HINT}),或一个 mc_map 路标名`,
+      doc: '要面向的目标格，支持相对坐标和已登记路标。' }],
+  },
+  {
     name: 'goto',
     doc: `{"skill":"goto","at":[100,-20],"dimension":"overworld"} 去坐标。dimension 是当前维度前置条件,不符就不动。
-                                                 **只写 [x,z] = 按那儿的地表落脚**(区块没加载会照实受阻)。
+                                                 **只写 [x,z] = 到那儿附近的可达落脚点**，不会强制爬上同列屋顶(区块没加载会照实受阻)。
+                                                 要指定楼层或高度,请给完整 [x,y,z]。
+                                                 完整坐标的到达判定允许离目标格 1 格，回执给出实际落脚格；到门旁不代表已经进屋。
+                                                 dryRun 只计算路线，不移动身体。穿过门洞要选择门另一侧的可站立空气格，并核对实际位置。
                                                  at 也收 mc_map 的路标名:{"skill":"goto","at":"家"}。
-                                                 赶路会自己挖方块/搭方块开路`,
+                                                 赶路可能挖方块或搭路；已绑定蓝图范围内不生成这些动作，完工后仍生效。
+                                                 走不通时核对门洞、通道与落点；改结构用显式 dig/build，按现场和权限核验。`,
     parse: parseGoto,
     fields: [
       {
         key: 'at', kind: 'anchor', required: true,
         error: `goto 要 at:[x,y,z] / [x,z](${RELATIVE_HINT}),或一个 mc_map 路标名`,
         schema: { type: ['array', 'string'], items: { type: ['number', 'string'] }, minItems: 2, maxItems: 3 },
-        doc: '只写 [x,z] = 按那儿的地表落脚;给字符串 = mc_map 路标名',
+        doc: '只写 [x,z] = 到附近可达落脚点(不强制爬屋顶);指定楼层请给 [x,y,z];给字符串 = mc_map 路标名',
       },
       { key: 'dimension', kind: 'string', doc: '可选的当前维度前置条件(overworld/the_nether/the_end)' },
       { key: 'dryRun', kind: 'flag' },
@@ -982,16 +1041,19 @@ const SKILLS: readonly SkillSpec[] = [
   },
   {
     name: 'follow',
-    doc: '{"skill":"follow","name":"Alice"}                持续跟随,直到被新任务顶替',
+    doc: '{"skill":"follow","name":"Alice"}                玩家叫你“跟我来”时持续跟随他,直到被新任务顶替',
     fields: [{ key: 'name', kind: 'string', required: true, hint: '在线玩家名' }],
   },
   {
     name: 'find',
     doc: `{"skill":"find","target":"chest","distance":32}  找东西,方块和活物都认,只报看得见的(隔玻璃算看得见)。
                                                  不给 direction = 站着扫一圈,最远 ${FIND_STATIC_MAX} 格,不挪地方。
+                                                 找采集物时跳过已知受保护的方块；箱子等可交互设施仍可作为观察目标找到。
                                                  回执里的 blockAt 是目标方块占用格,不是可站落点;seenAt 是活物被看见那一刻的位置。
                                                  当前没看见只说明当前观察面没命中,不表示目标不存在。旧位置只在真实看见过时出现,并带年龄。
                                                  给了 direction = 朝那个方向边走边找,看见就停下报坐标;走满没看见也算做完。
+                                                 定向找采集物会跳过 collect 保留的已开工蓝图材料；站着扫仍可看见这些材料，并注明来源。
+                                                 对小麦等有生长阶段的作物，定向搜索只把成熟植株当作命中；站着扫仍报告幼苗及 age。
                                                  若出发点全向扫描先命中,回执会明确请求方向尚未搜索,不能把命中叫作该方向的结果
 {"skill":"find","target":"cow","distance":64,"direction":"east","until":["#ores","water"]}
                                                  边走边找时加 "until" = 路上看见这里头任何一样就停下来报坐标(算做完)。
@@ -1018,14 +1080,29 @@ const SKILLS: readonly SkillSpec[] = [
   {
     name: 'surface',
     doc: `{"skill":"surface"}                              脱离水体或向上到露天:在水里=浮上水面并站到干燥落脚格,回执另报 sky_visible;
-                                                 只换到气、没找到岸或游不到岸都算没完成;在陆上=挖+垫一路上行到露天`,
+                                                 只换到气、没找到岸或游不到岸都算没完成;在陆上=挖+垫上行至头顶已知无遮盖并稳定落脚。
+                                                 天空柱未加载则陆上受阻;可见天空不保证已走出通天井或到周围地面,横向出口另行探路`,
     fields: [],
   },
+  {
+    name: 'flight',
+    doc: `{"skill":"flight","at":[103,68,-31]}       服务端授予飞行权限后，飞到 12 格内已核对的平台并落地。
+{"skill":"flight","at":[103,71,-31],"land":false}  飞至空中并悬停，供就近施工、转头或视觉观察；坐标是脚底格中心。
+                                                 路径和身位须已加载且无遮挡。取得权限的方法由当前服务器说明提供。
+{"skill":"land"}                                从悬停位置沿下方已加载、安全的落脚面下降落地，再进行普通地面寻路。`,
+    fields: [
+      { key: 'at', kind: 'anchor', required: true,
+        error: `flight 要 at:[x,y,z](落脚格；${RELATIVE_HINT})` },
+      { key: 'land', kind: 'flag', retainFalse: true, doc: 'false=抵达后悬停；省略或true=平台落地' },
+    ],
+  },
+  { name: 'land', doc: '{"skill":"land"}  从飞行悬停位置下降到下方已加载的安全地面，恢复普通地面动作。', fields: [] },
   {
     name: 'collect',
     doc: `{"skill":"collect","block":"oak_log","count":3}  采集方块,只挖看得见的——埋在石头里的看不见,得先挖开或者找暴露的。
                                                  加 "buried":true = 看得见但走不过去时,允许挖条路过去(最多 4 次)。
-                                                 加 "mature":true = 作物只收 age 到顶的,没长成的留着。
+                                                 作物默认只收 age 到顶的,没长成的留着；mature:true 也可显式写出。
+                                                 已开工蓝图中材质已对上的非作物格不作为采集来源；明确拆改用精确坐标的 dig。
                                                  tool 不写=节约耐久;"fastest"=本步最快;物品 id=本步精确指定,都不改长期设置`,
     fields: [
       { key: 'block', kind: 'string', required: true, hint: '方块英文 id' },
@@ -1038,7 +1115,7 @@ const SKILLS: readonly SkillSpec[] = [
   {
     name: 'fish',
     doc: `{"skill":"fish"}                                 钓一竿:12 格内的水面里优先选开阔水域(周围 5×5 至少 2 格深、离岸 ≥3 格,宝藏只在这种水里出),没有才钓岸边并说明;
-                                                 站在原地抛得到就不挪窝。45 秒没上钩就收竿(浮标头顶看不到天时 60 秒);
+                                                 从干燥岸上抛竿；人在水中时会先择岸，找不到岸就停。不必先 goto 水格。45 秒没上钩就收竿(浮标头顶看不到天时 60 秒);
                                                  加 "at":[x,y,z] = 指定钓哪格水面。抛竿角度按弹道自己算,浮标没落进水里会换角度重抛`,
     fields: [
       { key: 'at', kind: 'anchor', error: `fish 的 at 要 [x,y,z](水面那一格;${RELATIVE_HINT})` },
@@ -1085,6 +1162,7 @@ const SKILLS: readonly SkillSpec[] = [
 {"skill":"build","blueprint":"home-v2","at":[100,64,-30]}
                                                  按 mc_blueprint 装载着的那张图施工。**at 是蓝图 [0,0,0] 落在世界的哪一格**,
                                                  第一次要给,续建省略(接着上次那个锚点往下施工)。
+                                                 改绑到新位置须给 "rebindFrom":[旧x,旧y,旧z]，执行时与当前绑定核对；confirm 只确认清场。
                                                  开工前先跟世界对一遍账:已经对上的格子跳过,只做差的那些;
                                                  料用完就停在那儿。完成(或阶段停)会逐格回读验收。
                                                  加 "stopAfter":2 = 施工到第 2 层(y 层号,0 是最低层)就收工;
@@ -1100,6 +1178,11 @@ const SKILLS: readonly SkillSpec[] = [
       {
         key: 'stopAfter', kind: 'int', lo: 0, hi: Number.MAX_SAFE_INTEGER, def: 0,
         doc: '按蓝图施工时:做到这个 y 层就收工(0 是最低层)',
+      },
+      {
+        key: 'rebindFrom', kind: 'opaque',
+        schema: { type: 'array', items: { type: 'integer' }, minItems: 3, maxItems: 3 },
+        doc: '按蓝图施工改绑到新 at 时，给出当前绑定的绝对锚点；dryRun 可先试算新位置',
       },
       { key: 'confirm', kind: 'flag', doc: 'retrofit 有冲突时:确认清掉冲突格后施工' },
       { key: 'skipConflicts', kind: 'flag', doc: 'retrofit 有冲突时:留着冲突格,先放能放的' },
@@ -1187,17 +1270,26 @@ const SKILLS: readonly SkillSpec[] = [
   },
   {
     name: 'use',
-    doc: `{"skill":"use","item":"flint_and_steel","at":[103,64,-31]}
-                                                 右键那一格:开门/拉杆/按钮、空桶装水、锄头翻地、骨粉催熟、
-                                                 开箱子看一眼、点床睡觉。不写 item = 用手上现在拿着的。
+    doc: `{"skill":"use","at":[103,64,-31]}
+                                                 空手右键世界里已有的那一格:开门、拉杆、按钮、开箱子看一眼、点床睡觉。
+                                                 at 是要点击的方块坐标；item 是从背包拿在手里的物品，不是被点击方块的名字。
+                                                 点击已有方块不要求包里有同名物品。查看方块容器后会关窗；要取物直接用 take at 点名方块。
+{"skill":"use","item":"flint_and_steel","at":[103,64,-31]}
+                                                 拿着打火石右键那一格；其他手持工具同理，如空桶装水、锄头翻地、骨粉催熟。
+                                                  炉子装料点火用 smelt(input 原料、fuel 燃料、at 炉位)；手持材料右键炉子只打开窗口，不会装入槽位。
+                                                  物品打开的自定义容器也会在每单结束时关闭；搬运须在同一 mc_do.steps 内先 use 再 take/stow/compact。
+                                                  给 at 且不写 item = 腾空主手后右键方块；满包无法腾手时受阻，不丢物品。
                                                  加 "times":5 = 连着右键 5 次(最多 16)。
-                                                 想让空着的那一格出现东西(放方块/床/船)用 build
+                                                 at 是被点击的参照格，face 是其表面；上面一格是 at+[0,1,0]，下面一格是 at+[0,-1,0]。
+                                                 右键完成只证明点击流程已结束。放方块/床/船用 build 的 anchors 指定目标格并核验
 {"skill":"use","item":"water_bucket","at":[-185,70,61]}
                                                  满桶倒出去:水/岩浆浇在那一格,倒完包里多一个空桶。
                                                  倒水走这条,build 的 material 不认水桶
 {"skill":"use","item":"shears","target":"sheep"} 右键活物:剪毛、挤奶、喂食、上鞍。
-                                                 target 写 villager/wandering_trader = 看报价菜单(只看不买);
+                                                 target 不写 item = 用手上现在拿着的。写 villager/wandering_trader = 看报价菜单(只看不买);
                                                  再带 "index":1,"times":2 = 按菜单 1 号成交 2 次
+                                                 喂鸡用 wheat_seeds，驯狼用 bone、喂狼用肉，驯猫/喂猫用 cod 或 salmon。
+                                                 多只同类可带现场读到的 entityId 精确点一只；ID 只在当前连接有效，失效后重新观察，不会改点别只。
 {"skill":"use","item":"potion"}                  只给 item:对自己/面前用,喝药水、拉弓蓄力。
                                                  投掷类(喷溅药水、末影珍珠、雪球、鸡蛋)再给 at = 朝那一格扔
 {"skill":"use","at":[-147,72,101],"text":"欢迎来我家\\n可缇"}
@@ -1208,9 +1300,10 @@ const SKILLS: readonly SkillSpec[] = [
                                                  face = 右键那一格的哪一面(缺省顶面)。画只能贴侧面`,
     parse: parseUse,
     fields: [
-      { key: 'item', kind: 'string', doc: '不写 = 用手上现在拿着的' },
-      { key: 'at', kind: 'anchor', error: `use 的 at 要 [x,y,z](${RELATIVE_HINT})`, doc: '右键那一格;与 target 二选一' },
-      { key: 'target', kind: 'string', doc: '右键活物;与 at 二选一' },
+      { key: 'item', kind: 'string', doc: '从背包拿在手里使用的物品，不是被点击对象的名字。填原版英文 id 或 mc_bag 的自定义显示名；有 at 时不写 = 腾空主手右键方块，有 target 时不写 = 用当前手持物' },
+      { key: 'at', kind: 'anchor', error: `use 的 at 要 [x,y,z](${RELATIVE_HINT})`, doc: '世界里要点击的方块绝对坐标，点击已有方块不要求背包有同名物品；face 指它的表面；放置目标用 build.anchors；与 target 二选一' },
+      { key: 'target', kind: 'string', doc: '要右键的活物名称，不是方块或背包物品；与 at 二选一。点击世界里的方块只给 at，不填 target' },
+      { key: 'entityId', kind: 'int', lo: 0, hi: 2_147_483_647, def: 0, doc: '可选；本连接里观察到的实体 ID，与 target 一起给，精确点该实体，不退回最近者' },
       { key: 'index', kind: 'int', lo: 1, hi: 99, def: 1 },
       { key: 'times', kind: 'int', lo: 1, hi: USE_TIMES_MAX, def: 1, doc: '连着右键几次;带 index 时是成交几次' },
       { key: 'text', kind: 'string', doc: `写在告示牌上的字,\\n 分行;最多 ${SIGN_LINES} 行、每行 ${SIGN_LINE_CHARS} 字符` },
@@ -1221,15 +1314,15 @@ const SKILLS: readonly SkillSpec[] = [
   {
     name: 'ride',
     doc: `{"skill":"ride","target":"pig","to":[120,64,-30]}
-                                                 骑上坐骑并驾着走。**能驾的只有猪(要先上鞍、包里有胡萝卜钓竿)
-                                                 和船**;马/驴骑得上但驾不了(这版不支持),骑上不动。
+                                                 骑上坐骑并驾着走。能驾的是猪(要鞍、胡萝卜钓竿)、炽足兽(要鞍、诡异菌钓竿)和船。
+                                                 马/驴/骡可空手上骑、尝试驯服和下车；尚不支持驾驶。坐上去不证明驯服成功。
                                                  to 只认水平目的地,到目标 2.5 格内算到;20 秒零推进会自己下来并报走到哪。
 {"skill":"ride","target":"boat"}                 只骑上不走;之后驾驭再来一步 {"skill":"ride","to":[x,y,z]}
 {"skill":"ride","off":true}                      从坐骑上下来。骑着的时候寻路器不管坐骑,goto 走不了`,
     parse: parseRide,
     fields: [
       { key: 'target', kind: 'string', doc: '骑上哪种(实体英文 id:pig/boat/horse…);已骑着时可省' },
-      { key: 'to', kind: 'anchor', error: `ride 的 to 要 [x,y,z](${RELATIVE_HINT})`, doc: '驾着去哪;只有猪和船能驾' },
+      { key: 'to', kind: 'anchor', error: `ride 的 to 要 [x,y,z](${RELATIVE_HINT})`, doc: '驾着去哪;猪、炽足兽和船能驾，马科暂不支持驾驶' },
       { key: 'off', kind: 'flag', doc: '下坐骑;与 target/to 互斥' },
     ],
   },
@@ -1262,15 +1355,15 @@ const SKILLS: readonly SkillSpec[] = [
   },
   {
     name: 'craft',
-    doc: `{"skill":"craft","grid":[["charcoal"],["stick"]],"count":4}
-                                                 **自己摆合成格**:grid 是按行写的名字二维数组,空位写 null。
-                                                 2 行 2 列以内徒手就能做,更大要工作台。产出槽出什么算什么。
-{"skill":"craft","item":"wooden_pickaxe","count":1}
-                                                 也可以只写 item,按游戏自带的配方表摆。**中间材料不会自动补**。
-                                                 够得着的工作台直接用;够不着就放一个自己带的,包里没有才走去现成的`,
+    doc: `{"skill":"craft","item":"chest","count":1}
+                                                 已知目标物品优先写 item,按游戏配方表选可用材料和摆位;1.20.6 木板等标签材料可混用不同种类。**中间材料不会自动补**。
+                                                 材料不足时先按回执补材料,不要靠猜 grid 消耗库存。
+{"skill":"craft","grid":[["charcoal"],["stick"]],"count":4}
+                                                 grid 用于自定配方或游戏配方表没有的目标:按行写名字二维数组,空位写 null;产出槽出什么算什么。
+                                                 2 行 2 列以内徒手就能做,更大要工作台。够得着的工作台直接用;够不着就放一个自己带的,包里没有才走去现成的`,
     parse: parseCraft,
     fields: [
-      { key: 'item', kind: 'string', doc: '按游戏配方表摆;与 grid 二选一' },
+      { key: 'item', kind: 'string', doc: '已知目标物品优先使用;按游戏配方表摆;与 grid 二选一' },
       {
         key: 'grid', kind: 'opaque',
         schema: { type: 'array', items: { type: 'array', items: { type: ['string', 'null'] } } },
@@ -1283,7 +1376,8 @@ const SKILLS: readonly SkillSpec[] = [
     name: 'smelt',
     doc: `{"skill":"smelt","input":"raw_iron","count":8,"fuel":"charcoal"}
                                                  走到炉边下料点火就走,input 与 fuel 都必写。炉子自己烧
-                                                 (熔炉一件约 10 秒),烧好会有事件提醒;取货用 take 的 at 指着炉子。
+                                                 input 与 fuel 是从背包放入炉槽的物品；use 只查看炉子，take 取出炉中已有物品。
+                                                 (熔炉一件约 10 秒),烧好会有事件提醒;输出槽有成品时用 take 的 at 指着炉子取货。
                                                  够得着的炉子直接用;够不着就放一个自己带的,包里没有才走去现成的。
                                                  还烧着别的东西的炉子不挑,几座炉子可以同时各烧各的;
                                                  加 "at":[x,y,z] = 指定用那一座炉子`,
@@ -1372,8 +1466,9 @@ const SKILLS: readonly SkillSpec[] = [
   },
   {
     name: 'eat',
-    doc: `{"skill":"eat","item":"bread"}                 吃点名的食物;item 必须写完整英文 id。
-                                                 河豚/蜘蛛眼/毒马铃薯会中毒:第一次只回后果不吃,3 分钟内再下一模一样的单才吃。
+    doc: `{"skill":"eat","item":"bread"}                 吃点名的食物;item 必须写完整英文 id。食物先补饥饿；若服务端开启自然回血，饥饿达到 18/20 后生命才会逐渐恢复。低血且饥饿不足时脱离危险后吃。
+                                                 战斗或撤退占用身体时这一步会排队，等脱身后执行；立即治疗可用服务端已列出的 mc_cast(selfheal)。
+                                                 回执给出进食前后的饱食度和新增或延长的状态效果。吃成功仅说明动作完成；是否有助于恢复，要结合副作用和身体读数判断，并在下次选食物时复用已验证的经验。
                                                  milk_bucket 也走这条:喝掉清光身上的状态效果,不管饱,剩个空桶`,
     fields: [{ key: 'item', kind: 'string', required: true, hint: '食物英文 id(牛奶桶写 milk_bucket)' }],
   },
@@ -1393,23 +1488,23 @@ const SKILLS: readonly SkillSpec[] = [
   },
   {
     name: 'equip',
-    doc: `{"skill":"equip","item":"stone_sword"}           手持物品;盔甲、鞘翅、盾牌会自动穿进对应装备槽。
+    doc: `{"skill":"equip","item":"stone_sword"}           手持物品;盔甲、鞘翅、盾牌和不死图腾会自动放进对应装备槽。
                                                  不写 item = 把主手腾空(骑马、上鞍这类要空手的动作用它)`,
     parse: parseEquip,
     fields: [
-      { key: 'item', kind: 'string', hint: '物品英文 id', doc: '不写 = 把主手腾空' },
+      { key: 'item', kind: 'string', hint: '物品英文 id 或背包显示名', doc: '自定义物品可用 mc_bag 中的显示名;不写 = 把主手腾空' },
       { key: 'pick', kind: 'string' },
     ],
   },
   {
     name: 'pickup',
-    doc: '{"skill":"pickup","item":"cobblestone"}          拾取附近掉落物;item 可选,不写就近扫',
+    doc: '{"skill":"pickup","item":"cobblestone"}          拾取附近掉落物;item 可选,不写就近扫;按目标物品实际入包验收,靠近后零入包报受阻',
     fields: [{ key: 'item', kind: 'string', doc: '不写就近扫' }],
   },
   {
     name: 'toss',
-    doc: `{"skill":"toss","item":"cobblestone","count":64} 扔掉。不写 at = 自己挑一个开阔方向抛出去,
-                                                 免得东西落回脚边又被自己捡回来
+    doc: `{"skill":"toss","item":"cobblestone","count":64} 把物品抛到地上,不会销毁。不写 at = 朝开阔方向抛,
+                                                 实际落点由服务端计算;走近掉落物仍可能自动捡回。要稳定腾背包格,用 stow 存进容器,之后用 mc_bag 核对
 {"skill":"toss","item":"gold_ingot","at":[12,32,10]}
                                                  **朝那一格扔**:以物易物把金锭扔到猪灵脚边、
                                                  把东西放到指定的地方。最远约 8 格,远了先走近。
@@ -1427,32 +1522,74 @@ const SKILLS: readonly SkillSpec[] = [
   {
     name: 'stow',
     doc: `{"skill":"stow","item":"cobblestone","count":64} 存进附近箱子(32 格内)。先找上次看见还有空位的,没有就开最近没开过的
+{"skill":"stow","item":"cobblestone","count":64,"at":[103,63,-31]} 只存进点名坐标的箱子;目标须在已加载的 32 格内,不会改投别的箱子
+{"skill":"use","item":"大背包"},{"skill":"stow","item":"bread","count":32,"into":"open"}
+                                                 先右键打开服务端自定义容器,再存进当前打开的窗口;into:open 不会去找地上的箱子
 {"skill":"stow","item":"enchanted_book","pick":"精准采集","count":1}
-                                                 同 id 的几件里只存点名的那件(留下别的)`,
+                                                 同 id 的几件可按附魔、自定义名称或「耐久1550/1561」挑选。先用 mc_bag 看完整标签；同一单连续指向同一个箱子的 stow 会共用一次开窗。
+                                                 仓库已满时，可自己决定保留哪些随身物、存哪些装备；有材料可合成并放置新箱子，再存放。决定舍弃的物品可用 toss，之后核对背包净变化。`,
     fields: [
       { key: 'item', kind: 'string', required: true, hint: '物品英文 id' },
       { key: 'count', kind: 'int', lo: 1, hi: 64, def: 1 },
       { key: 'pick', kind: 'string' },
+      { key: 'at', kind: 'anchor', error: `stow 的 at 要 [x,y,z](${RELATIVE_HINT})`, doc: '只存进指定箱子;与 into:open 二选一' },
+      { key: 'into', kind: 'enum', values: ['open'], error: 'into 只认 open', doc: 'open = 存进当前打开的窗口;不写 = 找附近箱子' },
     ],
   },
   {
+    name: 'compact',
+    doc: `{"skill":"use","at":[103,63,-31]},{"skill":"compact"}
+                                                 整理当前打开的真实容器:只将组件完全相同、允许堆叠的物品合堆。不会碰玩家背包或把不同附魔装备混在一起；若仍满，取出多余装备另存。`,
+    fields: [],
+  },
+  {
     name: 'take',
-    doc: `{"skill":"take","item":"coal","count":16}        从附近箱子取出。先找账本里有的,对不上再开,最多 3 个
-{"skill":"take","at":[103,63,-31],"all":true}    明确清空那一格容器:炉子=输出+没烧完的料+剩的燃料;箱子=整箱。
+    doc: `{"skill":"take","item":"coal","count":16}        从当前楼层附近箱子取出。先查近处有货/未查的箱子，再去较远有货的；最多 3 个
+ {"skill":"take","item":"iron_ingot","count":1,"at":[103,63,-31]} 从指定熔炉/箱子直接取；无需先 use at 开窗
+ {"skill":"take","item":"furnace","count":1,"from":"open"} 只用于仍开着的自定义容器窗口,不会走向附近的箱子。同一单连续从这个窗口取多类物品,只在最后关窗
+                                                 单独 use 查看结束后窗口已关闭；下一单须重新开窗，例如 steps:[{skill:"use",item:"背包显示名"},{skill:"take",item:"furnace",count:1,from:"open"}]
+{"skill":"take","at":[103,63,-31],"all":true}    箱子整箱取;炉子输入槽有原料时只取输出,原料烧完后连剩余燃料一同取。要收回未烧完的原料或燃料,用 item+count 点名。
                                                  定量取物必须同时写 item 和 count,不默认数量`,
     parse: parseTake,
     fields: [
       { key: 'item', kind: 'string', hint: '物品英文 id', doc: '定量取物时与 count 一起写' },
       { key: 'count', kind: 'int', lo: 1, hi: 64, def: 1, doc: '定量取物必须显式写;不再默认成 1' },
       { key: 'at', kind: 'anchor', error: `take 的 at 要 [x,y,z](${RELATIVE_HINT})`, doc: '点名哪一格容器' },
-      { key: 'all', kind: 'flag', doc: '只在 at+all:true 时清空指定容器' },
+      { key: 'from', kind: 'enum', values: ['open'], error: 'from 只认 open', doc: '从当前打开的容器窗口取;不写 = 找附近箱子' },
+      { key: 'all', kind: 'flag', doc: 'at+all:true 取指定容器;炉子有原料时保留原料和燃料' },
       { key: 'pick', kind: 'string' },
     ],
   },
   {
+    name: 'server_travel',
+    doc: `{"skill":"server_travel","command":"/spawn","at":[103,64,-31],"within":3}
+                                                 发服务端传送命令并等待位置确认；成功后下一步才开始。仅使用服务端已验证可用的单行命令，最多 256 字符。`,
+    fields: [
+      { key: 'command', kind: 'string', required: true, schema: { type: 'string', maxLength: CHAT_LENGTH_LIMIT } },
+      { key: 'at', kind: 'anchor', required: true, error: `server_travel 的 at 要 [x,y,z](${RELATIVE_HINT})` },
+      { key: 'within', kind: 'int', lo: 1, hi: 16, def: 3 },
+    ],
+  },
+  {
     name: 'chat',
-    doc: '{"skill":"chat","text":"..."}                    游戏内说话',
-    fields: [{ key: 'text', kind: 'string', required: true }],
+    doc: `{"skill":"chat","text":"大家好"}               发送游戏内公屏聊天，其他玩家能否收到以服务端与对方客户端为准
+{"skill":"chat","text":"/msg PlayerName 你好"} 私聊指定玩家；姓名用游戏里显示的完整登录名，含跨版玩家前缀
+{"skill":"chat","text":"/help"}               在游戏聊天栏输入服务端命令，结果看随后服务端消息
+单条最多 256 个字符（含 / 和命令参数），不收换行或控制字符；长内容分成多条单行 chat 步骤，私聊每条重复完整的 /msg 玩家名。`,
+    fields: [{ key: 'text', kind: 'string', required: true, schema: { type: 'string', maxLength: CHAT_LENGTH_LIMIT } }],
+  },
+  {
+    name: 'gesture',
+    doc: `{"skill":"gesture","name":"Alice","motion":"wave"} 朝 6 格内看得见的玩家挥手，只播放手臂动画，不攻击。
+{"skill":"gesture","name":"Alice","motion":"bow"}  面向玩家短暂蹲下致意。
+{"skill":"gesture","name":"Alice","motion":"nod"}  面向玩家点头。
+{"skill":"gesture","name":"Alice","motion":"beckon"} 向玩家招手并短暂蹲下，表达“跟我来”；之后可接 chat 和 goto 指明目的地。
+{"skill":"gesture","name":"Alice","motion":"shake_head"} 面向玩家摇头。动作需要玩家在本客户端视野内；不会移动过去，也不会发送聊天。`,
+    fields: [
+      { key: 'name', kind: 'string', required: true, hint: '在线玩家名' },
+      { key: 'motion', kind: 'enum', required: true, values: ['wave', 'bow', 'nod', 'beckon', 'shake_head'],
+        error: 'gesture 的 motion 只认 wave/bow/nod/beckon/shake_head' },
+    ],
   },
 ];
 
@@ -1481,6 +1618,7 @@ until 名单认带井号的 ${UNTIL_CATEGORY_DOC}。
 chest 不是末影箱,dirt 不是土径 —— 要"随便哪种木板"就写裸类别名 planks。
 count 一律 1-64;distance:flee 1-128,find 1-1024(不给 direction 时站着扫,最远 ${FIND_STATIC_MAX})。
 "needs" 声明这一步依赖哪些更早的步(序号 1 起);"needs":[] = 独立步。缺省见字段说明。
+容器窗口在每单结束时关闭；from/into:"open" 的搬运和开窗步骤须在同一次 mc_do.steps 中，不能跨单沿用窗口。
 每一步都会核验:判据由执行器按 (skill, 参数) 推,达成与落空都写进回执
 (「该步按『背包内原木 ≥5』核验:达成(实测 7)」)。`;
 
@@ -1488,19 +1626,49 @@ function skillDocOf(skills: readonly SkillSpec[], lead: string): string {
   return [lead, ...skills.map((s) => s.doc), SKILL_DOC_TAIL].join('\n');
 }
 
-/** 技能表的对外说明:直接作 mc_do 的 steps 参数说明。骨架来自注册表,首尾两段手写 */
+/** 全部技能的完整说明；按需帮助与注册表共用原文。 */
 export const SKILL_DOC = skillDocOf(SKILLS, '一步一个对象,按顺序执行:');
 
-/**
- * mc_scout 的 steps 说明:**指向 mc_do 那一份,不再重列技能条目**。
- *
- * 重列的那一版 53 行里 52 行逐字同于 `SKILL_DOC`(3,891 字符),而两处措辞一旦漂移
- * 就成了两套口径。结构化那份(`SCOUT_STEP_SCHEMA`)照旧是完整字段池 —— 解参数读的是它。
- */
+function skillSignature(skill: SkillSpec): string {
+  const fields = skill.fields.map((field) => field.key
+    + ('required' in field && field.required ? '*' : '?'));
+  return `${skill.name}(${fields.join(',')})`;
+}
+
+/** 常驻目录保留字段签名；完整示例与执行条件按技能查询。 */
+export const SKILL_SIGNATURE_DOC = [
+  '一步一个对象,skill 写技能名。* = 该字段适用的形态必填;? = 可选或条件参数。',
+  '复杂形态、执行条件和完整示例用 mc_help {"skill":"技能名"} 查询。',
+  ...SKILLS.map(skillSignature),
+  SKILL_DOC_TAIL,
+].join('\n');
+
+export const SKILL_HELP_MAX_SKILLS = 4;
+
+/** 只读取注册表，不读取连接、排队或执行技能。 */
+export function readSkillHelp(args: Record<string, unknown>): { text: string } | { error: string } {
+  if (args.skill !== undefined && args.skills !== undefined) {
+    return { error: 'skill 与 skills 只能写一个' };
+  }
+  const requested = args.skill === undefined ? args.skills : [args.skill];
+  if (requested === undefined || (Array.isArray(requested) && requested.length === 0)) {
+    return { text: SKILL_SIGNATURE_DOC };
+  }
+  if (!Array.isArray(requested) || requested.length > SKILL_HELP_MAX_SKILLS
+    || requested.some((name) => typeof name !== 'string' || !name.trim())) {
+    return { error: `skill 要技能名;skills 要 1-${SKILL_HELP_MAX_SKILLS} 个技能名` };
+  }
+  const names = [...new Set(requested as string[])];
+  const unknown = names.filter((name) => !SKILL_INDEX.has(name));
+  if (unknown.length) return { error: `未知技能:${unknown.join('、')};mc_help {} 可查看目录` };
+  return { text: skillDocOf(names.map((name) => SKILL_INDEX.get(name)!), '技能完整说明:') };
+}
+
+/** 试算目录只列支持的技能；完整动作说明由 mc_help 读取。 */
 export const SCOUT_SKILL_DOC = [
   '一步一个对象,按顺序试算,不动世界。',
   `收 ${SCOUT_SKILLS.map((s) => s.name).join(' / ')} 这几个技能,写法与参数跟 mc_do 的 steps 完全一样`,
-  '(见 mc_do 的说明),一律按试算跑,不用自己写 dryRun。',
+  '完整示例和条件用 mc_help 按技能查询;一律按试算跑,不用自己写 dryRun。',
 ].join('');
 
 function defaultFieldSchema(f: FieldSpec): Record<string, unknown> {
@@ -1557,7 +1725,7 @@ function fieldUse(skill: string, f: FieldSpec, merged: Record<string, unknown>):
  * steps.items schema:一份扁平字段池,description 写明每个字段用于哪些技能。
  * 每技能自己的必填与横向规则不进 schema:判别式 oneOf 不能用,有的 provider 解工具参数
  * 约束只认顶层 properties,分支里的字段会被整个吃掉,她填了也传不出来。硬约束改由
- * SKILL_DOC 陈述、parseSteps 裁决,报错回执带整张技能表。
+ * 注册表签名与按需说明陈述、parseSteps 裁决,报错回执带整张技能表。
  */
 function stepSchemaOf(skills: readonly SkillSpec[]): Record<string, unknown> {
   const pool = new Map<string, { schema: Record<string, unknown>; uses: Array<[string, FieldSpec]> }>();
@@ -1651,8 +1819,9 @@ function parseByFields(
       }
       case 'flag': {
         if (v === true) out[f.key] = true;
+        else if (v === false && f.retainFalse) out[f.key] = false;
         else if (v !== undefined && v !== null && v !== false) {
-          notes.push({ field: f.key, given: v, kind: 'dropped', why: '只认 true' });
+          notes.push({ field: f.key, given: v, kind: 'dropped', why: f.retainFalse ? '只认布尔值' : '只认 true' });
         }
         break;
       }
@@ -1708,6 +1877,13 @@ export function parseSteps(
     const spec = name ? SKILL_INDEX.get(name) : undefined;
     if (!spec) {
       return { error: `${at}的 skill「${String(c.skill)}」不是技能表里的动作` };
+    }
+    if (spec.name === 'chat' || spec.name === 'server_travel') {
+      const text = spec.name === 'chat' ? c.text : c.command;
+      if (typeof text === 'string') {
+        const error = chatInputError(text);
+        if (error) return { error: `${at} ${error}` };
+      }
     }
     const parsed = spec.parse ? spec.parse(c, at, marks) : parseByFields(spec, c, at, marks);
     if ('error' in parsed) return parsed;

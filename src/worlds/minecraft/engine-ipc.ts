@@ -5,7 +5,7 @@
 import type { LogNote } from '../../core/ipc-logger.ts';
 import type {
   CognitionRequest, CognitionResult, EventEnvelope, EventTag, LLMUsage, WorldConsoleDecl,
-  PushOptions, TriggerMode,
+  PushOptions, TriggerMode, WorldRequestFacts,
 } from '../../core/types.ts';
 import type { MinecraftConfigSection } from './config.ts';
 
@@ -15,6 +15,7 @@ export interface EngineInit {
   botName: string;
   /** 账本目录 data/;null = 只在内存 */
   dataDir: string | null;
+  agentFriendEnabled?: boolean;
   cfg: MinecraftConfigSection;
 }
 
@@ -68,6 +69,8 @@ export type EngineNote =
       kind: 'status';
       decl: Pick<WorldConsoleDecl, 'lamps' | 'badges' | 'links'>;
       storage: StorageStat[];
+      promptVars: Record<'minecraft.current_task' | 'minecraft.goals', string>;
+      requestFacts: WorldRequestFacts | null;
     };
 
 /** 子进程调用宿主并等待结果。跨进程 drain 仅支持读取本 World 来源的事件。 */

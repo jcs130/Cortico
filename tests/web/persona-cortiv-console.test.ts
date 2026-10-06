@@ -9,6 +9,7 @@ import { CortiV } from '../../bots/cortiv/persona/persona.ts';
 import { personaPanels, personaConsoleDecl } from '../../bots/cortiv/persona/consoleSurface.ts';
 import { GitWorkspaceMemory } from '../../bots/cormini/persona/memory.ts';
 import type { PersonaConsoleDecl, Persona } from '../../src/core/types.ts';
+import { makeFakeHarnessApi } from '../core/helpers.ts';
 
 const BUNDLE_ENTRY = '../../bots/cortiv/console/client.ts';
 
@@ -29,8 +30,9 @@ describe('CortiV 控制面声明', () => {
     expect(validateContributions([c!])).toEqual([]);
   });
 
-  it('CortiV.console() 保留 promptDocs,Memory 页是工作区三块且不带工作区清除项,并提供 invoke', () => {
+  it('CortiV.console() 保留 promptDocs,Memory 页不带清除项,复盘与后台整理可只读查询', async () => {
     const core = new CortiV({ memoryDir: dir });
+    core.attach(makeFakeHarnessApi());
     const decl = core.console();
     // 没给 firstTurnDir(部署的 prompts/)就没有首轮对话三份;装配层会给
     expect(decl.promptDocs?.map((d) => d.key)).toEqual(['orientation', 'constitution', 'memoryNote']);
@@ -40,7 +42,13 @@ describe('CortiV 控制面声明', () => {
       'firstTurn.user', 'firstTurn.thinking', 'firstTurn.reply',
     ]);
     expect(decl.storage).toBeUndefined();
-    expect(decl.panels).toBeUndefined();
+    expect(decl.panels?.map((panel) => ({ id: panel.id, getMethods: panel.getMethods })))
+      .toEqual([{ id: 'planning', getMethods: ['state'] }, { id: 'dream', getMethods: ['state'] }]);
+    expect(await decl.invoke!('planning', 'state', [])).toMatchObject({ enabled: false, running: false });
+    const dream = await decl.invoke!('dream', 'state', []);
+    expect(dream).toMatchObject({ currentTask: null, queuedTasks: [], lastOutcome: null,
+      social: { pendingEntries: 0, committedSeq: 0, lastSeq: 0, scheduled: false } });
+    expect(await decl.invoke!('dream', 'state', [])).toEqual(dream);
     expect(decl.memory?.storage).toBeUndefined();
     expect(decl.memory?.panels?.map((p) => p.id)).toEqual(['workspace', 'memory', 'history']);
     expect(typeof decl.invoke).toBe('function');

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
-  UsageError, bundle, doctor, formatLogLine, listRunIds, locateRun, main, parseArgs, parseWhen, quantile, queryLog,
+  UsageError, bundle, caseBundle, doctor, formatLogLine, listRunIds, locateRun, main, parseArgs, parseWhen, quantile, queryLog,
   redactSecrets, resolveDataDir, resolveRunId, runsTable, timeline, turn,
 } from '../../scripts/logq.ts';
 
@@ -62,7 +62,7 @@ function buildFixture(): void {
   ]));
   const log: unknown[] = [
     { ts: at(3000), run: R2, seq: 3, level: 'warn', area: 'worlds.vtuber.inject', event: 'reconnect', msg: 'VTS 排定重连', repeat: 4 },
-    { ts: at(20_000), run: R2, seq: 4, level: 'error', area: 'core.loop', event: 'llm-failed', msg: 'LLM 已连续失败 3 次', err: { name: 'Error', message: 'upstream 502' }, round: 2 },
+    { ts: at(20_000), run: R2, seq: 4, level: 'error', area: 'core.loop', event: 'llm-failed', msg: 'LLM 已连续失败 3 次', err: { name: 'Error', message: 'upstream 502' }, round: 2, pid: 123 },
     { ts: at(21_000), run: R2, seq: 5, level: 'error', area: 'core.loop', event: 'llm-failed', msg: 'LLM 已连续失败 4 次', err: { name: 'Error', message: 'upstream 502' }, round: 2 },
     { ts: at(22_000), run: R2, seq: 6, level: 'error', area: 'worlds.minecraft.bridge', msg: '桥断了', data: { code: 'ECONNRESET' } },
   ];
@@ -203,6 +203,22 @@ describe('log', () => {
   it('文本行包含时间、级别、区域、事件、重复数与关联字段', () => {
     const line = formatLogLine({ ts: at(3000), run: R2, seq: 3, level: 'warn', area: 'worlds.vtuber.inject', event: 'reconnect', msg: 'VTS 排定重连', repeat: 4, data: { delayMs: 500 }, err: { name: 'E', message: '拒连' }, round: 7, call: 'c9' });
     expect(line).toBe('10:00:03.000 WARN  worlds.vtuber.inject/reconnect  VTS 排定重连 ×5  {"delayMs":500}  err: 拒连 [r=7 c=c9]');
+  });
+});
+
+describe('case 异常回归样本', () => {
+  it('从旧日志 seq 回填，连同前后事件、模型输入、工具调用和进程锚点落成一份 JSON', async () => {
+    const ctx = locateRun(dataDir, R2);
+    const trigger = (await queryLog(ctx, { event: 'llm-failed' }))[0];
+    const file = await caseBundle(ctx, { seq: trigger.seq, out: join(root, 'case-output') });
+    const saved = JSON.parse(readFileSync(file, 'utf8'));
+    expect(saved.trigger).toMatchObject({ seq: trigger.seq, event: 'llm-failed', round: 2, pid: 123 });
+    expect(saved.anchors).toMatchObject({ round: 2, pid: 123 });
+    expect(saved.streams.logs.some((r: { seq: number }) => r.seq === trigger.seq)).toBe(true);
+    expect(saved.streams.transcript.length).toBeGreaterThan(0);
+    expect(saved.streams.toolcalls.length).toBeGreaterThan(0);
+    expect(saved.streams.events.length).toBeGreaterThan(0);
+    expect(saved.streams.usage.length).toBeGreaterThan(0);
   });
 });
 

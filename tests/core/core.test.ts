@@ -153,7 +153,7 @@ describe('Core · session 声明与 fork 原语', () => {
       messages: [{ role: 'user', content: '画一张图' }],
     });
     const session = core.sessions.list().find((s) => s.role === 'sidethought')!;
-    expect(llmSessionId).toBe(session.id);
+    expect(llmSessionId).toBe('sidethought');
     expect(core.sessions.messages(session.id)?.map(entry => entry.item)).toMatchObject([
       { type: 'message', role: 'user', content: [{ type: 'input_text', text: '画一张图' }] },
       { type: 'reasoning', content: [{ type: 'reasoning_text', text: '正在画第一层' }] },
@@ -202,15 +202,15 @@ describe('Core · session 声明与 fork 原语', () => {
     const { core, llm } = build({ extraSessions: [forkDecl()] });
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
-    const seen: Array<{ role?: string; sessionId?: string }> = [];
+    const seen: Array<{ role?: string; sessionId?: string; model: string; maxTokens?: number }> = [];
     const original = llm.chat.bind(llm);
     llm.chat = async (spec, messages, tools, opts) => {
-      seen.push({ role: opts?.role, sessionId: opts?.sessionId });
+      seen.push({ role: opts?.role, sessionId: opts?.sessionId, model: spec.model, maxTokens: spec.maxTokens });
       await gate;
       return original(spec, messages, tools, opts);
     };
 
-    const first = core.spawnFork({ id: 'sidethought', messages: [] });
+    const first = core.spawnFork({ id: 'sidethought', model: 'bulk', maxOutputTokens: 2000, messages: [] });
     const second = core.spawnFork({ id: 'sidethought', messages: [] });
     const activeIds = core.sessions.list()
       .filter((s) => s.role === 'sidethought' && s.endedAt === null)
@@ -218,7 +218,9 @@ describe('Core · session 声明与 fork 原语', () => {
       .sort();
 
     expect(seen.map((call) => call.role)).toEqual(['sidethought', 'sidethought']);
-    expect(seen.map((call) => call.sessionId).sort()).toEqual(activeIds);
+    expect(seen.map((call) => call.sessionId)).toEqual(['sidethought', 'sidethought']);
+    expect(seen[0]).toMatchObject({ model: 'bulk', maxTokens: 2000 });
+    expect(seen[1].maxTokens).toBeUndefined();
     expect(new Set(activeIds).size).toBe(2);
 
     release();

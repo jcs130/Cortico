@@ -5,18 +5,26 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createRequire } from 'node:module';
+import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MinecraftWorld, BlueprintBook, encodeBlueprint, parseBlueprintArgs } from '../../../src/worlds/minecraft/world.ts';
 import { MINECRAFT_DEFAULTS, type MinecraftConfigSection } from '../../../src/worlds/minecraft/config.ts';
 import { acceptBlueprint } from '../../../src/worlds/minecraft/blueprint-plan.ts';
 import {
   Executor, describeSkill, parseScoutSteps, parseSteps,
-  type BlueprintDesk, type TaskReport,
+  type BlueprintDesk, type TaskProgress, type TaskReport,
 } from '../../../src/worlds/minecraft/executor.ts';
 import { ChestBook } from '../../../src/worlds/minecraft/chests.ts';
+import type { SiteZone } from '../../../src/worlds/minecraft/pathfinder-perf.ts';
+import type { SkillCall } from '../../../src/worlds/minecraft/skills.ts';
 import type { CognitionRequest, CognitionResult, Logger } from '../../../src/core/types.ts';
 import { Vec3 } from 'vec3';
 import { FakeHost } from '../../helpers/fake-host.ts';
+
+const dependency = createRequire(createRequire(import.meta.url).resolve('mineflayer'));
+const gameRegistry = dependency('prismarine-registry')('1.20.6');
+const Blocks = dependency('prismarine-block')(gameRegistry);
 
 const log = { child() { return this; }, info() {}, warn() {}, error() {}, debug() {}, trace() {}, emit() {} } as unknown as Logger;
 const ctx = { role: 'test', log } as never;
@@ -118,6 +126,36 @@ function startBlueprint(m: MinecraftWorld, key: string, anchor: [number, number,
   inner.blueprints.bind(key, anchor);
   inner.syncBlueprintResources();
 }
+
+describe('蓝图自动寻路范围', () => {
+  const zones = (m: MinecraftWorld): SiteZone[] =>
+    (m as unknown as { blueprintPathZones(): SiteZone[] }).blueprintPathZones();
+
+  it('完工和账本恢复后继续保留已绑定建筑的范围', async () => {
+    const r = rig();
+    await r.bp({ save: floorSubmission() });
+    expect(zones(r.m)).toEqual([]);
+    startBlueprint(r.m, 'home-v2', [10, 64, -8]);
+    const bound = zones(r.m);
+    expect(bound).toMatchObject([{ key: 'home-v2', min: [10, 64, -8], max: [11, 64, -7] }]);
+    const book = (r.m as unknown as { blueprints: BlueprintBook }).blueprints;
+    book.progress('home-v2', book.get('home-v2')!.plan.steps.length);
+    expect(zones(r.m)).toEqual(bound);
+    const restored = rig({ dir: r.dir });
+    await restored.bp();
+    expect(zones(restored.m)).toEqual(bound);
+  });
+
+  it('绑定迁移和卸载刷新范围，不沿用旧坐标', async () => {
+    const r = rig();
+    await r.bp({ save: floorSubmission() });
+    startBlueprint(r.m, 'home-v2', [10, 64, -8]);
+    startBlueprint(r.m, 'home-v2', [-12, 72, 30]);
+    expect(zones(r.m)).toMatchObject([{ min: [-12, 72, 30], max: [-11, 72, 31] }]);
+    await r.bp({ unload: 'home-v2' });
+    expect(zones(r.m)).toEqual([]);
+  });
+});
 
 async function waitUntil(cond: () => boolean, timeoutMs = 4000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -309,6 +347,19 @@ describe('mc_blueprint{} 与 {unload}', () => {
     expect(all).toContain('还缺圆石 4');
   });
 
+  it('查询将历史容器数量与随身材料可用量分开', async () => {
+    const held: Record<string, number> = {};
+    const r = stockedRig(held);
+    r.inner.chests.remember('overworld', { x: 20, y: 64, z: 5 }, [{ name: 'cobblestone', count: 4 }], 1, 27);
+    await r.bp({ save: floorSubmission() });
+    const storedOnly = await r.bp();
+    expect(storedOnly).toContain('随身还需圆石 4');
+    expect(storedOnly).toContain('容器历史合计 4，需复核来源并取出');
+    expect(storedOnly).not.toContain('料够了');
+    held.cobblestone = 4;
+    expect(await r.bp()).toContain('随身材料数量够');
+  });
+
   /**
    * 施工游标只在施工时前进，不回读世界；清单须标明进度是上次施工时点的读数。
    */
@@ -342,7 +393,8 @@ describe('mc_blueprint{design}:认知档', () => {
     let saved: ((args: Record<string, unknown>) => Promise<string>) | null = null;
     const r = rig({
       cognition: async (req) => {
-        expect(req.tools).toEqual(['mc_blueprint']);
+        expect(req.tools).toEqual(['mc_blueprint', 'mc_visual']);
+        expect(req.hint?.kind).toBe('blueprint');
         expect(req.hint?.rounds).toBe(8);
         expect(req.brief).toContain('home-v2');
         expect(req.brief).toContain('要一间小木屋'); // 主意识写下的原文原样进 brief
@@ -350,6 +402,11 @@ describe('mc_blueprint{design}:认知档', () => {
         expect(req.brief).toContain('第一人称写回');
         expect(req.brief).not.toContain('她自己刚才写下的');
         expect(req.brief).toContain('layers[y][z][x]');
+        expect(req.brief).toContain('提交前对照矩阵核验');
+        expect(req.brief).toContain('入口、门窗、室内可用空间、层间通路和屋顶');
+        expect(req.brief).toContain('家具只按实际需求配置');
+        expect(req.brief).toContain('每阶段写明需用物品和完成判据');
+        expect(req.brief).toContain('木板、楼梯等先核对库存与配方');
         await saved!({ save: floorSubmission({ job_id: jobIdFromBrief(req.brief) }) });
         return { text: '我给你画了个 2×2 的地基,先把地面找平。' };
       },
@@ -1065,11 +1122,28 @@ function worldBot(opts: {
   }
   const unloaded = new Set(opts.unloaded ?? []);
   const bag = Object.entries(opts.stock ?? { cobblestone: 64 })
-    .map(([name, count], i) => ({ name, count, type: 100 + i }));
+    .map(([name, count]) => ({ name, count, type: gameRegistry.itemsByName[name].id }));
   const keyOf = (x: number, y: number, z: number): string => `${x},${y},${z}`;
   let aim: { x: number; y: number; z: number } | null = null;
+  const readBlock = (p: { x: number; y: number; z: number }) => {
+    const k = keyOf(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z));
+    if (unloaded.has(k)) return null;
+    const name = placed.get(k) ?? (solid.has(k) ? 'stone' : 'air');
+    const real = Blocks.fromStateId(gameRegistry.blocksByName[name].defaultState, 0);
+    return {
+      name,
+      position: new Vec3(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z)),
+      boundingBox: real.boundingBox,
+      shapes: real.shapes,
+      diggable: true,
+      stateId: real.stateId,
+      getProperties: () => properties.get(k) ?? {},
+      canHarvest: () => true,
+    };
+  };
   const bot = {
     placedAt: [] as string[],
+    _client: Object.assign(new EventEmitter(), { write: () => {} }),
     dugAt: [] as string[],
     blockName: (key: string) => placed.get(key) ?? (solid.has(key) ? 'stone' : 'air'),
     entity: { id: 1, position: new Vec3(0.5, 64, 0.5), onGround: true },
@@ -1078,8 +1152,9 @@ function worldBot(opts: {
     food: 20,
     players: {},
     game: { dimension: 'overworld' },
-    // itemsByName/blocksByName 是材料名判据要问的两张表(真 bot 上一定有)
-    registry: { blocksByName: {}, itemsByName: {}, items: {} },
+    // Use the real version's collision registry for scaffold and placement preflight.
+    registry: gameRegistry,
+    world: { getBlock: readBlock },
     inventory: { items: () => bag.filter((b) => b.count > 0) },
     heldItem: null as null | { name: string; count: number; type: number },
     // build 按 material 挑手上那件;假 bot 让 placeBlock 用"排在最前面且有货"的那件
@@ -1088,23 +1163,15 @@ function worldBot(opts: {
       if (hit > 0) bag.unshift(...bag.splice(hit, 1));
       bot.heldItem = bag.find((entry) => entry.name === item.name) ?? null;
     },
+    unequip: async () => { bot.heldItem = null; },
     // 瞄哪儿决定「使用物品」落在哪一格,记下来给 activateItem 用
     lookAt: async (p: { x: number; y: number; z: number }) => { aim = p; },
-    setControlState: () => {},
-    blockAt: (p: { x: number; y: number; z: number }) => {
-      const k = keyOf(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z));
-      if (unloaded.has(k)) return null;
-      const name = placed.get(k) ?? (solid.has(k) ? 'stone' : 'air');
-      return {
-        name,
-        position: new Vec3(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z)),
-        boundingBox: name === 'air' || name === 'water' || name === 'wheat' ? 'empty' : 'block',
-        diggable: true,
-        stateId: `${name}:${JSON.stringify(properties.get(k) ?? {})}`,
-        getProperties: () => properties.get(k) ?? {},
-        canHarvest: () => true,
-      };
+    setControlState: (control: string, active: boolean) => {
+      if (control !== 'jump') return;
+      if (active) { bot.entity.position.y += 1.1; bot.entity.onGround = false; }
+      else { bot.entity.position.y = Math.round(bot.entity.position.y); bot.entity.onGround = true; }
     },
+    blockAt: readBlock,
     placeBlock: async (ref: { position: { x: number; y: number; z: number } }, face: { x: number; y: number; z: number }) => {
       const held = bot.heldItem ?? bag.find((b) => b.count > 0)!;
       const spot = keyOf(
@@ -1187,7 +1254,13 @@ function worldBot(opts: {
       else bag.push({ name: 'bucket', count: 1, type: 999 });
     },
     closeWindow: () => {},
-    pathfinder: { stop() {}, setGoal() {}, goto: async () => {} },
+    pathfinder: { stop() {}, setGoal() {}, goto: async (goal: { pos?: Vec3; x?: number; y?: number; z?: number }) => {
+      // A placement goal moves clear of the target; a coordinate goal reaches its cell.
+      if (goal.pos) bot.entity.position = goal.pos.offset(-1.5, 0, 0.5);
+      else if (goal.x !== undefined && goal.y !== undefined && goal.z !== undefined) {
+        bot.entity.position = new Vec3(goal.x + 0.5, goal.y, goal.z + 0.5);
+      }
+    } },
   };
   return bot;
 }
@@ -1247,7 +1320,7 @@ function fakeDesk(submissions: Array<Record<string, unknown>>): BlueprintDesk & 
   };
 }
 
-function execOn(bot: unknown, desk?: BlueprintDesk) {
+function execOn(bot: unknown, desk?: BlueprintDesk, chests?: ChestBook) {
   const reports: TaskReport[] = [];
   let seq = 0;
   const exec = new Executor({
@@ -1256,11 +1329,92 @@ function execOn(bot: unknown, desk?: BlueprintDesk) {
     log,
     nextId: () => ++seq,
     ...(desk ? { blueprints: () => desk } : {}),
+    ...(chests ? { chests } : {}),
   });
   return { exec, reports };
 }
 
 describe('build 的蓝图形态', () => {
+  it('进度分清清场与放置，并在下一技能开始时清除阶段读数', async () => {
+    const desk = fakeDesk([twoLayerSubmission()]);
+    const bot = worldBot({ stock: { cobblestone: 2, oak_planks: 2 }, blocks: { '0,64,0': 'dirt' } });
+    Object.assign(bot, { clearControlStates() {} });
+    bot.entity.position = new Vec3(2.5, 64, 0.5);
+    const goto = bot.pathfinder.goto;
+    let releaseClear!: () => void;
+    let releaseNext!: () => void;
+    const clearWait = new Promise<void>((resolve) => { releaseClear = resolve; });
+    const nextWait = new Promise<void>((resolve) => { releaseNext = resolve; });
+    let clearingReached = false;
+    let nextReached = false;
+    const dig = bot.dig;
+    bot.digTime = () => 20_000;
+    bot.dig = async (block) => {
+      clearingReached = true;
+      await clearWait;
+      await dig(block);
+    };
+    bot.pathfinder.goto = async (goal) => {
+      if (goal.x === 4) {
+        nextReached = true;
+        await nextWait;
+      }
+      await goto(goal);
+    };
+    const progress: TaskProgress[] = [];
+    const reports: TaskReport[] = [];
+    const exec = new Executor({ getBot: () => bot as never, report: (r) => reports.push(r),
+      log, nextId: () => 1, blueprints: () => desk, onProgress: (p) => progress.push(p) });
+    exec.submit([{ skill: 'build', blueprint: 'tower', at: [0, 64, 0], confirm: true },
+      { skill: 'goto', at: [4, 64, 0] }]);
+    await waitUntil(() => clearingReached);
+    await vi.advanceTimersByTimeAsync(30_000);
+    const clearing = progress.find((p) => p.stepIndex === 0 && !p.half);
+    expect(clearing?.detail).toContain('蓝图清场阶段');
+    expect(clearing?.detail).toContain('0 格目前为空，1 格仍有方块');
+    expect(clearing?.detail).toContain('尚未开始放置蓝图');
+    expect(clearing?.count).toBeNull();
+    releaseClear();
+    await waitUntil(() => nextReached, 15_000);
+    const placement = progress.find((p) => p.stepIndex === 0 && p.half);
+    expect(placement).toBeDefined();
+    expect(placement?.detail).toContain('蓝图放置阶段');
+    expect(placement?.count).toEqual({ done: 1, total: 2 });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(progress.find((p) => p.stepIndex === 1)).not.toHaveProperty('detail');
+    releaseNext();
+    await waitUntil(() => reports.length === 1);
+    expect(reports[0].kind).toBe('done');
+    expect(bot.dugAt).toEqual(['0,64,0']);
+    expect(bot.placedAt).toHaveLength(2);
+  });
+
+  it.each([4, 2])('World 正式施工库存 %i 接通版本、目标格与自身预留，不靠清空 gate', async (count) => {
+    const r = rig();
+    const bot = worldBot({ stock: { glass: count } });
+    const m = r.m as any;
+    m.bridge = { bot, retune: vi.fn() };
+    await r.bp({ save: floorSubmission({ palette: ['minecraft:glass'] }) });
+    const reports: TaskReport[] = [];
+    const permit = vi.fn((item, intent) => m.permitBlueprintResourcePlacement(item, intent));
+    const exec = new Executor({ getBot: () => bot as never, report: (report) => reports.push(report), log,
+      nextId: () => 1, blueprints: () => m.blueprintDesk(), permitResourcePlacement: permit });
+    exec.submit([{ skill: 'build', blueprint: 'home-v2', at: [0, 64, 0] }]);
+    await waitUntil(() => reports.length === 1, 15000);
+    expect(reports[0].kind).toBe(count === 4 ? 'done' : 'partial');
+    expect(bot.placedAt).toHaveLength(count);
+    const version = m.blueprints.get('home-v2').versionId;
+    expect(permit.mock.calls.filter(([, intent]) => intent)).toHaveLength(count);
+    for (const [item, intent] of permit.mock.calls.filter(([, intent]) => intent)) {
+      expect(item).toBe('glass');
+      expect(intent).toMatchObject({ key: 'home-v2', versionId: version, anchor: [0, 64, 0] });
+      expect(bot.placedAt).toContain(intent.at.join(','));
+    }
+    expect(m.blueprintResources.reserve()).toEqual(count === 4 ? {} : { glass: 2 });
+    expect(m.blueprintResources.restockMarkers()).toEqual([]);
+    if (count === 2) expect(reports[0].text).toContain('玻璃 要 2(随身 0、容器历史合计 0、按历史账还缺 2');
+  });
+
   it('没装载:不动工,回执指路', async () => {
     const { exec, reports } = execOn(worldBot(), fakeDesk([]));
     exec.submit([{ skill: 'build', blueprint: 'home-v2', at: [0, 64, 0] }]);
@@ -1311,6 +1465,62 @@ describe('build 的蓝图形态', () => {
     expect(bot.placedAt).toHaveLength(4); // 第二单一块都没再放
   });
 
+  it.each([false, true])('续建换锚点但未声明原绑定时不改方块，confirm=%s', async (confirm) => {
+    const desk = fakeDesk([floorSubmission()]);
+    const bot = worldBot({ blocks: { '0,64,2': 'oak_planks' } });
+    const { exec, reports } = execOn(bot, desk);
+    exec.submit([{ skill: 'build', blueprint: 'home-v2', at: [0, 64, 0] }]);
+    await waitUntil(() => reports.length === 1, 15000);
+    exec.submit([{ skill: 'build', blueprint: 'home-v2', at: [0, 64, 2], confirm }]);
+    await waitUntil(() => reports.length === 2, 8000);
+    expect(reports[1].kind).toBe('blocked');
+    expect(reports[1].text).toContain('当前绑定锚点 [0,64,0]');
+    expect(reports[1].text).toContain('本单锚点 [0,64,2]');
+    expect(reports[1].text).toContain('rebindFrom:[0,64,0]');
+    expect(desk.get('home-v2')?.anchor).toEqual([0, 64, 0]);
+    expect(bot.blockName('0,64,2')).toBe('oak_planks');
+    expect(bot.dugAt).toEqual([]);
+    expect(bot.placedAt).toHaveLength(4);
+  });
+
+  it('试算不同锚点只报告改绑条件，保留原工地与现场', async () => {
+    const desk = fakeDesk([floorSubmission()]);
+    const bot = worldBot({ blocks: { '0,64,2': 'oak_planks' } });
+    const { exec, reports } = execOn(bot, desk);
+    exec.submit([{ skill: 'build', blueprint: 'home-v2', at: [0, 64, 0] }]);
+    await waitUntil(() => reports.length === 1, 15000);
+    exec.submit([{ skill: 'build', blueprint: 'home-v2', at: [0, 64, 2], dryRun: true }]);
+    await waitUntil(() => reports.length === 2, 8000);
+    expect(reports[1].kind).toBe('done');
+    expect(reports[1].text).toContain('rebindFrom:[0,64,0]');
+    expect(desk.get('home-v2')?.anchor).toEqual([0, 64, 0]);
+    expect(bot.blockName('0,64,2')).toBe('oak_planks');
+    expect(bot.dugAt).toEqual([]);
+    expect(bot.placedAt).toHaveLength(4);
+  });
+
+  it('核对原锚点后可在新工地施工，迟到的旧改绑调用受阻', async () => {
+    const desk = fakeDesk([floorSubmission({ size_xyz: [1, 1, 1], layers: [[[0]]] })]);
+    const bot = worldBot({ blocks: { '0,64,2': 'oak_planks' } });
+    const { exec, reports } = execOn(bot, desk);
+    exec.submit([{ skill: 'build', blueprint: 'home-v2', at: [0, 64, 0] }]);
+    await waitUntil(() => reports.length === 1, 15000);
+    exec.submit([{ skill: 'build', blueprint: 'home-v2', at: [0, 64, 2], rebindFrom: [0, 64, 0], confirm: true }]);
+    await waitUntil(() => reports.length === 2, 15000);
+    expect(reports[1].kind, reports[1].text).toBe('done');
+    expect(desk.get('home-v2')?.anchor).toEqual([0, 64, 2]);
+    expect(bot.blockName('0,64,2')).toBe('cobblestone');
+    expect(bot.placedAt).toHaveLength(2);
+    const dug = [...bot.dugAt];
+    exec.submit([{ skill: 'build', blueprint: 'home-v2', at: [0, 64, 0], rebindFrom: [0, 64, 0], confirm: true }]);
+    await waitUntil(() => reports.length === 3, 8000);
+    expect(reports[2].kind).toBe('blocked');
+    expect(reports[2].text).toContain('当前绑定锚点 [0,64,2]');
+    expect(desk.get('home-v2')?.anchor).toEqual([0, 64, 2]);
+    expect(bot.dugAt).toEqual(dug);
+    expect(bot.placedAt).toHaveLength(2);
+  });
+
   it('料尽:自然收束成「做了一部分」,报游标与还缺什么', async () => {
     const desk = fakeDesk([floorSubmission()]);
     const bot = worldBot({ stock: { cobblestone: 2 } });
@@ -1322,7 +1532,7 @@ describe('build 的蓝图形态', () => {
     expect(reports[0].text).toContain('第 1/1 步(圆石 (0, 64, 0)–(1, 64, 1))只放上一部分');
     expect(reports[0].text).toContain('还差 2 处没放上');
     expect(reports[0].text).toContain('游标到 0/1');
-    expect(reports[0].text).toContain('圆石 要 4(随身 0、在箱 0、还缺 4)');
+    expect(reports[0].text).toContain('圆石 要 4(随身 0、容器历史合计 0、按历史账还缺 4');
     expect(reports[0].text).toContain('还差 1 步没完成');
   });
 
@@ -1443,12 +1653,42 @@ describe('build 的蓝图形态', () => {
     await waitUntil(() => reports.length === 1, 8000);
     expect(reports[0].kind).toBe('done');
     expect(reports[0].text).toContain('试算');
-    expect(reports[0].text).toContain('随身 1、在箱 0、还缺 3');
+    expect(reports[0].text).toContain('随身 1、容器历史合计 0、按历史账还缺 3');
     expect(reports[0].text).toContain('一步都不够');
     expect(reports[0].text).toContain('逐层图');
     expect(reports[0].text).toContain('没动工');
+    expect(reports[0].text).toContain('材料表中的名称是施工所需物品');
+    expect(reports[0].text).toContain('从既有结构拆取须确认授权');
     expect(bot.placedAt).toHaveLength(0);
     expect(desk.bound).toHaveLength(0); // 试算不登记锚点
+  });
+
+  it('dryRun 定位历史材料来源，开窗更新后不再把空箱计为有料', async () => {
+    const chests = new ChestBook(null);
+    const source = { x: -20, y: 64, z: 10 };
+    chests.remember('overworld', source, [{ name: 'cobblestone', count: 7 }], 1, 27);
+    chests.remember('the_nether', { x: 30, y: 64, z: 10 }, [{ name: 'cobblestone', count: 40 }], 1, 27);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    const desk = fakeDesk([floorSubmission()]);
+    desk.stored = () => chests.tally('overworld');
+    const bot = worldBot({ stock: {} });
+    const { exec, reports } = execOn(bot, desk, chests);
+    const step: SkillCall = { skill: 'build', blueprint: 'home-v2', at: [0, 64, 0], dryRun: true };
+    exec.submit([step]);
+    await waitUntil(() => reports.length === 1, 8000);
+    const text = reports[0].text;
+    expect(text).toContain('随身 0、容器历史合计 7；随身还需 4');
+    expect(text).toContain('cobblestone 历史来源：(-20,64,10)×7（观测距今 10 分钟）');
+    expect(text).toContain('当前内容待开窗复核');
+    expect(text).not.toContain('(30,64,10)');
+    expect(text).toContain('若容器历史库存仍在且已取到随身');
+    expect(bot.placedAt).toHaveLength(0);
+    chests.remember('overworld', source, [], 0, 27);
+    exec.submit([step]);
+    await waitUntil(() => reports.length === 2, 8000);
+    expect(reports[1].text).toContain('容器历史合计 0、按历史账还缺 4');
+    expect(reports[1].text).not.toContain('cobblestone 历史来源');
+    expect(bot.placedAt).toHaveLength(0);
   });
 
   it('dryRun 也摆出靠现场满足的那几条:动工前唯一一次核对的机会', async () => {
@@ -1546,6 +1786,52 @@ describe('build 的蓝图形态', () => {
     expect(reports[0].text).toContain('没动它');
     expect(bot.blockName('0,64,0')).toBe('chest');
     expect(bot.blockName('1,64,0')).toBe('air');
+  });
+
+  it.each([
+    { name: '先清成一段后下一段够不着', firstBlocked: false, refill: false, unload: false,
+      reading: '1 格目前为空，1 格仍有方块', dug: ['0,64,0'] },
+    { name: '第一段完全失败', firstBlocked: true, refill: false, unload: false,
+      reading: '0 格目前为空，2 格仍有方块', dug: [] },
+    { name: '先前清掉的格被重新填回', firstBlocked: false, refill: true, unload: false,
+      reading: '0 格目前为空，2 格仍有方块', dug: ['0,64,0'] },
+    { name: '先前清掉的格已无法回读', firstBlocked: false, refill: false, unload: true,
+      reading: '0 格目前为空，1 格仍有方块，1 格读不到', dug: ['0,64,0'] },
+  ])('清场受阻回执按原冲突格现场读数说明进展：$name', async ({ firstBlocked, refill, unload, reading, dug }) => {
+    const pit = {
+      key: 'split-pit', site_mode: 'new', size_xyz: [5, 1, 1], axis_order: 'YZX',
+      palette: ['minecraft:air'], layers: [[[0, 0, 0, 0, 0]]],
+    };
+    const desk = fakeDesk([pit]);
+    const bot = worldBot({
+      blocks: { '0,64,0': 'minecraft:dirt', '4,64,0': 'minecraft:dirt' },
+      onDig: (at, put) => {
+        if (refill && at === '0,64,0') put(at, 'cobblestone');
+      },
+    });
+    Object.assign(bot, {
+      canDigBlock: (block: { position: Vec3 }) => !firstBlocked && block.position.x !== 4,
+    });
+    bot.pathfinder.goto = async () => { throw new Error('no path'); };
+    if (unload) {
+      const read = bot.blockAt;
+      bot.blockAt = (pos) => bot.dugAt.length > 0 && pos.x === 0 && pos.y === 64 && pos.z === 0
+        ? null : read(pos);
+    }
+    const { exec, reports } = execOn(bot, desk);
+    exec.submit([{ skill: 'build', blueprint: 'split-pit', at: [0, 64, 0], confirm: true }]);
+    await waitUntil(() => reports.length === 1, 15000);
+    expect(reports[0].kind).toBe('blocked');
+    expect(reports[0].text).toContain('清场尚未完成，当前清理段受阻');
+    expect(reports[0].text).toContain('初始 2 个冲突格的现场回读');
+    expect(reports[0].text).toContain(reading);
+    expect(reports[0].text).toContain('尚未开始放置蓝图');
+    expect(reports[0].text).toContain('够不着');
+    if (!firstBlocked) expect(reports[0].text).toContain('挖开了 1/1 块');
+    expect(bot.dugAt).toEqual(dug);
+    expect(bot.placedAt).toEqual([]);
+    expect(bot.blockName('4,64,0')).toBe('dirt');
+    expect(desk.bound).toEqual([]);
   });
 
   /**
@@ -1735,7 +2021,7 @@ describe('build 的蓝图形态', () => {
     const { exec, reports } = execOn(bot, desk);
     exec.submit([{ skill: 'build', blueprint: 'functional-farm', at: [0, 64, 0] }]);
     await waitUntil(() => reports.length === 1, 20000);
-    expect(reports[0].kind).toBe('done');
+    expect(reports[0].kind, reports[0].text).toBe('done');
     expect(reports[0].text).toContain('整张图施工完了');
     expect(reports[0].text).toContain('mc_map 的 set');
     expect(bot.blockName('0,64,0')).toBe('farmland');
@@ -1785,7 +2071,7 @@ describe('build 的蓝图形态', () => {
       layers: [[[0, 0], [0, 0]], [[1, 1], [1, 1]]],
     };
 
-    it('收工回收:垫进工地体积的那块挖回来,工地外的留着当路', async () => {
+    it('收工不把只有粗台账的旧支撑当作可自动回收的临时块', async () => {
       const desk = fakeDesk([yard]);
       const bot = worldBot({ stock: { cobblestone: 64 } });
       // 寻路器路上垫的两块(与 mineflayer-fixes 的记账同形):一块落在工地里,一块在外面
@@ -1803,9 +2089,10 @@ describe('build 的蓝图形态', () => {
       const { exec, reports } = execOn(bot, desk);
       exec.submit([{ skill: 'build', blueprint: 'yard', at: [0, 64, 0] }]);
       await waitUntil(() => reports.length === 1, 20000);
-      expect(reports[0].text).toContain('顺手清掉了工地里的垫脚 1 块');
-      expect(bot.dugAt).toContain('0,65,0');
+      expect(reports[0].text).not.toContain('拆除 1 块');
+      expect(bot.dugAt).not.toContain('0,65,0');
       expect(bot.dugAt).not.toContain('5,64,5');
+      expect(bot.blockName('0,65,0')).toBe('cobblestone');
       expect(bot.blockName('5,64,5')).toBe('cobblestone');
     });
 
@@ -1852,6 +2139,8 @@ describe('build 的蓝图形态', () => {
       // 只盖第 0 层:工地在建,圆石是它的建材,垫脚改报泥土
       exec.submit([{ skill: 'build', blueprint: 'tower', at: [0, 64, 0], stopAfter: 0 }]);
       await waitUntil(() => reports.length === 2, 20000);
+      // This assertion concerns a vertical trial from the original column, not the build's final stance.
+      bot.entity.position = new Vec3(0.5, 64, 0.5);
       exec.submit([{ skill: 'tunnel', at: [0, 70, 0], dryRun: true }]);
       await waitUntil(() => reports.length === 3, 8000);
       expect(reports[2].text).toContain('个泥土');
@@ -1864,6 +2153,7 @@ describe('build 的蓝图形态', () => {
       // 只盖第 0 层:锚点绑上了、游标没走完,工地就此在建
       exec.submit([{ skill: 'build', blueprint: 'tower', at: [0, 64, 0], stopAfter: 0 }]);
       await waitUntil(() => reports.length === 1, 20000);
+      bot.entity.position = new Vec3(0.5, 64, 0.5);
       // 塔从 (0,64,0) 往上垫,第一格就落在工地体积里
       exec.submit([{ skill: 'tunnel', at: [0, 66, 0] }]);
       await waitUntil(() => reports.length === 2, 20000);

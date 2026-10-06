@@ -1,11 +1,28 @@
 import { describe, expect, it } from 'vitest';
+import { Vec3 } from 'vec3';
 import {
-  bearing, bodyInWater, classifyEntity, cropAgeAt, dayNightTransition, droppedStackOf, facingDegrees,
+  bearing, bodyInWater, canSeeBlockAt, classifyEntity, cropAgeAt, dayNightTransition, droppedStackOf, facingDegrees,
   facingOf, findBankCell, isNight, isBackground, isRaining, narrateWorld, narrateWorldSegments,
   pitchPhrase, pocketScan, scanMatureCrops, snapshotFingerprint, snapshotFromBot, standCellsAround,
   timePhrase, villagerNote, worldDelta,
   type BlockReader, type ItemStack, type WorldSnapshot,
 } from '../../../src/worlds/minecraft/terrain.ts';
+
+describe('canSeeBlockAt 的坐标契约', () => {
+  it('普通坐标对象经 Vec3 转换后交给 Mineflayer，不依赖调用方持有 Vec3 原型', () => {
+    let lookedUp: Vec3 | null = null;
+    const bot = {
+      blockAt: (point: Vec3) => {
+        lookedUp = point.floored();
+        return { name: 'oak_leaves', position: lookedUp };
+      },
+      canSeeBlock: () => true,
+    };
+    expect(canSeeBlockAt(bot, JSON.parse('{"x":2.5,"y":65,"z":-1.2}'))).toBe(true);
+    expect(lookedUp).toEqual(new Vec3(2, 65, -2));
+    expect(canSeeBlockAt({ ...bot, blockAt: () => null }, { x: 2, y: 65, z: -2 })).toBe(false);
+  });
+});
 
 function snap(over: Partial<WorldSnapshot> = {}): WorldSnapshot {
   return {
@@ -236,6 +253,18 @@ describe('天候读的是雨量不是 isRaining', () => {
     expect(isRaining({ rainState: 1, isRaining: false })).toBe(true);
     // 真晴天:reason 1 让 mineflayer 把 isRaining 置成了 true
     expect(isRaining({ rainState: 0, isRaining: true })).toBe(false);
+  });
+
+  it('雨量大于零但当前群系禁止降水时不显示雨', () => {
+    const bot = {
+      rainState: 1,
+      entity: { position: { x: -586, y: 87, z: -317 } },
+      blockAt: () => ({ biome: { id: 113 } }),
+      registry: { biomes: { 113: { has_precipitation: false } } },
+    };
+    expect(isRaining(bot)).toBe(false);
+    bot.registry.biomes[113].has_precipitation = true;
+    expect(isRaining(bot)).toBe(true);
   });
 });
 
@@ -681,6 +710,30 @@ describe('narrateWorld', () => {
     expect(text).toContain('西边 1.5 格是箱子（圆石×378、煤炭×6）');
     expect(text).toContain('东边 4 格是箱子（没开过）');
   });
+
+  it('可见交互对象提供绝对坐标，不从玩家站位或方位距离猜点击目标', () => {
+    const text = narrateWorld(snap({
+      position: { x: -573, y: 68, z: -483 },
+      nearbyBlocks: [
+        { name: 'green_bed', distance: 1.8, direction: 'west', dy: 0, x: -575, y: 68, z: -483 },
+        { name: 'furnace', distance: 2, direction: 'north', dy: 0, x: -573, y: 68, z: -485 },
+        { name: 'crafting_table', distance: 2, direction: 'east', dy: 0, x: -571, y: 68, z: -483 },
+        { name: 'chest', distance: 3, direction: 'south', dy: 0, x: -573, y: 68, z: -480, contents: null },
+      ],
+    }));
+    expect(text).toContain('绿色床（坐标 -575, 68, -483）');
+    expect(text).toContain('熔炉（坐标 -573, 68, -485）');
+    expect(text).toContain('工作台（坐标 -571, 68, -483）');
+    expect(text).toContain('箱子（没开过）（坐标 -573, 68, -480）');
+  });
+
+  it('同种方块落在相同方向与距离分桶时，坐标变化仍投递新事实', () => {
+    const block = { name: 'green_bed', distance: 4, direction: 'north' as const, dy: 0, x: 100, y: 64, z: -24 };
+    const before = narrateWorldSegments(snap({ nearbyBlocks: [block] })).find(s => s.key === 'structure')!;
+    const after = narrateWorldSegments(snap({ nearbyBlocks: [{ ...block, x: 101 }] })).find(s => s.key === 'structure')!;
+    expect(after.cmp).not.toBe(before.cmp);
+    expect(after.text).toContain('坐标 101, 64, -24');
+  });
 });
 
 describe('作物与耕地感知', () => {
@@ -736,12 +789,15 @@ describe('作物与耕地感知', () => {
       .not.toBe(narrateWorld(one({ name: 'farmland', moisture: { value: 5, max: 7 } })));
   });
 
-  it('snapshotFromBot 读 age/moisture:小麦与耕地带着状态进快照', () => {
-    const spots: Record<number, Pos[]> = { 1: [pos(3, 64, 0)], 2: [pos(0, 63, 3)] };
+  it('snapshotFromBot 读作物与门状态，给多扇同材质门各自的精确坐标', () => {
+    const spots: Record<number, Pos[]> = {
+      1: [pos(3, 64, 0)], 2: [pos(0, 63, 3)],
+      3: [pos(1, 64, 0), pos(2, 64, 0)],
+    };
     const bot = {
       entity: { position: pos(0.5, 64, 0.5) },
       entities: {},
-      registry: { biomes: {}, blocksByName: { wheat: { id: 1 }, farmland: { id: 2 } } },
+      registry: { biomes: {}, blocksByName: { wheat: { id: 1 }, farmland: { id: 2 }, spruce_door: { id: 3 } } },
       // 判据形态:水/岩浆仍按 id 数组各查一次,其余走一次函数判据(见 world.ts 的注释)
       findBlocks: ({ matching }: { matching: number[] | ((b: { type: number }) => boolean) }) =>
         (typeof matching === 'function'
@@ -749,7 +805,9 @@ describe('作物与耕地感知', () => {
           : matching.flatMap((id) => spots[id] ?? [])),
       blockAt: (p: Pos) => (p.y === 63
         ? { name: 'farmland', position: p, getProperties: () => ({ moisture: 4 }) }
-        : { name: 'wheat', position: p, getProperties: () => ({ age: 5 }) }),
+        : p.x === 1 || p.x === 2
+          ? { name: 'spruce_door', position: p, getProperties: () => ({ open: p.x === 2 }) }
+          : { name: 'wheat', position: p, getProperties: () => ({ age: 5 }) }),
       canSeeBlock: () => true,
       world: { raycast: () => null },
       game: { dimension: 'overworld', gameMode: 'survival' },
@@ -762,9 +820,15 @@ describe('作物与耕地感知', () => {
     const s = snapshotFromBot(bot);
     expect(s.nearbyBlocks.find((b) => b.name === 'wheat')?.age).toEqual({ value: 5, max: 7 });
     expect(s.nearbyBlocks.find((b) => b.name === 'farmland')?.moisture).toEqual({ value: 4, max: 7 });
+    expect(s.nearbyBlocks.filter((b) => b.name === 'spruce_door')).toMatchObject([
+      { x: 1, y: 64, z: 0, open: false },
+      { x: 2, y: 64, z: 0, open: true },
+    ]);
     const text = narrateWorld(s);
     expect(text).toContain('小麦（age 5/7）');
     expect(text).toContain('耕地（moisture 4/7）');
+    expect(text).toContain('云杉门（关着，坐标 1, 64, 0）');
+    expect(text).toContain('云杉门（开着，坐标 2, 64, 0）');
   });
 });
 

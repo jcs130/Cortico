@@ -12,8 +12,9 @@ import {
   RECENT_FILE,
   renderDreamTranscript,
 } from '../../bots/cortiv/persona/persona.ts';
+import { HANDOFF_NOTE_TYPE } from '../../bots/cormini/persona/handoffNote.ts';
 import type { ChatMessage } from '../core/fixture-types.ts';
-import type { EventEnvelope } from '../../src/core/types.ts';
+import type { EventEnvelope, World } from '../../src/core/types.ts';
 import { estimateTokens, nullLogger } from '../../src/core/util.ts';
 import { CoreState } from '../../src/core/state.ts';
 import { makeFakeHarnessApi, sleep } from '../core/helpers.ts';
@@ -538,7 +539,7 @@ describe('CortiV 并行梦', () => {
   let injected: Array<{ text: string; kind?: string }>;
   let externals: Array<{ text: string; kind?: string }>;
   let forks: ForkOptions[];
-  let forkResult: () => Promise<string>;
+  let forkResult: (opts: ForkOptions) => Promise<string>;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'cormini-mem-'));
@@ -555,7 +556,7 @@ describe('CortiV 并行梦', () => {
         sessionInfo: sessionInfoOf(900),
         spawnFork: async (opts) => {
           forks.push(opts);
-          return forkResult();
+          return forkResult(opts);
         },
       }),
     );
@@ -567,8 +568,12 @@ describe('CortiV 并行梦', () => {
 
   it('声明 dream session:同档模型、只有文件工具、不收事件', () => {
     const decls = p.declareSessions();
-    // main / dream / cognition(World 请托的后台构思,见 tests/cortiv/cognition.test.ts)
-    expect(decls.map((d) => d.id).sort()).toEqual(['cognition', 'dream', 'main']);
+    // planning reads preassembled materials and returns optional directions; it has no file or body tools.
+    expect(decls.map((d) => d.id).sort()).toEqual(['cognition', 'dream', 'focused-cognition', 'main', 'planning', 'social-memory']);
+    const planning = decls.find((d) => d.id === 'planning')!;
+    expect(planning.tools()).toEqual([]);
+    expect(planning.persistent).toBe(false);
+    expect(planning.receivesEvents).toBe(false);
     const dream = decls.find((d) => d.id === 'dream')!;
     expect(dream.persistent).toBe(false);
     expect(dream.receivesEvents).toBe(false);
@@ -615,13 +620,13 @@ describe('CortiV 并行梦', () => {
     expect(externals.map((part) => part.kind)).toEqual(['handoff-note', 'handoff-note']);
     expect(externals.map((part) => part.text).join('\n')).toBe(text);
     expect(externals[0].text).toContain('更早的一段');
-    expect(externals[0].text).not.toContain('[调用] vtuber_act');
+    expect(externals[0].text).not.toContain('[历史工具请求] vtuber_act');
     expect(externals[1].text).toContain('最近的一段');
     expect(text).toContain('三只猫');
     expect(text).toContain('事件帧');
     expect(text).not.toContain('三只猫还好吗');
-    expect(text).toContain('[调用] vtuber_act {"script":"第二句"}\n[回执] 已开演(流式)。');
-    expect(text).toContain('[调用] vtuber_act {"script":"第三句"}\n[回执] [未播出] 合成失败。');
+    expect(text).toContain('[历史工具请求] vtuber_act {"script":"第二句"}\n[历史回执] 已开演(流式)。');
+    expect(text).toContain('[历史工具请求] vtuber_act {"script":"第三句"}\n[历史回执] [未播出] 合成失败。');
     expect(snapshot).toEqual(before);
     // 醒来说明指向同一份文件,交代最近段的内容与继续行动的方式。
     const wake = injected.find((i) => i.kind === 'handoff')!.text;
@@ -637,6 +642,48 @@ describe('CortiV 并行梦', () => {
     const sys = forks[0].messages.find((m) => m.role === 'system')!;
     expect(sys.content).toContain('viewers/');
     expect(sys.content).toContain(RECENT_FILE);
+    expect(forks[0].messages.filter((m) => m.role === 'user')).toHaveLength(1);
+  });
+
+  it('梦在截断的历史之外收到 World 的短证据；无事实的 World 不增加内容', async () => {
+    const fact = '服务端回执 2026-10-03T14:38:43+08:00：章节 15/15 已完成';
+    const worlds: World[] = [{
+      id: 'adventure',
+      envPromptVars: () => ({}),
+      verifiedFacts: () => fact,
+      tools: () => [],
+      start: async () => {},
+      stop: async () => {},
+    }, {
+      id: 'ordinary',
+      envPromptVars: () => ({}),
+      tools: () => [],
+      start: async () => {},
+      stop: async () => {},
+    }];
+    p = new CortiV({ memoryDir: dir, context: NOTE_CONTEXT, worlds });
+    p.attach(makeFakeHarnessApi({
+      injectInternal: (text, kind) => injected.push({ text, kind }),
+      injectExternal: (text, kind) => externals.push({ text, kind }),
+      sessionInfo: sessionInfoOf(900),
+      spawnFork: async (opts) => { forks.push(opts); return '(nothing)'; },
+    }));
+    const snapshot = records(Array.from({ length: 80 }, (_, i) => ({
+      role: 'user' as const, content: `旧记录 ${i} ${'甲'.repeat(1200)}`,
+    })));
+    await p.onHandoff(snapshot, HANDOFF_CTX);
+    await sleep(0);
+
+    expect(forks).toHaveLength(1);
+    expect(forks[0].messages).toHaveLength(3);
+    expect(forks[0].messages[1].content).toContain('旧记录 0');
+    expect(forks[0].messages[1].content).toContain('旧记录 79');
+    expect(forks[0].messages[1].content).toContain('未展开');
+    const latest = forks[0].messages[2].content;
+    expect(latest).toContain('[adventure]');
+    expect(latest).toContain(fact);
+    expect(latest).toContain('采样于');
+    expect(latest).not.toContain('ordinary');
   });
 
   it('无软阈值连续交接仅投递本窗最近段,上一份 note 不套娃且新台词不逐轮缩短', async () => {
@@ -666,7 +713,7 @@ describe('CortiV 并行梦', () => {
         expect(previous).toHaveLength(1);
         const text = previous[0].text;
         expect(text).toContain(JSON.stringify({ script }));
-        expect(text).toContain(`[回执] 第${round}窗已受理,尚未播放`);
+        expect(text).toContain(`[历史回执] 第${round}窗已受理,尚未播放`);
         expect(text).toContain(`第${round}窗当前事件`);
         if (round > 1) expect(text).not.toContain(`第${round - 1}窗`);
         expect(text.match(/# 交接笔记 ·/g)).toHaveLength(1);
@@ -689,17 +736,75 @@ describe('CortiV 并行梦', () => {
     expect(injected.filter((i) => i.text.includes('最近在说的事'))).toHaveLength(0);
 
     // 写了:整份原样送到她面前
-    forkResult = async () => {
-      mkdirSync(join(dir, 'sessions'), { recursive: true });
-      writeFileSync(join(dir, RECENT_FILE), '还差两只羊做床,云那个梗还挂着。', 'utf8');
+    forkResult = async (opts) => {
+      await opts.tools!.find(tool => tool.name === 'write_file')!.handler(
+        { path: RECENT_FILE, content: '还差两只羊做床,云那个梗还挂着。' }, { role: 'dream', log: nullLogger() });
       return '(nothing)';
     };
     await p.onHandoff(records([{ role: 'user', content: 'y' }]), HANDOFF_CTX);
     await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(injected.filter(i => i.text.includes('最近在说的事'))).toHaveLength(1));
     const notes = injected.filter((i) => i.text.includes('最近在说的事'));
     expect(notes).toHaveLength(1);
     expect(notes[0].kind).toBe('dream');
     expect(notes[0].text).toContain('还差两只羊做床');
+  });
+
+  it('超长结构化短笺保留现场、未完目标与清单后的完结证据', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const recent = [
+      '# 最近在说的事',
+      '我在河边等队友回信，准备继续钓鱼。',
+      '## 位置与状态',
+      ...Array.from({ length: 45 }, (_, i) => `- 背包格${i}: 备用材料和装备明细${'甲'.repeat(18)}`),
+      '## 还在跟的事',
+      '- 约好的钓鱼还差两竿，等队友回信后再决定路线。',
+      '## 未完成事项',
+      '- 任务甲也被旧计划列作未完成，仍需按回执对账。',
+      '## 已完结',
+      '- 任务甲已有服务端完成回执；后来一次失败不撤销这条回执。',
+    ].join('\n');
+    expect(recent.indexOf('## 已完结')).toBeGreaterThan(900);
+    forkResult = async (opts) => {
+      await opts.tools!.find(tool => tool.name === 'write_file')!.handler(
+        { path: RECENT_FILE, content: recent }, { role: 'dream', log: nullLogger() });
+      return '(nothing)';
+    };
+
+    await p.onHandoff(records([{ role: 'user', content: '本场记录' }]), HANDOFF_CTX);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(injected.filter(i => i.kind === 'dream' && i.text.includes('最近在说的事'))).toHaveLength(1));
+    const notes = injected.filter((i) => i.kind === 'dream' && i.text.includes('最近在说的事'));
+    expect(notes).toHaveLength(1);
+    const excerpt = notes[0].text.split('】\n').slice(1).join('】\n');
+    expect(excerpt.length).toBeLessThanOrEqual(900);
+    expect(excerpt).toContain('我在河边等队友回信');
+    expect(excerpt).toContain('还差两竿');
+    expect(excerpt).toContain('旧计划列作未完成');
+    expect(excerpt).toContain('服务端完成回执');
+    expect(excerpt).toContain('若有冲突');
+    expect(readFileSync(join(dir, RECENT_FILE), 'utf8')).toBe(recent);
+  });
+
+  it('无可识别标题的超长短笺保留首尾原文', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const recent = `开头现场：我在等雨停。\n${'途中的琐事。'.repeat(220)}\n末尾确认：约定的灯已经点亮。`;
+    forkResult = async (opts) => {
+      await opts.tools!.find(tool => tool.name === 'write_file')!.handler(
+        { path: RECENT_FILE, content: recent }, { role: 'dream', log: nullLogger() });
+      return '(nothing)';
+    };
+
+    await p.onHandoff(records([{ role: 'user', content: '本场记录' }]), HANDOFF_CTX);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(injected.filter(i => i.kind === 'dream' && i.text.includes('最近在说的事'))).toHaveLength(1));
+    const notes = injected.filter((i) => i.kind === 'dream' && i.text.includes('最近在说的事'));
+    expect(notes).toHaveLength(1);
+    const excerpt = notes[0].text.split('】\n').slice(1).join('】\n');
+    expect(excerpt.length).toBeLessThanOrEqual(900);
+    expect(excerpt).toContain('开头现场');
+    expect(excerpt).toContain('末尾确认');
+    expect(excerpt).toContain('灯已经点亮');
   });
 
   it('上一场留下的旧交接笔记不冒充这一场的', async () => {
@@ -742,6 +847,59 @@ describe('CortiV 并行梦', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(forks).toHaveLength(2);
     expect(forks[1].messages.find((m) => m.role === 'user')!.content).toContain('第二场');
+  });
+
+  it('晚到的摘要保留旧观察时间，事件帧时间可用且前缀时间不冒充现场', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-04T00:30:00Z'));
+    let release!: (value: string) => void;
+    forkResult = () => new Promise<string>((resolve) => { release = resolve; });
+    const snapshot = records([
+      { role: 'system', content: '常驻前缀', ts: '2026-10-04T02:00:00Z', head: true },
+      { role: 'user', content: '任务正在执行', ts: '2026-10-04T00:29:50Z', frame: { events: [{
+        cursor: 10, ts: '2026-10-04T00:29:57Z', source: 'ordinary', type: 'ordinary.task', start: 0, chars: 7,
+      }] } },
+    ]);
+    await p.onHandoff(snapshot, HANDOFF_CTX);
+    await vi.advanceTimersByTimeAsync(0);
+    vi.setSystemTime(new Date('2026-10-04T00:31:00Z'));
+    p.onDelivery({ events: [ev({ source: 'ordinary', type: 'ordinary.task', ts: new Date().toISOString(), text: '任务已完成' })] });
+    await forks[0].tools!.find(tool => tool.name === 'write_file')!.handler(
+      { path: RECENT_FILE, content: '任务还在执行，等它结束。' }, { role: 'dream', log: nullLogger() });
+    release('我还在等任务结束。');
+    await vi.advanceTimersByTimeAsync(0);
+
+    const notes = injected.filter((item) => item.kind === 'dream');
+    expect(notes).toHaveLength(2);
+    for (const note of notes) {
+      expect(note.text).toContain('旧会话观察截止 2026-10-04T00:29:57Z');
+      expect(note.text).toContain('交接排队于 2026-10-04T00:30:00.000Z');
+      expect(note.text).toContain('较新的实际回执');
+      expect(note.text).not.toContain('2026-10-04T00:31:00');
+      expect(note.text).not.toContain('2026-10-04T02:00:00');
+    }
+    expect(forks[0].messages.find((item) => item.role === 'user')!.content).toContain('旧会话观察截止 2026-10-04T00:29:57Z');
+    expect(readFileSync(join(dir, RECENT_FILE), 'utf8')).toBe('任务还在执行，等它结束。');
+  });
+
+  it('串行排队保留入队时间，无时间戳的记录明确不提供观察时间', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-04T00:30:00Z'));
+    let release!: (value: string) => void;
+    forkResult = () => new Promise<string>((resolve) => { release = resolve; });
+    await p.onHandoff(records([{ role: 'user', content: '第一段' }]), HANDOFF_CTX);
+    await vi.advanceTimersByTimeAsync(0);
+    vi.setSystemTime(new Date('2026-10-04T00:31:00Z'));
+    forkResult = async () => '第二段的结论';
+    await p.onHandoff(records([{ role: 'user', content: '第二段' }]), HANDOFF_CTX);
+    vi.setSystemTime(new Date('2026-10-04T00:40:00Z'));
+    release('(nothing)');
+    await vi.advanceTimersByTimeAsync(0);
+
+    const note = injected.find((item) => item.kind === 'dream')!.text;
+    expect(note).toContain('旧会话观察截止 未记录时间');
+    expect(note).toContain('交接排队于 2026-10-04T00:31:00.000Z');
+    expect(note).not.toContain('2026-10-04T00:40:00');
   });
 
   it('空 session(只有 system)不入梦', async () => {
@@ -801,6 +959,8 @@ describe('CortiV 梦整理失败重试', () => {
 
     await vi.advanceTimersByTimeAsync(30_000);
     expect(forks).toHaveLength(2);
+    expect(forks[1].messages.find((item) => item.role === 'user')!.content)
+      .toBe(forks[0].messages.find((item) => item.role === 'user')!.content);
 
     // 重试成功 ⇒ 下一次交接的告知里不该出现"没整理"
     await p.onHandoff(records([{ role: 'user', content: '第二场' }]), HANDOFF_CTX);
@@ -836,18 +996,48 @@ describe('CortiV 梦整理失败重试', () => {
 });
 
 describe('renderDreamTranscript', () => {
-  it('头部优先:超预算截掉尾部并注明未展开,不宣称原始尾巴仍在新会话', () => {
+  it('超预算仍保留早期线索和近期失败、改法、成功回执，按时间顺序标出缺口', () => {
     const snapshot: ChatMessage[] = [
       { role: 'system', content: 'sys' },
-      { role: 'user', content: `开头的事:${'早'.repeat(50)}` },
-      { role: 'assistant', content: `中段:${'中'.repeat(50)}` },
-      { role: 'user', content: `最近的事:${'晚'.repeat(50)}` },
+      { role: 'user', content: '早期线索：田里有一株成熟小麦。' },
+      ...Array.from({ length: 8 }, (_, i): ChatMessage => ({ role: 'user', content: `中段-${i}:${'经过'.repeat(90)}` })),
+      { role: 'assistant', content: '', tool_calls: [
+        { id: 'failed', type: 'function', function: { name: 'mymc_do', arguments: '{"skill":"use","at":[1,2,3]}' } },
+      ] },
+      { role: 'tool', tool_call_id: 'failed', content: '右键已执行，但背包小麦未增加。' },
+      { role: 'assistant', content: '', tool_calls: [
+        { id: 'revised', type: 'function', function: { name: 'mymc_do', arguments: '{"skill":"collect","block":"wheat"}' } },
+      ] },
+      { role: 'tool', tool_call_id: 'revised', content: '收获成功，背包小麦增加 1。' },
     ];
-    const out = renderDreamTranscript(records(snapshot), 120);
-    expect(out).toContain('开头的事');
-    expect(out).not.toContain('最近的事');
+    const out = renderDreamTranscript(records(snapshot), 500);
+    expect(out).toContain('早期线索');
+    expect(out).not.toContain('中段-0');
+    expect(out).toContain('背包小麦未增加');
+    expect(out).toContain('"skill":"collect"');
+    expect(out).toContain('背包小麦增加 1');
+    expect(out.indexOf('背包小麦未增加')).toBeLessThan(out.indexOf('"skill":"collect"'));
+    expect(out.indexOf('"skill":"collect"')).toBeLessThan(out.indexOf('背包小麦增加 1'));
     expect(out).toContain('未展开');
-    expect(out).not.toContain('仍留在');
+    expect(out.length).toBeLessThanOrEqual(500);
+    expect(renderDreamTranscript(records(snapshot), 12).length).toBeLessThanOrEqual(12);
+  });
+
+  it('跳过上一份交接笔记的事件正文，保留同一帧的近期事件', () => {
+    const oldNote = '# 交接笔记 · 最近的一段\n旧目标待办';
+    const current = '新的服务端回执：目标已经完成';
+    const snapshot: ChatMessage[] = [{
+      role: 'user', content: `${oldNote}\n${current}`,
+      frame: { events: [
+        { cursor: 1, ts: '2026-10-03T10:00:00+08:00', type: HANDOFF_NOTE_TYPE,
+          source: 'persona', start: 0, chars: oldNote.length },
+        { cursor: 2, ts: '2026-10-03T10:01:00+08:00', type: 'mymc.task',
+          source: 'mymc', start: oldNote.length + 1, chars: current.length },
+      ] },
+    }];
+    const out = renderDreamTranscript(records(snapshot));
+    expect(out).not.toContain('旧目标待办');
+    expect(out).toContain(current);
   });
 
   it('工具调用与回执被截短且带名字;system 不出现', () => {
@@ -863,7 +1053,7 @@ describe('renderDreamTranscript', () => {
       { role: 'tool', tool_call_id: 'c1', content: 'R'.repeat(2000) },
     ];
     const out = renderDreamTranscript(records(snapshot), 10_000);
-    expect(out).toContain('[调用 dig]');
+    expect(out).toContain('[历史原生工具请求 dig]');
     expect(out).not.toContain('SECRET-PREFIX');
     expect(out.length).toBeLessThan(1500);
   });
@@ -890,8 +1080,11 @@ describe('CortiV 凡特主档常驻前缀', () => {
     writeFileSync(join(dir, 'PHANT.md'), '=== 凡特 Phant ===\n\n后台的人,我的搭档。\n', 'utf8');
     const first = await segs();
     expect(first.find((s) => s.title === 'PARTNER')?.text).toContain('后台的人,我的搭档');
+    expect(first.at(-1)?.title).toBe('PARTNER');
+    const stableHead = first.slice(0, -1).map((s) => s.text).join('');
     writeFileSync(join(dir, 'PHANT.md'), '=== 凡特 Phant ===\n\n改过的主档。\n', 'utf8');
     const second = await segs();
+    expect(second.slice(0, -1).map((s) => s.text).join('')).toBe(stableHead);
     expect(second.find((s) => s.title === 'PARTNER')?.text).toContain('改过的主档');
     expect(second.find((s) => s.title === 'PARTNER')?.text).not.toContain('我的搭档');
   });

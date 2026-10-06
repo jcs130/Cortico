@@ -701,10 +701,46 @@ describe('BilibiliWorld', () => {
     });
   });
 
+  it('preserves platform identities on named arrivals and separates anonymous counts from follow and share', async () => {
+    const { module, host, feed } = await mount();
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1, uid: 41, uname: '同名观众' } });
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1, uid: 42, uname: '同名观众' } });
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1, uid: 0, uname: '匿***' } });
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 2, uid: 43, uname: '关注者' } });
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 3, uid: 44, uname: '分享者' } });
+    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
+    await module.stop();
+    expect(host.archivedEvents.map(event => [event.type, event.senderKey])).toEqual([
+      ['bilibili.enter', '41'], ['bilibili.enter', '42'], ['bilibili.follow', '43'], ['bilibili.share', '44'],
+    ]);
+    expect(host.events.filter(event => event.type === 'bilibili.enter').map(event => event.senderKey)).toEqual(['41', '42']);
+    expect(host.events[0].meta?.uname).toBe('同名观众');
+    expect(host.events[1].meta?.uname).toBe('同名观众');
+    expect(host.deferred).toHaveLength(1);
+    expect(await host.deferred[0].spec.render()).toBe('[直播间] 刚才 1 人进场');
+  });
+
+  it('archives named arrivals before crowded-room context selection', async () => {
+    const host = new BatchCandidateHost();
+    const { module, feed } = await mount({
+      audienceOnlineRankOn: () => 2, audienceOnlineRankOff: () => 1,
+      audienceEventLineBudget: () => 2, audienceEventTokenBudget: () => 100,
+    }, host);
+    feed({ cmd: 'ONLINE_RANK_COUNT', data: { count: 2 } });
+    for (let index = 0; index < 8; index++) {
+      feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1, uid: 41 + index, uname: `观众${index}` } });
+    }
+    await module.stop(); host.projectBatch();
+    expect(host.archivedEvents.map(event => event.senderKey)).toEqual(Array.from({ length: 8 }, (_, index) => String(41 + index)));
+    expect(host.events.length).toBeLessThanOrEqual(2);
+    expect(host.events.every(event => event.type === 'bilibili.enter' && event.senderKey)).toBe(true);
+    expect(host.archivedEvents.every(event => event.contextDelivery === 'archive-only')).toBe(true);
+  });
+
   it('人流读数不成事件:布置一条待成文的,发车刻才渲染,而且只布置一条', async () => {
     const { module, host, feed } = await mount();
-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1, uid: 0 } });
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1, uid: 0 } });
     feed({ cmd: 'WATCHED_CHANGE', data: { num: 288429 } });
     feed({ cmd: 'LIKE_INFO_V3_CLICK', data: {} });
 
@@ -721,7 +757,7 @@ describe('BilibiliWorld', () => {
     expect(await host.deferred[0].spec.render()).toBeNull();
 
     // 清空后新来的读数会重新布置一条
-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1, uid: 0 } });
     expect(host.deferred).toHaveLength(2);
     await module.stop();
   });
@@ -731,7 +767,7 @@ describe('BilibiliWorld', () => {
     vi.setSystemTime(new Date('2026-08-22T15:37:00+08:00'));
     const { module, host, feed } = await mount();
 
-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1, uid: 0 } });
     expect(host.deferred).toHaveLength(1);
 
     // 控制台「清空待投递」把挂单抽走了,render 一次都没跑 —— 复位点随之消失
@@ -739,7 +775,7 @@ describe('BilibiliWorld', () => {
 
     // 窗口内不重挂:安静期不该堆一叠陈旧观察
     vi.setSystemTime(Date.now() + 299_000);
-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1, uid: 0 } });
     expect(host.deferred).toHaveLength(0);
 
     // 过了陈旧窗口视为失踪,允许重挂 —— 这一条在布尔闩版本里永远拿不到
@@ -758,9 +794,9 @@ describe('BilibiliWorld', () => {
     vi.setSystemTime(new Date('2026-08-22T15:37:00+08:00'));
     const { module, host, feed } = await mount();
 
-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1, uid: 0 } });
     vi.setSystemTime(Date.now() + 301_000); // 一直没发车,窗口到期
-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1, uid: 0 } });
     expect(host.deferred).toHaveLength(2);
 
     // 第一条把攒下的读数整个带走,第二条渲染出空正文 → 整条蒸发
@@ -774,10 +810,10 @@ describe('BilibiliWorld', () => {
     vi.setSystemTime(new Date('2026-08-22T15:37:00+08:00'));
     const { module, host, feed } = await mount();
 
-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1, uid: 0 } });
     await host.deferred[0].spec.render();
 
-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1, uid: 0 } });
     expect(host.deferred).toHaveLength(2);
     await module.stop();
   });
@@ -1209,6 +1245,7 @@ describe('BilibiliWorld', () => {
       expect(room).toHaveLength(1);
       expect(room[0].text).toContain('平台确认已下播');
       expect(room[0].text).toContain('live_status=0');
+      expect(room[0].meta).toMatchObject({ liveRoomState: { schemaVersion: 1, living: false, via: 'poll' } });
       expect(room[0].text).toContain('看不到直播画面');
       // 留场弹幕的反向证据要提前说破
       expect(room[0].text).toContain('不代表直播还在');
@@ -1233,6 +1270,10 @@ describe('BilibiliWorld', () => {
       expect(room.map((e) => e.text)).toEqual([
         expect.stringContaining('平台确认已下播'),
         expect.stringContaining('平台确认已开播'),
+      ]);
+      expect(room.map(e => e.meta?.liveRoomState)).toEqual([
+        { schemaVersion: 1, living: false, via: 'poll' },
+        { schemaVersion: 1, living: true, via: 'poll' },
       ]);
       expect(host.logs.filter((log) => log.level === 'error')).toHaveLength(1);
       expect(host.logs.some((log) => log.level === 'warn' && log.msg.includes('已开播'))).toBe(true);

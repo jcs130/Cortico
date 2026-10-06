@@ -14,7 +14,7 @@ import type { Direction } from './terrain.ts';
 import type { SkillCall } from './skills.ts';
 import type { PolicyDefaults, PolicySettings } from './policy.ts';
 import type { NormalizedBlueprint, PositionXYZ } from './blueprint.ts';
-import type { BlueprintPlan, ItemTally } from './blueprint-plan.ts';
+import type { BlueprintPlan, BlueprintStep, ItemTally } from './blueprint-plan.ts';
 import type { BowShotResult, RangedTarget } from './ranged.ts';
 import type { ShowTempo } from './show.ts';
 import type { FindObservationCache, SearchScope } from './search-observation.ts';
@@ -51,15 +51,19 @@ export type TargetDiag =
 /** 技能受阻是业务终态；scene 携带受阻时的坐标、可见性与试算事实，随回执返回。 */
 export class SkillBlocked extends Error {
   readonly scene: string[];
+  /** 机器可读原因；调用方不靠中文回执做重复失败判定。 */
+  readonly code?: 'target-not-visible' | 'target-not-ready' | 'container-window-changed' | 'container-window-rollback' | 'inventory-click-sync' | 'use-hand-changed';
   /**
    * 受阻来源：server 表示操作后的回读或服务端结果，local 表示本地前置判断。
    * 仅写入 World 诊断日志。
    */
   readonly source: 'server' | 'local';
-  constructor(message: string, scene: string[] = [], source: 'server' | 'local' = 'local') {
+  constructor(message: string, scene: string[] = [], source: 'server' | 'local' = 'local',
+    code?: SkillBlocked['code']) {
     super(message);
     this.scene = scene;
     this.source = source;
+    this.code = code;
   }
 }
 
@@ -75,6 +79,8 @@ export class SkillNoop extends SkillBlocked {}
  */
 export interface BlueprintSite {
   key: string;
+  /** World 给出的不可复用版本身份；旧施工台架可省略，省略时不取得工程材料许可。 */
+  versionId?: string;
   name: string | null;
   blueprint: NormalizedBlueprint;
   plan: BlueprintPlan;
@@ -114,6 +120,11 @@ export interface BlueprintDesk {
   survey(key: string, anchor: PositionXYZ, result: BlueprintSurvey): void;
   /** 进度游标回写 */
   progress(key: string, cursor: number): void;
+  /** 已有施工回读的事实；未加载的目标仍保留在待放置集合中。 */
+  observeRemaining?(key: string, versionId: string, anchor: PositionXYZ,
+    remainingSteps: readonly number[], placements: Readonly<Record<number, readonly PositionXYZ[]>>): void;
+  /** 最近施工回读的材料需求；不产生额外方块扫描。 */
+  remainingBill?(key: string): readonly BlueprintStep[];
   /** 三分账单的「在箱」一栏(容器账本合计;口径是「上次看见」) */
   stored(): ItemTally;
 }
@@ -147,16 +158,30 @@ export function dangerNoteText(names: readonly string[], what: string): string |
 }
 
 export type ResourcePlacementPermit =
-  | { ok: true; finish(placed: boolean): void }
+  | { ok: true; finish(placed: boolean): void | Promise<void> }
   | { ok: false; reason: string };
 
-export type ResourcePlacementGate = (item: string) => ResourcePlacementPermit;
+export interface BlueprintPlacementIntent {
+  key: string;
+  versionId: string;
+  anchor: PositionXYZ;
+  at: PositionXYZ;
+  aborted: () => boolean;
+}
+
+export type ResourcePlacementGate = (item: string, intent?: BlueprintPlacementIntent) => ResourcePlacementPermit;
 
 /** 试算用的只读判据:不占串行闸、不扣账,因此也没有 finish */
 export type ResourcePlacementPreview = (item: string) => { ok: boolean; reason?: string };
 
 export interface SkillContext {
   aborted: () => boolean;
+  /**
+   * 在可按现场续做的原子动作边界请求让位。没有排队请求时不执行 settle；有请求时
+   * 先等待 settle 完成，再复验身体与库存状态。让位抛出 Yielded，技能须透传 Aborted。
+   * 容器事务与尚未确认的动作不属于检查点，嵌套收尾上下文应关闭 checkpoint。
+   */
+  checkpoint?: (settle?: () => Promise<void>) => Promise<void>;
   /** 谁把这一步打飞的(战斗/反射/mc_stop/顶替);没被打飞时 null */
   abortedBy?: () => string | null;
   log: Logger;
@@ -176,6 +201,8 @@ export interface SkillContext {
   taskId: number;
   /** 计数类技能(collect/build/excavate/tunnel)每完成一个单位报一次;执行器据此出进度事件 */
   progress?: (done: number, total: number) => void;
+  /** 当前技能阶段的现场读数；执行器在进度采样时现读，不计为已完成单位。 */
+  progressDetail?: () => string;
   /** 常驻规矩(mc_policy;World 持有并落盘)。技能只读它,改由工具面走 */
   policy?: {
     get(): PolicySettings;
@@ -184,6 +211,8 @@ export interface SkillContext {
   };
   /** 普通放置的材料许可；成功与否必须在同一 permit 上结算。 */
   permitResourcePlacement?: ResourcePlacementGate;
+  /** 仅正式蓝图目标放置携带；垫脚和补光不使用这份身份。 */
+  blueprintPlacement?: Omit<BlueprintPlacementIntent, 'at' | 'aborted'>;
   /** 试算的材料判据;不取 permit,免得预览文案说出结算期的话 */
   previewResourcePlacement?: ResourcePlacementPreview;
   /**
@@ -220,7 +249,7 @@ export interface SkillContext {
   /** 挂钟时刻 HH:MM:SS(与回执同一时区);账本里的 placedAt/到期估计都用它渲染 */
   clock?: (ms: number) => string;
   /** probe 差分的单槽记忆(执行器持有,跨任务;mc_stop 不清,重启清) */
-  probeMemo?: { last: ProbeMemo | null };
+  probeMemo?: { last: ProbeMemo | null; entries?: Map<number, ProbeMemo> };
   /** find 边走边找收工(走满/命中)落探索覆盖账本(World 持久化) */
   explored?: (dimension: string, direction: Direction, distance: number, biome: string) => void;
   /** find 的短期真实观察；只供回执，不改变动作。 */
@@ -230,15 +259,16 @@ export interface SkillContext {
   };
   /** 容器 GUI 演出节拍;摄像机没开/演出关着时回 null,每单容器操作开工时现取一次 */
   showTempo?: () => ShowTempo | null;
+  /** Retained container windows belong to this task and close on completion or cancellation. */
+  holdWindow?: (window: NonNullable<Bot['currentWindow']>) => void;
   /**
    * 这一单还剩哪些步、当前是第几步,以及「这一步顺手把后面某一步也做掉了」的登记口。
-   * 目前只有 stow 用它并窗(见 collectStowBatch):登记过的步执行器不再跑,直接用
-   * 登记的那句当回执。
+   * 容器连续存取共用窗口时，登记过的后续步由执行器按各自结果落账。
    */
   batch?: {
     steps: readonly SkillCall[];
     index: number;
-    absorb(stepIndex: number, receipt: string): void;
+    absorb(stepIndex: number, receipt: string, ok?: boolean): void;
   };
   /** 登记部分完成：技能正常返回，任务终态为部分完成，gap 说明未完成的量。 */
   partial?: (gap: string) => void;
@@ -247,6 +277,8 @@ export interface SkillContext {
    * 「先记重生点,再拒绝睡觉」,回执只说没躺下的话,那一次点击在她眼里就是纯空操作。
    */
   spawnNote?: () => string | null;
+  /** 操作开始后服务端送来的短暂动作栏拒绝理由；只供这一步的回执读取。 */
+  serverFeedbackSince?: (startedAt: number) => string | null;
   /**
    * 这一步有意放的那些格(cellKey),由 build 自己登记。执行器据此把「路上垫脚/搭路
    * 用掉了」那句里的落点摘掉,落点之外的放置仍是耗材,照报。执行器每步换一只新的,
@@ -294,6 +326,13 @@ export class Aborted extends Error {
   constructor(by: string | null = null) {
     super(by ? `aborted: ${by}` : 'aborted');
     this.by = by;
+  }
+}
+
+/** 原任务在安全检查点让位后保存断点；继承 Aborted 以穿过技能的中止清理路径。 */
+export class Yielded extends Aborted {
+  constructor() {
+    super('安全检查点让位');
   }
 }
 

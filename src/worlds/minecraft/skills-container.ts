@@ -8,7 +8,7 @@ import pathfinderPkg from 'mineflayer-pathfinder';
 import { Vec3 } from 'vec3';
 import {
   INVENTORY_SLOTS, awaitInvConfirm, invCount, invCountIn, invGains, invGainsSplit, invSnapshot,
-  itemAsked, itemPredOf, lootNote, moveExactSlot, noSuchItem, playerInvIn, type InvItem,
+  itemAsked, itemIdHint, itemPredOf, lootNote, moveExactSlot, noSuchItem, playerInvIn, type InvItem,
   type InvPred,
 } from './inventory.ts';
 import { isSpawnAnchorBlock } from './policy.ts';
@@ -16,13 +16,16 @@ import { roman, zhDimension, zhEnchant, zhName } from './names.ts';
 import { Aborted, SkillBlocked, SkillNoop, checkAbort, sleep, type SkillContext } from './skill-context.ts';
 import { AIR_NAMES, LIQUIDS, blockAtCell, cellText, dimensionOf, feetOf, resolveAt } from './cell-facts.ts';
 import { droppedStackOf, type ItemStack } from './terrain.ts';
-import { CONTAINER_FIND, FURNACE_KINDS, matchItemName } from './chests.ts';
+import { CONTAINER_FIND, FURNACE_KINDS, matchItemName, matchMaterialName } from './chests.ts';
 import { dropGoal, gotoGoal } from './travel.ts';
 import { type SkillCall } from './skills.ts';
-import { pickMissText, pickTargetOf, pickedText, type PickTarget } from './item-pick.ts';
+import { itemMatchesPick, pickMissText, pickTargetOf, pickedText, type PickTarget } from './item-pick.ts';
 import {
-  containerStacks, findContainers, furnaceDoneAt, noContainerNearby, openNearbyContainer,
-  openWindowGuarded, orderForStow, orderForTake, rememberChest, slotStack, smeltPerItemMs,
+  AUTO_CONTAINER_OPEN_LIMIT, clearStorageMenu, clearStorageWriteFailure, containerStacks,
+  findContainers, furnaceDoneAt, noContainerNearby, openNearbyContainer,
+  openWindowGuarded, orderForStow, orderForTake, rememberChest, rememberNonStorageMenu,
+  rememberStorageAccessFailure, rememberStorageWriteFailure, storageSkipReason, slotStack, smeltPerItemMs,
+  WINDOW_SETTLE_MS,
   type GenericWindow,
 } from './containers.ts';
 import { contentsText, zhErrorText } from './receipt.ts';
@@ -31,6 +34,9 @@ import { type Anchor, type Cell } from './geometry.ts';
 import { FURNACE_STATION, ensureStation, type Station, type StationAt } from './placement.ts';
 import { readEnchants, readPotionId, type ItemEnchant } from './item-facts.ts';
 import { normalizeDimension } from './escape.ts';
+import { consumesOpenWindow, selectionMenuTitle } from './window-semantics.ts';
+import { itemCustomName, itemProfileSkinHash } from './item-display.ts';
+import { inventoryReadConfirmed } from './inventory-window-sync.ts';
 
 const { goals } = pathfinderPkg;
 
@@ -60,22 +66,29 @@ export async function skillPickup(bot: Bot, ctx: SkillContext, item?: string): P
   // 刚打死的东西掉落物实体还没生成:先等一小会儿再判"附近有没有"
   await sleep(500);
   let walked = 0;
+  const attempted = new Set<string>();
   for (let i = 0; i < 8; i++) {
     checkAbort(ctx);
     const me = bot.entity.position;
-    let nearest: { pos: { x: number; y: number; z: number }; d: number } | null = null;
+    let nearest: { id: string; pos: { x: number; y: number; z: number }; d: number } | null = null;
     for (const id of Object.keys(bot.entities)) {
+      if (attempted.has(id)) continue;
       const e = bot.entities[id];
       if (!e?.position || (e.name !== 'item' && e.name !== 'item_stack')) continue;
       const stack = droppedStackOf(e);
       if (item && (!stack || !matchItemName(item, stack.name))) continue;
       const d = e.position.distanceTo(me);
-      if (d <= 24 && (!nearest || d < nearest.d)) nearest = { pos: e.position, d };
+      if (d <= 24 && (!nearest || d < nearest.d)) nearest = { id, pos: e.position, d };
     }
     if (!nearest) break;
-    await gotoGoal(bot, new goals.GoalNear(nearest.pos.x, nearest.pos.y, nearest.pos.z, 0.5), ctx).catch(() => undefined);
+    attempted.add(nearest.id);
+    await gotoGoal(bot, new goals.GoalNear(nearest.pos.x, nearest.pos.y, nearest.pos.z, 0.5), ctx).catch((err) => {
+      if (err instanceof Aborted) throw err;
+      checkAbort(ctx);
+    });
     walked++;
     await sleep(300);
+    checkAbort(ctx);
   }
   const anchorNote = anchorInHandNote(bot, ctx, gainedAnchors(before, bot), '捡起来');
   // 指定物品时，验收按同一匹配规则区分目标增量与沿途拾得。
@@ -84,17 +97,20 @@ export async function skillPickup(bot: Bot, ctx: SkillContext, item?: string): P
     const along = alongside.length > 0 ? `;顺手带进包的:${alongside.join('、')}` : '';
     if (wanted.length > 0) return `捡了 ${wanted.join('、')}${along}${anchorNote}`;
     if (alongside.length > 0) {
-      return `没捡到${zhName(item)}${along.replace(/^;/, ',')}${anchorNote}`;
+      throw new SkillBlocked(`没捡到${zhName(item)}${along.replace(/^;/, ',')}${anchorNote}`);
     }
   }
   const gains = invGains(before, bot);
   if (gains.length > 0) return `捡了 ${gains.join('、')}${anchorNote}`;
-  if (walked > 0) return `走了 ${walked} 处掉落物,一样都没进包`;
+  if (walked > 0) {
+    const occupied = bot.inventory.items().length;
+    throw new SkillBlocked(`尝试靠近 ${walked} 处掉落物,一样都没进包;当前主背包占用 ${occupied}/${INVENTORY_SLOTS},空 ${Math.max(0, INVENTORY_SLOTS - occupied)} 格`);
+  }
   // 地上本来就没有可捡的 = 无事可做,不是没做成(见 SkillNoop)
   throw new SkillNoop(item ? `附近没有${zhName(item)}掉落物,包里也没多出什么` : '附近没有掉落物,包里也没多出什么');
 }
 
-/** 抛远的落点找多远(格);近端要出得了自己的拾取半径(原版 ~1 格),远端别丢到看不见的地方 */
+/** 搜索投掷方向时检查的开阔范围(格),不是物品实际落点或安全拾取距离 */
 export const TOSS_RANGE = { min: 4, max: 8 } as const;
 /** 抛远的仰角(弧度)。mineflayer 的 pitch 是**负值朝上**,抬头 30–45° 取中间偏上的 40° */
 export const TOSS_PITCH = -(40 * Math.PI) / 180;
@@ -103,10 +119,15 @@ export const TOSS_YAW_STEP = 30;
 
 /** `toss` 带 at 时的瞄准上限:手扔的抛物线大致就到这儿,再远只是把东西丢在半路 */
 export const TOSS_AIM_MAX = 8;
+/** 等服务端结算掉落与紧接着的自动拾取后，再核对背包净变化 */
+const TOSS_SETTLE_MS = 1200;
+// 空位用途的整堆丢弃要等服务端掉落物拾取窗口过去；1.2 秒会把稍后自动捡回误报为腾格成功。
+const TOSS_FREE_SLOT_SETTLE_MS = 4000;
+const recentTosses = new WeakMap<Bot, Map<string, { at: number; after: number; x: number; y: number; z: number }>>();
 
 /**
  * toss 按当前 yaw/pitch 给物品初速度，须预先转向。
- * 纯读已加载格，在 min..max 范围检查落点及头格均为空气；选最长畅通方向，同距取首。
+ * 纯读已加载格，在 min..max 范围检查头部空间是否开阔；选最长畅通方向，同距取首。
  * 无合格方向返回 null，调用方就地丢弃；不寻路或修改方块。
  */
 export function planTossThrow(bot: Bot): { yaw: number; distance: number } | null {
@@ -151,15 +172,21 @@ export async function skillToss(
   ctx: SkillContext,
 ): Promise<string> {
   const { item, count, pick } = call;
+  const protectedItem = protectedTossItem(bot, item);
+  if (protectedItem) throw new SkillBlocked(protectedItem);
+  const pickedBack = reacquiredTossNote(bot, item);
+  if (pickedBack) throw new SkillBlocked(pickedBack);
   const pred = itemPredOf(bot, item, pick);
+  const registryName = bot.inventory.items().find((stack) => pred(stack.name, stack))?.name ?? item;
   const have = invCount(bot, pred);
   if (have === 0) throw noSuchItem(bot, item, pick);
   const want = Math.min(count, have);
+  const freeingFullBagSlot = bot.inventory.items().length >= INVENTORY_SLOTS && want === have;
   let left = want;
   let tossed = 0;
   // 先转向再扔。两种瞄法:
   //   · 给了 at —— 朝那一格扔(以物易物把金锭扔到猪灵脚边就是这一形态)
-  //   · 没给 —— 自己挑一个开阔方向,让抛物线把东西送出自己的拾取半径(见 planTossThrow)
+  //   · 没给 —— 自己挑一个开阔方向;实际落点和是否会被捡回要等服务端结算
   const aim = call.at === undefined ? null : resolveAt(bot, call.at);
   let where: string;
   if (aim) {
@@ -183,7 +210,7 @@ export async function skillToss(
       await bot.look(throwTo.yaw, TOSS_PITCH, true);
     }
     where = throwTo
-      ? `,朝${yawCompass(throwTo.yaw)}抬头抛出去,那个方向 ${throwTo.distance} 格内是空的`
+      ? `,朝${yawCompass(throwTo.yaw)}抬头抛出去,前方 ${throwTo.distance} 格有开阔空间(实际落点未核验)`
       : ',周围 4–8 格没找到又空又开阔的方向,就在脚边扔的';
   }
   const picked: PickTarget[] = [];
@@ -201,9 +228,52 @@ export async function skillToss(
     if (pick !== undefined) picked.push(pickTargetOf(it, bot.registry as never));
   }
   if (tossed === 0) throw new SkillBlocked(`${zhName(item)}没扔出去`);
+  await sleep(freeingFullBagSlot ? TOSS_FREE_SLOT_SETTLE_MS : TOSS_SETTLE_MS);
+  checkAbort(ctx);
+  const netAway = have - invCount(bot, pred);
+  if (netAway <= 0) {
+    throw new SkillBlocked(`${zhName(item)}确实抛出×${tossed},但稍等后背包同类物品没有净减少;可能已自动捡回或同时拾得同类物品。不要重复 toss 腾格,改用 stow 存进容器`);
+  }
+  rememberToss(bot, registryName);
   const anchor = isSpawnAnchorBlock(item) ? anchorInHandNote(bot, ctx, [zhName(item)], '扔掉') : '';
   // 往哪边扔的照实说;没找到开阔方向时说清是就地扔的(否则她会以为东西在几格外)
-  return `扔掉了${picked.length > 0 ? pickedText(picked) : zhName(item)}×${tossed}${where}${anchor}`;
+  const netNote = `;稍等后背包同类物品净少${netAway}/${tossed}`;
+  const pickupNote = aim ? '' : ';之后走近仍可能自动捡回。要稳定腾背包格请用 stow 存入容器';
+  return `从背包抛出了${picked.length > 0 ? pickedText(picked) : zhName(item)}×${tossed}${where}${anchor}${netNote}${pickupNote}`;
+}
+
+/** 抛出后又自动捡回的同种物品，不能继续当作腾格手段。 */
+export function reacquiredTossNote(bot: Bot, item: string): string | null {
+  if (typeof bot.inventory?.items !== 'function') return null;
+  const stack = bot.inventory.items().find((candidate) => matchItemName(item, candidate.name));
+  if (!stack) return null;
+  const prior = recentTosses.get(bot)?.get(stack.name);
+  if (!prior || Date.now() - prior.at >= 120_000) return null;
+  const pos = bot.entity?.position;
+  if (!pos || Math.hypot(pos.x - prior.x, pos.y - prior.y, pos.z - prior.z) > 8) return null;
+  const now = invCount(bot, (name) => name === stack.name);
+  return now > prior.after
+    ? `${zhName(stack.name)}刚抛出又回到背包；原地重复 toss 腾不出稳定空格，请换储物或回收方式`
+    : null;
+}
+
+function rememberToss(bot: Bot, name: string): void {
+  const pos = bot.entity.position;
+  let map = recentTosses.get(bot);
+  if (!map) { map = new Map(); recentTosses.set(bot, map); }
+  map.set(name, { at: Date.now(), after: invCount(bot, (candidate) => candidate === name),
+    x: pos.x, y: pos.y, z: pos.z });
+}
+
+/** 抛物按物品类型选槽；同类型有定制物品时无法保证扔的是普通那件。 */
+export function protectedTossItem(bot: Bot, item: string): string | null {
+  if (typeof bot.inventory?.items !== 'function') return null;
+  const candidates = bot.inventory.items().filter((stack) => matchItemName(item, stack.name));
+  const special = candidates.find((stack) => itemCustomName(stack)
+    || itemProfileSkinHash(stack as unknown as Parameters<typeof itemProfileSkinHash>[0]));
+  if (!special) return null;
+  const name = itemCustomName(special) ?? zhName(special.name);
+  return `${zhName(item)}中有带专属名称或纹理的${name}；抛物按类型选槽，可能误丢重要道具。这件物品不允许 toss，请改存到有空位的容器`;
 }
 
 /** 一次开窗里存一样东西的账 */
@@ -220,6 +290,9 @@ export interface StowEntry {
   /** 开窗前那本账(开着窗 bot.inventory 是冻的),关窗后拿它对账 */
   invBefore: number;
   deposited: number;
+  /** 每步前后箱内同类物品的增量；库存回灌缺失时用它裁决。 */
+  chestBefore: number;
+  chestDelta: number;
   /** 点不动的时候服务端/mineflayer 给的原话,翻好了带进回执:不拿猜测顶替 */
   failure: string | null;
   snap: ReturnType<typeof rememberChest>;
@@ -228,12 +301,13 @@ export interface StowEntry {
 /** 一次开窗最多并几步:并太多这扇窗要开很久,反射抢占的窗口也跟着变大 */
 export const STOW_BATCH_MAX = 6;
 
-/** 相邻 stow 仅在 orderForStow 仍选同一首选箱子时共用窗口，不改变选箱策略。 */
+/** 相邻 stow 指向同一箱子时共用窗口，不改变每一步的存放目标。 */
 export function collectStowBatch(
   bot: Bot,
   ctx: SkillContext,
   found: Parameters<typeof orderForStow>[0],
   target: { x: number; y: number; z: number },
+  at?: Anchor,
 ): Array<{ stepIndex: number; item: string; count: number; pick?: string }> {
   const b = ctx.batch;
   const out: Array<{ stepIndex: number; item: string; count: number; pick?: string }> = [];
@@ -241,12 +315,16 @@ export function collectStowBatch(
   for (let i = b.index + 1; i < b.steps.length && out.length < STOW_BATCH_MAX - 1; i++) {
     const s = b.steps[i];
     if (s.skill !== 'stow') break;
+    if (s.into === 'open') break;
+    if ((s.at === undefined) !== (at === undefined)) break;
     // 她自己写了闸门或判据的步不并:并进来就等于替她跳过 needs、替她免掉 expect 裁决。
     // 缺省的因果闸不用管——它拦的是「上游没产出」,而下一行的包里没有正好覆盖那种情况。
     if (s.needs !== undefined || s.expect !== undefined) break;
     // 包里没有这样东西:别并,让它自己跑自己报「包里没有X」
     if (invCount(bot, itemPredOf(bot, s.item, s.pick)) === 0) break;
-    const chest = orderForStow(found, ctx, bot, s.item)[0];
+    const chest = s.at === undefined
+      ? orderForStow(found, ctx, bot, s.item)[0]
+      : resolveAt(bot, s.at);
     if (!chest || chest.x !== target.x || chest.y !== target.y || chest.z !== target.z) break;
     out.push({ stepIndex: i, item: s.item, count: s.count, ...(s.pick ? { pick: s.pick } : {}) });
   }
@@ -285,10 +363,10 @@ export function stowReceipt(
     return { ok: true, text: `${head},没来得及对账就被打断了,存没存进以箱里为准${tail}` };
   }
   if (conf.status === 'timeout') {
-    return {
-      ok: true,
-      text: `${head},但关窗后包里的账没跟着变(服务端没回灌确认),存没存进以箱里为准${tail}`,
-    };
+    if (e.chestDelta >= e.deposited) {
+      return { ok: true, text: `${head};关窗后包里没回灌确认,箱内同类物品多了 ${e.chestDelta} 个${tail}` };
+    }
+    return { ok: false, text: `${where}尝试存${what}×${e.deposited},关窗后包里没少,箱内同类物品只多了 ${e.chestDelta} 个;这一步未确认成功${tail}` };
   }
   if (conf.status === 'rolled-back') {
     return { ok: false, text: `往${where}存${name}×${e.deposited}被服务端收回了,包里一个都没少${tail}` };
@@ -306,24 +384,67 @@ export async function skillStow(
   bot: Bot, call: Extract<SkillCall, { skill: 'stow' }>, ctx: SkillContext,
 ): Promise<string> {
   const { item, count, pick } = call;
+  if (call.at !== undefined && call.into === 'open') {
+    throw new SkillBlocked('stow 的 at 与 into:open 只能选一个');
+  }
   if (invCount(bot, itemPredOf(bot, item, pick)) === 0) throw noSuchItem(bot, item, pick);
-  const found = findContainers(bot, 32);
+  if (call.into === 'open') return stowIntoOpenWindow(bot, call, ctx);
+  const found = call.at === undefined ? findContainers(bot, 32) : (() => {
+    const cell = resolveAt(bot, call.at!);
+    const block = bot.blockAt(new Vec3(cell.x, cell.y, cell.z));
+    if (!block) throw new SkillBlocked(`指定的 (${cell.x}, ${cell.y}, ${cell.z}) 方块数据尚未加载;先走近或用 find chest 找已可见的箱子`);
+    if (!CONTAINER_FIND.includes(block.name)) {
+      const stale = ctx.chests?.forget(dimensionOf(bot), cell) ?? false;
+      throw new SkillBlocked(`指定的 (${cell.x}, ${cell.y}, ${cell.z}) 实际是${zhName(block.name)},不是储物箱;用 find chest 找已可见的箱子`
+        + (stale ? ';已从仓储账移除这个过期坐标' : ''));
+    }
+    const d = bot.entity.position.distanceTo(new Vec3(cell.x, cell.y, cell.z));
+    if (d > 32) throw new SkillBlocked(`指定储物箱距离 ${Math.round(d)} 格;先走到 32 格内再存`);
+    return [{ x: cell.x, y: cell.y, z: cell.z, name: block.name, d }];
+  })();
   if (found.length === 0) throw noContainerNearby(bot, ctx);
-  const target = orderForStow(found, ctx, bot, item)[0];
+  const show = new ShowPacer(ctx.showTempo?.() ?? null);
+  let target: (typeof found)[number] | undefined;
+  let chest: Awaited<ReturnType<Bot['openContainer']>> | undefined;
+  const failures: string[] = [];
+  const ordered = call.at === undefined ? orderForStow(found, ctx, bot, item) : found;
+  for (const candidate of ordered.slice(0, AUTO_CONTAINER_OPEN_LIMIT)) {
+    checkAbort(ctx);
+    const candidateWhere = `(${candidate.x}, ${candidate.y}, ${candidate.z}) 的${zhName(candidate.name)}`;
+    let opened: Awaited<ReturnType<Bot['openContainer']>>;
+    try {
+      await show.openGap();
+      opened = await openNearbyContainer(bot, candidate, ctx);
+    } catch (err) {
+      if (err instanceof Aborted) throw err;
+      const why = zhErrorText((err as Error).message);
+      rememberStorageAccessFailure(bot, candidate, why);
+      failures.push(`${candidateWhere}打不开:${why}`);
+      continue;
+    }
+    const menu = selectionMenuTitle(opened.title);
+    if (menu) {
+      opened.close();
+      rememberNonStorageMenu(bot, candidate);
+      failures.push(`${candidateWhere}打开的是${menu}选择菜单`);
+      ctx.diag?.write({ lane: 'skill', event: 'stow-menu-skip', taskId: ctx.taskId,
+        msg: `${candidateWhere}打开的是${menu}，跳过并寻找普通箱子`, data: { at: candidate, menu } });
+      continue;
+    }
+    clearStorageMenu(bot, candidate);
+    target = candidate;
+    chest = opened;
+    break;
+  }
+  if (!target || !chest) {
+    const prior = found.map((spot) => storageSkipReason(bot, spot, item)).filter((why): why is string => why !== null);
+    throw new SkillBlocked(`附近没有当前可存物的容器:${[...failures, ...prior].slice(0, 4).join('；') || '未找到可用目标'}。换站位或容器后可再试`);
+  }
   const where = `(${target.x}, ${target.y}, ${target.z}) 的${zhName(target.name)}`;
   const plan: Array<{ stepIndex: number | null; item: string; count: number; pick?: string }> = [
     { stepIndex: null, item, count, ...(pick ? { pick } : {}) },
-    ...collectStowBatch(bot, ctx, found, target),
+    ...collectStowBatch(bot, ctx, found, target, call.at),
   ];
-  const show = new ShowPacer(ctx.showTempo?.() ?? null);
-  let chest;
-  try {
-    await show.openGap();
-    chest = await openNearbyContainer(bot, target, ctx);
-  } catch (err) {
-    if (err instanceof Aborted || err instanceof SkillBlocked) throw err;
-    throw new SkillBlocked(`打不开 ${where}: ${zhErrorText((err as Error).message)}`);
-  }
   const entries: StowEntry[] = [];
   /** 抢占落在半路:已经点进去的那几样照样要关窗对账、照样要落回执,不能当没发生过 */
   let aborted: Aborted | null = null;
@@ -336,6 +457,9 @@ export async function skillStow(
       const e: StowEntry = {
         stepIndex: p.stepIndex, item: p.item, count: p.count, pick: p.pick, pred, picked: [],
         invBefore: invCount(bot, pred), deposited: 0, failure: null,
+        chestBefore: containerStacks(chest, bot.registry as never).items
+          .filter((stack) => matchItemName(p.item, stack.name)).reduce((sum, stack) => sum + stack.count, 0),
+        chestDelta: 0,
         snap: { items: [], usedSlots: 0, slots: 27 },
       };
       entries.push(e);
@@ -374,6 +498,9 @@ export async function skillStow(
       }
       // 每样各存一份关窗时刻的箱内容:三条回执同刻送达,各说各那一步做完时箱里有什么
       e.snap = rememberChest(ctx, bot, target, chest);
+      e.chestDelta = Math.max(0, e.snap.items
+        .filter((stack) => matchItemName(p.item, stack.name)).reduce((sum, stack) => sum + stack.count, 0)
+        - e.chestBefore);
       if (aborted) break;
     }
     await show.beat('close');
@@ -399,7 +526,8 @@ export async function skillStow(
       msg: `${where}:窗口里点走${zhName(e.item)} ${e.deposited} 个,关窗后包里少了 ${conf?.moved ?? 0} 个`,
       data: {
         at: target, item: e.item, want: Math.min(e.count, e.invBefore), deposited: e.deposited,
-        confirmed: conf?.moved ?? 0, status: conf?.status ?? 'none', failure: e.failure,
+        confirmed: conf?.moved ?? 0, chestDelta: e.chestDelta,
+        status: conf?.status ?? 'none', failure: e.failure,
         batchedInto: e.stepIndex === null ? null : (ctx.batch?.index ?? null),
       },
     });
@@ -408,15 +536,16 @@ export async function skillStow(
       .filter((x) => matchItemName(e.item, x.item) || matchItemName(x.item, e.item))
       .reduce((n, x) => n + x.deposited, 0);
     const r = stowReceipt(where, e, conf, windowTotal);
+    if (r.ok && conf?.status === 'confirmed') clearStorageWriteFailure(bot, target, e.item);
+    else if (!r.ok) rememberStorageWriteFailure(bot, target, e.item, e.failure ?? r.text);
     done.push({ e, ...r });
   }
 
-  // 并进来的步:成了才登记(登记的那一步不会再跑)。没成的不登记——它自己跑一趟,
-  // 自己报自己的理由;它一格都没动过,重跑不会重复扣料。
+  // 同窗后续步骤复用这次窗口的实际下场。拒绝后立刻重开会撞上服务端库存回灌竞态。
   const first = done[0];
   for (const d of done.slice(1)) {
-    if (!d.ok || d.e.stepIndex === null) continue;
-    ctx.batch?.absorb(d.e.stepIndex, `(跟第 ${(ctx.batch.index ?? 0) + 1} 步同一次开窗)${d.text}`);
+    if (d.e.stepIndex === null) continue;
+    ctx.batch?.absorb(d.e.stepIndex, `(跟第 ${(ctx.batch.index ?? 0) + 1} 步同一次开窗)${d.text}`, d.ok);
   }
   if (aborted) throw aborted;
   if (!first.ok) throw new SkillBlocked(first.text);
@@ -425,10 +554,212 @@ export async function skillStow(
   return `${first.text}${anchor}`;
 }
 
+/** 存进已经打开的服务端容器窗口；物品名和位置都从窗口读，不猜玩家头或槽位。 */
+async function awaitCurrentWindow(bot: Bot, ctx: SkillContext): Promise<Bot['currentWindow']> {
+  for (let attempt = 0; attempt < 15 && !bot.currentWindow; attempt++) {
+    checkAbort(ctx);
+    await sleep(100);
+  }
+  checkAbort(ctx);
+  return bot.currentWindow;
+}
+
+/** Never send a click to a replacement window, including within an absorbed batch. */
+function requireSameWindow(bot: Bot, win: NonNullable<Bot['currentWindow']>): void {
+  if (bot.currentWindow !== win) throw new SkillBlocked(
+    '容器窗口已关闭或被替换，不能继续本次存取或整理', [], 'local', 'container-window-changed');
+}
+
+type CompactStack = { type: number; metadata?: number; count: number; stackSize?: number;
+  nbt?: unknown; components?: unknown; removedComponents?: unknown; name?: string };
+
+/** 1.20.6 物品组件决定能否堆叠；仅比较 type/name 会把不同附魔或自定义物品混为一谈。 */
+export function compactStackKey(item: CompactStack): string {
+  return JSON.stringify([item.type, item.metadata ?? 0, item.nbt ?? null,
+    item.components ?? [], item.removedComponents ?? []]);
+}
+
+/** 只整理已打开容器的槽位，不碰玩家背包，也不丢弃或改造装备。 */
+export async function skillCompact(bot: Bot, ctx: SkillContext): Promise<string> {
+  const win = await awaitCurrentWindow(bot, ctx);
+  if (!win || win.inventoryStart <= 0 || win.inventoryEnd <= win.inventoryStart) {
+    throw new SkillBlocked('当前没有打开可整理的容器；先用 use 打开箱子，或输入服务端提供的打开仓库命令');
+  }
+  const menu = selectionMenuTitle(win.title);
+  if (menu) {
+    bot.closeWindow(win);
+    throw new SkillBlocked(`${menu}是选择菜单，图标不是实际物品，不能整理`);
+  }
+  requireSameWindow(bot, win);
+  ctx.holdWindow?.(win);
+  const cells = win.slots as Array<CompactStack | null>;
+  const limit = win.inventoryStart;
+  const free = (): number => cells.slice(0, limit).filter((s) => !s).length;
+  const beforeFree = free();
+  let merges = 0;
+  let failure: string | null = null;
+  const keepOpen = consumesOpenWindow(ctx.batch?.steps[ctx.batch.index + 1]);
+  let completed = false;
+  try {
+    for (let dest = 0; dest < limit; dest++) {
+      checkAbort(ctx);
+      requireSameWindow(bot, win);
+      const target = cells[dest];
+      if (!target) continue;
+      const max = target.stackSize ?? (bot.registry.itemsByName as Record<string, { stackSize?: number }> | undefined)
+        ?.[target.name ?? '']?.stackSize ?? 1;
+      if (max <= 1 || target.count >= max) continue;
+      const key = compactStackKey(target);
+      for (let source = dest + 1; source < limit && cells[dest]?.count! < max; source++) {
+        checkAbort(ctx);
+        requireSameWindow(bot, win);
+        const stack = cells[source];
+        if (!stack || compactStackKey(stack) !== key) continue;
+        const before = cells[source]?.count ?? 0;
+        try { await bot.moveSlotItem(source, dest); }
+        catch (error) {
+          if (error instanceof Aborted || (error instanceof SkillBlocked && error.code === 'container-window-changed')) throw error;
+          failure = zhErrorText((error as Error).message); break;
+        }
+        requireSameWindow(bot, win);
+        if ((cells[source]?.count ?? 0) < before) merges++;
+      }
+      if (failure) break;
+    }
+    completed = failure === null;
+    if (completed && keepOpen) ctx.holdWindow?.(win);
+  } finally {
+    if (bot.currentWindow === win && (!completed || !keepOpen || ctx.aborted())) bot.closeWindow(win);
+  }
+  const afterFree = free();
+  ctx.diag?.write({ lane: 'skill', event: 'container-compact', taskId: ctx.taskId,
+    msg: `容器整理:合堆 ${merges} 次，空格 ${beforeFree}→${afterFree}`,
+    data: { merges, beforeFree, afterFree, failure },
+  });
+  return `容器同类物品合堆 ${merges} 次，空格 ${beforeFree}→${afterFree}`
+    + (failure ? `；有点击未完成:${failure}` : '')
+    + (afterFree === 0 ? '；已无可合并的物品，需把多余装备取到其他仓库才能继续收奖励' : '；重新打开奖励箱可领取待入箱奖励');
+}
+
+export async function stowIntoOpenWindow(
+  bot: Bot, call: Extract<SkillCall, { skill: 'stow' }>, ctx: SkillContext,
+): Promise<string> {
+  const win = await awaitCurrentWindow(bot, ctx);
+  if (!win || win.inventoryStart <= 0 || win.inventoryEnd <= win.inventoryStart) {
+    throw new SkillBlocked('当前没有打开可存东西的容器窗口;先用 use 打开要存入的物品或容器');
+  }
+  const menu = selectionMenuTitle(win.title);
+  if (menu) {
+    bot.closeWindow(win);
+    throw new SkillBlocked(`${menu}是领奖或选择菜单，槽位图标是按钮，不是可存放物品的容器；改用真正可存放的箱子`);
+  }
+  requireSameWindow(bot, win);
+  ctx.holdWindow?.(win);
+  const view = playerInvIn(bot, win);
+  const plan: Array<{ stepIndex: number | null; call: Extract<SkillCall, { skill: 'stow' }> }> = [
+    { stepIndex: null, call },
+  ];
+  const batch = ctx.batch;
+  if (batch) {
+    const names = [call.item];
+    for (let i = batch.index + 1; i < batch.steps.length; i++) {
+      const next = batch.steps[i];
+      if (next.skill !== 'stow' || next.into !== 'open' || next.needs !== undefined || next.expect !== undefined) break;
+      if (names.some((name) => matchItemName(name, next.item) || matchItemName(next.item, name))) break;
+      plan.push({ stepIndex: i, call: next });
+      names.push(next.item);
+    }
+  }
+  const entries: Array<{
+    stepIndex: number | null; item: string; pick?: string; pred: InvPred;
+    before: number; wanted: number; moved: number; failure: string | null;
+  }> = [];
+  const lastIndex = plan.at(-1)?.stepIndex ?? batch?.index;
+  let retained = lastIndex !== undefined && consumesOpenWindow(batch?.steps[lastIndex + 1]);
+  let transfersCompleted = false;
+  try {
+    for (const step of plan) {
+      requireSameWindow(bot, win);
+      const pred = itemPredOf(bot, step.call.item, step.call.pick);
+      const entry = {
+        stepIndex: step.stepIndex, item: step.call.item, pick: step.call.pick, pred,
+        before: invCountIn(view, pred), wanted: Math.min(step.call.count, invCountIn(view, pred)),
+        moved: 0, failure: null as string | null,
+      };
+      entries.push(entry);
+      while (entry.moved < entry.wanted) {
+        checkAbort(ctx);
+        requireSameWindow(bot, win);
+        const next = view.items().find((it) => pred(it.name, it));
+        if (!next) break;
+        const amount = Math.min(next.count, entry.wanted - entry.moved);
+        const old = invCountIn(view, pred);
+        try {
+          if (entry.pick && next.count === 1) {
+            const empty = win.slots.slice(0, win.inventoryStart).findIndex((it) => it === null);
+            if (empty < 0) { entry.failure = '容器没有空格了'; break; }
+            await moveExactSlot(bot, next.slot, empty);
+          } else {
+            await bot.transfer({ window: win, itemType: next.type, metadata: next.metadata ?? null,
+              count: amount, sourceStart: win.inventoryStart, sourceEnd: win.inventoryEnd,
+              destStart: 0, destEnd: win.inventoryStart });
+          }
+        } catch (err) {
+          if (err instanceof Aborted || (err instanceof SkillBlocked && err.code === 'container-window-changed')) throw err;
+          entry.failure = zhErrorText((err as Error).message);
+          break;
+        }
+        requireSameWindow(bot, win);
+        const delta = old - invCountIn(view, pred);
+        if (delta <= 0) { entry.failure = '窗口里一格都没动'; break; }
+        entry.moved += delta;
+      }
+    }
+    transfersCompleted = true;
+  } finally {
+    retained &&= transfersCompleted && !ctx.aborted()
+      && entries.every((entry) => entry.moved > 0 && entry.failure === null);
+    if (bot.currentWindow === win && !retained) bot.closeWindow(win);
+  }
+  let first: { text: string; ok: boolean } | null = null;
+  let completed = false;
+  let allOk = true;
+  try {
+    for (const entry of entries) {
+      let result: { text: string; ok: boolean };
+      if (entry.wanted <= 0) {
+        result = { ok: false, text: noSuchItem(bot, entry.item, entry.pick).message };
+      } else if (entry.moved <= 0) {
+        result = { ok: false, text: `当前窗口没有存进${zhName(entry.item)}:${entry.failure ?? '可能已经满了或服务端拒绝了'}` };
+      } else {
+        const conf = await awaitInvConfirm(() => {
+          if (!retained) return invCount(bot, entry.pred);
+          if (bot.currentWindow !== win) throw new SkillBlocked('存物对账时容器窗口已关闭或被替换，不能确认本次存入',
+            [], 'local', 'container-window-changed');
+          return invCountIn(view, entry.pred);
+        }, entry.before, -1, ctx, retained ? WINDOW_SETTLE_MS : 0);
+        result = conf.status === 'confirmed'
+          ? { ok: true, text: `往当前打开的容器存了${zhName(entry.item)}×${conf.moved}`
+            + (retained ? '；当前窗口玩家槽已稳定减少，保持窗口供下一步使用' : '') }
+          : { ok: false, text: `窗口里尝试存${zhName(entry.item)}×${entry.moved},${retained ? '当前窗口玩家槽' : '关窗后背包'}没确认减少(${conf.status});不能算存成` };
+      }
+      allOk &&= result.ok;
+      if (entry.stepIndex === null) first = result;
+      else batch?.absorb(entry.stepIndex, `(跟第 ${batch.index + 1} 步同一次开窗)${result.text}`, result.ok);
+    }
+    if (!first?.ok) throw new SkillBlocked(first!.text, [], 'local',
+      retained ? 'container-window-rollback' : undefined);
+    completed = true;
+    if (retained && allOk) ctx.holdWindow?.(win);
+    return first.text;
+  } finally {
+    if (bot.currentWindow === win && (!completed || !allOk || ctx.aborted())) bot.closeWindow(win);
+  }
+}
+
 /**
- * take 的 at 形态:点名哪一格容器。炉子族走 openFurnace(输出 + 没烧完的料 + 剩的
- * 燃料),箱子族走 openContainer(不带 item 就整箱掏空)。提前取不是灾难——拿到几个
- * 算几个,槽里现在有几个照实说。
+ * take 的 at 形态:点名哪一格容器。炉子有输入原料时 all:true 只取输出；
+ * 点名 item 可取回原料或燃料。箱子族走 openContainer。
  */
 export async function skillTakeAt(
   bot: Bot,
@@ -443,7 +774,9 @@ export async function skillTakeAt(
   if (FURNACE_KINDS.has(block.name)) return takeFromFurnace(bot, call, cell, block, ctx);
   if (block.name === 'brewing_stand') return takeFromBrewingStand(bot, call, cell, block, ctx);
   if (CONTAINER_FIND.includes(block.name)) return takeFromChestAt(bot, call, cell, block, ctx);
-  throw new SkillBlocked(`${cellText(cell)} 那一格是${zhName(block.name)},不是箱子、炉子或酿造台,take 掏不了它`);
+  const stale = ctx.chests?.forget(dimensionOf(bot), cell) ?? false;
+  throw new SkillBlocked(`${cellText(cell)} 那一格是${zhName(block.name)},不是箱子、炉子或酿造台,take 掏不了它`
+    + (stale ? ';已从仓储账移除这个过期坐标' : ''));
 }
 
 /** 关窗之后等包里的账跟上:多种东西一起取时对着这几样的总数等 */
@@ -476,10 +809,14 @@ export async function takeFromFurnace(
     throw new SkillBlocked(`打不开 ${where}: ${zhErrorText((err as Error).message)}`);
   }
   const before = invSnapshot(bot);
-  const pred: InvPred | null = call.item ? itemPredOf(bot, call.item, call.pick) : null;
+  const pred: InvPred | null = call.item
+    ? (name, stack) => matchMaterialName(bot.registry, call.item!, name)
+      && itemMatchesPick(call.pick, stack, bot.registry as never)
+    : null;
   const parts: string[] = [];
   const takenNames = new Set<string>();
   let leftBehind: string | null = null;
+  let pendingInput: string | null = null;
   try {
     await show.beat('open');
     const grab = async (
@@ -502,8 +839,14 @@ export async function takeFromFurnace(
       }
     };
     await grab('输出槽的', () => furnace.outputItem() ?? null, () => furnace.takeOutput());
-    await grab('没烧完的', () => furnace.inputItem() ?? null, () => furnace.takeInput());
-    await grab('没烧掉的燃料', () => furnace.fuelItem() ?? null, () => furnace.takeFuel());
+    const input = furnace.inputItem();
+    if (call.all && input) {
+      pendingInput = `${zhName(input.name)}×${input.count}`;
+      leftBehind = `输入槽还有${pendingInput},原料和燃料留在炉里;要收回请用 take 的 item+count 点名`;
+    } else {
+      await grab('没烧完的', () => furnace.inputItem() ?? null, () => furnace.takeInput());
+      await grab('没烧掉的燃料', () => furnace.fuelItem() ?? null, () => furnace.takeFuel());
+    }
     // 槽位剩什么重新入账;估时还需确认炉火与进度。
     const state = {
       input: furnace.inputItem() ?? null,
@@ -526,7 +869,9 @@ export async function takeFromFurnace(
   });
   if (parts.length === 0) {
     throw new SkillBlocked(
-      call.item
+      pendingInput
+        ? `${where}没有取出输出槽物品;${leftBehind}`
+        : call.item
         ? `${where}三个槽里没有${zhName(call.item)}${leftBehind ? `(${leftBehind})` : ''}`
         : `${where}三个槽都是空的,没东西可取`,
     );
@@ -631,7 +976,153 @@ export async function takeFromChestAt(
   return `${head}。${inside}`;
 }
 
+/** 当前已打开的容器窗口是取物来源；不走世界里的箱子搜索与寻路。 */
+export async function takeFromOpenWindow(
+  bot: Bot, call: Extract<SkillCall, { skill: 'take' }>, ctx: SkillContext,
+): Promise<string> {
+  const win = await awaitCurrentWindow(bot, ctx);
+  if (!win || win.inventoryStart <= 0 || win.inventoryEnd <= win.inventoryStart) {
+    throw new SkillBlocked('当前没有打开可取东西的容器窗口;先用 use 打开要取物的窗口');
+  }
+  const menu = selectionMenuTitle(win.title);
+  if (menu) {
+    bot.closeWindow(win);
+    throw new SkillBlocked(`${menu}是选择菜单，槽位图标是按钮，不是可取走的物品；请使用菜单操作或服务端提供的文字命令`);
+  }
+  requireSameWindow(bot, win);
+  ctx.holdWindow?.(win);
+  const view = playerInvIn(bot, win);
+  const plan: Array<{ stepIndex: number | null; call: Extract<SkillCall, { skill: 'take' }> }> = [
+    { stepIndex: null, call },
+  ];
+  const batch = ctx.batch;
+  if (batch) {
+    const names = [call.item!];
+    for (let i = batch.index + 1; i < batch.steps.length; i++) {
+      const next = batch.steps[i];
+      if (next.skill !== 'take' || next.from !== 'open' || next.needs !== undefined || next.expect !== undefined) break;
+      if (names.some((name) => matchItemName(name, next.item!) || matchItemName(next.item!, name))) break;
+      plan.push({ stepIndex: i, call: next });
+      names.push(next.item!);
+    }
+  }
+  const entries: Array<{
+    stepIndex: number | null; item: string; pick?: string; pred: InvPred;
+    before: number; wanted: number; moved: number; failure: string | null;
+    observed: ReturnType<typeof containerStacks>;
+  }> = [];
+  const lastIndex = plan.at(-1)?.stepIndex ?? batch?.index;
+  let retained = lastIndex !== undefined && consumesOpenWindow(batch?.steps[lastIndex + 1]);
+  let transfersCompleted = false;
+  try {
+    for (const step of plan) {
+      requireSameWindow(bot, win);
+      const item = step.call.item!;
+      const pred = itemPredOf(bot, item, step.call.pick);
+      const entry = {
+        stepIndex: step.stepIndex, item, pick: step.call.pick, pred,
+        before: invCountIn(view, pred), wanted: step.call.count ?? 1,
+        moved: 0, failure: null as string | null,
+        observed: containerStacks(win, bot.registry as never),
+      };
+      entries.push(entry);
+      while (entry.moved < entry.wanted) {
+        checkAbort(ctx);
+        requireSameWindow(bot, win);
+        const source = win.slots.findIndex((it, i) => i < win.inventoryStart && it && pred(it.name, it));
+        if (source < 0) break;
+        const stack = win.slots[source]!;
+        const amount = Math.min(stack.count, entry.wanted - entry.moved);
+        const old = invCountIn(view, pred);
+        try {
+          if (entry.pick && stack.count === 1) {
+            const destination = win.slots.findIndex((it, i) => i >= win.inventoryStart && i < win.inventoryEnd && it === null);
+            if (destination < 0) { entry.failure = '背包里没有空格了'; break; }
+            await moveExactSlot(bot, source, destination);
+          } else {
+            await bot.transfer({ window: win, itemType: stack.type, metadata: stack.metadata ?? null,
+              count: amount, sourceStart: 0, sourceEnd: win.inventoryStart,
+              destStart: win.inventoryStart, destEnd: win.inventoryEnd });
+          }
+        } catch (err) {
+          if (err instanceof Aborted || (err instanceof SkillBlocked && err.code === 'container-window-changed')) throw err;
+          entry.failure = zhErrorText((err as Error).message);
+          break;
+        }
+        requireSameWindow(bot, win);
+        const delta = invCountIn(view, pred) - old;
+        if (delta <= 0) { entry.failure = '窗口里一格都没动'; break; }
+        entry.moved += delta;
+      }
+    }
+    transfersCompleted = true;
+  } finally {
+    retained &&= transfersCompleted && !ctx.aborted()
+      && entries.every((entry) => entry.moved > 0 && entry.failure === null);
+    if (bot.currentWindow === win && !retained) {
+      bot.closeWindow(win);
+      // 服务端自定义大背包关窗后若立即打开地面箱，后一窗口偶发超时。
+      // 等关窗同步过一拍，再让同一任务后续的 stow 开下一个容器。
+      await sleep(WINDOW_SETTLE_MS);
+    }
+  }
+  let first: { text: string; ok: boolean; server: boolean } | null = null;
+  let completed = false;
+  let allOk = true;
+  try {
+    for (const entry of entries) {
+      let result: { text: string; ok: boolean; server: boolean };
+      if (entry.moved <= 0) {
+        // Some server-backed windows apply the click only when closed. The window
+        // mirror may report no movement even though the confirmed player bag gained
+        // the item; use the final inventory ledger before declaring a failed take.
+        const bagKnown = inventoryReadConfirmed(bot);
+        const gained = bagKnown ? Math.max(0, invCount(bot, entry.pred) - entry.before) : 0;
+        result = gained > 0
+          ? { ok: true, server: false,
+            text: `关窗后包里多了${zhName(entry.item)}×${gained}(窗口点击回执延迟)` }
+          : { ok: false, server: false,
+            text: `当前窗口没取到${itemAsked(entry.item, entry.pick)}${entry.failure ? `:${entry.failure}` : ''}`
+              + itemIdHint(bot, entry.item, entry.observed.items)
+              + `;实际容器里有:${contentsText(entry.observed.items, true).split('、').slice(0, 8).join('、')}`
+              + `${entry.observed.items.length > 8 ? '等' : ''}`
+              + (bagKnown
+                ? `;包里已有该物品×${entry.before}。以当前开窗和背包为准，别据旧公告重复取；改取窗口现有物品或做别的事`
+                : '；背包玩家槽未完整同步，已有数量待核对；先以当前窗口内容为准') };
+      } else {
+        const conf = await awaitInvConfirm(() => {
+          if (!retained) return invCount(bot, entry.pred);
+          if (bot.currentWindow !== win) throw new SkillBlocked('取物对账时容器窗口已关闭或被替换，不能确认本次取出',
+            [], 'local', 'container-window-changed');
+          return invCountIn(view, entry.pred);
+        }, entry.before, 1, ctx, retained ? WINDOW_SETTLE_MS : 0);
+        const head = `从当前窗口取出${zhName(entry.item)}×${entry.moved}`
+          + (entry.moved < entry.wanted ? `(要 ${entry.wanted} 个${entry.failure ? `,${entry.failure}` : ''})` : '');
+        result = conf.status === 'rolled-back'
+          ? { ok: false, server: true, text: `${head};但被服务端收回了,包里没多` }
+          : conf.status === 'timeout'
+            ? retained
+              ? { ok: false, server: false, text: `${head};当前窗口玩家槽未确认增加，不能继续依赖取物的步骤` }
+              : { ok: true, server: false, text: `${head};关窗后包里的账还没跟着变(服务端没回灌确认),以包里为准` }
+            : { ok: true, server: false, text: `${head};${retained ? '当前窗口玩家槽稳定增加' : '包里多了'} ${conf.moved} 个`
+              + (retained ? '，保持窗口供下一步使用' : '') };
+      }
+      allOk &&= result.ok;
+      if (entry.stepIndex === null) first = result;
+      else batch?.absorb(entry.stepIndex, `(跟第 ${batch.index + 1} 步同一次开窗)${result.text}`, result.ok);
+    }
+    if (!first?.ok) throw new SkillBlocked(first!.text, [], first!.server ? 'server' : 'local',
+      retained ? 'container-window-rollback' : undefined);
+    completed = true;
+    if (retained && allOk) ctx.holdWindow?.(win);
+    return first.text;
+  } finally {
+    if (bot.currentWindow === win && (!completed || !allOk || ctx.aborted())) bot.closeWindow(win);
+  }
+}
+
 export async function skillTake(bot: Bot, call: Extract<SkillCall, { skill: 'take' }>, ctx: SkillContext): Promise<string> {
+  if (call.from === 'open') return takeFromOpenWindow(bot, call, ctx);
   if (call.at) return skillTakeAt(bot, call, ctx);
   const item = call.item!; // parse 保证:没有 at 就一定有 item
   const count = call.count ?? 1;
@@ -646,7 +1137,7 @@ export async function skillTake(bot: Bot, call: Extract<SkillCall, { skill: 'tak
   let noRoom = false;
   // 巡回取最多开 3 口箱:一单共享一份节拍预算,不按箱翻倍
   const show = new ShowPacer(ctx.showTempo?.() ?? null);
-  for (const target of ordered.slice(0, 3)) {
+  for (const target of ordered.slice(0, AUTO_CONTAINER_OPEN_LIMIT)) {
     if (got >= count) break;
     checkAbort(ctx);
     const at = `(${target.x}, ${target.y}, ${target.z})`;
@@ -656,9 +1147,19 @@ export async function skillTake(bot: Bot, call: Extract<SkillCall, { skill: 'tak
       chest = await openNearbyContainer(bot, target, ctx);
     } catch (err) {
       if (err instanceof Aborted) throw err;
-      notes.push(`${at} 打不开`);
+      const why = zhErrorText((err as Error).message);
+      rememberStorageAccessFailure(bot, target, why);
+      notes.push(`${at} 打不开:${why}`);
       continue;
     }
+    const menu = selectionMenuTitle(chest.title);
+    if (menu) {
+      chest.close();
+      rememberNonStorageMenu(bot, target);
+      notes.push(`${at} 打开的是${menu}选择菜单`);
+      continue;
+    }
+    clearStorageMenu(bot, target);
     // 开窗期间 bot.inventory 冻在开窗前那本账,正好是 close() 之后要对的账底
     const invBefore = invCount(bot, pred);
     let took = 0;
@@ -768,7 +1269,7 @@ export async function skillTake(bot: Bot, call: Extract<SkillCall, { skill: 'tak
 /** 输入槽只有一格:同一次只烧一种,包里符合的挑最多的那一摞 */
 export function pickSmeltInput(bot: Bot, item: string) {
   return bot.inventory.items()
-    .filter((i) => matchItemName(item, i.name))
+    .filter((i) => matchMaterialName(bot.registry, item, i.name))
     .sort((a, b) => b.count - a.count)[0];
 }
 
@@ -789,11 +1290,11 @@ export async function skillSmelt(
   if (!input) throw new SkillBlocked(`包里没有${zhName(item)}`);
   // 要烧的那样东西自己不当燃料:同一摞既进输入槽又进燃料槽,账对不上,
   // 而且一句 smelt log 能把要烧的原木先烧光
-  if (matchItemName(fuelName, input.name)) {
+  if (matchMaterialName(bot.registry, fuelName, input.name)) {
     throw new SkillBlocked(`${zhName(input.name)}正是要烧的东西,不能拿它自己当燃料`);
   }
   const fuelItem = bot.inventory.items()
-    .filter((i) => i.name !== input.name && matchItemName(fuelName, i.name))
+    .filter((i) => i.name !== input.name && matchMaterialName(bot.registry, fuelName, i.name))
     .sort((a, b) => b.count - a.count)[0];
   if (!fuelItem) throw new SkillBlocked(`包里没有${zhName(fuelName)}`);
   const want = Math.min(count, invCount(bot, (n) => n === input.name));
@@ -846,6 +1347,8 @@ export async function skillSmelt(
   const where = `(${at.x}, ${at.y}, ${at.z}) 的${zhName(at.name)}`;
   const cell = { x: at.x, y: at.y, z: at.z };
   let staleNote = '';
+  let inputBefore = 0;
+  let outputBefore: ItemStack | null = null;
   /** 正常收尾和中断都将当前窗口实际槽位写入容器账本。 */
   const record = (): {
     input: ItemStack | null; fuel: ItemStack | null; output: ItemStack | null;
@@ -882,6 +1385,9 @@ export async function skillSmelt(
       if (leftover && leftover.name !== input.name) {
         throw new SkillBlocked(`${where}输入槽还留着${zhName(leftover.name)},先处理已有原料`);
       }
+      inputBefore = leftover?.count ?? 0;
+      const existingOutput = furnace.outputItem();
+      outputBefore = existingOutput ? { name: existingOutput.name, count: existingOutput.count } : null;
       try {
         await furnace.putFuel(fuelItem.type, fuelItem.metadata ?? null, fuelUse);
         await show.beat('click');
@@ -903,6 +1409,10 @@ export async function skillSmelt(
   const slots = `输入槽${slot(loaded.input)},燃料槽${slot(loaded.fuel)},输出槽${slot(loaded.output)}`;
   const burning = loaded.fuelLevel > 0 ? '炉火读数正在燃烧' : '未确认炉火正在燃烧';
   const progress = loaded.progress > 0 ? `烧炼进度读数 ${Math.round(loaded.progress * 100)}%` : '未确认烧炼进度';
+  const outputAdvanced = loaded.output !== null
+    && (outputBefore === null || loaded.output.name !== outputBefore.name
+      || loaded.output.count > outputBefore.count);
+  const inputAdvanced = loaded.input?.name === input.name && loaded.input.count > inputBefore;
   ctx.diag?.write({
     lane: 'craft', event: 'smelt-loaded', taskId: ctx.taskId,
     msg: `${where}:${slots};${burning},${progress}`,
@@ -911,12 +1421,18 @@ export async function skillSmelt(
       ...loaded, expectedDoneAt: loaded.doneAt,
     },
   });
+  if (!inputAdvanced && !outputAdvanced) {
+    throw new SkillBlocked(`${station}往${where}下料后读到:${slots}。输入槽未确认接收${zhName(input.name)},也没有新产物;未完成下料`);
+  }
+  if (!loaded.fuel && !(loaded.fuelLevel > 0) && !outputAdvanced) {
+    throw new SkillBlocked(`${station}往${where}下料后读到:${slots}。燃料槽为空且炉火未起,没有新产物;未点火。原料仍在炉里,可点名 take 的 item+count 收回`);
+  }
   const etaClock = loaded.doneAt !== null && ctx.clock ? `${ctx.clock(loaded.doneAt)} 左右,` : '';
   const estimate = loaded.doneAt === null ? '当前不估完成时间。'
     : `若燃料持续足够,预计 ${etaClock}${Math.max(0, Math.round((loaded.doneAt - Date.now()) / 1000))} 秒后出完,到时提醒查看。`;
   return `${station}在${where}下料后读到:${staleNote}${slots}。${burning},${progress}。` +
     `${zhName(at.name)}烧一件约 ${perS} 秒。${estimate}` +
-    `取货:{"skill":"take","at":[${at.x},${at.y},${at.z}],"all":true}`;
+    `输出槽有成品时取货:{"skill":"take","at":[${at.x},${at.y},${at.z}],"all":true}`;
 }
 
 // ── 附魔台 ────────────────────────────────────────────────────────────────────
@@ -1340,4 +1856,3 @@ export async function skillTransit(
   return `穿门成功:${zhDimension(fromDimension)} ${cellText(portal)} → `
     + `${zhDimension(toDimension)} ${cellText(arrived)}(两端都由这次维度切换实测)`;
 }
-

@@ -35,12 +35,22 @@ export interface ChestRecord {
   items: ItemStack[];
   usedSlots: number;
   slots: number;
+  /** Last actual window contents observation; older saved records may lack this. */
+  observedAt?: number;
   /** 方块名;旧档案没有这个字段,读档按 chest 兜底 */
   name?: string;
   /** 我们自己放下的时刻;捡现成的没有 */
   placedAt?: number;
   /** 炉子族的三槽位;箱子族没有 */
   furnace?: FurnaceState;
+}
+
+export interface StoredItemSource {
+  x: number;
+  y: number;
+  z: number;
+  count: number;
+  observedAt?: number;
 }
 
 /** 缺少 name 的记录按 chest 处理。 */
@@ -115,6 +125,7 @@ export class ChestBook {
     const prev = this.map.get(chestKey(dimension, p));
     const rec: ChestRecord = {
       x: p.x, y: p.y, z: p.z, dimension, items, usedSlots, slots,
+      observedAt: Date.now(),
       ...(prev?.name !== undefined ? { name: prev.name } : {}),
       ...(prev?.placedAt !== undefined ? { placedAt: prev.placedAt } : {}),
     };
@@ -136,6 +147,7 @@ export class ChestBook {
       items: prev?.items ?? [],
       usedSlots: prev?.usedSlots ?? 0,
       slots: prev?.slots ?? 0,
+      ...(prev?.observedAt !== undefined ? { observedAt: prev.observedAt } : {}),
       name,
       ...(placedAt !== undefined ? { placedAt } : prev?.placedAt !== undefined ? { placedAt: prev.placedAt } : {}),
       ...(prev?.furnace !== undefined ? { furnace: prev.furnace } : {}),
@@ -230,6 +242,14 @@ export class ChestBook {
     return out;
   }
 
+  /** Exact item counts from each recorded container; absence of a timestamp remains unknown. */
+  itemSources(dimension: string, item: string): StoredItemSource[] {
+    return [...this.map.values()].filter((rec) => rec.dimension === dimension).flatMap((rec) => {
+      const count = rec.items.reduce((total, entry) => total + (entry.name === item ? entry.count : 0), 0);
+      return count > 0 ? [{ x: rec.x, y: rec.y, z: rec.z, count, observedAt: rec.observedAt }] : [];
+    });
+  }
+
   stat(): string {
     const n = this.map.size;
     if (!this.file || !existsSync(this.file)) return n === 0 ? '(无文件)' : `${n} 个(未落盘)`;
@@ -265,6 +285,7 @@ export class ChestBook {
           items: Array.isArray(v.items) ? v.items : [],
           usedSlots: typeof v.usedSlots === 'number' ? v.usedSlots : 0,
           slots: typeof v.slots === 'number' ? v.slots : 27,
+          ...(typeof v.observedAt === 'number' ? { observedAt: v.observedAt } : {}),
           ...(typeof v.name === 'string' ? { name: v.name } : {}),
           ...(typeof v.placedAt === 'number' ? { placedAt: v.placedAt } : {}),
           ...(f && typeof f === 'object' ? {

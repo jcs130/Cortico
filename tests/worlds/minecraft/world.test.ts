@@ -9,10 +9,11 @@ import { MINECRAFT_DEFAULTS, type MinecraftConfigSection } from '../../../src/wo
 import { acceptBlueprint } from '../../../src/worlds/minecraft/blueprint-plan.ts';
 import { parseGoalPlan, recordGoalJudgment } from '../../../src/worlds/minecraft/goal-plan.ts';
 import { SET_SPAWN_TRANSLATE } from '../../../src/worlds/minecraft/escape.ts';
-import { renderQueue } from '../../../src/worlds/minecraft/executor.ts';
+import { parseScoutSteps, parseSteps, renderQueue, QUEUE_MODES } from '../../../src/worlds/minecraft/executor.ts';
 import { Bridge } from '../../../src/worlds/minecraft/bridge.ts';
 import { MinecraftServerManager, type MinecraftServerState } from '../../../src/worlds/minecraft/server.ts';
 import { FakeHost } from '../../helpers/fake-host.ts';
+import { combatBot, makeExecutor, makeExecutorOn } from './executor-harness.ts';
 
 function cfg(over: Partial<MinecraftConfigSection> = {}): MinecraftConfigSection {
   return structuredClone({ ...MINECRAFT_DEFAULTS, enabled: true, ...over }) as MinecraftConfigSection;
@@ -55,6 +56,36 @@ function stub(m: MinecraftWorld, parts: Record<string, unknown>): void {
   Object.assign(m, parts);
 }
 
+describe('同类成功任务 fallback 的 World 受理边界', () => {
+  it('仅暂缓名单内的 mc_do，不隐藏整个工具或影响聊天和 mc_scout', async () => {
+    const config = cfg({ repeatSuccessFallback: {
+      enabled: true, skillsCsv: 'goto', maxSuccesses: 3, windowMinutes: 15,
+    } });
+    const world = new MinecraftWorld({ cfg: config });
+    const bot = combatBot({});
+    const { exec, reports } = makeExecutorOn(bot);
+    stub(world, { host: new FakeHost(), executor: exec, bridge: { bot } });
+    for (let i = 1; i <= 3; i++) {
+      exec.submit([{ skill: 'goto', at: [i * 2, 64, 0] }]);
+      await vi.waitFor(() => expect(reports).toHaveLength(i));
+      expect(reports.at(-1)?.kind).toBe('done');
+    }
+    const goto = [{ skill: 'goto', at: [8, 64, 0] }];
+    const queueBefore = exec.status();
+    const blocked = (world as any).enqueueTool('mc_do', { steps: goto }, parseSteps);
+    expect(blocked).toMatchObject({ failed: true, endsTurn: true,
+      text: expect.stringContaining('成功 3 次') });
+    expect(blocked).not.toHaveProperty('retryAfterMs');
+    expect(exec.status()).toEqual(queueBefore);
+    expect((world as any).enqueueTool('mc_do', {
+      steps: [{ skill: 'chat', text: '你好' }],
+    }, parseSteps)).toContain('已发送');
+    expect((world as any).enqueueTool('mc_scout', { steps: goto }, parseScoutSteps))
+      .toContain('任务#');
+    exec.clear();
+  });
+});
+
 
 describe('实体接近滞回(常规 16/24，持弓可见敌对 32/40)', () => {
   function proxRig(raycast: () => unknown = () => null) {
@@ -70,7 +101,7 @@ describe('实体接近滞回(常规 16/24，持弓可见敌对 32/40)', () => {
     const host = new FakeHost();
     stub(m, { host });
     const tick = () => (m as any).proximityTick(bot);
-    return { bot, zombie, bag, host, tick };
+    return { m, bot, zombie, bag, host, tick };
   }
 
   it('进 16 报一次,16-24 之间抖动不重复,出 24 报走远', () => {
@@ -81,6 +112,7 @@ describe('实体接近滞回(常规 16/24，持弓可见敌对 32/40)', () => {
     tick();
     expect(host.events).toHaveLength(1);
     expect(host.events[0].text).toContain('僵尸在东边 14 格');
+    expect(host.pushOpts[0]?.trigger).toBe('flush');
     zombie.position = pos(20, 64, 0.5);
     tick(); // 滞回区:保持在态
     zombie.position = pos(14, 64, 0.5);
@@ -90,6 +122,96 @@ describe('实体接近滞回(常规 16/24，持弓可见敌对 32/40)', () => {
     tick();
     expect(host.events).toHaveLength(2);
     expect(host.events[1].text).toContain('僵尸走远了');
+    expect(host.pushOpts[1]?.trigger).toBe('piggyback');
+  });
+
+  it('任务赶路时附近敌人只搭车汇报，战斗接敌另行唤醒', () => {
+    const { m, zombie, host, tick } = proxRig();
+    stub(m, { executor: { currentTask: { id: 1, label: '赶路', elapsedMs: 1000 } } });
+    zombie.position = pos(10, 64, 0.5);
+    tick();
+    expect(host.events[0].text).toContain('僵尸');
+    expect(host.pushOpts[0]?.trigger).toBe('piggyback');
+  });
+
+  it('附近玩家主动唤醒一次，走到身边再提示；观战号不算玩家', () => {
+    const { bot, host, tick } = proxRig();
+    const alex = { id: 8, name: 'player', type: 'player', username: 'Alex', position: pos(20, 64, 0.5) };
+    bot.entities = {
+      '8': alex,
+      '9': { id: 9, name: 'player', type: 'player', username: 'CortiCam', position: pos(2, 64, 0.5) },
+    };
+    tick();
+    expect(host.events).toHaveLength(0);
+    alex.position = pos(10, 64, 0.5);
+    tick();
+    expect(host.events).toHaveLength(1);
+    expect(host.events[0].text).toContain('玩家 Alex 在东边约 10 格');
+    expect(host.pushOpts[0]?.trigger).toBe('flush');
+    tick();
+    expect(host.events).toHaveLength(1);
+    alex.position = pos(3, 64, 0.5);
+    tick();
+    expect(host.events[1].text).toContain('玩家 Alex 走到身边');
+    expect(host.pushOpts[1]?.trigger).toBe('flush');
+  });
+
+  it('玩家在近处明显移动会有节流提示；隔墙时不报精确距离', () => {
+    let blocked = true;
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    try {
+      const { bot, host, tick } = proxRig(() => (blocked ? { name: 'stone' } : null));
+      const alex = { id: 8, name: 'player', type: 'player', username: 'Alex', position: pos(6.5, 64, 0.5) };
+      bot.entities = { '8': alex };
+      tick();
+      expect(host.events[0].text).toContain('方向有遮挡');
+      expect(host.events[0].text).not.toContain('6 格');
+      blocked = false;
+      tick();
+      expect(host.events[1].text).toContain('玩家 Alex 在东边约 6 格');
+      clock.mockReturnValue(1_012_000);
+      alex.position = pos(-5.5, 64, 0.5);
+      tick();
+      expect(host.events[2].text).toContain('玩家 Alex 仍在身边移动，现在在西边约 6 格');
+      expect(host.pushOpts[2]?.trigger).not.toBe('flush');
+      tick();
+      expect(host.events).toHaveLength(3);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('近处玩家连续空手挥臂只投递一次动作事实', () => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    try {
+      const { m, bot, host } = proxRig();
+      const alex = { id: 8, type: 'player', username: 'Alex', position: pos(3, 64, 0.5) };
+      (m as any).notePlayerGesture(bot, alex, 'wave');
+      expect(host.events).toHaveLength(0);
+      clock.mockReturnValue(1_000_400);
+      (m as any).notePlayerGesture(bot, alex, 'wave');
+      expect(host.events).toHaveLength(1);
+      expect(host.events[0].text).toContain('Alex 在你身边空手连续挥动手臂');
+      clock.mockReturnValue(1_001_000);
+      (m as any).notePlayerGesture(bot, alex, 'wave');
+      (m as any).notePlayerGesture(bot, alex, 'wave');
+      expect(host.events).toHaveLength(1);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('武器挥动和隔墙蹲起不被当成玩家互动', () => {
+    const { m, bot, host } = proxRig(() => ({ name: 'stone' }));
+    const alex = {
+      id: 8, type: 'player', username: 'Alex', position: pos(3, 64, 0.5),
+      equipment: [{ name: 'iron_sword' }],
+    };
+    (m as any).notePlayerGesture(bot, alex, 'wave');
+    (m as any).notePlayerGesture(bot, alex, 'wave');
+    (m as any).notePlayerGesture(bot, alex, 'crouch');
+    (m as any).notePlayerGesture(bot, alex, 'crouch');
+    expect(host.events).toHaveLength(0);
   });
 
   it('隔墙的怪只报动静不给坐标,露头后补一条看清了', () => {
@@ -284,7 +406,7 @@ describe('MinecraftWorld World 面(未连接状态)', () => {
     expect(Object.keys(byName).sort())
       .toEqual([
         'mc_bag', 'mc_blocked', 'mc_blueprint', 'mc_check', 'mc_do', 'mc_escape',
-        'mc_goal', 'mc_map', 'mc_policy', 'mc_queue', 'mc_scout', 'mc_stop',
+        'mc_goal', 'mc_help', 'mc_map', 'mc_policy', 'mc_queue', 'mc_scout', 'mc_stop', 'mc_visual',
       ]);
     // 三个只读原语与 mc_check 同一档:纯读、不进队列、不该进只读 fork 的禁区;
     // 回执是此刻读数,另打 snapshot(交接笔记同名只留最后一次)
@@ -305,6 +427,11 @@ describe('MinecraftWorld World 面(未连接状态)', () => {
     // 同时保证它不进只读 fork 的装配。没有要复核的东西,所以没有 barrierAfter
     expect(byName.mc_policy.tags).toEqual(['write']);
     expect(byName.mc_policy.barrierAfter).toBeUndefined();
+    expect(byName.mc_cast).toBeUndefined();
+    expect(byName.mc_combat_tactic).toBeUndefined();
+    const customTools = new MinecraftWorld({ cfg: cfg(), agentFriendEnabled: true }).tools();
+    expect(customTools.find((tool) => tool.name === 'mc_cast')?.tags).toContain('act');
+    expect(customTools.find((tool) => tool.name === 'mc_combat_tactic')?.tags).toEqual(['write']);
   });
 
   it('未启动时工具返回可读失败文本,不抛错', async () => {
@@ -312,8 +439,10 @@ describe('MinecraftWorld World 面(未连接状态)', () => {
     const tools = Object.fromEntries(m.tools().map((t) => [t.name, t]));
     const ctx = { role: 'test', log: console as never };
     const steps = [{ skill: 'collect', block: 'stone', count: 1 }];
-    expect(await tools.mc_do.handler({ steps }, ctx as never)).toContain('未启动');
-    expect(await tools.mc_scout.handler({ steps: [{ skill: 'probe', shape: 'line', anchors: [[0, 64, 0], [0, 66, 0]] }] }, ctx as never)).toContain('未启动');
+    expect(await tools.mc_do.handler({ steps }, ctx as never))
+      .toMatchObject({ text: expect.stringContaining('未启动'), failed: true });
+    expect(await tools.mc_scout.handler({ steps: [{ skill: 'probe', shape: 'line', anchors: [[0, 64, 0], [0, 66, 0]] }] }, ctx as never))
+      .toMatchObject({ text: expect.stringContaining('未启动'), failed: true });
     expect(await tools.mc_stop.handler({}, ctx as never)).toContain('未启动');
     expect(await tools.mc_escape.handler({}, ctx as never)).toContain('未启动');
   });
@@ -325,7 +454,10 @@ describe('MinecraftWorld World 面(未连接状态)', () => {
     const m = new MinecraftWorld({ cfg: cfg() });
     const tools = Object.fromEntries(m.tools().map((t) => [t.name, t]));
     const ctx = { role: 'test', log: console as never };
-    const bad = await tools.mc_do.handler({ steps: [{ skill: '往下挖' }] }, ctx as never) as string;
+    const result = await tools.mc_do.handler({ steps: [{ skill: '往下挖' }] }, ctx as never);
+    expect(result).toMatchObject({ failed: true });
+    expect(result).not.toHaveProperty('endsTurn');
+    const bad = (result as { text: string }).text;
     expect(bad).toContain('第 1 步');
     expect(bad).toContain('你写的是 [{"skill":"往下挖"}]');
     // 技能表的任何一段都不该出现在失败回执里
@@ -337,11 +469,46 @@ describe('MinecraftWorld World 面(未连接状态)', () => {
     const m = new MinecraftWorld({ cfg: cfg() });
     const tools = Object.fromEntries(m.tools().map((t) => [t.name, t]));
     const ctx = { role: 'test', log: console as never };
-    const bad = await tools.mc_scout.handler({ steps: [{ skill: 'collect', block: 'stone' }] }, ctx as never) as string;
+    const result = await tools.mc_scout.handler({ steps: [{ skill: 'collect', block: 'stone' }] }, ctx as never);
+    expect(result).toMatchObject({ failed: true });
+    const bad = (result as { text: string }).text;
     expect(bad).toContain('会动世界');
     expect(bad).toContain('你写的是 [{"skill":"collect","block":"stone"}]');
     expect(bad).not.toContain('"skill":"probe"');
     expect(bad.length).toBeLessThan(200);
+  });
+
+  it('参数拒收有失败标记，保留运行和待办，并允许同轮修正参数', () => {
+    const world = new MinecraftWorld({ cfg: cfg() });
+    let finish!: () => void;
+    const gate = new Promise<void>(resolve => { finish = resolve; });
+    const { exec, bot } = makeExecutor(gate);
+    stub(world, { executor: exec, bridge: { bot } });
+    exec.submit([{ skill: 'goto', at: [10, 64, 10] }]);
+    exec.submit([{ skill: 'chat', text: '已有待办' }], 'append');
+    const before = exec.status();
+    const malformed = (world as any).enqueueTool('mc_do', {
+      queue: 'append', steps: [{ skill: 'unknown_skill' }],
+    }, parseSteps);
+    expect(malformed).toMatchObject({ failed: true, text: expect.stringContaining('失败') });
+    expect(malformed).not.toHaveProperty('endsTurn');
+    const badQueue = (world as any).enqueueTool('mc_do', {
+      queue: 'guess', steps: [{ skill: 'goto', at: [0, 64, 0] }],
+    }, parseSteps);
+    expect(badQueue).toMatchObject({ failed: true });
+    const unchanged = exec.status();
+    expect(unchanged.waiting).toEqual(before.waiting);
+    expect(unchanged.hold).toEqual(before.hold);
+    expect(unchanged.running).toMatchObject({ id: before.running!.id, label: before.running!.label,
+      stepIndex: before.running!.stepIndex, stepCount: before.running!.stepCount });
+    const corrected = (world as any).enqueueTool('mc_do', {
+      queue: 'append', steps: [{ skill: 'chat', text: '修正后的待办' }],
+    }, parseSteps);
+    expect(corrected).toContain('排进队尾');
+    expect(exec.status().running?.id).toBe(before.running?.id);
+    expect(exec.status().waiting).toHaveLength(before.waiting.length + 1);
+    finish();
+    exec.clear();
   });
 
   it('console 自报:未连接 off 徽标 + 配置组归属正确', () => {
@@ -418,19 +585,193 @@ describe('MinecraftWorld World 面(未连接状态)', () => {
     expect((await m.playerConsole().teleport()).detail).toContain('传送不了');
   });
 
-  it('mc_do 收 steps 与 queue 两个字段;mc_scout 同一条队列同一套三态', async () => {
+  it('mc_do 与 mc_scout 共用队列模式并接受安全检查点调度', async () => {
     const m = new MinecraftWorld({ cfg: cfg() });
     const tools = Object.fromEntries(m.tools().map((t) => [t.name, t]));
     const ctx = { role: 'test', log: console as never };
     for (const name of ['mc_do', 'mc_scout']) {
       const props = tools[name].parameters.properties as Record<string, Record<string, unknown>>;
       expect(Object.keys(props).sort()).toEqual(['queue', 'steps']);
-      expect(props.queue.enum).toEqual(['replace', 'append', 'now']);
+      expect(props.queue.enum).toEqual(QUEUE_MODES);
       expect(tools[name].parameters.required).toEqual(['steps']); // queue 不写 = replace
+      const queued = await tools[name].handler({
+        steps: name === 'mc_do' ? [{ skill: 'eat', item: 'bread' }] : [{ skill: 'goto', at: [0, 64, 0] }],
+        queue: 'afterCheckpoint',
+      }, ctx as never);
+      expect(queued).toMatchObject({ failed: true, text: expect.stringContaining('未启动') });
+      expect((queued as { text: string }).text).not.toContain('queue 只认');
     }
     // schema 外的字段照旧忽略,随后因 World 未启动而停止
     expect(await tools.mc_do.handler({ steps: [{ skill: 'eat', item: 'bread' }], mode: 'append' }, ctx as never))
-      .toContain('未启动');
+      .toMatchObject({ failed: true, text: expect.stringContaining('未启动') });
+  });
+
+  it('战斗施法立即发送；低血自愈须先收到服务端可用清单且会限频', async () => {
+    const m = new MinecraftWorld({ cfg: cfg(), agentFriendEnabled: true });
+    const host = new FakeHost();
+    const bot = Object.assign(new EventEmitter(), idleBot(), { chat: vi.fn() }) as EventEmitter & {
+      chat: ReturnType<typeof vi.fn>;
+      health: number;
+    };
+    bot.health = 7;
+    (bot as any).food = 14;
+    (bot as any).registry.foodsByName = { bread: {} };
+    (bot as any).inventory.items = () => [{ name: 'bread', count: 2 }];
+    stub(m, { host, bridge: { bot, connected: true }, combat: { active: true } });
+    (m as any).hookBotEvents(bot);
+    const cast = m.tools().find((tool) => tool.name === 'mc_cast')!;
+    const ctx = { role: 'test', log: console as never };
+
+    expect(await cast.handler({ spell: 'starbolt' }, ctx as never)).toContain('已发送 /mycli cast starbolt');
+    expect(bot.chat).toHaveBeenCalledWith('/mycli cast starbolt');
+    expect(await cast.handler({ spell: 'selfheal extra' }, ctx as never)).toMatchObject({ failed: true,
+      text: expect.stringContaining('失败') });
+    (m as any).onLowHealth(bot);
+    expect(bot.chat).toHaveBeenCalledTimes(1);
+    expect(host.events.some((event) => event.text.includes('饥饿 14/20，包里的食物：面包(bread)×2'))).toBe(true);
+
+    bot.emit('message', { toString: () => '可用咏唱：圣愈术(selfheal，治疗自己)' }, 'system');
+    (m as any).onLowHealth(bot);
+    (m as any).onLowHealth(bot);
+    expect(bot.chat).toHaveBeenCalledTimes(2);
+    expect(bot.chat).toHaveBeenLastCalledWith('/mycli cast selfheal');
+    expect(host.events.some((event) => event.text.includes('血低时试着施了圣愈术'))).toBe(true);
+  });
+
+  it('私有技能状态启用自动治疗，撤退低血时按服务端魔力和冷却施放', () => {
+    const m = new MinecraftWorld({ cfg: cfg(), agentFriendEnabled: true });
+    const bot = Object.assign(new EventEmitter(), idleBot(), { chat: vi.fn() }) as EventEmitter & {
+      chat: ReturnType<typeof vi.fn>; health: number; _client: EventEmitter;
+    };
+    bot.health = 8;
+    stub(m, { host: new FakeHost(), bridge: { bot, connected: true },
+      combat: { active: true, fighting: false } });
+    (m as any).hookBotEvents(bot);
+    (m as any).combatSpells.setTactic({ spells: null, healAtOrBelow: 10 });
+    const state = (mana: number, cooldownRemainingMs: number) => Buffer.from(JSON.stringify({
+      schemaVersion: 1, mana: { current: mana, max: 32 },
+      abilities: [{ id: 'mycli:selfheal', name: '圣愈术', level: 1,
+        cooldownMs: 15_000, cooldownRemainingMs, manaCost: 6 }],
+    }));
+    const clock = vi.spyOn(Date, 'now');
+    try {
+      clock.mockReturnValue(100_000);
+      bot._client.emit('custom_payload', { channel: 'mcagent:state', data: state(4, 0) });
+      bot.emit('physicsTick');
+      expect(bot.chat).not.toHaveBeenCalled();
+      clock.mockReturnValue(101_000);
+      bot._client.emit('custom_payload', { channel: 'mcagent:state', data: state(10, 5_000) });
+      bot.emit('physicsTick');
+      expect(bot.chat).not.toHaveBeenCalled();
+      clock.mockReturnValue(106_000);
+      bot._client.emit('custom_payload', { channel: 'mcagent:state', data: state(10, 0) });
+      bot.emit('physicsTick');
+      expect(bot.chat).toHaveBeenCalledTimes(1);
+      expect(bot.chat).toHaveBeenLastCalledWith('/mycli cast selfheal');
+      clock.mockReturnValue(106_250);
+      bot.emit('physicsTick');
+      expect(bot.chat).toHaveBeenCalledTimes(1);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('战术工具允许 Agent 设置法术优先序和回血血线，拒绝重复技能', async () => {
+    const m = new MinecraftWorld({ cfg: cfg(), agentFriendEnabled: true });
+    const tactic = m.tools().find((tool) => tool.name === 'mc_combat_tactic')!;
+    const ctx = { role: 'test', log: console as never };
+    expect(await tactic.handler({}, ctx as never)).toContain('默认即时战斗法术');
+    expect(await tactic.handler({ spells: ['golem', 'frostnova', 'starbolt'], healAtOrBelow: 12 }, ctx as never))
+      .toContain('golem → frostnova → starbolt');
+    expect(await tactic.handler({}, ctx as never)).toContain('生命线 12/20');
+    expect(await tactic.handler({ spells: ['golem', 'golem'] }, ctx as never)).toContain('未设置');
+    expect(await tactic.handler({ spells: ['selfheal'] }, ctx as never)).toContain('未设置');
+    expect(await tactic.handler({}, ctx as never)).toContain('golem → frostnova → starbolt');
+    expect(await tactic.handler({ enabled: false }, ctx as never)).toContain('恢复默认');
+  });
+
+  it('交战中先按战术血线自愈，间隔后再继续连招', async () => {
+    const m = new MinecraftWorld({ cfg: cfg(), agentFriendEnabled: true });
+    const host = new FakeHost();
+    const bot = Object.assign(new EventEmitter(), idleBot(), { chat: vi.fn() }) as EventEmitter & {
+      chat: ReturnType<typeof vi.fn>;
+      health: number;
+      entities: Record<string, unknown>;
+    };
+    bot.health = 11;
+    bot.entities = { '1': { name: 'zombie', isValid: true, position: pos(3, 64, 0.5) } };
+    stub(m, { host, bridge: { bot, connected: true }, combat: { fighting: true } });
+    (m as any).hookBotEvents(bot);
+    const tactic = m.tools().find((tool) => tool.name === 'mc_combat_tactic')!;
+    await tactic.handler({ spells: ['golem', 'starbolt'], healAtOrBelow: 12 },
+      { role: 'test', log: console as never } as never);
+    bot.emit('message', { toString: () => '可用咏唱：圣愈术(selfheal，治疗自己)' }, 'system');
+    bot.emit('message', { toString: () => '探索咏唱：守护傀儡(golem，12 魔力/75 秒)' }, 'system');
+    const clock = vi.spyOn(Date, 'now');
+    try {
+      clock.mockReturnValue(100_000);
+      bot.emit('physicsTick');
+      expect(bot.chat).toHaveBeenCalledWith('/mycli cast selfheal');
+      expect(bot.chat).toHaveBeenCalledTimes(1);
+      bot.health = 20;
+      clock.mockReturnValue(100_500);
+      bot.emit('physicsTick');
+      expect(bot.chat).toHaveBeenCalledTimes(1);
+      clock.mockReturnValue(101_500);
+      bot.emit('physicsTick');
+      expect(bot.chat).toHaveBeenLastCalledWith('/mycli cast golem');
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('交战时收到服务端技能清单后由脚本即时施法，撤退时停止进攻施法', () => {
+    const m = new MinecraftWorld({ cfg: cfg(), agentFriendEnabled: true });
+    const host = new FakeHost();
+    const bot = Object.assign(new EventEmitter(), idleBot(), { chat: vi.fn() }) as EventEmitter & {
+      chat: ReturnType<typeof vi.fn>;
+      entities: Record<string, unknown>;
+    };
+    bot.entities = Object.fromEntries(['zombie', 'husk', 'skeleton', 'witch'].map((name, i) => [i + 1, {
+      name, isValid: true, position: pos(i + 3, 64, 0.5),
+    }]));
+    const combat = { fighting: true };
+    stub(m, { host, bridge: { bot, connected: true }, combat });
+    (m as any).hookBotEvents(bot);
+    bot.emit('physicsTick');
+    expect(bot.chat).not.toHaveBeenCalled();
+    bot.emit('message', { toString: () => '探索咏唱：守护傀儡(golem，12 魔力/75 秒)' }, 'system');
+    bot.emit('physicsTick');
+    expect(bot.chat).toHaveBeenCalledWith('/mycli cast golem');
+    combat.fighting = false;
+    bot.emit('physicsTick');
+    expect(bot.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it('最终层入口收到服务端通知后立刻召唤傀儡', () => {
+    const m = new MinecraftWorld({ cfg: cfg(), agentFriendEnabled: true });
+    const host = new FakeHost();
+    const bot = Object.assign(new EventEmitter(), idleBot(), { chat: vi.fn() });
+    stub(m, { host, bridge: { bot, connected: true } });
+    (m as any).hookBotEvents(bot);
+    bot.emit('message', { toString: () => '探索咏唱：守护傀儡(golem，12 魔力/75 秒)' }, 'system');
+    bot.emit('message', { toString: () => '附近 1 人进入第 6/6 层：深层宝库；生命已补满。' }, 'system');
+    expect(bot.chat).toHaveBeenCalledWith('/mycli cast golem');
+  });
+
+  it('重连恢复较早楼层时识别楼层并保留魔力', () => {
+    const m = new MinecraftWorld({ cfg: cfg() });
+    const host = new FakeHost();
+    const bot = Object.assign(new EventEmitter(), idleBot(), { chat: vi.fn() });
+    (bot as any).entities = Object.fromEntries(['zombie', 'zombie', 'zombie'].map((name, i) => [i + 1, {
+      name, isValid: true, position: pos(i + 3, 64, 0.5),
+    }]));
+    stub(m, { host, bridge: { bot, connected: true }, combat: { fighting: true } });
+    (m as any).hookBotEvents(bot);
+    bot.emit('message', { toString: () => '探索咏唱：守护傀儡(golem，12 魔力/75 秒)' }, 'system');
+    bot.emit('message', { toString: () => '已恢复第 1/6 层试炼。当前层怪物会重新出现' }, 'system');
+    bot.emit('physicsTick');
+    expect(bot.chat).not.toHaveBeenCalled();
   });
 
   it('queue 写了个不认识的值:当场退回,不猜她想说哪一个', async () => {
@@ -439,9 +780,10 @@ describe('MinecraftWorld World 面(未连接状态)', () => {
     const ctx = { role: 'test', log: console as never };
     const bad = await tools.mc_do.handler(
       { steps: [{ skill: 'eat', item: 'bread' }], queue: 'next' }, ctx as never,
-    ) as string;
-    expect(bad).toContain('queue 只认 replace/append/now');
-    expect(bad).not.toContain('未启动'); // 参数错误优先于「World 未启动」
+    ) as { text: string; failed?: true };
+    expect(bad.failed).toBe(true);
+    expect(bad.text).toContain('queue 只认 replace/append/now');
+    expect(bad.text).not.toContain('未启动'); // 参数错误优先于「World 未启动」
   });
 
   it('世界快照是投递成文挂单:连着才挂 piggyback,在途不重复,发车刻现拿', () => {
@@ -868,11 +1210,14 @@ describe('掉血播报:快到来不及的伤害必须当场唤醒', () => {
     const m = new MinecraftWorld({ cfg: cfg() });
     const host = new FakeHost();
     stub(m, { host });
-    const bot = Object.assign(new EventEmitter(), idleBot() as Record<string, unknown>, { health: 0.086 });
+    const bot = Object.assign(new EventEmitter(), idleBot() as Record<string, unknown>, { health: 0.086, food: 14 });
+    (bot as any).registry.foodsByName = { bread: {} };
+    (bot as any).inventory.items = () => [{ name: 'bread', count: 2 }];
     (m as unknown as { hookBotEvents(bot: unknown): void }).hookBotEvents(bot);
     bot.emit('health');
     const said = host.events.find((e) => e.text.includes('濒死'))?.text ?? '';
     expect(said).toContain('生命只剩 1/20');
+    expect(said).toContain('饥饿 14/20，包里的食物：面包(bread)×2');
   });
 });
 
@@ -1108,10 +1453,94 @@ describe('队列的全部入口:排进去、试算、清空', () => {
       const again = await callInRound(1, 'mc_queue');
       expect(again).toBe('这轮已经答过了,答案不会变,先看上一条。');
       expect(again).not.toContain('[队列]');
-      // 换一轮就照常答
-      expect(await callInRound(2, 'mc_queue')).toContain('[队列]');
+      // 跨轮仍按同一份状态累计；第三次触发防刷单闸。
+      expect(await callInRound(2, 'mc_queue')).toMatchObject({
+        text: expect.stringContaining('队列状态未变'),
+        endsTurn: true,
+      });
       // 闸是按工具分格的:同一轮里另一个只读原语照常答
       expect(await callInRound(2, 'mc_blocked')).toContain('[上次没成]');
+    } finally {
+      await m.stop();
+    }
+  });
+
+  it('短时间跨轮反复查同一队列状态时结束当前唤醒', async () => {
+    const { m, callInRound } = await started();
+    try {
+      expect(await callInRound(1, 'mc_queue')).toContain('[队列]');
+      expect(await callInRound(2, 'mc_queue')).toContain('[队列]');
+      const third = await callInRound(3, 'mc_queue') as unknown;
+      expect(third).toMatchObject({
+        text: expect.stringContaining('队列状态未变'),
+        endsTurn: true,
+      });
+    } finally {
+      await m.stop();
+    }
+  });
+
+  it('任务仍在执行时首次查队列就结束当前唤醒，等待终态事件', async () => {
+    const { m, callInRound } = await started();
+    try {
+      vi.spyOn((m as any).executor, 'status').mockReturnValue({
+        running: { id: 7, label: '采集原木', step: '采集原木', stepIndex: 0,
+          stepCount: 1, elapsedMs: 1000, taskElapsedMs: 1000, count: null, pos: null },
+        waiting: [],
+      });
+      expect(await callInRound(1, 'mc_queue')).toMatchObject({
+        text: expect.stringContaining('正在做任务#7'),
+        endsTurn: true,
+      });
+    } finally {
+      await m.stop();
+    }
+  });
+
+  it('服务器明确给出交互等待秒数时，同一目标的重复 use 不再入队', async () => {
+    const { m, call } = await started();
+    try {
+      const guard = (m as any).serverActionWait;
+      guard.noteUse([-596, 92, -313], Date.now() - 100);
+      guard.noteFeedback('试炼场休息中，还需 58 秒。');
+      const reply = await call('mc_do', { steps: [{ skill: 'use', at: [-596, 92, -313] }] }) as unknown;
+      expect(reply).toMatchObject({
+        text: expect.stringContaining('同一目标还需等'),
+        failed: true,
+        endsTurn: true,
+      });
+      expect((m as any).executor.status().running).toBeNull();
+    } finally {
+      await m.stop();
+    }
+  });
+
+  it('多行看板刚查询过时，不向执行队列重复提交相同命令', async () => {
+    const { m, call } = await started();
+    try {
+      (m as any).serverActionWait.noteChat('/mycli guild board', Date.now() - 100);
+      const reply = await call('mc_do', { steps: [{ skill: 'chat', text: '/mycli guild board' }] }) as unknown;
+      expect(reply).toMatchObject({
+        text: expect.stringContaining('同一只读查询刚发送过'),
+        failed: true,
+        endsTurn: true,
+      });
+      expect((m as any).executor.status().running).toBeNull();
+    } finally {
+      await m.stop();
+    }
+  });
+
+  it('右键不清空系统状态去重账，变更后的新状态仍可投递', async () => {
+    const { m, call } = await started();
+    try {
+      const same = 'MC_DUNGEON status participant=false globalActive=false';
+      const changed = 'MC_DUNGEON status participant=true globalActive=true';
+      expect((m as any).suppressRepeatedSystemMessage(same)).toBe(false);
+      expect(await call('mc_do', { steps: [{ skill: 'use', at: [-596, 92, -313] }] }))
+        .toContain('任务#1');
+      expect((m as any).suppressRepeatedSystemMessage(same)).toBe(true);
+      expect((m as any).suppressRepeatedSystemMessage(changed)).toBe(false);
     } finally {
       await m.stop();
     }
@@ -1144,8 +1573,8 @@ describe('队列的全部入口:排进去、试算、清空', () => {
     try {
       const before = queueText();
       const rejected = await call('mc_do', { steps: [{ skill: 'eat', item: 'bread' }, { skill }] });
-      expect(rejected).toContain('第 2 步');
-      expect(rejected).toContain(skill);
+      expect(rejected).toMatchObject({ failed: true, text: expect.stringContaining('第 2 步') });
+      expect((rejected as unknown as { text: string }).text).toContain(skill);
       expect(queueText()).toBe(before);
       expect(await call('mc_do', { steps: [{ skill: 'eat', item: 'bread' }] })).toContain('任务#1');
     } finally {
@@ -1161,6 +1590,200 @@ describe('队列的全部入口:排进去、试算、清空', () => {
       const second = await call('mc_do', { steps: [{ skill: 'goto', at: [10, 64, 10] }] });
       expect(second).toContain('任务#2');
       expect(second).not.toContain('顶');
+    } finally {
+      await m.stop();
+    }
+  });
+
+  it('已满足 goto 的即时成功结束当前轮，回执不标失败或触发脱困', async () => {
+    const { m, call } = await started();
+    try {
+      vi.spyOn((m as any).executor, 'submit').mockImplementation(
+        (...params: unknown[]) => {
+          (params[3] as (accepted: boolean, retryAfterMs?: number, completedImmediately?: true) => void)(true, undefined, true);
+          return '[21:00:00] goto 已达成：本次无移动、未创建新任务。';
+        },
+      );
+      const escape = vi.spyOn(m as any, 'doEscape').mockResolvedValue('已回安全落点');
+      const result = await call('mc_do', { steps: [{ skill: 'goto', at: [0, 64, 0] }] }) as unknown as {
+        text: string; endsTurn?: boolean; failed?: boolean;
+      };
+      expect(result.text).toContain('goto 已达成');
+      expect(result.endsTurn).toBe(true);
+      expect(result.failed).toBeUndefined();
+      expect(escape).not.toHaveBeenCalled();
+    } finally {
+      await m.stop();
+    }
+  });
+
+  it('同一个 goto 的短时重复下单不会误判为寻路失败并传送', async () => {
+    const { m, call } = await started();
+    try {
+      vi.spyOn((m as any).executor, 'submit').mockImplementation(
+        (...params: unknown[]) => {
+          (params[3] as (accepted: boolean) => void)(false);
+          return '[21:00:00] 这一单我没接:同一个 goto 刚从 (0,64,0) 提交过，现在仍在同一格';
+        },
+      );
+      const escape = vi.spyOn(m as any, 'doEscape').mockResolvedValue('已回安全落点');
+      const args = { steps: [{ skill: 'goto', at: [10, 64, 10] }] };
+      await call('mc_do', args);
+      await call('mc_do', args);
+      const third = await call('mc_do', args) as unknown as { text: string };
+      expect(third.text).not.toContain('正在尝试已登记的安全落点');
+      expect(escape).not.toHaveBeenCalled();
+    } finally {
+      await m.stop();
+    }
+  });
+
+  it('目标区域不可站的重复拒单不会把玩家传走', async () => {
+    const { m, call } = await started();
+    try {
+      vi.spyOn((m as any).executor, 'submit').mockImplementation(
+        (...params: unknown[]) => {
+          (params[3] as (accepted: boolean) => void)(false);
+          return '[21:00:00] 这一单我没接:这片目标区域已经走不通';
+        },
+      );
+      const escape = vi.spyOn(m as any, 'doEscape').mockResolvedValue('已回安全落点');
+      const args = { steps: [{ skill: 'goto', at: [10, 64, 10] }] };
+      await call('mc_do', args);
+      await call('mc_do', args);
+      const third = await call('mc_do', args) as unknown as { text: string; endsTurn: boolean; failed: boolean };
+      expect(third.text).not.toContain('正在尝试已登记的安全落点');
+      expect(third.endsTurn).toBe(true);
+      expect(third.failed).toBe(true);
+      expect(escape).not.toHaveBeenCalled();
+    } finally {
+      await m.stop();
+    }
+  });
+
+  it('身体确实钉在原地的重复拒单仍可触发安全逃逸', async () => {
+    const { m, call } = await started();
+    try {
+      vi.spyOn((m as any).executor, 'submit').mockImplementation(
+        (...params: unknown[]) => {
+          (params[3] as (accepted: boolean) => void)(false);
+          return '[21:00:00] 这一单我没接:连续寻路仍钉在原地';
+        },
+      );
+      const escape = vi.spyOn(m as any, 'doEscape').mockResolvedValue('已回安全落点');
+      const args = { steps: [{ skill: 'goto', at: [10, 64, 10] }] };
+      await call('mc_do', args);
+      await call('mc_do', args);
+      const third = await call('mc_do', args) as unknown as { text: string };
+      expect(third.text).toContain('正在尝试已登记的安全落点');
+      expect(escape).toHaveBeenCalledTimes(1);
+    } finally {
+      await m.stop();
+    }
+  });
+
+  it('包含 goto 的整单连续失败后仍原样刷单也不会自动传送', async () => {
+    const { m, call } = await started();
+    try {
+      vi.spyOn((m as any).executor, 'submit').mockImplementation(
+        (...params: unknown[]) => {
+          (params[3] as (accepted: boolean) => void)(false);
+          return '[21:00:00] 这一单我没接:同一整单已经连续失败 2 次，原样重下不会受理';
+        },
+      );
+      const escape = vi.spyOn(m as any, 'doEscape').mockResolvedValue('已回安全落点');
+      const args = { steps: [
+        { skill: 'goto', at: [10, 64, 10] },
+        { skill: 'tunnel', at: ['~', '~10', '~'] },
+      ] };
+      await call('mc_do', args);
+      await call('mc_do', args);
+      const third = await call('mc_do', args) as unknown as { text: string; endsTurn: boolean };
+      expect(third.text).not.toContain('正在尝试已登记的安全落点');
+      expect(third.endsTurn).toBe(true);
+      expect(escape).not.toHaveBeenCalled();
+    } finally {
+      await m.stop();
+    }
+  });
+
+  it('同一水层竖井只改目标深度仍连续拒收时触发安全逃逸', async () => {
+    const { m, call } = await started();
+    try {
+      vi.spyOn((m as any).executor, 'submit').mockImplementation(
+        (...params: unknown[]) => {
+          (params[3] as (accepted: boolean) => void)(false);
+          return '[21:00:00] 这一单我没接:这片井筒刚在 (1,62,0) 遇到水，该格现在仍是水';
+        },
+      );
+      const escape = vi.spyOn(m as any, 'doEscape').mockResolvedValue('已回安全落点');
+      await call('mc_do', { steps: [{ skill: 'tunnel', at: [0, 60, 0] }] });
+      await call('mc_do', { steps: [{ skill: 'tunnel', at: [0, 58, 0] }] });
+      const third = (await call('mc_do', { steps: [{ skill: 'tunnel', at: [0, 55, 0] }] })) as unknown as { text: string; endsTurn: boolean };
+      expect(third.text).toContain('正在尝试已登记的安全落点');
+      expect(third.endsTurn).toBe(true);
+      expect(escape).toHaveBeenCalledTimes(1);
+    } finally {
+      await m.stop();
+    }
+  });
+
+  it('goto 加下行挖掘的整单撞到同一水层也触发安全逃逸', async () => {
+    const { m, call } = await started();
+    try {
+      vi.spyOn((m as any).executor, 'submit').mockImplementation(
+        (...params: unknown[]) => {
+          (params[3] as (accepted: boolean) => void)(false);
+          return '[21:00:00] 这一单我没接:这片井筒刚在 (1,62,0) 遇到水，该格现在仍是水';
+        },
+      );
+      const escape = vi.spyOn(m as any, 'doEscape').mockResolvedValue('已回安全落点');
+      await call('mc_do', { steps: [{ skill: 'goto', at: [0, 64, 0] }, { skill: 'tunnel', at: ['~', '~-10', '~'] }] });
+      await call('mc_do', { steps: [{ skill: 'goto', at: [0, 64, 1] }, { skill: 'tunnel', at: ['~', '~-10', '~'] }] });
+      const third = (await call('mc_do', { steps: [{ skill: 'goto', at: [0, 64, 2] }, { skill: 'tunnel', at: ['~', '~-10', '~'] }] })) as unknown as { text: string; endsTurn: boolean };
+      expect(third.text).toContain('正在尝试已登记的安全落点');
+      expect(third.endsTurn).toBe(true);
+      expect(escape).toHaveBeenCalledTimes(1);
+    } finally {
+      await m.stop();
+    }
+  });
+
+  it('已记账的失败路线在重载后只拒收该路线并结束本次唤醒', async () => {
+    const { m, call } = await started();
+    try {
+      vi.spyOn((m as any).rejectedRoutes, 'match').mockReturnValue('shaft-liquid:1:62:0:水');
+      const submit = vi.spyOn((m as any).executor, 'submit');
+      const outcome = (await call('mc_do', { steps: [
+        { skill: 'goto', at: [0, 64, 0] },
+        { skill: 'tunnel', at: ['~', '~-10', '~'] },
+      ] })) as unknown as { text: string; failed: boolean; endsTurn: boolean };
+      expect(outcome.text).toContain('曾连续失败并触发自动脱困');
+      expect(outcome.failed).toBe(true);
+      expect(outcome.endsTurn).toBe(true);
+      expect(outcome).not.toHaveProperty('retryAfterMs');
+      expect(submit).not.toHaveBeenCalled();
+    } finally {
+      await m.stop();
+    }
+  });
+
+  it('同一悬空通道连续拒收后即使改写整单也触发安全逃逸', async () => {
+    const { m, call } = await started();
+    try {
+      vi.spyOn((m as any).executor, 'submit').mockImplementation(
+        (...params: unknown[]) => {
+          (params[3] as (accepted: boolean) => void)(false);
+          return '[21:00:00] 这一单我没接:这条通道会经过 (1,64,0)，那里刚因脚下悬空且垫脚未获服务端确认而停工';
+        },
+      );
+      const escape = vi.spyOn(m as any, 'doEscape').mockResolvedValue('已回安全落点');
+      await call('mc_do', { steps: [{ skill: 'goto', at: [0, 64, 0] }, { skill: 'tunnel', at: [3, 64, 0] }] });
+      await call('mc_do', { steps: [{ skill: 'tunnel', at: [4, 64, 0] }] });
+      const third = (await call('mc_do', { steps: [{ skill: 'goto', at: [0, 64, 0] }, { skill: 'tunnel', at: [5, 64, 0] }] })) as unknown as { text: string; endsTurn: boolean };
+      expect(third.text).toContain('正在尝试已登记的安全落点');
+      expect(third.endsTurn).toBe(true);
+      expect(escape).toHaveBeenCalledTimes(1);
     } finally {
       await m.stop();
     }
@@ -1224,15 +1847,19 @@ describe('队列的全部入口:排进去、试算、清空', () => {
    */
   it('受理回执尾巴上带队列现状:在做的那件第几步', async () => {
     const { m, call } = await started();
+    let release!: () => void;
+    const { exec, bot } = makeExecutor(new Promise<void>(resolve => { release = resolve; }));
+    stub(m, { executor: exec, bridge: { bot, stop: async () => {} } });
     try {
-      await call('mc_do', { steps: [{ skill: 'eat', item: 'bread' }] });
-      const second = await call('mc_do', { steps: [{ skill: 'eat', item: 'bread' }], queue: 'append' });
+      await call('mc_do', { steps: [{ skill: 'goto', at: [10, 64, 10] }] });
+      const second = await call('mc_do', { steps: [{ skill: 'chat', text: 'Arriving shortly.' }], queue: 'append' });
       expect(second).toContain('[队列] 正在做任务#1');
-      expect(second).toMatch(/第 1\/1 步:[^,)]+\)/);
+      expect(second).toMatch(/第 1\/1 步:[^\n]+\)/);
       expect(second).not.toContain('已跑 0s');
       expect(second).not.toContain('整单已跑 0.0s');
       expect(second).toContain('后面排着 任务#2');
     } finally {
+      release();
       await m.stop();
     }
   });
@@ -1454,6 +2081,173 @@ describe('world 泳道:官方死因与重生点变更', () => {
   });
 });
 
+describe('Minecraft 聊天框消息', () => {
+  function hooked(agentFriendEnabled = false) {
+    const m = new MinecraftWorld({ cfg: cfg(), agentFriendEnabled });
+    const host = new FakeHost();
+    const bot = Object.assign(new EventEmitter(), idleBot()) as EventEmitter & { _client: EventEmitter };
+    stub(m, { host });
+    (m as any).hookBotEvents(bot);
+    return { bot, host, m };
+  }
+
+  it('相同系统提示短时间重复时只唤醒一次，玩家聊天仍逐条保留', async () => {
+    const { bot, host, m } = hooked();
+    const text = '个人箱已满，部分奖励仍待入箱；腾出格子后重新打开即可。';
+    for (let n = 0; n < 3; n++) bot.emit('message', { toString: () => text }, 'system');
+    bot.emit('chat', 'Alex', '再来一次', null, { toString: () => '<Alex> 再来一次' });
+    bot.emit('chat', 'Alex', '再来一次', null, { toString: () => '<Alex> 再来一次' });
+    await Promise.resolve();
+    expect(host.events.filter((event) => event.text === `[MC 系统] ${text}`)).toHaveLength(1);
+    expect(host.events.filter((event) => event.text === '[MC] Alex: 再来一次')).toHaveLength(2);
+    expect(m.logConsole().entries().some((entry) => entry.event === 'system-message-repeat')).toBe(true);
+  });
+
+  it('高层普通聊天与私聊只投递一次，自己说的话只存档', async () => {
+    const { bot, host } = hooked();
+    const chat = { toString: () => '<Alex> 可缇，来看看' };
+    bot.emit('message', chat, 'chat');
+    bot.emit('chat', 'Alex', '可缇，来看看', null, chat);
+    const whisper = { toString: () => 'Alex whispers to you: 请过来' };
+    bot.emit('message', whisper, 'system');
+    bot.emit('whisper', 'Alex', '请过来', null, whisper);
+    bot.emit('chat', 'Alex', '请过来', null, whisper);
+    const self = { toString: () => '<corti> 我来了' };
+    bot.emit('message', self, 'chat');
+    bot.emit('chat', 'corti', '我来了', null, self);
+    await Promise.resolve();
+
+    const events = host.events.filter((e) => e.type === 'minecraft.chat');
+    expect(events.map((e) => e.text)).toEqual([
+      '[MC] Alex: 可缇，来看看',
+      '[MC 私聊] Alex: 请过来',
+      '[MC] corti: 我来了',
+    ]);
+    expect(host.pushOpts.map((o) => o?.trigger)).toEqual(['flush', 'flush', 'debounce']);
+    expect(host.pushOpts[2]?.deliver).toBe(false);
+  });
+
+  it('公屏用小写 cortilan 点名时唤醒，私聊发出回显作为服务端回执', async () => {
+    const { bot, host } = hooked();
+    bot.emit('chat', 'Alex', 'cortilan 在吗？', null, { toString: () => '<Alex> cortilan 在吗？' });
+    bot.emit('message', {
+      translate: 'commands.message.display.outgoing',
+      toString: () => 'You whisper to Alex: 在的',
+    }, 'system');
+    await Promise.resolve();
+    expect(host.events.map((e) => e.text)).toEqual([
+      '[MC] Alex: cortilan 在吗？',
+      '[MC 私聊发出] You whisper to Alex: 在的',
+    ]);
+    expect(host.pushOpts.map((o) => o?.trigger)).toEqual(['flush', 'debounce']);
+  });
+
+  it('未匹配高层正则的聊天和私聊仍能看到', async () => {
+    const { bot, host } = hooked();
+    bot.emit('message', { toString: () => '[公会] 阿福 » Corti 一起挖矿' }, 'chat');
+    bot.emit('message', {
+      translate: 'commands.message.display.incoming',
+      toString: () => '阿福悄悄对你说：回来一下',
+    }, 'system');
+    bot.emit('message', {
+      translate: 'chat.type.text',
+      with: [{ toString: () => 'corti' }],
+      toString: () => '[公会] corti » 好的',
+    }, 'chat');
+    await Promise.resolve();
+
+    expect(host.events.map((e) => e.text)).toEqual([
+      '[MC] [公会] 阿福 » Corti 一起挖矿',
+      '[MC 私聊] 阿福悄悄对你说：回来一下',
+      '[MC] [公会] corti » 好的',
+    ]);
+    expect(host.pushOpts.map((o) => o?.trigger)).toEqual(['flush', 'flush', 'debounce']);
+    expect(host.pushOpts[2]?.deliver).toBe(false);
+  });
+
+  it('方块保护与命令回执作为系统聊天投递，动作栏和进服广播不重复', async () => {
+    const { bot, host } = hooked();
+    bot.emit('message', { toString: () => '你不能破坏这里的方块' }, 'system');
+    bot.emit('message', { translate: 'commands.generic.permission', toString: () => '你没有权限' }, 'system');
+    bot.emit('message', { toString: () => '魔力 90/100' }, 'game_info');
+    bot.emit('message', { translate: 'multiplayer.player.joined', toString: () => 'Alex joined the game' }, 'system');
+    await Promise.resolve();
+
+    expect(host.events.map((e) => e.text)).toEqual([
+      '[MC 系统] 你不能破坏这里的方块',
+      '[MC 系统] 你没有权限',
+    ]);
+    expect(host.pushOpts.map((o) => o?.trigger)).toEqual(['flush', 'debounce']);
+  });
+
+  it('床的动作栏拒绝理由供当前操作读取，普通 HUD 不进入回执或事件流', () => {
+    const { bot, host, m } = hooked();
+    (bot as any).registry = { language: {
+      'block.minecraft.bed.too_far_away': 'You may not rest now; the bed is too far away',
+    } };
+    const startedAt = Date.now();
+    bot.emit('message', { toString: () => '魔力 90/100' }, 'game_info');
+    expect((m as any).freshServerFeedback(startedAt)).toBeNull();
+    bot.emit('message', {
+      translate: 'block.minecraft.bed.too_far_away',
+      toString: () => 'You may not rest now; the bed is too far away',
+    }, 'game_info');
+    expect((m as any).freshServerFeedback(startedAt)).toBe('You may not rest now; the bed is too far away');
+    expect((m as any).freshServerFeedback(startedAt + 1_000)).toBeNull();
+    bot._client.emit('action_bar', { text: {
+      type: 'compound', value: {
+        translate: { type: 'string', value: 'block.minecraft.bed.too_far_away' },
+      },
+    } });
+    expect((m as any).freshServerFeedback(startedAt)).toBe('You may not rest now; the bed is too far away');
+    bot._client.emit('system_chat', { isActionBar: true, content: {
+      type: 'compound', value: { text: { type: 'string', value: '离床太远了' } },
+    } });
+    expect((m as any).freshServerFeedback(startedAt)).toBe('离床太远了');
+    expect(host.events).toHaveLength(0);
+  });
+
+  it('服务器英文保护拒绝立即投递', async () => {
+    const { bot, host } = hooked();
+    bot.emit('message', { toString: () => "Hey! Sorry, but you can't break that block here." }, 'system');
+    await Promise.resolve();
+    expect(host.events.map((e) => e.text)).toEqual([
+      "[MC 系统] Hey! Sorry, but you can't break that block here.",
+    ]);
+    expect(host.pushOpts[0]?.trigger).toBe('flush');
+  });
+
+  it('千灯纪建筑保护提示立即终止当前任务并保留原话', async () => {
+    const { bot, host, m } = hooked();
+    const blocked: string[] = [];
+    // 方块保护提示由系统聊天进入；有运行任务时走同一条阻断通道。
+    stub(m, { executor: {
+      currentTask: { id: 7 },
+      blockCurrentFromServer: (text: string) => { blocked.push(text); return true; },
+    } });
+    bot.emit('message', { toString: () => '这块属于村庄原有建筑；旁边的树叶、草木和自己放的方块可以正常整理' }, 'system');
+    await Promise.resolve();
+    expect(host.events.map((e) => e.text)).toContain(
+      '[MC 系统] 这块属于村庄原有建筑；旁边的树叶、草木和自己放的方块可以正常整理',
+    );
+    expect(blocked).toEqual(['这块属于村庄原有建筑；旁边的树叶、草木和自己放的方块可以正常整理']);
+    expect(host.pushOpts.at(-1)?.trigger).toBe('piggyback');
+  });
+
+  it('已有插件回执保持急报，未匹配的系统提示也可见', async () => {
+    const { bot, host } = hooked(true);
+    bot.emit('message', { toString: () => '可用咏唱：治愈术' }, 'system');
+    bot.emit('message', { toString: () => '领地保护已开启' }, 'system');
+    await Promise.resolve();
+
+    expect(host.events.map((e) => e.text)).toEqual([
+      '[MC 插件] 可用咏唱：治愈术',
+      '[MC 系统] 领地保护已开启',
+    ]);
+    expect(host.pushOpts.map((o) => o?.trigger)).toEqual(['flush', 'debounce']);
+  });
+});
+
 /**
  * 死亡与重生点事件报告预计落点、距离和掉落保留时限；白天点床也可能更新重生点。
  */
@@ -1536,7 +2330,7 @@ describe('重生点与死亡:说清会落在哪儿、离多远、还剩多久', 
     }
   });
 
-  it('死亡回执三段:回哪儿、离死亡点多远、掉的东西还剩多久', async () => {
+  it('死亡回执说明死亡点、重生点及距离', async () => {
     const { m, bot, find } = await hooked();
     try {
       bot.emit('message', { translate: SET_SPAWN_TRANSLATE, toString: () => 'set' }, 'game_info');
@@ -1546,9 +2340,7 @@ describe('重生点与死亡:说清会落在哪儿、离多远、还剩多久', 
       expect(line).toContain('死亡点在 [主世界] (110, 64, -3)');
       expect(line).toContain('会回重生点 [主世界] (10, 64, -3) 重生');
       expect(line).toContain('离死亡点 100 格');
-      expect(line).toContain('5 分钟后消失');
-      // 掉落保留期限到达后，不能继续断言物品还在原地。
-      expect(line).not.toContain('还在原地');
+      expect(line).toContain('重生后核对背包和装备');
     } finally {
       await m.stop();
     }
@@ -1584,20 +2376,17 @@ describe('重生点与死亡:说清会落在哪儿、离多远、还剩多久', 
     }
   });
 
-  it('掉落到期由系统自己收回那句承诺,不用她去猜', async () => {
+  it('死亡回执不猜服务端的物品保留规则', async () => {
     const { m, bot, find } = await hooked();
-    vi.useFakeTimers();
     try {
       bot.entity.position = pos(110, 64, -3);
       bot.emit('death');
-      expect(find('那堆掉落物')).toBeNull();
-      await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 10);
-      const line = find('那堆掉落物');
-      expect(line).toContain('死亡点 [主世界] (110, 64, -3)');
-      expect(line).toContain('到 5 分钟了,没捡的已经消失');
+      const line = find('你死了');
+      expect(line).toContain('死亡点在 [主世界] (110, 64, -3)');
+      expect(line).toContain('重生后核对背包和装备');
+      expect(line).not.toContain('掉的东西留在死亡点');
     } finally {
       await m.stop();
-      vi.useRealTimers();
     }
   });
 
@@ -1711,11 +2500,15 @@ describe('世界摘要的唤醒口径', () => {
     };
   }
 
-  function report(first: unknown, second: unknown): FakeHost {
+  function report(first: unknown, second: unknown, running = false): FakeHost {
     const m = new MinecraftWorld({ cfg: cfg() });
     const host = new FakeHost();
     let cur = first;
-    stub(m, { host, snapshot: () => cur });
+    stub(m, {
+      host,
+      snapshot: () => cur,
+      ...(running ? { executor: { currentTask: { id: 1, label: '整理箱子', elapsedMs: 5000 } } } : {}),
+    });
     const tick = (): void => (m as any).reportWorldDelta();
     tick(); // 第一次只立基线
     cur = second;
@@ -1740,6 +2533,16 @@ describe('世界摘要的唤醒口径', () => {
     );
     expect(host.events[0].text).toContain('走了');
     expect(host.pushOpts[0]?.trigger).toBe('debounce');
+  });
+
+  it('执行任务途中位移只随下一次结果投递，不为自动寻路重新唤醒决策', () => {
+    const host = report(
+      partial({ position: { x: 0, y: 64, z: 0 } }),
+      partial({ position: { x: 20, y: 64, z: 0 } }),
+      true,
+    );
+    expect(host.events[0].text).toContain('走了');
+    expect(host.pushOpts[0]?.trigger).toBe('piggyback');
   });
 });
 
@@ -1840,7 +2643,7 @@ describe('World 自报的可清除存储', () => {
       expect(await part.clear()).toContain('已清空');
       expect((m.envPromptVars() as Record<string, string>)['minecraft.explored']).toBe('');
       expect(JSON.parse(readFileSync(join(dir, 'minecraft-explored.json'), 'utf8')))
-        .toEqual({ version: 2, currentRealm: '', realms: {} });
+        .toEqual({ version: 2, currentRealm: 'weak:127.0.0.1:25565|', realms: {} });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1943,7 +2746,8 @@ describe('mc_policy:规矩是设置,不是任务', () => {
     const m = new MinecraftWorld({ cfg: cfg() });
     const tools = Object.fromEntries(m.tools().map((t) => [t.name, t]));
     const ctx = { role: 'test', log: console as never };
-    expect(await tools.mc_do.handler({ steps: [{ skill: 'eat', item: 'bread' }] }, ctx as never)).toContain('未启动');
+    expect(await tools.mc_do.handler({ steps: [{ skill: 'eat', item: 'bread' }] }, ctx as never))
+      .toMatchObject({ failed: true, text: expect.stringContaining('未启动') });
     expect(await tools.mc_policy.handler({ fight: 'off' }, ctx as never))
       .toContain('不主动动手,挨打照旧还手');
   });
@@ -2332,12 +3136,12 @@ describe('摄像机:崩溃告警与跨维度跟机位', () => {
     try {
       const mm = m as any;
       mm.onCameraCrash({ detail: '客户端退出 code=3221225477(0xC0000005)', attempt: 1, max: 3, delayMs: 30_000 });
-      expect(host.events.at(-1)?.text).toContain('观察者摄像机崩了(第 1 次)');
+      expect(host.events.at(-1)?.text).toContain('观察者客户端意外退出(第 1 次)');
       expect(host.events.at(-1)?.text).toContain('30 秒后自动重启');
 
       mm.onCameraCrash({ detail: '客户端退出 code=3221225477(0xC0000005)', attempt: 0, max: 3, delayMs: 0 });
-      expect(host.events.at(-1)?.text).toContain('重启 3 次都没活');
-      expect(host.events.at(-1)?.text).toContain('需要人来看');
+      expect(host.events.at(-1)?.text).toContain('重启 3 次仍未就绪');
+      expect(host.events.at(-1)?.text).toContain('需要人检查');
     } finally {
       await m.stop();
     }
@@ -2505,6 +3309,30 @@ describe('cancelled 终态进事件流但不唤醒', () => {
     } finally {
       await m.stop();
     }
+  });
+});
+
+describe('安全让位的非终态事件', () => {
+  it('悬挂与续做保留上一终态，不更新完成数或触发失败建议', async () => {
+    const m = new MinecraftWorld({ cfg: cfg() });
+    const host = new FakeHost();
+    stub(m, { host, executor: { status: () => ({ running: null, waiting: [], hold: null }) } });
+    const report = (r: unknown): void => (m as any).onTaskReport(r);
+    report({ kind: 'done', text: '任务#8完成:已进食。', taskId: 8 });
+    const previous = (m as any).lastFinishedTask;
+    const count = (m as any).tasksSinceGoalWrite;
+    const version = (m as any).taskReportVersion;
+    const advise = vi.spyOn(m as any, 'adviseBlockedTask');
+    for (const kind of ['suspended', 'resumed']) {
+      report({ kind, text: `任务#7${kind === 'suspended' ? '在安全检查点让位' : '续做第1步'}。`, taskId: 7 });
+      const event = host.events.at(-1)!;
+      expect(event.type).toBe(`minecraft.task.${kind}`);
+      expect(host.pushOpts.at(-1)?.trigger).toBe('piggyback');
+      expect((m as any).lastFinishedTask).toBe(previous);
+      expect((m as any).tasksSinceGoalWrite).toBe(count);
+      expect((m as any).taskReportVersion).toBe(version);
+    }
+    expect(advise).not.toHaveBeenCalled();
   });
 });
 
@@ -3752,6 +4580,7 @@ describe('地点相对化(回执侧、事实措辞)', () => {
     const m = new MinecraftWorld({ cfg: cfg({ port: 1 }) });
     const bag: { name: string; count: number }[] = [{ name: 'oak_log', count: 3 }];
     const bot = Object.assign(idleBot() as Record<string, unknown>, { inventory: { items: () => bag } });
+    (bot.registry as Record<string, unknown>).foodsByName = { bread: { foodPoints: 5, saturation: 6 } };
     stub(m, {
       host: { pushDeferred: () => {}, log: console },
       bridge: { connected: true, bot, invSynced: true },
@@ -3761,16 +4590,54 @@ describe('地点相对化(回执侧、事实措辞)', () => {
       return (m as any).renderSnapshotEvent() as string | null;
     };
     // 首份没有基线 = 全量锚
+    expect(m.requestFacts()).toBeNull();
     expect(render()).toContain('包里有：橡木原木×3。');
+    expect(m.requestFacts()?.text).toContain('包里有：橡木原木×3。');
+    expect(m.requestFacts()?.text).toContain('常规 0 个');
     bag.push({ name: 'bread', count: 2 });
     const inc = render()!;
     expect(inc).toContain('包里变的：面包×2。');
     expect(inc).not.toContain('橡木原木');
+    const facts = m.requestFacts()!;
+    expect(facts.text).toContain('采样 ');
+    expect(facts.text).toContain('包里有：橡木原木×3、面包×2。');
+    expect(facts.text).toContain('常规 2 个（面包×2');
+    expect(facts.text).toContain('合计 10 点');
+    expect(facts.text).toContain('生命 20/20');
+    expect(facts.text).toContain('手上没有在做的事;后面没有排着的了');
+    expect(facts.snapshotTypes).toEqual(['minecraft.world.snapshot', 'minecraft.task.queue']);
+    const baseline = (m as any).snapshotBaseline;
+    const bagBaseline = (m as any).snapshotBagBase;
+    const scan = vi.spyOn(bot as any, 'findBlocks');
+    expect(m.requestFacts()).toEqual(facts);
+    expect(scan).not.toHaveBeenCalled();
+    expect((m as any).snapshotBaseline).toBe(baseline);
+    expect((m as any).snapshotBagBase).toBe(bagBaseline);
+    // 外部拿到的数组不是内部缓存的引用。
+    (facts.snapshotTypes as string[]).push('should-not-persist');
+    expect(m.requestFacts()?.snapshotTypes).not.toContain('should-not-persist');
     // 一条都没变:整条快照都不必存在(跳拍闸)
     expect(render()).toBeNull();
     // 全量锚那一拍:整份再摆一次
     (m as any).lastSnapshotFullAt = 0;
     expect(render()).toContain('包里有：橡木原木×3、面包×2。');
+  });
+
+  it('请求事实在断线后不可读，新连接采样前不复用旧连接读数', () => {
+    const m = new MinecraftWorld({ cfg: cfg({ port: 1 }) });
+    const bot = Object.assign(new EventEmitter(), idleBot() as Record<string, unknown>);
+    const bridge = { connected: true, bot, invSynced: true, stop: () => {} };
+    stub(m, { host: new FakeHost(), bridge });
+    (m as any).renderSnapshotEvent();
+    expect(m.requestFacts()).not.toBeNull();
+    bridge.connected = false;
+    expect(m.requestFacts()).toBeNull();
+    bridge.connected = true;
+    (m as any).onSpawn();
+    expect(m.requestFacts()).toBeNull();
+    (m as any).lastSnapshotRenderAt = 0;
+    expect((m as any).renderSnapshotEvent()).toContain('[Minecraft]');
+    expect(m.requestFacts()).not.toBeNull();
   });
 });
 

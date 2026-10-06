@@ -16,8 +16,10 @@ export interface LogNote extends LogAnchorFields {
   durMs?: number;
   data?: unknown;
   err?: LogError;
+  incident?: boolean;
   /** 子进程侧的 epoch 毫秒 */
   atMs: number;
+  pid: number;
 }
 
 const ANCHOR_KEYS = ['sess', 'round', 'resp', 'call', 'ev', 'task'] as const;
@@ -25,9 +27,10 @@ const ANCHOR_KEYS = ['sess', 'round', 'resp', 'call', 'ev', 'task'] as const;
 export function createIpcLogger(send: (note: LogNote) => void, area = ''): Logger {
   const emit = (level: LogLevel, msg: string, opts?: LogEmitOptions): void => {
     const anchors = currentAnchors();
-    const note: LogNote = { kind: 'log', level, area, msg, atMs: Date.now() };
+    const note: LogNote = { kind: 'log', level, area, msg, atMs: Date.now(), pid: process.pid };
     if (opts?.event !== undefined) note.event = opts.event;
     if (opts?.durMs !== undefined) note.durMs = opts.durMs;
+    if (opts?.incident) note.incident = true;
     for (const key of ANCHOR_KEYS) {
       const value = opts?.[key] ?? anchors[key];
       if (value !== undefined) (note as unknown as Record<string, unknown>)[key] = value;

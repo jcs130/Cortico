@@ -11,13 +11,28 @@ import { Vec3 } from 'vec3';
 import type { Logger } from '../../core/types.ts';
 import type { RouteProbe, TargetDiag } from './executor.ts';
 import type { MinecraftLog } from './log.ts';
-import { installMineflayerFixes, installPathfinderToolSelection } from './mineflayer-fixes.ts';
+import { DEFAULT_BLUEPRINT_MC_VERSION, setBlueprintMcVersion } from './blueprint-registry.ts';
+import { DIG_UNCONFIRMED_EVENT, installMineflayerFixes, installPathfinderToolSelection } from './mineflayer-fixes.ts';
+import { inventoryReadConfirmed } from './inventory-window-sync.ts';
+import { installNavigationBareHand } from './hand-interaction.ts';
+import { installDoorWaypointRepair } from './path-waypoints.ts';
 import {
-  installPathfinderPerf, setDigBackoff, setNoPlaceCells, setSiteZones, type SiteZone,
+  installPathfinderPerf, setDigBackoff, setNoPlaceCells, setProtectedCells, setProtectedPlaceCells,
+  setSiteZones, type SiteZone,
 } from './pathfinder-perf.ts';
+import { BREAK_ACL_CHANNEL, BreakPermissions } from './break-permissions.ts';
+import {
+  AgentFriendProtection, NearbyProtectionBackoff, holdUnverifiedPathAction,
+  selectHeldPathAction, type ProtectAction, type ProtectCell, type ProtectStatus,
+} from './agentfriend-protection.ts';
 import { isGravityBlock, isSpawnAnchorBlock } from './policy.ts';
+import { isStableScaffoldMaterial } from './scaffold-material.ts';
 import type { ShowTempo } from './show.ts';
-import { pocketScan, standCellsAround } from './terrain.ts';
+import { pocketScan, probeBlockInfo, standCellsAround } from './terrain.ts';
+import { walkOnlyPath } from './travel.ts';
+import { installPartialBlockStartRepair } from './pathfinder-start.ts';
+import { parseSkillsPayload, VIEWER_STATE_CHANNEL } from './viewer-state.ts';
+import { watchFlightAbilities } from './flight.ts';
 
 interface BridgeOptions {
   host: string;
@@ -26,6 +41,8 @@ interface BridgeOptions {
   version: string;
   /** prismarine-viewer 网页端口;0=不开 viewer */
   viewerPort: number;
+  viewerAssetsDir?: string;
+  viewerSpeakerName?: string;
   log: Logger;
   /** World 日志;不给就不记(合成与放置的包流走它) */
   diag?: MinecraftLog;
@@ -33,10 +50,13 @@ interface BridgeOptions {
   scaffoldBlocks?: () => string[];
   /** 挖/垫代价系数(mc_policy 的 travel 档位);spawn 与设置热改时求值 */
   movementCosts?: () => { placeCost: number; digCost: number };
-  /**
-   * 在建的蓝图工地(已绑定锚点、游标未满的那些)。寻路器据此**不在工地体积里垫脚
-   * 搭路**,并把工地建材降到垫脚候选末位;走与挖不受限。每次寻路搜索现取。
-   */
+  /** 当前执行器任务号，供异步物理刻异常与决策链关联。 */
+  taskId?: () => number | null;
+  /** 本服务端拒绝过的方块持久缓存；无目录时只保存在本次连接。 */
+  protectionFile?: string | null;
+  /** 千灯纪 AgentFriend 按格保护预检；其他 Minecraft World 不启用。 */
+  agentFriendProtect?: boolean;
+  /** 已绑定蓝图范围，含完工建筑；自动寻路不在范围内挖掘或搭路。每次搜索现取。 */
   blueprintZones?: () => readonly SiteZone[];
   /**
    * 成果登记里的一格(维度已由调用方合上)。寻路器不往登记格自己、也不往它头顶
@@ -66,6 +86,26 @@ const DIG_BACKOFF_MS = 60_000;
 interface Cell { x: number; y: number; z: number }
 
 const cellKey = (p: Cell): string => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`;
+
+/** 卡住瞬间只读脚边的门状态；不把整片方块快照塞进每轮模型上下文。 */
+export function nearbyDoorStates(bot: Pick<mineflayer.Bot, 'entity' | 'blockAt'>): Array<{
+  x: number; y: number; z: number; name: string; open: boolean | null; half: string | null;
+}> {
+  const at = bot.entity?.position;
+  if (!at) return [];
+  const cx = Math.floor(at.x), cy = Math.floor(at.y), cz = Math.floor(at.z);
+  const found: ReturnType<typeof nearbyDoorStates> = [];
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
+    const x = cx + dx, y = cy + dy, z = cz + dz;
+    const block = bot.blockAt(new Vec3(x, y, z));
+    if (!block || (!block.name.endsWith('_door') && !block.name.endsWith('_fence_gate'))) continue;
+    const props = typeof block.getProperties === 'function' ? block.getProperties() : {};
+    const open = props.open === true || props.open === 'true' ? true
+      : props.open === false || props.open === 'false' ? false : null;
+    found.push({ x, y, z, name: block.name, open, half: typeof props.half === 'string' ? props.half : null });
+  }
+  return found.slice(0, 16);
+}
 
 /** 「暂时挖不动」的一格,连同它进退避的时刻 */
 interface DigBackoffCell extends Cell {
@@ -177,6 +217,9 @@ class ResourceBag {
 }
 
 export class Bridge {
+  private readonly protection: BreakPermissions;
+  private agentFriendProtection: AgentFriendProtection | null = null;
+  private agentMana: { current: number; max: number } | null | undefined;
   private _bot: mineflayer.Bot | null = null;
   private started = false;
   private stopped = false;
@@ -193,6 +236,7 @@ export class Bridge {
   private scaffoldComplained = '';
   private refusedStreak = 0;
   private liveMovements: Movements | null = null;
+  private aclReplanTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
    * 挖掘失败按格坐标记账；连续失败 DIG_BACKOFF_TRIES 次进入退避，
@@ -200,16 +244,46 @@ export class Bridge {
    */
   private digFails = new Map<string, { tries: number; lastAt: number; since: number | null; cell: Cell }>();
 
-  constructor(private readonly opts: BridgeOptions) {}
+  constructor(private readonly opts: BridgeOptions) {
+    this.protection = new BreakPermissions(opts.protectionFile ?? null, `${opts.host}:${opts.port}`);
+  }
+
+  /** 服务端明确拒绝破坏时记住真实挖掘格；没有可靠坐标就只记录事件，不乱猜。 */
+  noteServerBreakDenied(reason: string): void {
+    const bot = this._bot;
+    if (!bot) return;
+    const target = bot.targetDigBlock;
+    const last = (bot as unknown as { cortiLastDigAttempt?: {
+      at: number; x: number; y: number; z: number; type: number;
+    } }).cortiLastDigAttempt;
+    const p = target?.position ?? (last && Date.now() - last.at <= 5000 ? last : null);
+    const type = target?.type ?? last?.type;
+    if (!p || type === undefined) {
+      this.opts.diag?.write({ lane: 'path', event: 'protection-unlocated',
+        msg: `服务端拒绝破坏，但没读到这一刻的挖掘格：${reason}`, incident: true });
+      return;
+    }
+    const x = Math.floor(p.x), y = Math.floor(p.y), z = Math.floor(p.z);
+    this.protection.noteDenied(String(bot.game.dimension), x, y, z, type);
+    if (target?.position && typeof bot.stopDigging === 'function') bot.stopDigging();
+    this.opts.diag?.write({ lane: 'path', event: 'protection-denied',
+      msg: `服务端拒绝破坏 (${x}, ${y}, ${z})；寻路以后不再把这格列为可挖`,
+      data: { cell: { x, y, z }, type, reason, protection: this.protection.status(String(bot.game.dimension)) },
+      incident: true, taskId: this.opts.taskId?.() ?? undefined });
+  }
 
   /** 当前连接的 bot;未连接或重连中为 null。 */
   get bot(): mineflayer.Bot | null {
-    return this._bot;
+    return this.connected ? this._bot : null;
   }
 
-  /** 登录后收到窗口 0 的 window_items 才将空物品栏视为真实状态。 */
+  get agentManaState(): { current: number; max: number } | null | undefined {
+    return this.agentMana;
+  }
+
+  /** 登录后收到窗口 0 的完整清单，且未被不完整容器窗覆盖。 */
   get invSynced(): boolean {
-    return this._invSynced;
+    return this._invSynced && (this._bot ? inventoryReadConfirmed(this._bot) : false);
   }
 
   get connected(): boolean {
@@ -269,8 +343,13 @@ export class Bridge {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    if (this.aclReplanTimer) {
+      clearTimeout(this.aclReplanTimer);
+      this.aclReplanTimer = null;
+    }
     const bot = this._bot;
     this._bot = null;
+    this.agentMana = undefined;
     this._invSynced = false;
     this.liveMovements = null;
     this.digFails.clear();
@@ -307,6 +386,11 @@ export class Bridge {
 
   private connect(): void {
     if (this.stopped || this.opts.shuttingDown?.()) return;
+    if (this.aclReplanTimer) {
+      clearTimeout(this.aclReplanTimer);
+      this.aclReplanTimer = null;
+    }
+    this.protection.beginConnection();
     const { host, port, username, version, log } = this.opts;
     const gen = ++this.generation;
     for (const old of [...this.bags.keys()]) {
@@ -314,6 +398,10 @@ export class Bridge {
     }
     this.bagFor(gen);
     log.info(`minecraft 连接 ${host}:${port} as ${username} (${version})`);
+    // 蓝图注册表按实际连接的版本走:写死 1.20.6 的话,1.21 上会拿旧表认方块状态与默认属性
+    if (setBlueprintMcVersion(version)) {
+      log.info(`蓝图注册表版本已跟随连接版本:${version}(原默认 ${DEFAULT_BLUEPRINT_MC_VERSION})`);
+    }
     let bot: mineflayer.Bot;
     try {
       bot = mineflayer.createBot({ host, port, username, version, auth: 'offline' });
@@ -323,10 +411,164 @@ export class Bridge {
       return;
     }
     this._bot = bot;
+    this.bagFor(gen).register('flight-abilities', watchFlightAbilities(bot));
+    this.agentMana = undefined;
+    const onAgentState = (packet: { channel?: unknown; data?: unknown }) => {
+      if (packet.channel !== VIEWER_STATE_CHANNEL || this._bot !== bot || this.generation !== gen) return;
+      const state = parseSkillsPayload(packet.channel, packet.data);
+      if (state) this.agentMana = state.mana;
+    };
+    bot._client.on('custom_payload', onAgentState);
+    this.bagFor(gen).register('agent-state', () => { bot._client.off('custom_payload', onAgentState); });
+    bot.on('death', () => { if (this._bot === bot && this.generation === gen) this.agentMana = null; });
+    const protectionBackoff = new NearbyProtectionBackoff();
+    let releaseProtectionWalk: (() => void) | null = null;
+    let releaseDistantWalk: (() => void) | null = null;
+    type HeldPathAction = { action: ProtectAction; cell: ProtectCell; dimension: string; key: string; querying: boolean };
+    let heldPathAction: HeldPathAction | null = null;
+    const endDistantWalk = (): void => {
+      if (!releaseDistantWalk) return;
+      releaseDistantWalk();
+      releaseDistantWalk = null;
+      scheduleProtectionReplan();
+    };
+    const scheduleProtectionReplan = (): void => {
+      if (this.aclReplanTimer) return;
+      this.aclReplanTimer = setTimeout(() => {
+        this.aclReplanTimer = null;
+        if (this._bot === bot && this.liveMovements) bot.pathfinder.setMovements(this.liveMovements);
+      }, 75);
+    };
+    const queryHeldAction = (): void => {
+      const gate = heldPathAction;
+      const protect = this.agentFriendProtection;
+      if (!gate || gate.querying || !protect || this._bot !== bot) return;
+      const pos = bot.entity?.position;
+      const distance = pos ? Math.hypot(pos.x - gate.cell.x, pos.y - gate.cell.y, pos.z - gate.cell.z) : Infinity;
+      // 服务端只接受 16 格内的查询；远处节点绝不能试探性地得到 unknown 后触发重算。
+      // 先沿现有通路靠近，进入可查询范围再开放挖/放和逐格预检。
+      if (distance > 15) return;
+      if (releaseDistantWalk) {
+        endDistantWalk();
+        return;
+      }
+      gate.querying = true;
+      void protect.check(gate.action, gate.dimension, gate.cell).then(() => {
+        if (heldPathAction === gate) {
+          heldPathAction = null;
+          scheduleProtectionReplan();
+        }
+      }).catch((error) => {
+        if (heldPathAction !== gate) return;
+        heldPathAction = null;
+        this.opts.diag?.write({ lane: 'path', event: 'protection-check-error',
+          msg: `寻路保护预检失败:${String(error)}`, incident: true });
+        scheduleProtectionReplan();
+      });
+    };
+    bot.on('physicsTick', () => {
+      if (heldPathAction) queryHeldAction();
+      if (!releaseProtectionWalk || protectionBackoff.active(bot.entity?.position,
+        String(bot.game?.dimension ?? 'overworld'))) return;
+      releaseProtectionWalk();
+      releaseProtectionWalk = null;
+      if (this._bot === bot && this.liveMovements) bot.pathfinder.setMovements(this.liveMovements);
+      this.opts.diag?.write({ lane: 'path', event: 'protection-walk-end',
+        msg: '离开保护密集区域或退避到期，恢复普通寻路规则' });
+    });
+    this.agentFriendProtection = this.opts.agentFriendProtect
+      ? new AgentFriendProtection(bot, (reply) => {
+        if (this._bot !== bot || !this.liveMovements) return;
+        const resolvedHeldPath = heldPathAction && heldPathAction.key ===
+          `${reply.action}|${reply.dimension.replace(/^minecraft:/, '')}|${reply.x},${reply.y},${reply.z}`;
+        if (resolvedHeldPath) {
+          heldPathAction = null;
+          scheduleProtectionReplan();
+        }
+        if (reply.status === 'allow_likely') return;
+        this.opts.diag?.write({ lane: 'path', event: 'agentfriend-protect',
+          msg: `服务端保护预检 ${reply.status}: ${reply.action} (${reply.x}, ${reply.y}, ${reply.z}) ${reply.reason}`,
+          data: reply.status === 'deny' ? { action: reply.action, status: reply.status, cell: [reply.x, reply.y, reply.z] }
+            : { action: reply.action, status: reply.status, cell: [reply.x, reply.y, reply.z], reason: reply.reason },
+          ...(reply.status === 'deny' ? { incident: true } : {}) });
+        if (protectionBackoff.note(reply, bot.entity?.position) && !releaseProtectionWalk) {
+          releaseProtectionWalk = walkOnlyPath(bot);
+          this.opts.diag?.write({ lane: 'path', event: 'protection-walk',
+            msg: '附近多个方块的破坏权限被拒或暂无法确认，60 秒内只沿现有通路寻路',
+            data: { position: bot.entity?.position, reason: reply.reason }, incident: true });
+        }
+        // 实际 dig/place 的 fresh 预检被拒时，包装器会拒绝操作，上游随即以
+        // dig_error/place_error 自己重算。这里再 reset 一次会撞上 equip 窗口的挖掘闩锁。
+        if (!resolvedHeldPath && !bot.pathfinder?.isMining?.() && !bot.pathfinder?.isBuilding?.()) {
+          scheduleProtectionReplan();
+        }
+      })
+      : null;
+    if (this.agentFriendProtection) this.opts.diag?.write({
+      lane: 'path', event: 'agentfriend-protect-ready',
+      msg: '千灯纪方块保护预检已接入寻路、挖掘和放置',
+    });
+    (bot as mineflayer.Bot & { cortiProtectCheck?: (action: ProtectAction, cell: ProtectCell) => Promise<{ status: string; reason: string }> })
+      .cortiProtectCheck = this.agentFriendProtection
+        ? (action, cell) => this.agentFriendProtection!.check(action, String(bot.game.dimension), cell, true)
+        : undefined;
+    (bot as mineflayer.Bot & { cortiBreakVerdict?: (block: { position: { x: number; y: number; z: number }; type: number }) =>
+      'allowed' | 'protected' | 'unknown' }).cortiBreakVerdict = (block) =>
+      this.agentFriendProtection?.verdict('break', String(bot.game.dimension), block.position) === 'deny'
+        ? 'protected'
+        : this.protection.verdict(String(bot.game.dimension), block.position.x, block.position.y, block.position.z, block.type);
     this._invSynced = false;
     /** 修补须通过插件注入，等待 Mineflayer 的 inject_allowed。 */
     bot.loadPlugin((b) => installMineflayerFixes(b, log, this.opts.diag, this.opts.showTempo));
     bot.loadPlugin(pathfinder);
+    if (this.agentFriendProtection) {
+      const protect = this.agentFriendProtection;
+      const clearHeldRoute = (): void => {
+        heldPathAction = null;
+        endDistantWalk();
+      };
+      bot.on('goal_updated', clearHeldRoute);
+      bot.on('goal_reached', clearHeldRoute);
+      bot.on('path_stop', clearHeldRoute);
+      bot.on('path_update', (result) => {
+        if (this._bot !== bot) return;
+        const dimension = String(bot.game.dimension);
+        const gate = holdUnverifiedPathAction(result, bot.entity.position,
+          (action, cell): ProtectStatus | null => protect.verdict(action, dimension, cell));
+        if (!gate) return;
+        const key = `${gate.action}|${dimension.replace(/^minecraft:/, '')}|${gate.cell.x},${gate.cell.y},${gate.cell.z}`;
+        const candidate: HeldPathAction = { action: gate.action, cell: gate.cell, dimension, key, querying: false };
+        const selected = selectHeldPathAction(heldPathAction, candidate);
+        // The new path is already truncated at its first unverified action.
+        // Finish the current query before allowing another path update to queue a different cell.
+        if (selected !== candidate && selected.key !== key) return;
+        if (gate.status !== null) {
+          heldPathAction = null;
+          scheduleProtectionReplan();
+          return;
+        }
+        if (selected === candidate) {
+          heldPathAction = candidate;
+          this.opts.diag?.write({ lane: 'path', event: 'protection-path-hold',
+            msg: `寻路将改动 (${gate.cell.x}, ${gate.cell.y}, ${gate.cell.z})，先等服务端 ${gate.action} 权限回执`,
+            data: { action: gate.action, cell: gate.cell, safePrefix: gate.safePrefix },
+          });
+        }
+        const distance = bot.entity.position.distanceTo(new Vec3(gate.cell.x, gate.cell.y, gate.cell.z));
+        if (distance > 15) {
+          if (!releaseDistantWalk) {
+            releaseDistantWalk = walkOnlyPath(bot);
+            this.opts.diag?.write({ lane: 'path', event: 'protection-distant-walk',
+              msg: `前方 ${Math.round(distance)} 格才需改方块；先走现有通路，接近后再预检`,
+              data: { action: gate.action, cell: gate.cell, safePrefix: gate.safePrefix },
+            });
+            scheduleProtectionReplan();
+          }
+        } else {
+          queryHeldAction();
+        }
+      });
+    }
     installPathfinderPerf(log);
     (bot._client as unknown as { on(ev: string, cb: (pkt: { windowId: number }) => void): void }).on(
       'window_items',
@@ -334,6 +576,23 @@ export class Bridge {
         if (this._bot === bot && this.generation === gen && pkt.windowId === 0) this._invSynced = true;
       },
     );
+    bot._client.on('custom_payload', (packet: { channel?: unknown; data?: unknown }) => {
+      if (packet.channel !== BREAK_ACL_CHANNEL) return;
+      if (this._bot !== bot || this.generation !== gen) return;
+      const result = this.protection.applyPacket(packet.channel, packet.data);
+      this.opts.diag?.write({ lane: 'path', event: result ? 'protection-acl' : 'protection-acl-invalid',
+        msg: result ? `收到了服务端方块保护清单 (${result})` : '服务端方块保护清单格式不符，未应用',
+        data: { channel: packet.channel, result }, ...(result ? {} : { incident: true }) });
+      // 一批区块加载只触发一次重算；相同 revision 续租不打断路线。
+      if (result === 'changed' && this.liveMovements && !this.aclReplanTimer) {
+        this.aclReplanTimer = setTimeout(() => {
+          this.aclReplanTimer = null;
+          if (this._bot === bot && this.generation === gen && this.liveMovements) {
+            bot.pathfinder.setMovements(this.liveMovements);
+          }
+        }, 75);
+      }
+    });
 
     bot.once('spawn', () => {
       if (this.stopped || this._bot !== bot || this.generation !== gen) return;
@@ -352,11 +611,18 @@ export class Bridge {
     const onGone = (reason: string) => {
       if (this._bot !== bot || this.generation !== gen) return;
       this._bot = null;
+      this.agentMana = undefined;
       this._invSynced = false;
       this.viewer = null;
       void this.disposeGeneration(gen);
       this.liveMovements = null;
       this.digFails.clear();
+      this.agentFriendProtection = null;
+      heldPathAction = null;
+      releaseDistantWalk?.();
+      releaseDistantWalk = null;
+      releaseProtectionWalk?.();
+      releaseProtectionWalk = null;
       const willReconnect = !this.stopped;
       this.opts.onDisconnect(reason, willReconnect, this.reconnectAttempt);
       if (willReconnect) this.scheduleReconnect(reason);
@@ -392,6 +658,8 @@ export class Bridge {
   /** 一条连接只装一次的那些东西(寻路器、挖掘退避、viewer);死亡重生不重装 */
   private installSpawnGear(bot: mineflayer.Bot, gen: number): void {
     const log = this.opts.log;
+    installPartialBlockStartRepair(bot);
+    installNavigationBareHand(bot);
     installPathfinderToolSelection(bot, log);
     const movements = new Movements(bot);
     movements.canDig = true;
@@ -402,6 +670,7 @@ export class Bridge {
     bot.pathfinder.tickTimeout = 60;
     suppressSprintNearWater(bot, movements);
     this.installDigBackoff(bot);
+    installDoorWaypointRepair(bot);
     this.installPathDiag(bot);
     this.startViewer(bot, gen);
   }
@@ -412,6 +681,9 @@ export class Bridge {
 
     /** 寻路单次落差限制为一格。 */
     movements.maxDropDown = 2;
+    // 上游 parkour 会把屋门边的两格高墙当成捷径，插入 y+1 的跳跃首步；
+    // 实际碰撞过不去，反复 reset stuck。普通走路/开门/搭桥仍由 Movements 规划。
+    movements.allowParkour = false;
 
     /** 上游 lava 的 diggable=true；额外加入 blocksCantBreak 禁止寻路挖掘。 */
     const lava = (bot.registry.blocksByName as Record<string, { id: number } | undefined>).lava;
@@ -467,15 +739,20 @@ export class Bridge {
       const byName = bot.registry.itemsByName as Record<string, { id: number } | undefined>;
       // 重力方块失去支撑后会下落，不能作为寻路器按固定落点记账的垫脚料。
       const heavy = wanted.filter((n) => isGravityBlock(n));
-      const usable = wanted.filter((n) => !isGravityBlock(n));
+      const usable = wanted.filter((n) => isStableScaffoldMaterial(bot.registry, n));
+      const shaped = wanted.filter((n) => !isGravityBlock(n)
+        && byName[n] !== undefined && !isStableScaffoldMaterial(bot.registry, n));
       const complaints: string[] = [];
       if (heavy.length > 0) {
         complaints.push(`scaffoldBlocks 里的重力方块不收(垫下去会自己掉,垫不住): ${heavy.join('、')}`);
       }
+      if (shaped.length > 0) {
+        complaints.push(`寻路垫脚需要完整稳定立方支撑，忽略非完整支撑材料: ${shaped.join('、')}`);
+      }
       const ids = usable.map((n) => byName[n]?.id).filter((id): id is number => id !== undefined);
-      const unknown = usable.filter((n) => byName[n] === undefined);
+      const unknown = wanted.filter((n) => byName[n] === undefined);
       if (unknown.length > 0) complaints.push(`scaffoldBlocks 里不认识的方块名被忽略: ${unknown.join('、')}`);
-      if (ids.length > 0 || wanted.length === 0) {
+      if (ids.length > 0 || wanted.length === 0 || shaped.length > 0 || heavy.length > 0) {
         movements.scafoldingBlocks = ids;
       } else {
         complaints.push('scaffoldBlocks 全部无效,沿用寻路器默认(泥土、圆石)');
@@ -489,6 +766,14 @@ export class Bridge {
     setSiteZones(movements, this.opts.blueprintZones ?? null);
     setNoPlaceCells(movements, this.opts.workCell ?? null);
     setDigBackoff(movements, (x, y, z) => this.digBackedOff(x, y, z));
+    setProtectedCells(movements, (x, y, z, type) =>
+      this.protection.denied(String(bot.game.dimension), x, y, z, type)
+      || (this.agentFriendProtection?.verdict('break', String(bot.game.dimension), { x, y, z }) === 'deny')
+      || (this.agentFriendProtection?.verdict('break', String(bot.game.dimension), { x, y, z }) === 'unknown'));
+    setProtectedPlaceCells(movements, (x, y, z) => {
+      const verdict = this.agentFriendProtection?.verdict('place', String(bot.game.dimension), { x, y, z });
+      return verdict === 'deny' || verdict === 'unknown';
+    });
     const costs = this.opts.movementCosts?.();
     if (costs) {
       movements.placeCost = costs.placeCost;
@@ -505,29 +790,34 @@ export class Bridge {
     bot.on('diggingCompleted', (block) => {
       this.digFails.delete(cellKey(block.position));
     });
+    // mineflayer 的本地完成事件可能早于服务端确认；服务端不认时一次即退避。
+    (bot as unknown as { on(event: string, listener: (block: { position: Cell }) => void): void })
+      .on(DIG_UNCONFIRMED_EVENT, (block) => this.noteDigFailure(block.position, true));
   }
 
-  private noteDigFailure(p: Cell): void {
+  private noteDigFailure(p: Cell, unconfirmed = false): void {
     const now = Date.now();
     const key = cellKey(p);
     const rec = this.digFails.get(key);
     if (rec === undefined || now - rec.lastAt > DIG_BACKOFF_MS) {
       this.pruneDigFails(now);
       this.digFails.set(key, {
-        tries: 1, lastAt: now, since: null,
+        tries: unconfirmed ? DIG_BACKOFF_TRIES : 1, lastAt: now, since: unconfirmed ? now : null,
         cell: { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) },
       });
-      return;
+      if (!unconfirmed) return;
+    } else {
+      rec.tries += unconfirmed ? DIG_BACKOFF_TRIES : 1;
+      rec.lastAt = now;
+      if (rec.tries < DIG_BACKOFF_TRIES || rec.since !== null) return;
+      rec.since = now;
     }
-    rec.tries += 1;
-    rec.lastAt = now;
-    if (rec.tries < DIG_BACKOFF_TRIES || rec.since !== null) return;
-    rec.since = now;
+    const blocked = this.digFails.get(key)!;
     this.opts.diag?.write({
       lane: 'path', event: 'dig-backoff',
-      msg: `(${rec.cell.x}, ${rec.cell.y}, ${rec.cell.z}) 连挖 ${rec.tries} 次没挖动,`
+      msg: `(${blocked.cell.x}, ${blocked.cell.y}, ${blocked.cell.z}) ${unconfirmed ? '服务端未确认挖掘' : `连挖 ${blocked.tries} 次没挖动`},`
         + `${DIG_BACKOFF_MS / 1000} 秒内寻路绕开`,
-      data: { cell: rec.cell, tries: rec.tries, ms: DIG_BACKOFF_MS },
+      data: { cell: blocked.cell, tries: blocked.tries, ms: DIG_BACKOFF_MS, unconfirmed },
     });
   }
 
@@ -576,7 +866,10 @@ export class Bridge {
     const bot = this._bot;
     if (!bot?.entity || typeof bot.pathfinder?.getPathFromTo !== 'function') return null;
     const me = bot.entity.position;
-    const startDist = Math.hypot(me.x - target.x, me.y - target.y, me.z - target.z);
+    const horizontal = goal instanceof goals.GoalNearXZ;
+    const startDist = horizontal
+      ? Math.hypot(me.x - target.x, me.z - target.z)
+      : Math.hypot(me.x - target.x, me.y - target.y, me.z - target.z);
     const out: RouteProbe[] = [];
     for (const profile of ['style', 'dig', 'walk'] as const) {
       const m = new Movements(bot);
@@ -604,7 +897,9 @@ export class Bridge {
       const path = result.path ?? [];
       const last = path[path.length - 1];
       const endDist = last
-        ? Math.hypot(last.x - target.x, last.y - target.y, last.z - target.z)
+        ? horizontal
+          ? Math.hypot(last.x - target.x, last.z - target.z)
+          : Math.hypot(last.x - target.x, last.y - target.y, last.z - target.z)
         : startDist;
       let place = 0;
       let breaks = 0;
@@ -631,7 +926,7 @@ export class Bridge {
     if (!bot?.entity) return null;
     const read = (x: number, y: number, z: number) => {
       const b = bot.blockAt(new Vec3(x, y, z));
-      return b ? { name: b.name, solid: b.boundingBox === 'block' } : null;
+      return b ? probeBlockInfo(b) : null;
     };
     const t = { x: Math.floor(target.x), y: Math.floor(target.y), z: Math.floor(target.z) };
     const stand = standCellsAround(read, t);
@@ -652,7 +947,9 @@ export class Bridge {
     // 抑制计数与时间窗按 key 独立记录；key 来自 RESET_ZH、update、goal、reached 的有限集合。
     const suppressed = new Map<string, number>();
     const lastAt = new Map<string, number>();
-    const write = (key: string, event: string, msg: string, data?: Record<string, unknown>): void => {
+    let lastPath: Array<Record<string, unknown>> = [];
+    let lastPathAt = 0;
+    const write = (key: string, event: string, msg: string, data?: Record<string, unknown>, incident = false): void => {
       const now = Date.now();
       if (now - (lastAt.get(key) ?? 0) < 5_000) {
         suppressed.set(key, (suppressed.get(key) ?? 0) + 1);
@@ -660,17 +957,36 @@ export class Bridge {
       }
       const n = suppressed.get(key) ?? 0;
       const tail = n > 0 ? `(此前 ${n} 条同类未记)` : '';
-      diag.write({ lane: 'path', event, msg: msg + tail, data });
+      diag.write({ lane: 'path', event, msg: msg + tail, data,
+        ...(incident ? { incident: true, taskId: this.opts.taskId?.() ?? undefined } : {}) });
       suppressed.set(key, 0);
       lastAt.set(key, now);
     };
     bot.on('path_update', (r) => {
+      lastPath = r.path.slice(0, 8).map((mv) => ({
+        at: [mv.x, mv.y, mv.z],
+        break: (mv.toBreak ?? []).slice(0, 3).map((p) => [p.x, p.y, p.z]),
+        interact: (mv.toPlace ?? []).filter((p) => 'useOne' in p && p.useOne).slice(0, 3).map((p) => [p.x, p.y, p.z]),
+      }));
+      lastPathAt = Date.now();
       write(`update:${r.status}`, 'update',
         `寻路 ${r.status}:${r.path.length} 步,搜了 ${r.visitedNodes} 节点/${Math.round(r.time)}ms`,
         { status: r.status, pathLen: r.path.length, visitedNodes: r.visitedNodes, timeMs: Math.round(r.time) });
     });
     bot.on('path_reset', (reason) => {
-      write(`reset:${reason}`, 'reset', `寻路重置:${RESET_ZH[reason] ?? reason}`, { reason });
+      const stuck = reason === 'stuck';
+      const at = bot.entity?.position;
+      write(`reset:${reason}`, 'reset', `寻路重置:${RESET_ZH[reason] ?? reason}`,
+        stuck ? {
+          reason,
+          position: at ? { x: at.x, y: at.y, z: at.z } : null,
+          doors: nearbyDoorStates(bot),
+          canDig: bot.pathfinder?.movements?.canDig ?? null,
+          canOpenDoors: bot.pathfinder?.movements?.canOpenDoors ?? null,
+          protection: this.protection.status(String(bot.game?.dimension ?? 'overworld')),
+          pathAgeMs: lastPathAt ? Date.now() - lastPathAt : null,
+          path: lastPath,
+        } : { reason }, stuck);
     });
     bot.on('goal_updated', (goal, dynamic) => {
       write(`goal:${goal ? 'set' : 'clear'}`, 'goal',
@@ -700,29 +1016,39 @@ export class Bridge {
           );
           return;
         }
-        const mod = await this.loadViewer();
-        if (this.stopped || this._bot !== bot || this.generation !== gen || this.bagFor(gen).disposed) return;
-        mod.mineflayer(bot, { port, firstPerson: true });
-        // 取得句柄后必须同步注册到资源袋，中间不能 await，以免 stop 时漏收。
-        const close = (bot as unknown as { viewer?: { close?: () => void } }).viewer?.close;
-        this.bagFor(gen).register('prismarine-viewer', () => this.releaseViewer(gen, port, close));
+        if (this.opts.viewerAssetsDir) {
+          const { startModernViewer } = await import('./modern-viewer.ts');
+          if (this.stopped || this._bot !== bot || this.generation !== gen || this.bagFor(gen).disposed) return;
+          const handle = await startModernViewer(bot, {
+            port, assetsDir: this.opts.viewerAssetsDir, speakerName: this.opts.viewerSpeakerName,
+            agentMana: () => this.agentMana,
+          });
+          this.bagFor(gen).register('modern-viewer', () => this.releaseViewer(gen, port, handle.close));
+        } else {
+          const mod = await this.loadViewer();
+          if (this.stopped || this._bot !== bot || this.generation !== gen || this.bagFor(gen).disposed) return;
+          mod.mineflayer(bot, { port, firstPerson: true });
+          // 取得句柄后必须同步注册到资源袋，中间不能 await，以免 stop 时漏收。
+          const close = (bot as unknown as { viewer?: { close?: () => void } }).viewer?.close;
+          this.bagFor(gen).register('prismarine-viewer', () => this.releaseViewer(gen, port, close));
+        }
         if (this.stopped || this.generation !== gen) return; // 旧代不得改新代状态
         this.viewer = { gen, url: `http://127.0.0.1:${port}` };
-        this.opts.log.info(`prismarine-viewer 已启动 http://127.0.0.1:${port}`);
+        this.opts.log.info(`minecraft viewer 已启动 http://127.0.0.1:${port}`);
       } catch (err) {
-        this.opts.log.warn(`prismarine-viewer 启动失败(不影响游玩): ${(err as Error).message}`);
+        this.opts.log.warn(`minecraft viewer 启动失败(不影响游玩): ${(err as Error).message}`);
       }
     })();
   }
 
   /** viewer.close() 不返回 Promise，关闭后通过端口绑定探测确认释放。 */
-  private async releaseViewer(gen: number, port: number, close?: () => void): Promise<void> {
+  private async releaseViewer(gen: number, port: number, close?: () => Promise<void> | void): Promise<void> {
     if (this.viewer?.gen === gen) this.viewer = null;
     if (!close) {
       this.opts.log.warn(`viewer 没有暴露 close,端口 ${port} 无法主动释放`);
       return;
     }
-    close();
+    await close();
     const deadline = Date.now() + VIEWER_RELEASE_MS;
     for (;;) {
       if (await probePort(port)) return;

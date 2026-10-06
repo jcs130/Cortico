@@ -10,9 +10,10 @@
  * 3. 空实体索引直接返回，safeToBreak 按位置缓存；compute 之外保留原始读取逻辑。
  * 4. 浅水允许垫塔，深水表面允许游上一格高的岸。
  * 5. 脚在液体且脚下无实底时不生成放置动作。
- * 6. 工地范围禁止寻路放置，走与挖不受限；工地建材在垫脚候选中排最后。
+ * 6. 已绑定工地禁止自动寻路挖掘与放置；工地建材在垫脚候选中排最后。
  * 7. 前行与跳上一格的整个放置分支同样受脚下实底约束。
  * 8. 三分钟内被拒且方块未变的落点进入放置黑名单。
+ * 9. 候选边的身体扫掠体积不能接触已加载的烧灼方块；原已接触的身体仍可向外脱离。
  *
  * 缺失区块列须返回不可走；已加载列的越界 y 按空气处理。getMoveJumpUp 的高度调整使用局部值，避免污染缓存。
  */
@@ -20,6 +21,7 @@ import { createRequire } from 'node:module';
 import { Movements } from 'mineflayer-pathfinder';
 import AStar from 'mineflayer-pathfinder/lib/astar.js';
 import type { Logger } from '../../core/types.ts';
+import { movementTouchesHazard } from './hazard-geometry.ts';
 
 // prismarine-nbt / vec3 是 mineflayer-pathfinder 的依赖而非本包的,要顺它的依赖链拿
 const req = createRequire(import.meta.url);
@@ -80,7 +82,7 @@ const DOOR_KIND = 3;
  * 开着的活板门当空气是对的,但那属于另一个判断(掉下去),这里不顺手做。
  */
 export function doorStateOf(name: string, props: Record<string, unknown>): number {
-  const isDoor = name.endsWith('_door');
+  const isDoor = name.endsWith('_door') && !name.endsWith('_trapdoor');
   if (!isDoor && !name.endsWith('_fence_gate')) return 0;
   const open = props.open === true || props.open === 'true';
   // 铁门(以及万一有的铁栅栏门)手上没有开关的办法
@@ -124,6 +126,23 @@ export function applyDoorState(
     b.openable = true;
     b.height = y;
   }
+}
+
+/** A door panel spanning the perpendicular axis blocks a body crossing this axis.
+ * The panel rotates when used, so both open and shut wooden doors may need a click,
+ * depending on the approach direction. The block's current shapes are authoritative.
+ */
+export function doorPanelBlocksMove(
+  shapes: readonly (readonly number[])[] | undefined,
+  dx: number,
+  dz: number,
+): boolean {
+  if (!shapes?.length) return false;
+  return shapes.some((shape) => {
+    const xSpan = shape[3] - shape[0];
+    const zSpan = shape[5] - shape[2];
+    return dx !== 0 ? xSpan < 0.5 && zSpan > 0.8 : dz !== 0 && zSpan < 0.5 && xSpan > 0.8;
+  });
 }
 
 const tablesByRegistry = new WeakMap<object, StateTables>();
@@ -190,8 +209,7 @@ function buildBits(m: PatchedMovements, maxType: number): Uint8Array {
 }
 
 /**
- * 一片在建工地。包围盒含端点两格,寻路器对它有两条规矩:区内不生成放置动作
- * (走、挖不受限),区里的建材在垫脚候选里排到最后。
+ * 已绑定工地。包围盒含端点；自动寻路不在区内挖掘或放置，建材垫脚排到最后。
  */
 export interface SiteZone {
   /** 日志与受阻文案里怎么称呼这片工地 */
@@ -204,7 +222,7 @@ export interface SiteZone {
 
 /**
  * 给一份 movements 装上工地取数口;`null` 撤销。搜索开工与每次挑垫脚料时现取,
- * 所以工地绑定/完工下一次寻路就生效,不必重装 movements。
+ * 所以工地绑定与卸载在下一次寻路生效，不必重装 movements。
  */
 export function setSiteZones(
   movements: Movements,
@@ -236,6 +254,22 @@ export function setDigBackoff(
   (movements as unknown as PatchedMovements).__digBackoffFn = blocked;
 }
 
+/** 服务端方块权限缓存；寻路避开这些格，显式技能通过同一缓存检查。 */
+export function setProtectedCells(
+  movements: Movements,
+  denied: ((x: number, y: number, z: number, type: number) => boolean) | null,
+): void {
+  (movements as unknown as PatchedMovements).__protectedCellFn = denied;
+}
+
+/** 已预检且服务端拒绝或未确认的放置落点，不进入搭路候选。 */
+export function setProtectedPlaceCells(
+  movements: Movements,
+  denied: ((x: number, y: number, z: number) => boolean) | null,
+): void {
+  (movements as unknown as PatchedMovements).__protectedPlaceFn = denied;
+}
+
 function inZones(zones: readonly SiteZone[], x: number, y: number, z: number): boolean {
   for (const zone of zones) {
     if (x >= zone.min[0] && x <= zone.max[0]
@@ -264,8 +298,10 @@ interface PatchedMovements {
   __entityIdxEmpty?: boolean;
   __siteZonesFn?: (() => readonly SiteZone[]) | null;
   __digBackoffFn?: ((x: number, y: number, z: number) => boolean) | null;
+  __protectedCellFn?: ((x: number, y: number, z: number, type: number) => boolean) | null;
+  __protectedPlaceFn?: ((x: number, y: number, z: number) => boolean) | null;
   __noPlaceFn?: ((x: number, y: number, z: number) => boolean) | null;
-  /** 本次搜索的工地快照;compute 之外为 null(路径跟随不判包围盒) */
+  /** 本次搜索的工地快照；compute 之外为 null，破坏检查改用当前绑定。 */
   __siteZones?: readonly SiteZone[] | null;
   entityIntersections: Record<string, number>;
   exclusionStep(block: unknown): number;
@@ -425,6 +461,12 @@ export function installPathfinderPerf(log?: Logger): void {
   const origSafeToBreak = mProto.safeToBreak;
   mProto.safeToBreak = function (this: PatchedMovements, block: BlockLike & { position: { x: number; y: number; z: number } }) {
     const cache = this.__sliceCache;
+    const zones = this.__siteZones ?? this.__siteZonesFn?.();
+    if (zones && block.position
+      && inZones(zones, block.position.x, block.position.y, block.position.z)) return false;
+    const protectedCell = this.__protectedCellFn;
+    if (protectedCell && block.position
+      && protectedCell(block.position.x, block.position.y, block.position.z, block.type)) return false;
     // 退避判据带时效,排在记忆化之前:过期之后同一格立刻恢复可挖
     const backoff = this.__digBackoffFn;
     if (backoff && block.position
@@ -595,13 +637,14 @@ export function installPathfinderPerf(log?: Logger): void {
   // 搭桥同样要求脚下有实底；游泳状态下缺少可贴附的支撑面。
   type FwdBlock = {
     physical: boolean; replaceable: boolean; liquid: boolean; safe: boolean;
-    openable: boolean; shapes?: number[][]; height: number;
+    openable: boolean; shapes?: number[][]; height: number; name?: string;
     position: { x: number; y: number; z: number };
     /** 见 DOOR_*;非本模块拼的块(退回原始读块那条)没有这一项 */
     door?: number;
   };
   (mProto as unknown as {
-    getMoveForward(node: { x: number; y: number; z: number; remainingBlocks: number }, dir: { x: number; z: number }, neighbors: unknown[]): void;
+    getMoveForward(node: { x: number; y: number; z: number; remainingBlocks: number;
+      toPlace?: Array<{ x: number; y: number; z: number; useOne?: boolean }> }, dir: { x: number; z: number }, neighbors: unknown[]): void;
   }).getMoveForward = function (
     this: PatchedMovements & {
       getBlock(pos: unknown, dx: number, dy: number, dz: number): FwdBlock;
@@ -615,6 +658,7 @@ export function installPathfinderPerf(log?: Logger): void {
     },
     node, dir, neighbors,
   ) {
+    const blockA = this.getBlock(node, 0, 0, 0);
     const blockB = this.getBlock(node, dir.x, 1, dir.z);
     const blockC = this.getBlock(node, dir.x, 0, dir.z);
     const blockD = this.getBlock(node, dir.x, -1, dir.z);
@@ -623,7 +667,7 @@ export function installPathfinderPerf(log?: Logger): void {
     cost += this.exclusionStep(blockC);
 
     const toBreak: unknown[] = [];
-    const toPlace: unknown[] = [];
+    const toPlace: Array<{ x: number; y: number; z: number; dx: number; dy: number; dz: number; useOne?: boolean }> = [];
 
     if (!blockD.physical && !blockC.liquid) {
       if (node.remainingBlocks === 0) return; // not enough blocks to place
@@ -640,11 +684,34 @@ export function installPathfinderPerf(log?: Logger): void {
       cost += this.placeCost; // additional cost for placing a block
     }
 
+    // Turning inside a doorway can cross its panel while *leaving* the door
+    // cell. A* must schedule a click on the source door in that case. If the
+    // incoming edge already clicked this same door, use the opposite state as
+    // the effective geometry rather than clicking it shut again.
+    const sourceDoor = blockA.name?.endsWith('_door') && !blockA.name.endsWith('_trapdoor')
+      && ((blockA.door ?? 0) & DOOR_KIND) !== DOOR_SHUT_LOCKED;
+    if (sourceDoor) {
+      const clickedOnEntry = node.toPlace?.some((p) => p.useOne === true
+        && p.x === node.x && p.y === node.y && p.z === node.z) ?? false;
+      const blocksExit = doorPanelBlocksMove(blockA.shapes, dir.x, dir.z) !== clickedOnEntry;
+      if (blocksExit) {
+        if (!this.canOpenDoors) return;
+        toPlace.push({ x: node.x, y: node.y, z: node.z, dx: 0, dy: 0, dz: 0, useOne: true });
+      }
+    }
+
     cost += this.safeOrBreak(blockB, toBreak);
     if (cost > 100) return;
 
-    // Open fence gates
-    if (this.canOpenDoors && blockC.openable && blockC.shapes && blockC.shapes.length !== 0) {
+    // A door may block this approach whether its state is open or shut. Toggle only
+    // when the actual panel crosses the route; clicking a passable open door shuts it
+    // in front of the bot. Fence gates keep their upstream interaction rule.
+    const woodenDoor = blockC.name?.endsWith('_door') && !blockC.name.endsWith('_trapdoor')
+      && ((blockC.door ?? 0) & DOOR_KIND) !== DOOR_SHUT_LOCKED;
+    const toggleDoor = woodenDoor && doorPanelBlocksMove(blockC.shapes, dir.x, dir.z);
+    if (toggleDoor && !this.canOpenDoors) return;
+    if (toggleDoor || (this.canOpenDoors && !woodenDoor && blockC.openable
+      && blockC.shapes && blockC.shapes.length !== 0)) {
       toPlace.push({ x: node.x + dir.x, y: node.y, z: node.z + dir.z, dx: 0, dy: 0, dz: 0, useOne: true });
     } else {
       cost += this.safeOrBreak(blockC, toBreak);
@@ -658,10 +725,15 @@ export function installPathfinderPerf(log?: Logger): void {
     // 落脚这一头就必须在这里挡住,不然 A* 会生出"顺着门爬上去"的假路。
     if (((blockC.door ?? 0) & DOOR_UPPER) !== 0) return;
 
-    neighbors.push(new Move(blockC.position.x, blockC.position.y, blockC.position.z, node.remainingBlocks - toPlace.length, cost, toBreak, toPlace));
+    neighbors.push(new Move(blockC.position.x, blockC.position.y, blockC.position.z,
+      node.remainingBlocks - toPlace.filter((p) => !p.useOne).length, cost, toBreak, toPlace));
   };
 
   /**
+   * 斜走必须两条正交侧边都可穿过。上游只选「两边有一边可挖」便放行，
+   * A* 会在墙角规划一条斜线；实际玩家碰撞箱却会顶住没挖的那一边。
+   * 千灯纪家门口的云杉木墙正是这个形状，首步一直斜撞墙角。
+   *
    * 斜着不进门框。
    *
    * getMoveDiagonal 里没有 useOne 那条分支(上游只给 getMoveForward 写了开门),
@@ -678,10 +750,19 @@ export function installPathfinderPerf(log?: Logger): void {
     getMoveDiagonal(node: unknown, dir: unknown, neighbors: unknown[]): void;
   }).getMoveDiagonal = function (
     this: PatchedMovements & {
-      getBlock(pos: unknown, dx: number, dy: number, dz: number): { door?: number };
+      getBlock(pos: unknown, dx: number, dy: number, dz: number): {
+        door?: number; physical: boolean; openable: boolean;
+      };
     },
     node, dir, neighbors,
   ) {
+    const from = node as { x: number; y: number; z: number };
+    const offset = dir as { x: number; z: number };
+    for (const [dx, dz] of [[offset.x, 0], [0, offset.z]]) {
+      const feet = this.getBlock(from, dx, 0, dz);
+      const head = this.getBlock(from, dx, 1, dz);
+      if (feet.physical || feet.openable || head.physical || head.openable) return;
+    }
     const before = neighbors.length;
     origGetMoveDiagonal.call(this, node, dir, neighbors);
     for (let i = neighbors.length - 1; i >= before; i--) {
@@ -699,14 +780,24 @@ export function installPathfinderPerf(log?: Logger): void {
   const origGetNeighbors = mProto.getNeighbors;
   mProto.getNeighbors = function (
     this: PatchedMovements & {
-      getBlock(pos: { x: number; y: number; z: number } | null, dx: number, dy: number, dz: number): { physical: boolean; name?: string };
+      getBlock(pos: { x: number; y: number; z: number } | null, dx: number, dy: number, dz: number): { physical: boolean; name?: string; door?: number };
       bot: { placeMisses?: Array<{ was: string; x: number; y: number; z: number; at?: number }> };
     },
     node,
   ) {
-    const moves = origGetNeighbors.call(this, node);
+    // 关门与开门的上半扇都不是落脚点；各生成器的 jump/parkour/down 可能
+    // 绕过 forward 的门判据，把人送到门框 y+1，实际碰撞后会原地卡住。
+    const from = node as { x: number; y: number; z: number };
+    const source = { x: from.x + 0.5, y: from.y, z: from.z + 0.5 };
+    const moves = origGetNeighbors.call(this, node).filter((mv) => {
+      const next = mv as { x: number; y: number; z: number };
+      if (((this.getBlock(next, 0, 0, 0).door ?? 0) & DOOR_UPPER) !== 0) return false;
+      return !movementTouchesHazard(source, { x: next.x + 0.5, y: next.y, z: next.z + 0.5 },
+        (x, y, z) => this.getBlock({ x, y, z }, 0, 0, 0).name);
+    });
     const zones = this.__siteZones;
     const noPlace = this.__noPlaceFn;
+    const protectedPlace = this.__protectedPlaceFn;
     // 服务端刚三连拒过的放置,同格同块短期内还会拒:进搜索黑名单,逼 A* 换条路
     // (没有这条,drop 目标 → 重算 → 又选中同一个最便宜的放置,循环一整个小时)
     const now = Date.now();
@@ -715,7 +806,7 @@ export function installPathfinderPerf(log?: Logger): void {
       if (miss.at === undefined || now - miss.at > PLACE_MISS_TTL_MS) continue;
       (misses ??= new Map()).set(`${miss.x},${miss.y},${miss.z}`, miss.was);
     }
-    if ((zones === null || zones === undefined || zones.length === 0) && !noPlace && !misses) return moves;
+    if ((zones === null || zones === undefined || zones.length === 0) && !noPlace && !protectedPlace && !misses) return moves;
     return moves.filter((mv) => {
       // 注意这里不做"参照格必须实心"的静态预检:A* 的跨步放置合法地踩在
       // 前几步刚垫的块上,搜索时世界里那一格还是水/空气(垫塔第二步的参照
@@ -723,6 +814,7 @@ export function installPathfinderPerf(log?: Logger): void {
       for (const p of mv.toPlace ?? []) {
         if (p.useOne === true) continue;
         const [x, y, z] = [p.x + p.dx, p.y + p.dy, p.z + p.dz];
+        if (protectedPlace?.(x, y, z)) return false;
         // 落点自己在成果登记上、或它正压在一格登记的东西头顶,两种都不生成这个放置
         if (zones !== null && zones !== undefined && zones.length > 0 && inZones(zones, x, y, z)) return false;
         if (noPlace !== null && noPlace !== undefined && (noPlace(x, y, z) || noPlace(x, y - 1, z))) return false;

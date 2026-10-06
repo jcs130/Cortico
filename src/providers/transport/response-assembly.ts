@@ -13,16 +13,52 @@ export interface ResponseAssembly {
 
 /**
  * Validate native Responses Items before notifying observers.
- * Normalize response.reasoning_text.* to the schema name response.reasoning.* before validation.
+ * Normalize reasoning aliases by the announced Item shape. Summary-only reasoning streams may
+ * omit part events; their observed text supplies the missing summary part lifecycle.
  */
 export class NativeResponseAssembly implements ResponseAssembly {
   private readonly accumulator = new ResponseAccumulator();
   private usage = unknownMeters();
   private tier: string | null = null;
+  private nativeSequence = -1;
+  private sequence = -1;
+  private readonly synthesizedSummaries = new Set<string>();
+
+  private send(event: StreamEvent, emit: (event: StreamEvent) => void): void {
+    const normalized = { ...event, sequence_number: Math.max(event.sequence_number, this.sequence + 1) };
+    this.accumulator.accept(normalized);
+    this.sequence = normalized.sequence_number;
+    emit(normalized);
+  }
+
   feed(payload: unknown, emit: (event: StreamEvent) => void): void {
     if (!payload || typeof payload !== 'object') throw new ResponseProtocolError('Invalid native Responses event');
-    if ('type' in payload && (payload.type === 'response.reasoning_text.delta' || payload.type === 'response.reasoning_text.done'))
-      payload = { ...payload, type: payload.type.replace('reasoning_text', 'reasoning') };
+    const native = payload as Record<string, unknown>;
+    if (!Number.isInteger(native.sequence_number) || (native.sequence_number as number) <= this.nativeSequence)
+      throw new ResponseProtocolError('Non-increasing event sequence');
+    this.nativeSequence = native.sequence_number as number;
+    if (native.type === 'response.reasoning_text.delta' || native.type === 'response.reasoning_text.done') {
+      const item = this.accumulator.snapshot()?.output.find(item => item.id === native.item_id);
+      if (item?.type === 'reasoning' && item.content === undefined && Array.isArray(item.summary)) {
+        const { content_index: summary_index, ...fields } = native;
+        const partFields = { sequence_number: native.sequence_number, output_index: native.output_index,
+          item_id: native.item_id, summary_index };
+        const key = `${native.item_id}/${summary_index}`;
+        if (native.type === 'response.reasoning_text.delta' && item.summary[summary_index as number] === undefined) {
+          this.send({ ...partFields, type: 'response.reasoning_summary_part.added',
+            part: { type: 'summary_text', text: '' } } as StreamEvent, emit);
+          this.synthesizedSummaries.add(key);
+        }
+        this.send({ ...fields, summary_index,
+          type: native.type.replace('reasoning_text', 'reasoning_summary_text') } as StreamEvent, emit);
+        if (native.type === 'response.reasoning_text.done' && this.synthesizedSummaries.has(key)) {
+          this.send({ ...partFields, type: 'response.reasoning_summary_part.done',
+            part: { type: 'summary_text', text: native.text } } as StreamEvent, emit);
+        }
+        return;
+      }
+      payload = { ...native, type: native.type.replace('reasoning_text', 'reasoning') };
+    }
     let event = payload as StreamEvent;
     if ('response' in event) {
       const raw = event.response;
@@ -31,8 +67,7 @@ export class NativeResponseAssembly implements ResponseAssembly {
       if (raw.usage) this.usage = responseMeters(raw.usage);
       event = { ...event, response: { ...createResponse(raw.id, { model: raw.model }), ...raw, usage: standardUsage(this.usage) } };
     }
-    this.accumulator.accept(event);
-    emit(event);
+    this.send(event, emit);
     if (event.type === 'error') throw new ResponseProtocolError(`Native response error: ${JSON.stringify(event)}`);
   }
   finish(): Response { return this.accumulator.finish(); }

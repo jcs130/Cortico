@@ -1,4 +1,4 @@
-<!-- Owner: src/providers/base.ts, src/providers/console/hub.ts, src/providers/hub-api.ts, src/providers/name.ts, src/providers/registry.ts, src/providers/console/settings.ts, src/providers/console/config.ts, src/providers/openai-responses-compat/config.ts, src/providers/transport/responses-input.ts, src/providers/transport/history.ts, src/providers/llamacpp/native.ts -->
+<!-- Owner: src/providers/base.ts, src/providers/console/hub.ts, src/providers/hub-api.ts, src/providers/name.ts, src/providers/registry.ts, src/providers/console/settings.ts, src/providers/console/config.ts, src/providers/openai-responses-compat/config.ts, src/providers/transport/responses-input.ts, src/providers/transport/history.ts, src/providers/transport/response-assembly.ts, src/providers/llamacpp/native.ts -->
 
 # src/providers
 
@@ -16,6 +16,7 @@
 | `pricebook.ts` | 价目定义、快照、报价合并 |
 | `console/` | provider 页的服务端:`ProviderSettings`(落盘、密钥、探活) |
 | `openai-responses-compat/` | 内建模块:Responses 协议客户端与模型目录 |
+| `openai-chat-compat/` | 内建模块:兼容 Chat Completions 的服务，地址、密钥、模型和特有参数由端点配置 |
 | `llamacpp/` | 内建模块:llama-server 的 Chat 客户端、router 目录、官方 release 的下载安装与进程托管 |
 | `transport/` | HTTP/SSE 引擎、Chat 与 Responses 请求转换、事件装配、计量、错误 |
 
@@ -65,6 +66,22 @@ Core 侧:`activeProviderEntry()` / `activeSpec()` 每次现读;`contextWindowOf(
 
 ## transport
 
+`openai-responses-compat` 的 `options.maxContextImages` 是可选的附件图像重放预算：
+未设置时不限；0 只保留文字。设置后只读取并展开最新 N 个不同的图像附件句柄，
+每个句柄仅在最后一次引用处展开，输出顺序保持不变。旧引用的文字、时间与工具配对保留，
+运行记录和 Memory 不变；原生 `input_image` 分片不受此附件预算限制。
+预算由端点选择，其他 provider 不会自动获得上限。
+
+`options.imageReplayPlacement` 默认 `inline`，在原引用处展开图像。`tail` 将选中的附件
+图像放在文字历史末尾，每张附带原句柄、说明、消息或调用来源及可用的时间戳。
+滚动选择最新图像时，前部文字与工具配对保持相同，模型可复用这部分缓存。
+原生 `input_image` 分片仍保留原位，运行记录与 Memory 不变。
+
+`options.imageReplayScope` 默认 `history`。`fresh` 只展开最近真实模型输出之后新增的附件
+与原生图像；assistant 消息、工具调用和推理项构成边界，合成 head 示例不计。图像仅从
+请求副本退出，原记录和文字保留；同一请求重试仍带图。旧的纯图片项以未回放的事实占位，
+包含文字或其他内容的项保持这些内容。此选项由端点选择，缓存复用能力仍取决于上游。
+
 `response-http.ts` 处理 HTTP/SSE:一次生成可包含多次请求尝试,重试间隔为 `[1s, 4s, 10s]`;超时
 四档(流式首包 300s、非流式 120s、帧空闲 120s、内容空闲 300s);只对状态 0 / 408 / 429 / 5xx
 重试,响应带 `Retry-After` 时按它退避,401 / 403 先 `transport.refresh()`
@@ -80,6 +97,11 @@ Core 侧:`activeProviderEntry()` / `activeSpec()` 每次现读;`contextWindowOf(
 `response-assembly.ts` 把两种流归一成 Open Responses 的 Item 流,
 `finish_reason` 的 `length` / `content_filter` 落成 `incomplete_details.reason`;
 `response-meters.ts` 把两种 usage 归一成 `TokenMeters`,缺项保持 null。
+
+原生 `response.reasoning_text.*` 按已声明的 reasoning Item 形状归一。
+只有 `summary` 而没有 `content` 的 Item 使用 summary 文本事件；端点省略 part 开合时，
+以首个增量和已核对的完整文本补齐。已声明 content 的流沿用 content 事件。
+上游事件序号仍须递增；补齐事件后的序号单调递增，内容、身份和最终资源仍接受完整协议校验。
 
 线协议类型在 `src/protocol/open-responses/`(规范 2026-04-24 生成),`ResponseAccumulator`
 逐事件强校验:序号递增、终态自洽、已关闭的 Item 不得再变。

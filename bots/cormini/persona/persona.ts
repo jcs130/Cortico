@@ -184,7 +184,7 @@ export class Cormini implements Persona {
   readonly memoryDir: string;
   protected readonly caps: { soft: number; hard: number };
   /** 挂载表的活引用(装配层与 core 共用);用时按 id 排序,顺序决定前缀缓存命中。 */
-  private readonly worlds: World[];
+  protected readonly worlds: World[];
   private readonly orientationFile: string;
   private readonly orientationOverrideFile: string | null;
   protected readonly firstTurnDir: string | null;
@@ -538,8 +538,9 @@ export class Cormini implements Persona {
   onDelivery(ctx: { events: EventEnvelope[] }): void {
     const externals = ctx.events.filter((e) => e.origin === 'external');
     if (externals.length === 0) return;
-    // 外部事件投递复位静默时长。
-    this.heartbeat.noteActivity();
+    // Deferred snapshots ride along with a tick. They are observations, not
+    // fresh activity; counting them would reset idle backoff on every tick.
+    if (externals.some((e) => !e.tags?.includes('snapshot'))) this.heartbeat.noteActivity();
     this.core?.injectInternal(`[system] ${externals.length} 条新事件。`, 'notice');
   }
 

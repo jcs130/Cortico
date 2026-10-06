@@ -1068,6 +1068,7 @@ export class BilibiliWorld implements World {
           type: 'bilibili.room',
           trigger: 'flush',
           text: '[直播间] 平台确认已开播(接口 live_status=1):直播画面已对观众可见',
+          meta: { liveRoomState: { schemaVersion: 1, living: true, via: 'poll' } },
         }
       : {
           kind: 'event',
@@ -1075,6 +1076,7 @@ export class BilibiliWorld implements World {
           trigger: 'flush',
           text: '[直播间] 平台确认已下播(接口 live_status=0):观众已经看不到直播画面;'
             + '此后的弹幕来自仍留在房间页的人,不代表直播还在进行',
+          meta: { liveRoomState: { schemaVersion: 1, living: false, via: 'poll' } },
         });
   }
 

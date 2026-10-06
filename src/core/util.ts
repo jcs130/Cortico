@@ -212,13 +212,13 @@ export class Runlog {
 
   write(input: LogInput): LogRecord | null {
     const rank = LOG_LEVEL_RANK[input.level];
-    const toFile = rank >= LOG_LEVEL_RANK[this.fileThreshold(input.area)];
+    const toFile = input.incident === true || rank >= LOG_LEVEL_RANK[this.fileThreshold(input.area)];
     const toConsole = this.echo && rank >= LOG_LEVEL_RANK[this.levels().console];
     if (!toFile && !toConsole) return null;
     const record = this.build(input);
     if (rank >= LOG_LEVEL_RANK.warn && this.fold(record)) return null;
     this.commit(record, toFile, toConsole);
-    if (record.level === 'error') this.incident(record);
+    if (record.level === 'error' || record.incident) this.incident(record);
     return record;
   }
 
@@ -228,6 +228,7 @@ export class Runlog {
       ts: input.ts ?? nowIso(this.timezone),
       run: this.run,
       seq: ++this.seq,
+      pid: input.pid ?? process.pid,
       level: input.level,
       area: input.area,
       msg: input.msg,
@@ -238,6 +239,7 @@ export class Runlog {
       if (value !== undefined) (record as unknown as Record<string, unknown>)[key] = value;
     }
     if (input.durMs !== undefined) record.durMs = input.durMs;
+    if (input.incident) record.incident = true;
     let data = input.data;
     let err = input.err;
     if (data instanceof Error) { err ??= data; data = undefined; }

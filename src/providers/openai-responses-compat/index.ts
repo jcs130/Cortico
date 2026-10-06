@@ -20,6 +20,12 @@ const BASE_URLS: readonly string[] = [
 const EFFORTS: readonly string[] = ['none', 'low', 'medium', 'high', 'xhigh'];
 
 export interface CompatOptions {
+  /** Saved image replay budget; unset = unlimited, 0 = attachment text only. */
+  maxContextImages?: number;
+  /** Default inline; tail places saved images after text history for prefix caching. */
+  imageReplayPlacement?: 'inline' | 'tail';
+  /** Default history; fresh stops replaying an image after the model has emitted new output. */
+  imageReplayScope?: 'history' | 'fresh';
   endpointPath?: string;
   extraHeaders?: Record<string, string>;
   extraBody?: Record<string, unknown>;
@@ -41,7 +47,7 @@ export interface CompatControl {
 /** Empty strings and empty objects are the console's "unset"; they do not reach the wire. */
 function normalizeCompat(entry: LLMProviderEntry): LLMProviderEntry {
   const options: Record<string, unknown> = { ...entry.options };
-  for (const key of ['endpointPath', 'reasoningReplay', 'syntheticReasoningText'] as const) if (options[key] === '') delete options[key];
+  for (const key of ['endpointPath', 'reasoningReplay', 'syntheticReasoningText', 'maxContextImages', 'imageReplayPlacement', 'imageReplayScope'] as const) if (options[key] === '') delete options[key];
   for (const key of ['extraHeaders', 'extraBody'] as const) {
     const value = options[key];
     if (value && typeof value === 'object' && !Array.isArray(value) && !Object.keys(value).length) delete options[key];
@@ -69,6 +75,15 @@ export default {
   validateEntry: (entry, language) => {
     const S = text(language);
     const options = compatOptions(entry);
+    if (options.maxContextImages !== undefined
+      && (!Number.isSafeInteger(options.maxContextImages) || options.maxContextImages < 0))
+      throw new Error(S.maxContextImagesValue);
+    if (options.imageReplayPlacement !== undefined
+      && options.imageReplayPlacement !== 'inline' && options.imageReplayPlacement !== 'tail')
+      throw new Error(S.imageReplayPlacementValue);
+    if (options.imageReplayScope !== undefined
+      && options.imageReplayScope !== 'history' && options.imageReplayScope !== 'fresh')
+      throw new Error(S.imageReplayScopeValue);
     if (options.endpointPath !== undefined && (typeof options.endpointPath !== 'string' || !options.endpointPath.startsWith('/')))
       throw new Error(S.endpointPathSlash);
     if (options.extraHeaders !== undefined && (!isPlainObject(options.extraHeaders)
@@ -98,7 +113,9 @@ export default {
       extraHeaders: options.extraHeaders,
       extraBody: options.extraBody,
       log: host.log,
-      media: { enabled: () => entry.multimodal === true, read: host.readBlob },
+      media: { enabled: () => entry.multimodal === true, read: host.readBlob,
+        maxContextImages: options.maxContextImages, imageReplayPlacement: options.imageReplayPlacement,
+        imageReplayScope: options.imageReplayScope },
       keepThinking: host.keepThinking,
       reasoningReplay,
       syntheticReasoningText: options.syntheticReasoningText,

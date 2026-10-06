@@ -14,6 +14,7 @@ World 不直接访问 Memory 或调用 Persona 的工具。
 | `id` | 同时用于配置段 `worlds.<id>` 和控制台页 `world:<id>` |
 | `envPromptVars()` | 环境提示词模板的当前占位符值。返回 `null` 时省略整段,`{}` 时使用无变量模板;前缀重建时重新调用 |
 | `tools()` | 这个 World 暴露的工具 |
+| `requestFacts?()` | 同步只读的完整状态缓存，正文含观察时间；`snapshotTypes` 声明可被该完整读数替代的增量事件类型。没有完整读数时返回 `null` |
 | `start(host)` / `stop()` | 启动与停止;运行中挂载时先调用 `start`,成功后加入挂载表 |
 | `console?()` | 控制台页声明(见 [console.md](console.md)) |
 | `outputTap?()` | 主 session 输出流的接收器(演出、字幕);这一刻没有接收器时返回 `undefined` |
@@ -33,6 +34,10 @@ Core 通过 `WorldHost` 向 World 提供以下能力:
 | `cognition?` | 向 Persona 请求后台认知计算;Persona 未提供时该成员不存在 |
 | `log` | 包含 World 区域和调用关联字段的 Logger |
 
+认知请求可带本次 `blobs`；Core 将附件保存为句柄，经 `CognitionContext.blobs` 转交 Persona。
+`hint.context: 'task'` 建议仅读取本次材料，实际上下文、工具与预算仍由 Persona 决定。
+`hint.kind` 是 World 声明的任务类别，Persona 可据此选择 provider 和预算；Core 只转交该字段。
+
 `trigger` 控制投递时机:`preempt` 请求中断当前模型调用并立即投递,已提交不可逆输出时不取消调用;
 `flush` 立即投递并包含积压事件;`debounce` 参与合批;`piggyback` 仅排队,随其他触发产生的批次投递。
 外部事件默认 `debounce`,内部事件默认 `flush`。`deliver: false` 仅存储事件。
@@ -46,8 +51,9 @@ World 应通过事件报告服务器起停、存档切换、连接变化等状�
 系统生成的判断只陈述可确认的事实。`origin: 'internal'` 只用于来源可验证的内部通知;
 外部消息使用 `origin: 'external'`。
 
-工具回执 `ToolOutcome { text, blobs?, failed? }`;handler 抛错由 Core 转成失败回执。
-`endsTurn` 让一个工具结束本轮,`barrierAfter` 让流式提前派发在它之后停下。
+工具回执 `ToolOutcome { text, blobs?, failed?, endsTurn? }`;handler 抛错由 Core 转成失败回执。
+工具声明或执行回执的 `endsTurn` 结束当前唤醒，保留后续事件和 World 中已受理的任务；
+`barrierAfter` 让流式提前派发在它之后停下。跨进程 World 须在回执中保留这些控制字段。
 工具名在一个 bot 内全局唯一:模型按名字调用,Core 按名字归属与隐藏。用自家短名做前缀
 (`mc_`、`qq_`);工具名与已挂载 World、Persona 工具或 Core 保留帧名冲突时,装配层拒绝挂载并报告原因。
 

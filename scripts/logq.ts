@@ -11,7 +11,7 @@
  */
 import { copyFileSync, createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { LOG_LEVEL_RANK, type EventEnvelope, type LogLevel, type LogRecord, type UsageRecord } from '../src/core/types.ts';
 import { deploymentRoot } from '../src/paths.ts';
@@ -27,6 +27,7 @@ export const USAGE = `用法: pnpm logq [子命令] [选项]
   log                  过滤运行日志(缺省子命令;按 log.N.jsonl 旧→新再 log.jsonl 读)
   timeline             按 ts 归并 log / toolcalls / transcript / events / usage 为一条时间线
   turn <N>             回放第 N 轮:投递事件、推理、assistant 正文、工具调用及同 call 的 World 记录、用量
+  case [latest|文件名]   把一次异常前后日志、事件、模型回合与工具回执封成可回归的 JSON
   doctor               运行固定诊断项,输出 markdown
   bundle --out <dir>   把 run 目录、本 run 的 usage 行与 index 行、脱敏 config.json、doctor.md
                        拷到 <dir>/<run>/
@@ -48,10 +49,12 @@ export const USAGE = `用法: pnpm logq [子命令] [选项]
   --format text|jsonl  缺省 text
   --streams a,b,c      timeline 的流,缺省全部
   --full               turn 不截断推理 / args / 回执
+  --seq N              case 从 log.jsonl 的 seq 回填历史异常（没有 incidents 快照时）
+  --out <dir>           case 输出目录；缺省 run/cases/
   --help
 `;
 
-const COMMANDS = new Set(['runs', 'log', 'timeline', 'turn', 'doctor', 'bundle']);
+const COMMANDS = new Set(['runs', 'log', 'timeline', 'turn', 'case', 'doctor', 'bundle']);
 const FLAGS = new Set(['full', 'help']);
 const RUN_ID = /^r-\d{8}-\d{6}-[0-9a-f]{4}$/;
 const DEFAULT_LIMIT = 200;
@@ -682,6 +685,74 @@ export async function turn(ctx: RunContext, round: number, opts: { full?: boolea
   return out;
 }
 
+/**
+ * 一次异常的回归样本。保留原始输入、动作与回执，同时记下进程/轮次/任务锚点；
+ * 只截取异常前 2 分钟、后 30 秒，避免把整场直播上下文复制一遍。
+ */
+export async function caseBundle(
+  ctx: RunContext, opts: { incident?: string; seq?: number; out?: string } = {},
+): Promise<string> {
+  let trigger: LogRecord;
+  let source: string;
+  if (opts.seq !== undefined) {
+    const found = await (async () => {
+      for await (const row of readLog(ctx.runDir)) if (row.seq === opts.seq) return row;
+      return null;
+    })();
+    if (!found) throw new UsageError(`log seq=${opts.seq} 不在本 run`);
+    trigger = found;
+    source = `log.jsonl#${opts.seq}`;
+  } else {
+    const dir = join(ctx.runDir, 'incidents');
+    const files = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith('.json')).sort() : [];
+    const spec = opts.incident ?? 'latest';
+    const name = spec === 'latest' ? files.at(-1) : basename(spec);
+    if (!name || !files.includes(name)) throw new UsageError(`incident ${spec} 不在 ${dir}`);
+    const payload = JSON.parse(readFileSync(join(dir, name), 'utf8')) as { record?: LogRecord };
+    if (!payload.record?.ts || typeof payload.record.seq !== 'number') throw new UsageError(`incident ${name} 没有有效 record`);
+    trigger = payload.record;
+    source = `incidents/${name}`;
+  }
+  const t0 = Date.parse(trigger.ts);
+  if (!Number.isFinite(t0)) throw new UsageError(`异常时刻无效:${trigger.ts}`);
+  const from = t0 - 120_000, to = t0 + 30_000;
+  const inside = (ts: string): boolean => { const ms = Date.parse(ts); return ms >= from && ms <= to; };
+  const logs: LogRecord[] = [];
+  const toolcalls: ToolCallEntry[] = [];
+  const transcript: TranscriptRecord[] = [];
+  const refs = new Set<number>();
+  for await (const r of readLog(ctx.runDir)) if (inside(r.ts) || r.seq === trigger.seq) logs.push(r);
+  for await (const t of readJsonl<ToolCallEntry>(join(ctx.runDir, 'toolcalls.jsonl'))) {
+    if (inside(t.ts) || (trigger.round !== undefined && t.round === trigger.round)) toolcalls.push(t);
+  }
+  for await (const t of readJsonl<TranscriptRecord>(join(ctx.runDir, 'transcript.jsonl'))) {
+    if (!inside(t.ts) && !(trigger.round !== undefined && t.round === trigger.round)) continue;
+    transcript.push(t);
+    if (t.kind === 'item') for (const ref of t.context.frame?.events ?? []) refs.add(ref.cursor);
+  }
+  const events: EventEnvelope[] = [];
+  for await (const e of readJsonl<EventEnvelope>(join(ctx.runDir, 'events.jsonl'))) {
+    if (inside(e.ts) || refs.has(e.cursor)) events.push(e);
+  }
+  const usage: UsageRecord[] = [];
+  for await (const u of readJsonl<UsageRecord>(join(ctx.dataDir, 'usage.jsonl'))) {
+    if (u.run === ctx.run && inside(u.ts)) usage.push(u);
+  }
+  const outputDir = resolve(opts.out ?? join(ctx.runDir, 'cases'));
+  mkdirSync(outputDir, { recursive: true });
+  const stem = `${trigger.ts.slice(0, 23).replace(/[:.]/g, '-')}-${trigger.event ?? 'event'}-${trigger.seq}`
+    .replace(/[^\w.-]/g, '_');
+  const file = join(outputDir, `${stem}.json`);
+  writeFileSync(file, JSON.stringify({
+    schema: 1, run: ctx.run, source, trigger,
+    window: { from: new Date(from).toISOString(), to: new Date(to).toISOString() },
+    anchors: { pid: trigger.pid ?? null, round: trigger.round ?? null, call: trigger.call ?? null,
+      task: trigger.task ?? null, event: trigger.ev ?? null },
+    streams: { logs, toolcalls, transcript, events, usage },
+  }, null, 1), 'utf8');
+  return file;
+}
+
 // ---------------------------------------------------------------------------
 // doctor
 // ---------------------------------------------------------------------------
@@ -952,6 +1023,12 @@ export async function main(
         const n = Number(a.positional[0] ?? opt(a, 'round'));
         if (!Number.isInteger(n)) throw new UsageError('turn 需要轮次号:pnpm logq turn 12');
         out(lines(await turn(ctx, n, { full: a.opts.full === true })));
+        return 0;
+      }
+      case 'case': {
+        out(`${await caseBundle(ctx, {
+          incident: a.positional[0], seq: intOpt(a, 'seq'), out: opt(a, 'out'),
+        })}\n`);
         return 0;
       }
       case 'doctor':

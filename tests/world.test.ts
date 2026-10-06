@@ -108,6 +108,19 @@ describe('withWorlds', () => {
 });
 
 describe('槽位表', () => {
+  it('启动与热激活都拒绝两个 World 共用一个独占运行资源', async () => {
+    const defs = [probeDefinition('a', { exclusiveResource: 'minecraft-client' }),
+      probeDefinition('b', { exclusiveResource: 'minecraft-client' })];
+    const initial = assemblyOf(defs, ['a', 'b']);
+    expect(initial.assembly.mounted.map((world) => world.id)).toEqual(['a']);
+    expect(missingOf(initial.assembly)[0].reason).toContain('minecraft-client');
+
+    const runtime = assemblyOf(defs, ['a']);
+    await expect(runtime.assembly.activate('b')).rejects.toThrow('minecraft-client');
+    await runtime.assembly.deactivate('a');
+    await expect(runtime.assembly.activate('b')).resolves.toContain('已启用');
+  });
+
   it('按 worlds.<id>.enabled 分成挂载与未激活;声明了没定义的进 missing', () => {
     const { assembly } = assemblyOf([probeDefinition('a'), probeDefinition('b')], ['a', 'b', { id: 'ghost', label: '幽灵', reason: '没装' }]);
     expect(assembly.mounted.map((m) => m.id)).toEqual(['a', 'b']);

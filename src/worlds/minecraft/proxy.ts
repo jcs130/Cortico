@@ -11,8 +11,10 @@ import type {
   WorldConsoleDecl,
   StoragePart,
   ToolDef,
+  ToolOutcome,
+  WorldRequestFacts,
 } from '../../core/types.ts';
-import { COGNITION_ABSENT, MINECRAFT_PANEL_DECLS, MINECRAFT_STORAGE_DECLS, MINECRAFT_TOOL_DECLS, type MinecraftWorldOptions } from './world.ts';
+import { COGNITION_ABSENT, MINECRAFT_PANEL_DECLS, MINECRAFT_STORAGE_DECLS, minecraftToolDecls, type MinecraftWorldOptions } from './world.ts';
 import { MINECRAFT_CLIENT_CONFIG_GROUP, MINECRAFT_CONFIG_GROUP, MINECRAFT_PLAYER_CONFIG_GROUP, MINECRAFT_RHYTHM_CONFIG_GROUP } from './config.ts';
 import type {
   ChildToMain,
@@ -60,6 +62,11 @@ export class MinecraftWorldProxy implements World {
   private readonly pending = new Map<number, PendingRpc>();
   private declCache: Pick<WorldConsoleDecl, 'lamps' | 'badges' | 'links'> = {};
   private storageCache: StorageStat[] = [];
+  private requestFactsCache: WorldRequestFacts | null = null;
+  private promptVars: Record<'minecraft.current_task' | 'minecraft.goals', string> = {
+    'minecraft.current_task': '(引擎尚未报告任务状态；用 mc_queue 现查)',
+    'minecraft.goals': '(引擎尚未报告目标状态；用 mc_goal 现查)',
+  };
   private lastConfigJson = '';
   private lastCaps: boolean | null = null;
   private configTimer: ReturnType<typeof setInterval> | null = null;
@@ -73,6 +80,7 @@ export class MinecraftWorldProxy implements World {
    */
   envPromptVars(): Record<string, string> {
     return {
+      'minecraft.version': this.opts.cfg.version,
       'minecraft.world': worldEnvLine(worldIdentityOf(
         this.opts.cfg.local.serverDir,
         `${this.opts.cfg.host}:${this.opts.cfg.port}`,
@@ -82,11 +90,18 @@ export class MinecraftWorldProxy implements World {
       'minecraft.camera': this.opts.cfg.client.enabled
         ? readFileSync(CAMERA_NOTE_FILE, 'utf8').trim()
         : '',
+      ...this.promptVars,
     };
   }
 
+  /** 引擎已有采样的同步缓存；不发 RPC，也不读取存储。 */
+  requestFacts(): WorldRequestFacts | null {
+    if (!this.ready || !this.child?.connected || !this.requestFactsCache) return null;
+    return { ...this.requestFactsCache, snapshotTypes: [...this.requestFactsCache.snapshotTypes] };
+  }
+
   tools(): ToolDef[] {
-    return MINECRAFT_TOOL_DECLS.map((decl) => ({
+    return minecraftToolDecls(this.opts.agentFriendEnabled === true).map((decl) => ({
       ...decl,
       handler: async (args, ctx) => {
         try {
@@ -97,7 +112,7 @@ export class MinecraftWorldProxy implements World {
               round: roundTokenOf(ctx),
             },
             RPC_TIMEOUT_MS,
-          )) as string;
+          )) as string | ToolOutcome;
         } catch (err) {
           return `[${decl.name} 失败] 引擎进程不可用:${err instanceof Error ? err.message : String(err)}`;
         }
@@ -144,6 +159,14 @@ export class MinecraftWorldProxy implements World {
               name: 'minecraft.camera',
               description: '观察者摄像机说明;没开客户端时为空。措辞在「摄像机说明」那份里改。',
               multiline: true,
+            },
+            {
+              name: 'minecraft.current_task',
+              description: '引擎同步的当前任务;引擎未就绪时提示用 mc_queue 现查。',
+            },
+            {
+              name: 'minecraft.goals',
+              description: '引擎同步的 mc_goal 目标摘要;引擎未就绪时提示用 mc_goal 现查。',
             },
           ],
         },
@@ -235,6 +258,9 @@ export class MinecraftWorldProxy implements World {
     const child = fork(CHILD_ENTRY, [], {
       execArgv: ['--import', 'tsx'],
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+      // ToolOutcome may contain screenshot bytes. JSON IPC turns a Buffer into
+      // a plain object, which Core cannot persist as a BlobInput.
+      serialization: 'advanced',
     });
     this.child = child;
     if (this.host) logChildStdio(child, this.host.log);
@@ -249,6 +275,7 @@ export class MinecraftWorldProxy implements World {
           timezone: this.opts.timezone ?? 'Asia/Shanghai',
           botName: this.opts.botName ?? 'bot',
           dataDir: this.opts.dataDir ?? null,
+          agentFriendEnabled: this.opts.agentFriendEnabled === true,
           cfg: JSON.parse(this.lastConfigJson) as MinecraftWorldOptions['cfg'],
         },
       },
@@ -265,6 +292,11 @@ export class MinecraftWorldProxy implements World {
     this.ready = false;
     this.declCache = {};
     this.storageCache = [];
+    this.requestFactsCache = null;
+    this.promptVars = {
+      'minecraft.current_task': '(引擎尚未报告任务状态；用 mc_queue 现查)',
+      'minecraft.goals': '(引擎尚未报告目标状态；用 mc_goal 现查)',
+    };
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
       p.reject(new Error('Minecraft 引擎子进程已退出'));
@@ -388,6 +420,8 @@ export class MinecraftWorldProxy implements World {
       case 'status':
         this.declCache = note.decl;
         this.storageCache = note.storage;
+        this.promptVars = note.promptVars;
+        this.requestFactsCache = note.requestFacts;
         return;
     }
   }

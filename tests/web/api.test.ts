@@ -26,6 +26,7 @@ const promptDocs = new Map([
   ['worlds.terminal.envPrompt', { key: 'worlds.terminal.envPrompt', title: '终端 · 环境提示词', scope: 'world' as const, description: '终端环境', content: '旧环境', revision: 'r2' }],
 ]);
 let prefixReloads = 0;
+let contextHandoffs = 0;
 const baseToolSchemas: Array<ToolSchema & { owner: ToolOwner }> = [{
   name: 'terminal_send',
   description: '向终端发送文本。',
@@ -120,6 +121,7 @@ beforeAll(async () => {
         prefixReloads++;
         return '已重载';
       },
+      handoff: async () => { contextHandoffs++; },
     },
     pathPicker: {
       pick: async (options) => {
@@ -316,6 +318,13 @@ describe('/api/prompts 与 session 前缀重载', () => {
     const r = await fetch(base() + '/api/session/reload-prefix', { method: 'POST' });
     expect(r.status).toBe(200);
     expect(prefixReloads).toBe(1);
+  });
+
+  it('手动交接当前 session 上下文', async () => {
+    const r = await fetch(base() + '/api/session/handoff', { method: 'POST' });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ ok: true });
+    expect(contextHandoffs).toBe(1);
   });
 });
 

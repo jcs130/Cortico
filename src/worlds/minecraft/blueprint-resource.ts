@@ -64,7 +64,7 @@ interface BlueprintRestockMarker {
 }
 
 type BlueprintPlacementDecision =
-  | { ok: true; source: 'unreserved' | 'surplus' | 'override' }
+  | { ok: true; source: 'unreserved' | 'surplus' | 'override' | 'project' }
   | { ok: false; reason: string };
 
 /** 每次计算时读取名单和容器库存。 */
@@ -113,11 +113,12 @@ export class BlueprintResourceLedger {
   }
 
   /** 预留量为剩余需求扣除豁免物品与容器存货。施工材料统计使用随身与容器数量，放置要求随身持有。 */
-  reserve(): Record<string, number> {
+  reserve(owner?: { key: string; versionId: string }): Record<string, number> {
     const exempt = this.scaffoldExempt();
     const stored = this.facts.stored?.() ?? {};
     const total: Record<string, number> = {};
-    for (const project of this.projects.values()) {
+    for (const [key, project] of this.projects) {
+      if (owner?.key === key && owner.versionId === project.versionId) continue;
       for (const [item, count] of Object.entries(project.bill)) {
         if (exempt.has(item)) continue;
         total[item] = (total[item] ?? 0) + count;
@@ -146,7 +147,8 @@ export class BlueprintResourceLedger {
       ]));
   }
 
-  observe(stock: Readonly<Record<string, number>>, now = Date.now()): {
+  observe(stock: Readonly<Record<string, number>>, now = Date.now(),
+    projectConsumption: Readonly<Record<string, number>> = {}): {
     retune: boolean;
     borrowed: Readonly<Record<string, number>>;
   } {
@@ -158,7 +160,8 @@ export class BlueprintResourceLedger {
       const was = Math.max(0, Math.floor(before[item] ?? 0));
       const has = Math.max(0, Math.floor(stock[item] ?? 0));
       if ((was > need) !== (has > need)) retune = true;
-      const enteredReserve = Math.max(0, need - has) - Math.max(0, need - was);
+      const confirmed = Math.min(Math.max(0, was - has), Math.max(0, projectConsumption[item] ?? 0));
+      const enteredReserve = Math.max(0, need - has) - Math.max(0, need - was) - confirmed;
       if (enteredReserve <= 0) continue;
       const verdict = this.borrow(item, enteredReserve, now);
       if (verdict.ok) borrowed[item] = enteredReserve;
@@ -203,7 +206,16 @@ export class BlueprintResourceLedger {
     item: string,
     stock: Readonly<Record<string, number>> = this.observedStock,
     now = Date.now(),
+    owner?: { key: string; versionId: string },
   ): BlueprintPlacementDecision {
+    if (owner) {
+      if (this.projects.get(owner.key)?.versionId !== owner.versionId) {
+        return { ok: false, reason: '蓝图施工版本已变化，不能使用原版本的材料许可' };
+      }
+      const otherNeed = this.reserve(owner)[item] ?? 0;
+      if ((stock[item] ?? 0) > otherNeed) return { ok: true, source: 'project' };
+      return { ok: false, reason: `${item} 为其他蓝图保留 ${otherNeed},随身只有 ${stock[item] ?? 0}` };
+    }
     const need = this.reserve()[item];
     if (need === undefined) return { ok: true, source: 'unreserved' };
     const has = Math.max(0, Math.floor(stock[item] ?? 0));

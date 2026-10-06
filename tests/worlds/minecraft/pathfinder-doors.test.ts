@@ -39,7 +39,7 @@ function doorState(name: string, want: Record<string, string>): number {
  */
 const z0 = 0;
 
-function makeDoorWorld(lower: number | null, upper: number | null) {
+function makeDoorWorld(lower: number | null, upper: number | null, axis: 'x' | 'z' = 'z') {
   const world = new World(null).sync;
   for (let cx = -1; cx <= 1; cx++) {
     for (let cz = -1; cz <= 1; cz++) world.setColumn(cx, cz, new Chunk({ minY: -64, worldHeight: 384 }));
@@ -50,10 +50,11 @@ function makeDoorWorld(lower: number | null, upper: number | null) {
       world.setBlockStateId(new Vec3(x, 63, z), GRASS);
     }
   }
-  // 墙:整条 z=0 两格高,只在 x=0 留洞
-  for (let x = -8; x < 8; x++) {
-    if (x === 0) continue;
-    for (let y = 64; y <= 65; y++) world.setBlockStateId(new Vec3(x, y, z0), STONE);
+  // 沿门洞的通行轴布墙,仅原点留洞。
+  for (let cross = -8; cross < 8; cross++) {
+    if (cross === 0) continue;
+    for (let y = 64; y <= 65; y++) world.setBlockStateId(
+      axis === 'z' ? new Vec3(cross, y, 0) : new Vec3(0, y, cross), STONE);
   }
   if (lower !== null) world.setBlockStateId(new Vec3(0, 64, z0), lower);
   if (upper !== null) world.setBlockStateId(new Vec3(0, 65, z0), upper);
@@ -131,12 +132,12 @@ function tunedMovements(bot: unknown, tuning: Tuning): Movements {
   return m;
 }
 
-function walkThroughDoor(world: unknown, tuning: Tuning = {}): DoorPath {
+function walkThroughDoor(world: unknown, tuning: Tuning = {}, axis: 'x' | 'z' = 'z'): DoorPath {
   const bot = makeBot(world);
   const m = tunedMovements(bot, tuning);
   (m as unknown as { clearCollisionIndex(): void }).clearCollisionIndex();
   (m as unknown as { updateCollisionIndex(): void }).updateCollisionIndex();
-  const start = new (Move as never as new (...a: unknown[]) => unknown)(0, 64, -3, 0, 0);
+  const start = new (Move as never as new (...a: unknown[]) => unknown)(axis === 'z' ? 0 : -3, 64, axis === 'z' ? -3 : 0, 0, 0);
   const astar = new (AStar as never as new (...a: unknown[]) => {
     compute(): {
       status: string;
@@ -146,7 +147,7 @@ function walkThroughDoor(world: unknown, tuning: Tuning = {}): DoorPath {
         toPlace?: Array<{ x: number; y: number; z: number; useOne?: boolean }>;
       }>;
     };
-  })(start, m, new goals.GoalNear(0, 64, 3, 0), 5_000, 60, -1);
+  })(start, m, new goals.GoalNear(axis === 'z' ? 0 : 3, 64, axis === 'z' ? 3 : 0, 0), 5_000, 60, -1);
   let res = astar.compute();
   while (res.status === 'partial') res = astar.compute();
   const useOne: DoorPath['useOne'] = [];
@@ -190,6 +191,36 @@ describe('寻路器与门', () => {
     // 开着的门不能再「用一下」:那一下是把门关上
     expect(path.useOne).toHaveLength(0);
     expect(path.breaks).toHaveLength(0);
+  });
+
+  it('侧向穿过开门时先切换门板,正向穿过则保持打开', () => {
+    installPathfinderPerf();
+    const path = walkThroughDoor(makeDoorWorld(OPEN_DOOR.lower, OPEN_DOOR.upper, 'x'), {}, 'x');
+    expect(path.status).toBe('success');
+    expect(path.useOne).toEqual([{ x: 0, y: 64, z: 0 }]);
+    expect(path.breaks).toHaveLength(0);
+  });
+
+  it('侧向穿过关门时门板不挡路,无需再打开', () => {
+    installPathfinderPerf();
+    const path = walkThroughDoor(makeDoorWorld(SHUT_DOOR.lower, SHUT_DOOR.upper, 'x'), {}, 'x');
+    expect(path.status).toBe('success');
+    expect(path.useOne).toHaveLength(0);
+    expect(path.breaks).toHaveLength(0);
+  });
+
+  it('从关门格转向门板时先切换脚下门；进门已切换过就不重复关门', () => {
+    installPathfinderPerf();
+    const world = makeDoorWorld(SHUT_DOOR.lower, SHUT_DOOR.upper);
+    const m = tunedMovements(makeBot(world), {});
+    const forward = (toPlace: unknown[]) => {
+      const neighbors: Array<{ toPlace: Array<{ x: number; y: number; z: number; useOne?: boolean }> }> = [];
+      (m as unknown as { getMoveForward(node: unknown, dir: unknown, out: unknown[]): void })
+        .getMoveForward({ x: 0, y: 64, z: 0, remainingBlocks: 0, toPlace }, { x: 0, z: 1 }, neighbors);
+      return neighbors[0]?.toPlace.filter((p) => p.useOne);
+    };
+    expect(forward([])).toEqual([{ x: 0, y: 64, z: 0, dx: 0, dy: 0, dz: 0, useOne: true }]);
+    expect(forward([{ x: 0, y: 64, z: 0, useOne: true }])).toEqual([]);
   });
 
   it('关着的木门:生成「用一下下半扇再过去」,不挖门', () => {

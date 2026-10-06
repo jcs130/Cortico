@@ -7,31 +7,45 @@
  * worlds.vtuber.delayedSources 可延迟 vtuber 侧投递，避免画面先行。
  */
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
-  ConfigGroup, World, WorldHost, WorldConsoleDecl, WorldPanelDecl,
-  EventTag, StoragePart, ToolCallContext, ToolDef, TriggerMode,
+  ConfigGroup, World, WorldHost, WorldConsoleDecl, WorldPanelDecl, WorldRequestFacts,
+  EventTag, StoragePart, ToolCallContext, ToolDef, ToolOutcome, TriggerMode,
 } from '../../core/types.ts';
 import { Vec3 } from 'vec3';
+import type { Bot } from 'mineflayer';
 import { nowIso } from '../../core/util.ts';
 import { Bridge } from './bridge.ts';
+import { captureMinecraftView, closeMinecraftViewCapture, warmMinecraftViewCapture } from './visual-capture.ts';
+import { PlayerObservations, playerObservationMeta, renderPlayerObservation, type PlayerObservation } from './player-observation.ts';
+import { precheckEmptyUseTarget } from './precheck.ts';
+import { blockAtCell, resolveAt } from './cell-facts.ts';
+import { createDecisionAdviser, type DecisionAdvice } from './decision-adviser.ts';
+import { IdleBehaviorController, type IdleBehaviorScene } from './idle-behavior.ts';
+import { sampleIdleActions, executeIdleAction } from './idle-actions.ts';
+import { RejectedRouteLedger } from './rejected-route-ledger.ts';
+import { classifyBossBarTitle } from './boss-bar.ts';
+import { minecraftTextComponent } from './text-component.ts';
 import {
   REPEATED_QUERY_RECEIPT, RoundOnceGate, roundTokenOf,
 } from './round.ts';
 import {
   bagStamp, blockedStamp, queueStamp,
-  renderBagReadout, renderBlockedReadout, renderQueueReadout,
+  renderBagReadout, renderBlockedReadout, renderQueueReadout, renderStorageReadout, renderStoredItemReadout,
 } from './readouts.ts';
 import type { SiteZone } from './pathfinder-perf.ts';
 import {
-  AXIS_ORDER, forEachCell, isAirState, isStructureVoidState, validateBlueprintLabel,
+  AXIS_ORDER, blockIdOf, forEachCell, isAirState, isStructureVoidState, normalizeBlockName, validateBlueprintLabel,
   type BlueprintLabel, type NormalizedBlueprint, type PositionXYZ, type SizeXYZ, type VoxelMetrics,
 } from './blueprint.ts';
 import {
-  acceptBlueprint, billForSteps, blueprintProgress, renderBlueprintAdvisories,
+  BLUEPRINT_MATERIAL_NOTE, acceptBlueprint, billForSteps, blueprintProgress, blueprintStepStateMatches,
+  remainingPlacementBillSteps, renderBlueprintAdvisories,
   BLUEPRINT_MAX_OUTPUT_CHARS,
-  type BlueprintBillLine, type BlueprintPlan,
+  type BlueprintBillLine, type BlueprintPlan, type BlueprintStep,
 } from './blueprint-plan.ts';
 import {
   BlueprintResourceLedger, blueprintContentHash, createBlueprintJobId, createBlueprintVersion,
@@ -54,12 +68,15 @@ import {
 } from './server.ts';
 import { GameClient, type ClientState } from './client.ts';
 import {
-  Executor, Reflexes, parseNoteText, parseQueueMode, parseScoutSteps, parseSteps,
+  Executor, Reflexes, parseNoteText, parseQueueMode, parseScoutSteps, parseSteps, sendChat,
   QUEUE_SCHEMA, renderQueue,
-  SCOUT_SKILL_DOC, SCOUT_STEP_SCHEMA, SKILL_DOC, SKILL_STEP_SCHEMA,
+  SCOUT_SKILL_DOC, SCOUT_STEP_SCHEMA, SKILL_STEP_SCHEMA,
   type BlueprintDesk, type BlueprintSurvey, type MarkDesk, type MarkLookup,
-  type ParseNote, type ResourcePlacementPermit, type SkillCall, type TaskReport,
+  type ParseNote, type ResourcePlacementPermit, type SkillCall, type TaskAdmissionRejection, type TaskQueueTail, type TaskReport,
 } from './executor.ts';
+import { Aborted, SkillBlocked, sleep, type BlueprintPlacementIntent } from './skill-context.ts';
+import { worldStateAt } from './skills-build.ts';
+import { chatInputError, readSkillHelp, SKILL_HELP_MAX_SKILLS, SKILL_SIGNATURE_DOC } from './skills.ts';
 import {
   parsePolicy, policyNoteText, renderFightRollback, renderPolicy, renderPolicyChange, renderPolicyEnv,
   PolicyBook, POLICY_DOC, POLICY_SCHEMA, type TravelPrefer,
@@ -86,10 +103,17 @@ import {
   type AccessSettings, type GameSettings, type LevelType, type WorldIdentity, type WorldInfo,
 } from './server-config.ts';
 import { ChestBook } from './chests.ts';
+import { DirectionalSweepBook } from './directional-sweeps.ts';
+import { containerStacks } from './containers.ts';
+import { selectionMenuTitle } from './window-semantics.ts';
 import { readEnchants } from './item-facts.ts';
 import { ItemBreakDecoder, type ItemBreakFact } from './item-break.ts';
 import { WorksBook } from './works.ts';
 import { CombatSession } from './combat.ts';
+import { CombatSpells, type CombatSpell } from './combat-spells.ts';
+import { chooseRoutineFood, renderFoodReserveReadout } from './nutrition.ts';
+import { publishViewerCastCommand } from './viewer-cast.ts';
+import { parseSkillsPayload, VIEWER_STATE_CHANNEL } from './viewer-state.ts';
 import {
   BowController,
   PositionVelocityTracker,
@@ -103,6 +127,7 @@ import {
 import { piglinIsHostile } from './piglin.ts';
 import { DeathBook } from './deaths.ts';
 import { ExploreBook } from './explored.ts';
+import { ServerActionWait } from './server-action-wait.ts';
 import { zhDimension, zhEntity, zhName } from './names.ts';
 import { offlineUuid } from './client-launch.ts';
 import {
@@ -123,11 +148,29 @@ import {
 } from './escape.ts';
 import { MINECRAFT_DEFAULTS, MINECRAFT_CONFIG_GROUP, MINECRAFT_RHYTHM_CONFIG_GROUP, MINECRAFT_CLIENT_CONFIG_GROUP, MINECRAFT_PLAYER_CONFIG_GROUP, type MinecraftConfigSection } from './config.ts';
 
-/** 死亡掉落的消失时限；回执注明剩余时间，到期后撤回仍在原地的提示。 */
-const DROP_DESPAWN_MS = 5 * 60 * 1000;
 /** 槽位交换会连续发多次 updateSlot；只在整笔交换安静下来后核对 reserve。 */
 const BLUEPRINT_INVENTORY_SETTLE_MS = 500;
-const DROP_DESPAWN_MIN = 5;
+/** 已确认正式施工后等待该物品数量扣减的上界。 */
+export const BLUEPRINT_PLACEMENT_SETTLE_MS = 1_500;
+
+interface BlueprintResourceReading {
+  scope: string;
+  bot: Bot;
+  remainingSteps: Set<number>;
+  placements: Record<number, PositionXYZ[]>;
+}
+
+interface BlueprintOwnedConsumption {
+  bot: Bot;
+  life: number;
+  scope: string;
+  intent: BlueprintPlacementIntent;
+  item: string;
+  step: BlueprintStep;
+  /** 同物品只有一笔未决放置；扣减必须来自其后且无其他库存改写。 */
+  maxAfter: number;
+  ambiguous?: boolean;
+}
 /** 重生点搬得比这远(或换了维度)才唤醒她:同一张床重睡、几格内的微调不值得打断 */
 const SPAWN_FAR_BLOCKS = 256;
 /** 实测重生点跟死亡回执里预告的差过这么多格，才值得再说一句（预告准了就不重复） */
@@ -1771,6 +1814,7 @@ const BLUEPRINT_DOC = [
   '· {} —— 看现在装载着哪几份、施工到哪儿了、还缺什么。',
   '· {"unload":"home-v2"} —— 卸掉一份(设计连缓存一起没,本世界的施工进度也没)。',
   '装载着的图用 mc_do 的 build 施工:{"skill":"build","blueprint":"farm-v2","at":[x,y,z]}。',
+  BLUEPRINT_MATERIAL_NOTE,
   'retrofit 首次只做初探。两种工地同待遇:有冲突格就要审阅无误后同锚点加 "confirm":true,'
     + '才会清掉那些格再施工——没有哪一种会自动清场。',
   '',
@@ -1972,9 +2016,16 @@ function blueprintDesignBrief(
     brief.trim(),
     '"""',
     '',
+    '若要求涉及外观、房间布局或既有建筑改造，可先用 mc_visual 看当前位置的真实画面；'
+      + '看不到的背面和隐藏结构不要从截图臆测。图只给外观依据，方块与权限仍以现场试算为准。',
     `交稿 = 调 mc_blueprint 的 save 把设计交回来,key 必须是「${key}」。`,
     jobId ? `这轮构思的不可变 job_id 是「${jobId}」；每次 save 都必须原样带 job_id。` : '',
     '先根据需求选择 site_mode:new 用于空地新建;retrofit 用于在现有结构上修改。',
+    '先把原要求逐项写成验收点，再确定外形、空间和功能，最后编码逐层矩阵；提交前对照矩阵核验，不能只在说明里声称已经画了。',
+    '建筑按用途与原要求检查入口、门窗、室内可用空间、层间通路和屋顶：入口与通路能实际走通，居住空间留足两格净高；要求多层时楼梯连通各层。农场、轨道、红石等工程按自身功能验收，家具只按实际需求配置。',
+    '屋顶的坡度、楼梯朝向和高差应与要求一致；门、床等多格部件要配对。材料和装饰形成一致风格，避免随机拼接。未知现场条件列为待核验，不能算作已满足。',
+    BLUEPRINT_MATERIAL_NOTE,
+    '交稿说明列出原要求与设计对应的位置、尚待现场验证的条件，以及适合本工程的施工阶段；每阶段写明需用物品和完成判据。可按地基、主体、屋顶、功能布置分段备料和施工，不以收齐整项工程全部材料为开工前提。',
     BLUEPRINT_FORMAT_DOC,
     'save 会当场校验:不过就把精确到某一格的错误回给你,照着改再交一次;',
     '一次交不下就分批(带 "append":true,layers 只放接着的几层,层数齐了自动收下)。',
@@ -2033,18 +2084,81 @@ const CHECK_DOC = [
 /** 进程内 World 与引擎代理共用工具 schema 和 description；handler 各自接入。 */
 export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
   {
+    name: 'mc_help',
+    tags: ['read'],
+    description:
+      'Read Minecraft action skill documentation. Empty arguments return the complete compact '
+      + 'directory with parameter signatures. Choose skill, or a short list of skills, to read their '
+      + 'full examples and execution conditions. This reads the action registry without executing '
+      + 'actions or contacting the server.',
+    parameters: {
+      type: 'object',
+      properties: {
+        skill: { type: 'string', description: 'One action skill name from the directory.' },
+        skills: { type: 'array', minItems: 1, maxItems: SKILL_HELP_MAX_SKILLS, uniqueItems: true,
+          items: { type: 'string' }, description: 'Several action skill names; omit skill when using this.' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'mc_cast',
+    tags: ['act'],
+    description:
+      'Cast one server-listed /mycli spell immediately, even during combat or retreat. '
+      + 'This does not enter the task queue or take movement control. The reply only confirms sending; '
+      + 'the server message and observed effects determine whether the spell worked. '
+      + 'Pass server-required arguments as separate tokens, such as arguments:["bread"] for a creation spell. '
+      + 'Use /mycli goddess skills or /mycli spells to discover available spell IDs.',
+    parameters: {
+      type: 'object',
+      properties: {
+        spell: {
+          type: 'string', pattern: '^[a-z][a-z0-9_:-]{0,63}$',
+          description: 'Server spell ID, such as selfheal, starbolt, frostnova, or flamewave.',
+        },
+        arguments: {
+          type: 'array',
+          items: { type: 'string', minLength: 1, pattern: '^[^\\s\\u0000-\\u001f\\u007f-\\u009f\\u00a7<>]+$' },
+          description: 'Optional command arguments in server order, one token per item. No whitespace, control characters or <placeholder> text; read the spell description for required values.',
+        },
+      },
+      required: ['spell'],
+    },
+  },
+  {
+    name: 'mc_combat_tactic',
+    tags: ['write'],
+    description:
+      'Read or replace the immediate combat spell tactic. {} reads it; '
+      + '{enabled:false} clears it. A spell list of server-listed combat spell IDs sets priority order while fighting; '
+      + 'healAtOrBelow casts selfheal at that health or lower before another attack. '
+      + 'The World checks observed spell availability, mana, targets and announced cooldowns; '
+      + 'server replies still decide success. This tactic stays through reconnects in this process.',
+    parameters: {
+      type: 'object',
+      properties: {
+        enabled: { type: 'boolean' },
+        spells: { type: 'array', minItems: 1, maxItems: 8, uniqueItems: true,
+          items: { type: 'string', pattern: '^[a-z][a-z0-9_:-]{0,63}$' } },
+        healAtOrBelow: { type: 'integer', minimum: 1, maximum: 20 },
+      },
+      required: [],
+    },
+  },
+  {
     name: 'mc_do',
     tags: ['act'],
     description:
-      'Queue one piece of work in Minecraft as an ordered list of skills. Returns immediately with a task id; the queue is drained one task at a time and each reports completion or obstruction as a minecraft.task event. A blocked task leaves later tasks queued.',
+      'Queue an ordered group of Minecraft skills and return immediately with a task id. Known next steps in one intention can be submitted together; steps and queued tasks continue in the background without another model turn. Use queue:"append" to add work after existing tasks. Use queue:"afterCheckpoint" to do this group at a safe checkpoint of current work, then resume that work; container and transaction groups wait until their operation is complete. Each task reports completion or obstruction as a minecraft.task event; a blocked task leaves later tasks queued. A single plain chat or vanilla /msg, /tell, /w to a named player, with default queue and no needs/expect, sends immediately while movement continues. Other slash commands and chat inside a multi-step group retain queue order.',
     parameters: {
       type: 'object',
       properties: {
         // items 是一份扁平字段池,由 skills.ts 注册表生成:每技能的必填与横向规则
-        // 只在 SKILL_DOC 里陈述,由 parseSteps 裁决(判别式 oneOf 见 stepSchemaOf 注释)
+        // 由签名与 mc_help 陈述,parseSteps 裁决(判别式 oneOf 见 stepSchemaOf 注释)
         steps: {
           type: 'array',
-          description: SKILL_DOC,
+          description: SKILL_SIGNATURE_DOC,
           items: SKILL_STEP_SCHEMA,
         },
         queue: QUEUE_SCHEMA,
@@ -2069,6 +2183,40 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
         queue: QUEUE_SCHEMA,
       },
       required: ['steps'],
+    },
+  },
+  {
+    name: 'mc_visual',
+    tags: ['read'],
+    barrierAfter: true,
+    description:
+      'Look at the rendered Minecraft scene from your current position. When task-focused cognition is '
+      + 'available, a separate image call returns a concise visible-evidence report with time and location; '
+      + 'otherwise returns the actual image. raw=true requests the image directly. Inspect entrances and routes, visible player '
+      + 'actions. background=true accepts one observation job immediately and later delivers its result as a minecraft.visual event; '
+      + 'acceptance does not mean the image or analysis is ready. Only one observation may remain in flight, '
+      + 'including synchronous calls; wait for its result instead of switching call modes to repeat it. Inspect '
+      + 'combat situations, item icons and open menus, as well as buildings and landscapes. '
+      + 'Compare fresh observations to check action results. include_hud includes the current game '
+      + 'interface. A still image does not prove intent, motion or hidden facts; move to a useful vantage '
+      + 'or compare another view when needed. '
+      + 'This is observation only and never places or breaks blocks.',
+    parameters: {
+      type: 'object',
+      properties: {
+        mode: {
+          type: 'string', enum: ['first', 'third', 'dungeon'],
+          description: 'Camera view. first follows what is in front of you; third shows the surroundings and avatar; dungeon offers an overview. Default third.',
+        },
+        focus: {
+          type: 'string', maxLength: 160,
+          description: 'What you want to inspect: an entrance, nearby player, combat result, menu, item or building. This labels the observation; it does not move the camera.',
+        },
+        include_hud: { type: 'boolean', description: 'Include visible health, items, notices and open menus. Default false captures the 3D scene alone.' },
+        raw: { type: 'boolean', description: 'Return the image directly instead of a separate focused observation. Default false.' },
+        background: { type: 'boolean', description: 'Accept a background observation job and deliver its actual result in a minecraft.visual event. Analyzed reports retain saved image references; raw or fallback results include the image. Default false waits for the result. Local waiting is capped at 75 seconds; a model request already running may finish later.' },
+      },
+      required: [],
     },
   },
   {
@@ -2299,9 +2447,13 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
       'Read your inventory right now: how many of the 36 slots are used, what is in them, '
       + 'what is in your hand, and what armour you are wearing. Read-only and instant — '
       + 'it never moves you, never touches the world and never touches the work queue. '
+      + 'Set item to locate one material in your inventory, the currently open container, and last observed chest records; '
+      + 'closed virtual backpacks are not included, and chest records are historical until reopened. '
       + 'Ask this instead of re-submitting a task to find out what you are carrying. '
       + 'Once per turn: asking again in the same turn returns a one-line pointer to the answer above.',
-    parameters: { type: 'object', properties: {}, required: [] },
+    parameters: { type: 'object', properties: {
+      item: { type: 'string', description: 'Optional focused stock lookup, e.g. emerald or 绿宝石.' },
+    }, required: [] },
   },
   {
     name: 'mc_queue',
@@ -2344,6 +2496,12 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
   },
 ];
 
+/** AgentFriend commands are exposed only by the World that enables that server integration. */
+export function minecraftToolDecls(agentFriendEnabled: boolean): ReadonlyArray<Omit<ToolDef, 'handler'>> {
+  return agentFriendEnabled ? MINECRAFT_TOOL_DECLS
+    : MINECRAFT_TOOL_DECLS.filter((decl) => decl.name !== 'mc_cast' && decl.name !== 'mc_combat_tactic');
+}
+
 /**
  * 服务端起来之后回读到的难度,说成她读得懂的一句。
  *
@@ -2372,6 +2530,8 @@ export function renderDifficultyFact(fact: MinecraftDifficultyFact): string {
 export interface MinecraftWorldOptions {
   /** worlds.minecraft 配置段(活对象引用;x-hot 键现读生效) */
   cfg: MinecraftConfigSection;
+  /** Enable the optional AgentFriend server integration (commands, abilities, protection). */
+  agentFriendEnabled?: boolean;
   timezone?: string;
   botName?: string;
   /**
@@ -2388,6 +2548,18 @@ export interface MinecraftWorldOptions {
  */
 export const COGNITION_ABSENT = '[cognition-absent] 后台想那一档这台机器上没接线';
 
+interface VisualObservationJob {
+  id: string;
+  host: WorldHost;
+  bot: Bot;
+  viewerUrl: string;
+  dimension: string;
+  generation: number;
+  controller: AbortController;
+  callId?: string;
+  timedOut: boolean;
+}
+
 export class MinecraftWorld implements World {
   readonly id = 'minecraft';
 
@@ -2397,9 +2569,22 @@ export class MinecraftWorld implements World {
   private readonly botName: string;
   /** 这份部署的账本目录;'' = 没给,几本账只在内存里,皮肤留不了底 */
   private readonly dataDir: string;
+  private readonly agentFriendEnabled: boolean;
   private bridge: Bridge | null = null;
   private itemBreak: ItemBreakDecoder | null = null;
   private executor: Executor | null = null;
+  private idleBehavior: IdleBehaviorController | null = null;
+  private idleActivityVersion = 0;
+  private idleQuietUntil = 0;
+  private idleQuietReason: string | null = null;
+  private static readonly IDLE_ARRIVAL_WINDOW_MS = 1_500;
+  private static readonly IDLE_ARRIVAL_MAX_WAIT_MS = 4_500;
+  private static readonly IDLE_ARRIVAL_SETTLE_MS = 150;
+  private idleArrival: { generation: string; expiresAtMs: number; readyAtMs?: number; blockedBy?: string } | null = null;
+  private idleSceneCache: IdleBehaviorScene | null = null;
+  private visualWarmKey: string | null = null;
+  private visualInFlight: VisualObservationJob | null = null;
+  private static readonly VISUAL_BACKGROUND_WAIT_MS = 75_000;
   private reflexes: Reflexes | null = null;
   private combat: CombatSession | null = null;
   private ranged: BowController | null = null;
@@ -2410,9 +2595,12 @@ export class MinecraftWorld implements World {
   private lastReported: WorldSnapshot | null = null;
   private lastTickTime: number | null = null;
   private lastLowHealthAt = 0;
+  private lastAutoEatAttemptAt = 0;
   /** 身上正在生效的状态效果名。服务端对同一效果每 30 秒重推一次 entity_effect,只有出现与消失才成文。 */
   private readonly activeEffects = new Set<string>();
   private hookedBots = new WeakSet<object>();
+  /** 服务端同一条系统提示在短时间连发时只投递首条；原始重复次数进诊断。 */
+  private readonly recentSystemMessages = new Map<string, { at: number; repeats: number }>();
   private readonly mcServer: MinecraftServerManager;
   /** 受管服务器开关串行化；热改反转时，后一个状态总在前一个收尾之后落地。 */
   private serverLifecycleQueue: Promise<void> = Promise.resolve();
@@ -2423,6 +2611,7 @@ export class MinecraftWorld implements World {
   private readonly playerClient: GameClient;
   private readonly diag: MinecraftLog;
   private readonly chests: ChestBook;
+  private readonly directionalSweeps: DirectionalSweepBook;
   private readonly explored: ExploreBook;
   private readonly deaths: DeathBook;
   /** 成果登记(建成的蓝图格、锄成的耕地、种下的作物);完工转长期保留,不随施工结束失效 */
@@ -2448,6 +2637,10 @@ export class MinecraftWorld implements World {
   private readonly blueprints: BlueprintBook;
   /** 已装载可执行版本的剩余耗材保留账；草稿不进账。 */
   private readonly blueprintResources: BlueprintResourceLedger;
+  private readonly blueprintResourceReadings = new Map<string, BlueprintResourceReading>();
+  private readonly blueprintOwnedConsumptions: BlueprintOwnedConsumption[] = [];
+  private readonly blueprintInventoryWriteDetach = new Map<Bot, () => void>();
+  private readonly blueprintPlacementLives = new WeakMap<Bot, number>();
   /**
    * 蓝图那张视图在骨架里的取数句柄。每次 syncRealm 都碰它一下 —— 骨架是"用到才
    * 建记录",而换世界公告只说得出**记录存在过**的那些命名空间;不碰它,一个只
@@ -2465,6 +2658,7 @@ export class MinecraftWorld implements World {
   private blueprintInventoryTimer: ReturnType<typeof setTimeout> | null = null;
   /** permit 存续时由完成回调统一观察库存，避免 updateSlot 与结算重复扣账。 */
   private blueprintPlacementHolds = 0;
+  private blueprintPlacementBot: Bot | null = null;
   /** 已经从旧命名空间「下桌」、还没公告出去的那几句 */
   private realmCleared: string[] = [];
   private lastSpectateAt = 0;
@@ -2480,6 +2674,15 @@ export class MinecraftWorld implements World {
   private readonly fallbackLog: import('../../core/types.ts').Logger;
   /** 任务号:排进队列的每一件事领一个,回报时认它 */
   private taskSeq = 0;
+  private readonly taskReportVersions = new Map<number, number>();
+  private taskReportVersion = 0;
+  private decisionAdviser: ReturnType<typeof createDecisionAdviser> | null = null;
+  private decisionAdviserKey = '';
+  private lastDecisionAdviceSceneKey: string | null = null;
+  /** 服务端本连接明确列出的自愈能力；重连后必须重新确认。 */
+  private selfHealAvailable = false;
+  private readonly combatSpells = new CombatSpells();
+  private arenaFloor: { floor: number; total: number } | null = null;
   /** 每次真实 spawn 递增；断线前后的工具、事件与连接日志据此分代。 */
   private connectionGeneration = 0;
   /** 全身租约当前只做影子决策；owner 随具体任务/战斗/环境事件更换。 */
@@ -2507,6 +2710,7 @@ export class MinecraftWorld implements World {
 
   constructor(opts: MinecraftWorldOptions) {
     this.cfg = opts.cfg;
+    this.agentFriendEnabled = opts.agentFriendEnabled === true;
     this.timezone = opts.timezone ?? 'Asia/Shanghai';
     this.botName = opts.botName ?? 'bot';
     this.bodyLease = new BodyLeaseArbiter({
@@ -2515,7 +2719,9 @@ export class MinecraftWorld implements World {
     });
     this.dataDir = opts.dataDir ?? '';
     const ledger = (name: string): string | null => (opts.dataDir ? join(opts.dataDir, name) : null);
+    this.rejectedRoutes = new RejectedRouteLedger(ledger('minecraft-rejected-routes.json'));
     this.chests = new ChestBook(ledger('minecraft-chests.json'));
+    this.directionalSweeps = new DirectionalSweepBook(ledger('minecraft-directional-sweeps.json'));
     this.explored = new ExploreBook(ledger('minecraft-explored.json'));
     this.deaths = new DeathBook(ledger('minecraft-deaths.json'), this.timezone);
     this.works = new WorksBook(ledger('minecraft-works.json'));
@@ -2999,6 +3205,7 @@ export class MinecraftWorld implements World {
     // 摄像机说明是一整段措辞,所以它住在自己的可编辑片段里——代码只决定用不用,
     // 措辞归人。前缀里不该有任何一句只存在于 .ts 里的话。
     return {
+      'minecraft.version': this.cfg.version,
       'minecraft.world': worldEnvLine(this.worldIdentity()),
       'minecraft.explored': this.explored.summary(normalizeDimension(this.bridge?.bot?.game?.dimension)),
       // 上下文截断时读取当前非默认设置，同时注明被蓝图预留收口的垫脚料。
@@ -3006,7 +3213,22 @@ export class MinecraftWorld implements World {
       'minecraft.camera': this.cfg.client.enabled
         ? readFileSync(CAMERA_NOTE_FILE, 'utf8').trim()
         : '',
+      ...this.envPromptRuntimeVars(),
     };
+  }
+
+  /** 子进程定期同步给主进程的提示词活状态；不触发快照重锚。 */
+  envPromptRuntimeVars(): Record<'minecraft.current_task' | 'minecraft.goals', string> {
+    return {
+      'minecraft.current_task': (() => { try { return this.executor?.current ?? '(手上没有在做的事)'; } catch { return '(读取当前任务失败)'; } })(),
+      'minecraft.goals': (() => { try { return goalSnapshotLine(this.goalTable().list); } catch { return '(读取目标表失败)'; } })(),
+    };
+  }
+
+  /** 已有快照的完整读数；只读缓存，不扫描、不推进增量基线。 */
+  requestFacts(): WorldRequestFacts | null {
+    if (!this.bridge?.connected || !this.requestFactsCache) return null;
+    return { ...this.requestFactsCache, snapshotTypes: [...this.requestFactsCache.snapshotTypes] };
   }
 
   console(): WorldConsoleDecl {
@@ -3070,6 +3292,10 @@ export class MinecraftWorld implements World {
           role: 'envPrompt',
           vars: [
             {
+              name: 'minecraft.version',
+              description: '当前连接使用的 Minecraft 协议版本。',
+            },
+            {
               name: 'minecraft.world',
               description: '世界身份:本地托管=「当前存档:名字」,外部服务器=「当前服务器:地址」。她的位置类记忆按它划界。',
             },
@@ -3085,6 +3311,14 @@ export class MinecraftWorld implements World {
               name: 'minecraft.camera',
               description: '观察者摄像机说明;没开客户端时为空。措辞在「摄像机说明」那份里改。',
               multiline: true,
+            },
+            {
+              name: 'minecraft.current_task',
+              description: '当前正在执行的任务标签;空闲时为「手上没有在做的事」。上下文交接后仍可见。',
+            },
+            {
+              name: 'minecraft.goals',
+              description: 'mc_goal 目标表快照(最多5格);空表时提示用 mc_goal 挂目标。',
             },
           ],
         },
@@ -3515,13 +3749,14 @@ export class MinecraftWorld implements World {
         abort: () => this.ranged?.abort(),
       },
       precheck: () => this.cfg.precheck,
+      repeatSuccessFallback: () => this.cfg.repeatSuccessFallback ?? MINECRAFT_DEFAULTS.repeatSuccessFallback,
       diag: this.diag,
       // 技能只读规矩;改它的唯一入口是 mc_policy(工具面,不进队列)
       policy: {
         get: () => this.policy.get(),
         defaults: () => this.policyDefaults(),
       },
-      permitResourcePlacement: (item) => this.permitBlueprintResourcePlacement(item),
+      permitResourcePlacement: (item, intent) => this.permitBlueprintResourcePlacement(item, intent),
       previewResourcePlacement: (item) => this.previewBlueprintResourcePlacement(item),
       probeRoutes: (target, goal) => this.bridge?.probeRoutes(target, goal) ?? null,
       probeTarget: (target) => this.bridge?.probeTarget(target) ?? null,
@@ -3535,7 +3770,9 @@ export class MinecraftWorld implements World {
       }),
       showTempo: () => this.showTempo(),
       onDrain: () => this.closeStrayWindow(),
+      onQueueTail: (notice) => this.onQueueTail(notice),
       spawnNote: () => this.freshSpawnNote(),
+      serverFeedbackSince: (startedAt) => this.freshServerFeedback(startedAt),
       // 重生点那一格:受理刻的重生锚闸与 pickup/stow/toss 的回执共读这一份
       spawnAnchor: () => this.personalSpawn,
       // 蓝图施工面(照 spawnAnchor 的接法):装载表与本世界绑定归 World,技能只读+写游标
@@ -3545,6 +3782,7 @@ export class MinecraftWorld implements World {
       // queue:"now" 夺手:战斗当场交还身体,不再走"腾出手就做"
       stopCombat: () => this.combat?.standDown() ?? null,
       chests: this.chests,
+      directionalSweeps: this.directionalSweeps,
       works: this.works,
       explored: (dimension, direction, distance, biome) => this.explored.record(dimension, direction, distance, biome),
       searchContext: () => ({
@@ -3554,6 +3792,7 @@ export class MinecraftWorld implements World {
       // 周期份捎带、计数过半升常规;卡没卡住由 agent 看净位移自己判断
       onProgress: (p) => {
         const cnt = p.count ? `,进度 ${p.count.done}/${p.count.total}` : '';
+        const detail = p.detail ? `;${p.detail}` : '';
         const where = p.pos ? `;我在 (${p.pos.x}, ${p.pos.y}, ${p.pos.z})` : '';
         // 躺在床上等醒的那段:人不动是因为在睡,不是卡住了。净位移那句在这一档里
         // 只会误导(「进行中、挪了 0 格」读起来就是卡死),换成说清在做什么。
@@ -3564,7 +3803,7 @@ export class MinecraftWorld implements World {
         this.emit(
           'minecraft.task.progress',
           `[执行器] 任务#${p.taskId}「${p.label}」进行中` +
-            `(第 ${p.stepIndex + 1}/${p.stepCount} 步:${p.step},已跑 ${p.elapsedS} 秒${cnt})${where}${moved}。`,
+            `(第 ${p.stepIndex + 1}/${p.stepCount} 步:${p.step},已跑 ${p.elapsedS} 秒${cnt})${detail}${where}${moved}。`,
           false,
           { trigger: p.half ? 'debounce' : 'piggyback', tags: ['snapshot'] },
         );
@@ -3578,8 +3817,10 @@ export class MinecraftWorld implements World {
       getBot: () => this.bridge?.bot ?? null,
       tuning: () => ({
         enabled: this.cfg.combat.enabled,
-        engageRadius: this.cfg.combat.engageRadius,
-        chaseMax: this.cfg.combat.chaseMax,
+        arena: this.arenaFloor !== null,
+        // 试炼层必须主动清怪才能继续；野外保留原来的近身自卫范围。
+        engageRadius: this.arenaFloor ? Math.max(this.cfg.combat.engageRadius, 16) : this.cfg.combat.engageRadius,
+        chaseMax: this.arenaFloor ? Math.max(this.cfg.combat.chaseMax, 18) : this.cfg.combat.chaseMax,
         maxSec: this.cfg.combat.maxSec,
         space: this.cfg.combat.space,
         busyRatio: this.cfg.combat.busyRatio,
@@ -3592,13 +3833,18 @@ export class MinecraftWorld implements World {
       envBusy: () => (this.reflexes?.envActive ?? false) || Date.now() < this.escapeHoldUntil,
       taskEscaping: () => this.executor?.escaping ?? false,
       taskFighting: () => this.executor?.attacking ?? false,
-      suspendTasks: (by) => this.executor?.suspend(by),
+      suspendTasks: (by) => {
+        this.interruptIdle('combat');
+        return this.executor?.suspend(by);
+      },
       resumeTasks: () => this.executor?.resume() ?? null,
       emit: (text, urgent, hurtNote) => {
         // 这句已讲明掉血来由:紧接着的掉血播报就是复述,压掉
         if (hurtNote) this.lastReflexHurtAt = Date.now();
-        this.emit('minecraft.event', `[Minecraft] ${text}`, urgent);
+        this.emit('minecraft.event', `[Minecraft] ${text}`, urgent,
+          urgent ? undefined : { trigger: 'piggyback' });
       },
+      onLowHealth: (bot) => this.onLowHealth(bot),
       ranged: {
         ready: (bot) => this.rangedBot === bot && Boolean(bestRangedWeapon(bot)) && hasUsableArrows(bot),
         active: () => this.ranged?.active ?? false,
@@ -3615,21 +3861,37 @@ export class MinecraftWorld implements World {
       report: (r) => this.onTaskReport(r),
       log,
       preempt: (reason) => {
+        this.interruptIdle('environment');
         // 低血直线脱战仍是不可恢复抢占；环境危机走下面的断点租约。
         this.combat?.yieldToEnv();
         this.executor?.preempt(reason);
       },
       pauseEnvironment: (reason) => {
+        this.interruptIdle('environment');
         this.combat?.yieldToEnv();
         return this.executor?.pauseForEnvironment(reason) ?? null;
       },
       resumeEnvironment: (token) => this.executor?.resumeAfterEnvironment(token)
         ?? { released: false, note: null },
-      stopFallTask: (reason) => this.executor?.stopCurrent(reason) ?? null,
+      stopFallTask: (reason) => {
+        this.interruptIdle('fall');
+        return this.executor?.stopCurrent(reason) ?? null;
+      },
       resumeAfterFall: (token) => this.executor?.resumeQueue(token) ?? false,
       escapeActive: () => (this.executor?.escaping ?? false) || Date.now() < this.escapeHoldUntil,
       fightBack: () => this.cfg.reflex.fightBack,
       fleeHealth: () => this.cfg.reflex.fleeHealth,
+      onLowHealth: (bot) => this.onLowHealth(bot),
+      onWaterTrap: () => {
+        void this.doEscape().then((result) => {
+          this.diag.write({ lane: 'reflex', event: 'drown-trap-escape', msg: result });
+          this.emit('minecraft.task', `[自动脱困] ${result}`, true);
+        }, (error) => {
+          this.diag.write({ lane: 'reflex', event: 'drown-trap-escape-failed',
+            msg: String(error), incident: true });
+          this.emit('minecraft.task', `[自动脱困] 没成功:${String(error)}`, true);
+        });
+      },
       reactCooldownSec: () => this.cfg.reflex.reactCooldownSec,
       antiDrown: () => this.cfg.reflex.antiDrown,
       antiLava: () => this.cfg.reflex.antiLava,
@@ -3645,29 +3907,18 @@ export class MinecraftWorld implements World {
       username: this.cfg.username || this.botName,
       version: this.cfg.version,
       viewerPort: this.cfg.viewerPort,
+      viewerAssetsDir: this.cfg.viewerAssetsDir,
+      viewerSpeakerName: this.cfg.viewerSpeakerName,
       log,
       diag: this.diag,
       shuttingDown: () => this.shuttingDown,
       scaffoldBlocks: () => this.scaffoldBlocksForUse(),
       movementCosts: () => TRAVEL_COSTS[this.policy.get().travel],
-      // 在建工地(锚点已绑、游标未满):寻路器不在体积里垫脚搭路,工地建材也降到
-      // 垫脚候选末位。走与挖不受限;蓝图自己的落点走的是另一条路,不受这条影响。
-      blueprintZones: (): SiteZone[] => {
-        const desk = this.blueprintDesk();
-        const out: SiteZone[] = [];
-        for (const key of desk.keys()) {
-          const site = desk.get(key);
-          if (!site?.anchor || site.cursor >= site.plan.steps.length) continue;
-          const [sx, sy, sz] = site.blueprint.size_xyz;
-          out.push({
-            key: site.key,
-            min: [site.anchor[0], site.anchor[1], site.anchor[2]],
-            max: [site.anchor[0] + sx - 1, site.anchor[1] + sy - 1, site.anchor[2] + sz - 1],
-            materials: site.plan.steps.map((s) => s.item),
-          });
-        }
-        return out;
-      },
+      taskId: () => this.executor?.currentTask?.id ?? null,
+      protectionFile: this.dataDir ? join(this.dataDir, 'minecraft-break-permissions.json') : null,
+      agentFriendProtect: this.agentFriendEnabled,
+      // 工地绑定持续约束自动寻路；显式施工与拆改仍通过各自权限检查。
+      blueprintZones: () => this.blueprintPathZones(),
       // 成果登记的垫脚过滤:维度在这里合上,寻路器只问「这一格算不算」
       workCell: (x, y, z) => this.works.has(this.bridge?.bot?.game?.dimension ?? 'overworld', x, y, z),
       showTempo: () => this.showTempo(),
@@ -3676,6 +3927,8 @@ export class MinecraftWorld implements World {
       // 第一次掉线值得叫醒她(手上的事全废了);之后每一次重连没成只是同一件事的
       // 复述,压成不唤醒的一条,免得连不上的那半小时里每隔几十秒炸一次
       onDisconnect: (reason, willReconnect, attempt) => {
+        this.visualInFlight?.controller.abort(new Error('游戏连接已断开'));
+        this.interruptIdle('disconnect');
         this.bodyLease.invalidate('disconnect', Date.now());
         this.resetBodyOwners();
         this.diag.write({
@@ -3703,6 +3956,28 @@ export class MinecraftWorld implements World {
     void this.syncManagedServerLifecycle(true);
     this.reflexes.start();
     this.combat.start();
+    this.idleBehavior = new IdleBehaviorController({
+      config: () => this.cfg.idle ?? MINECRAFT_DEFAULTS.idle,
+      host: {
+        scene: () => this.idleScene(),
+        execute: async (id, scene, signal) => {
+          const bot = this.bridge?.bot;
+          if (!bot) return;
+          const origin = bot.entity.position.clone();
+          await executeIdleAction(bot, id, scene.state, signal, {
+            available: () => this.bridge?.bot === bot && this.canIdle()
+              && (id !== 'short_walk' || (this.cfg.idle ?? MINECRAFT_DEFAULTS.idle).allowMovement)
+              && this.idleGeneration() === scene.generation
+              && bot.entity.position.distanceTo(origin) < 3,
+            inventoryPreview: (open) => {
+              (bot as unknown as EventEmitter).emit('viewer_inventory_preview', { open });
+            },
+          });
+        },
+        record: (event) => this.diag.write({ lane: 'body', event: `idle-${event.event}`,
+          msg: event.actionId ?? event.reason ?? event.event, level: 'debug', data: { ...event } }),
+      },
+    });
     this.worldTimer = setInterval(() => this.worldTick(), 1_000);
     // 客户端自己会花几十秒加载,和连服务器并行起就行,不等它
     if (this.cfg.client.enabled) void this.client.start();
@@ -3712,7 +3987,14 @@ export class MinecraftWorld implements World {
 
   async stop(): Promise<void> {
     this.shuttingDown = true;
+    this.visualInFlight?.controller.abort(new Error('Minecraft World 已停止'));
+    this.requestFactsCache = null;
+    this.idleBehavior?.stop();
+    this.idleBehavior = null;
+    this.idleSceneCache = null;
+    this.visualWarmKey = null;
     this.bodyLease.invalidate('stop', Date.now());
+    this.idleArrival = null;
     this.flushBodyRejectFold();
     this.resetBodyOwners();
     this.detachItemBreak();
@@ -3727,8 +4009,6 @@ export class MinecraftWorld implements World {
     this.resourceOverrideTimer = null;
     if (this.blueprintInventoryTimer) clearTimeout(this.blueprintInventoryTimer);
     this.blueprintInventoryTimer = null;
-    for (const t of this.despawnTimers) clearTimeout(t);
-    this.despawnTimers.clear();
     this.combat?.stop();
     this.detachRanged();
     this.combat = null;
@@ -3737,8 +4017,15 @@ export class MinecraftWorld implements World {
     const bridge = this.bridge;
     this.bridge = null;
     this.blueprintPlacementHolds = 0;
+    this.blueprintPlacementBot = null;
+    this.blueprintOwnedConsumptions.length = 0;
+    this.blueprintResourceReadings.clear();
+    for (const detach of this.blueprintInventoryWriteDetach.values()) detach();
+    this.blueprintInventoryWriteDetach.clear();
     /* 先停止 bridge 与两份客户端，再停止 MC 服务器，避免退出期间安排重连或重启。 */
-    const bridgeStop = Promise.allSettled([bridge?.stop() ?? Promise.resolve()]);
+    const bridgeStop = Promise.allSettled([
+      closeMinecraftViewCapture(), bridge?.stop() ?? Promise.resolve(),
+    ]);
     await bridgeStop;
     // 托管进程随 World 收干净:客户端直接杀,MC 停机走 stop 指令存档
     await this.client.stop();
@@ -3757,32 +4044,381 @@ export class MinecraftWorld implements World {
 
   tools(): ToolDef[] {
     const handlers: Record<string, ToolDef['handler']> = {
+      mc_help: async (args) => {
+        const help = readSkillHelp(args);
+        return 'error' in help
+          ? { text: this.toolLog('mc_help', args, `[mc_help 失败] ${help.error}`), failed: true }
+          : this.toolLog('mc_help', args, help.text);
+      },
+      mc_cast: async (args) => this.castSpell(args),
+      mc_combat_tactic: async (args) => this.setCombatTactic(args),
       // 路标表在受理这一刻取一次:at 写名字时按当刻登记解析
       mc_do: async (args) => this.enqueueTool('mc_do', args, (raw) => parseSteps(raw, this.markLookup())),
       mc_scout: async (args) => this.enqueueTool('mc_scout', args, (raw) => parseScoutSteps(raw, this.markLookup())),
+      mc_visual: async (args, ctx) => this.visualObservation(args, ctx),
       mc_policy: async (args) => this.toolLog('mc_policy', args, this.setPolicy(args)),
       mc_goal: async (args) => this.toolLog('mc_goal', args, this.setGoal(args)),
       mc_map: async (args) => this.toolLog('mc_map', args, this.setMap(args)),
       mc_blueprint: async (args) => this.toolLog('mc_blueprint', args, this.setBlueprint(args)),
       mc_check: async (args) => this.toolLog('mc_check', args, this.runCheck(args)),
-      mc_bag: async (_args, ctx) => this.readOnce('mc_bag', ctx, () => this.bagReadout()),
+      mc_bag: async (args, ctx) => this.readOnce('mc_bag', ctx,
+        () => this.bagReadout(typeof args.item === 'string' ? args.item : undefined)),
       mc_queue: async (_args, ctx) => this.readOnce('mc_queue', ctx, () => this.queueReadout()),
       mc_blocked: async (_args, ctx) => this.readOnce('mc_blocked', ctx, () => this.blockedReadout()),
       mc_stop: async () => {
+        this.interruptIdle('stop-command');
         if (!this.executor) return this.toolLog('mc_stop', {}, '[mc_stop 失败] World 未启动');
         // 正在打:mc_stop = 收手 + 撤退(原地站住等于送死),队列照旧全撤
         const fight = this.combat?.requestStop() ?? null;
-        const cleared = this.executor.clear();
+        const cleared = this.executor.clear(fight !== null);
         const bits = [fight, cleared].filter(Boolean);
         return this.toolLog('mc_stop', {}, bits.length > 0 ? bits.join(';') : '手上本来就没有在做的事,队列也是空的');
       },
       mc_escape: async () => this.toolLog('mc_escape', {}, await this.doEscape()),
     };
-    return MINECRAFT_TOOL_DECLS.map((decl) => ({ ...decl, handler: handlers[decl.name] }));
+    return minecraftToolDecls(this.agentFriendEnabled).map((decl) => ({ ...decl, handler: handlers[decl.name] }));
+  }
+
+  private visualArgumentFailure(args: Record<string, unknown>): ToolOutcome | undefined {
+    const name = 'mc_visual';
+    const mode = args.mode === undefined ? 'third' : args.mode;
+    if (mode !== 'first' && mode !== 'third' && mode !== 'dungeon') {
+      return { text: this.toolLog(name, args, '[mc_visual 失败] mode 只能是 first、third 或 dungeon'), failed: true };
+    }
+    if (args.include_hud !== undefined && typeof args.include_hud !== 'boolean') {
+      return { text: this.toolLog(name, args, '[mc_visual 失败] include_hud 只能是 boolean'), failed: true };
+    }
+    if (args.raw !== undefined && typeof args.raw !== 'boolean') {
+      return { text: this.toolLog(name, args, '[mc_visual 失败] raw 只能是 boolean'), failed: true };
+    }
+    if (args.background !== undefined && typeof args.background !== 'boolean') {
+      return { text: this.toolLog(name, args, '[mc_visual 失败] background 只能是 boolean'), failed: true };
+    }
+    return undefined;
+  }
+
+  private async visualObservation(args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> {
+    const invalid = this.visualArgumentFailure(args);
+    if (invalid) return invalid;
+    const bot = this.bridge?.bot;
+    const viewerUrl = this.bridge?.viewerUrl;
+    const host = this.host;
+    if (this.shuttingDown || !host || !bot?.entity || !viewerUrl) {
+      return { text: this.toolLog('mc_visual', args, '[mc_visual 暂不可用] 游戏或网页画面未连接；等画面恢复后再看'),
+        failed: true, endsTurn: true };
+    }
+    if (ctx.signal?.aborted) {
+      return { text: this.toolLog('mc_visual', args, '[mc_visual 未受理] 本次调用已取消'), failed: true };
+    }
+    if (this.visualInFlight) {
+      return { text: this.toolLog('mc_visual', args,
+        `[mc_visual 未受理] 观察 job_id:${this.visualInFlight.id} 仍在收尾；本次没有拍摄或新建分析。`
+          + '等待原观察结果；期间可执行不依赖该结果的其他行动'), failed: true };
+    }
+    const job: VisualObservationJob = {
+      id: `vis_${randomUUID()}`, host, bot, viewerUrl,
+      dimension: String(bot.game.dimension ?? 'unknown'), generation: this.connectionGeneration,
+      controller: new AbortController(), callId: ctx.callId, timedOut: false,
+    };
+    this.visualInFlight = job;
+    const signal = args.background !== true && ctx.signal
+      ? AbortSignal.any([ctx.signal, job.controller.signal]) : job.controller.signal;
+    const work = this.visualReadout(args, { ...ctx, signal });
+    // A timed-out cognition request may still be running; keep its slot until it actually settles.
+    const release = () => { if (this.visualInFlight === job) this.visualInFlight = null; };
+    void work.then(release, release);
+    if (args.background !== true) return work;
+    void this.deliverVisualObservation(job, work);
+    return { text: this.toolLog('mc_visual', args,
+      `[mc_visual 已受理] job_id:${job.id}；画面和分析尚未完成，结果稍后通过 minecraft.visual 事件交回。`) };
+  }
+
+  private visualJobIsCurrent(job: VisualObservationJob): boolean {
+    return !this.shuttingDown && this.host === job.host && this.bridge?.bot === job.bot
+      && !!job.bot.entity && this.bridge?.viewerUrl === job.viewerUrl
+      && this.connectionGeneration === job.generation
+      && String(job.bot.game.dimension ?? 'unknown') === job.dimension;
+  }
+
+  private async deliverVisualObservation(job: VisualObservationJob, work: Promise<ToolOutcome>): Promise<void> {
+    let onAbort: () => void = () => {};
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(job.controller.signal.reason);
+      job.controller.signal.addEventListener('abort', onAbort, { once: true });
+      if (job.controller.signal.aborted) onAbort();
+    });
+    const timer = setTimeout(() => {
+      job.timedOut = true;
+      job.controller.abort(new Error('后台观察本地等待超过 75 秒；已取消拍摄等待，已发出的模型请求可能仍在运行，迟到结果将丢弃'));
+    }, MinecraftWorld.VISUAL_BACKGROUND_WAIT_MS);
+    timer.unref();
+    try {
+      let outcome: ToolOutcome;
+      try {
+        outcome = await Promise.race([work, cancelled]);
+      } catch (error) {
+        if (!job.timedOut) return;
+        outcome = { text: error instanceof Error ? error.message : String(error), failed: true };
+      }
+      if (!this.visualJobIsCurrent(job) || (job.controller.signal.aborted && !job.timedOut)) return;
+      await job.host.pushEvent({
+        origin: 'external', ts: nowIso(this.timezone), source: this.id, type: 'minecraft.visual',
+        senderKey: 'minecraft.visual',
+        text: `[mc_visual 后台${outcome.failed ? '失败' : '结果'}] job_id:${job.id}\n${outcome.text}`,
+        blobs: outcome.blobs,
+        meta: { jobId: job.id, callId: job.callId, status: outcome.failed ? 'failed' : 'completed',
+          dimension: job.dimension, connectionGeneration: job.generation },
+      }, { trigger: 'debounce' });
+    } catch (error) {
+      job.host.log.warn('mc_visual 后台事件投递失败', { err: error });
+    } finally {
+      clearTimeout(timer);
+      job.controller.signal.removeEventListener('abort', onAbort);
+    }
+  }
+
+  /** Capture current evidence; the Persona may interpret it in a separate task-scoped call. */
+  private async visualReadout(args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> {
+    const name = 'mc_visual';
+    const invalid = this.visualArgumentFailure(args);
+    if (invalid) return invalid;
+    const mode = (args.mode ?? 'third') as 'first' | 'third' | 'dungeon';
+    const focus = typeof args.focus === 'string' ? args.focus.replace(/\s+/g, ' ').trim().slice(0, 160) : '';
+    const bot = this.bridge?.bot;
+    const viewerUrl = this.bridge?.viewerUrl;
+    if (!bot?.entity || !viewerUrl) {
+      return { text: this.toolLog(name, args, '[mc_visual 暂不可用] 游戏或网页画面未连接；等画面恢复后再看'),
+        failed: true, endsTurn: true };
+    }
+    const before = bot.entity.position.clone();
+    const dimension = String(bot.game.dimension ?? 'unknown');
+    const host = this.host;
+    const generation = this.connectionGeneration;
+    const current = () => !this.shuttingDown && this.host === host && this.connectionGeneration === generation
+      && this.bridge?.bot === bot && !!bot.entity && this.bridge?.viewerUrl === viewerUrl
+      && String(bot.game.dimension ?? 'unknown') === dimension;
+    try {
+      const capture = await captureMinecraftView({ viewerUrl, mode, includeHud: args.include_hud === true,
+        timeoutMs: 25_000, signal: ctx.signal });
+      this.diag.write({ lane: 'world', event: 'visual-capture', msg: capture.mode,
+        data: { ...capture.timings, capturedAt: capture.capturedAt, width: capture.width, height: capture.height } });
+      if (!current()) {
+        return { text: this.toolLog(name, args, '[mc_visual 失败] 拍摄期间游戏连接或维度改变，旧画面已丢弃'), failed: true };
+      }
+      const after = bot.entity.position;
+      const moved = before.distanceTo(after);
+      const location = `${after.x.toFixed(1)}, ${after.y.toFixed(1)}, ${after.z.toFixed(1)}`;
+      const description = [
+        `[mc_visual] ${capture.capturedAt} 网页实景截图，${capture.mode} 视角，${capture.width}×${capture.height}，`
+          + `${dimension}，玩家位置 (${location})。`,
+        focus ? `这次想看：${focus}。` : '',
+        'focus 只提出本帧问题，不改变玩家位置或镜头朝向，也不证明所写地点或对象就在画面中。',
+        capture.includesHud ? '本帧包含游戏界面和当前可见菜单。' : '本帧只包含 3D 场景，未拍摄界面。',
+        moved > 2 ? `拍摄期间移动了约 ${moved.toFixed(1)} 格；请把这张图当作移动中的一帧。` : '',
+        '画面只证明当时可见的内容；一帧不能证明动作过程、玩家意图或隐藏区域。'
+          + '入口、路线和战况可以据此复核；精确坐标、物品数据、动作终态和施工权限仍需现场读数或回执核对。',
+      ].filter(Boolean).join('\n');
+      const blobs = [{ bytes: capture.png, mime: 'image/png',
+        name: `minecraft-${capture.mode}-${capture.capturedAt.replace(/[:.]/g, '-')}.png`,
+        fallbackText: `Minecraft ${capture.mode} 视角现场截图；位置 (${location})，${dimension}，${capture.capturedAt}。` }];
+      const cognition = args.raw !== true ? host?.cognition : undefined;
+      let analysisFailure = '';
+      if (cognition) {
+        const started = Date.now();
+        try {
+          const observation = await cognition.request({
+            brief: `${description}\n请回答本次想看的问题；没提出具体问题时，概述可见场景、入口、遮挡和附近实体。`
+              + '区分画面事实与不确定推断，不编造箱子内容或隐藏物品。'
+              + '问题中的地点与对象须由本帧证据核对；没有设计或参考图时，不能判定应有而缺失的结构，'
+              + '只能描述可见开口、断面和遮挡。蓝图完成度由绑定原点上的方块对账确认。',
+            blobs, hint: { context: 'task', rounds: 1 },
+          });
+          if (ctx.signal?.aborted) throw new Error('本次观察已取消');
+          if (!current()) {
+            return { text: this.toolLog(name, args, '[mc_visual 失败] 分析期间游戏连接或维度改变，旧观察已丢弃'), failed: true };
+          }
+          if ('text' in observation && observation.text.trim()) {
+            this.diag.write({ lane: 'world', event: 'visual-observation', msg: capture.mode,
+              data: { capturedAt: capture.capturedAt, analysisMs: Date.now() - started, reportChars: observation.text.length } });
+            return { text: this.toolLog(name, args, `${description}\n[本帧独立视觉观察]\n${observation.text.trim()}`) };
+          }
+          analysisFailure = 'error' in observation ? observation.error : '未返回观察结论';
+        } catch (error) {
+          if (ctx.signal?.aborted) throw error;
+          analysisFailure = error instanceof Error ? error.message : String(error);
+        }
+        if (!current()) {
+          return { text: this.toolLog(name, args, '[mc_visual 失败] 分析期间游戏连接或维度改变，旧画面已丢弃'), failed: true };
+        }
+        this.diag.write({ lane: 'world', event: 'visual-observation-fallback', msg: analysisFailure.slice(0, 300),
+          data: { capturedAt: capture.capturedAt, analysisMs: Date.now() - started } });
+      }
+      return {
+        text: this.toolLog(name, args, `${description}${analysisFailure ? `\n独立观察未完成（${analysisFailure.slice(0, 300)}），本次返回原图。` : ''}`),
+        blobs,
+      };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return { text: this.toolLog(name, args, `[mc_visual 暂不可用] ${reason}`), failed: true,
+        endsTurn: true };
+    }
+  }
+
+  private castSpell(args: Record<string, unknown>): string | ToolOutcome {
+    const spell = args.spell;
+    if (typeof spell !== 'string' || !/^[a-z][a-z0-9_:-]{0,63}$/.test(spell)) {
+      return { text: this.toolLog('mc_cast', args, '[mc_cast 失败] spell 必须是服务端给出的英文技能 ID'), failed: true };
+    }
+    const parameters = args.arguments === undefined ? [] : args.arguments;
+    if (!Array.isArray(parameters)
+      || !parameters.every((value: unknown) => typeof value === 'string' && value.length > 0
+        && !/[\s\u0000-\u001f\u007f-\u009f<>]/u.test(value))) {
+      return { text: this.toolLog('mc_cast', args,
+        '[mc_cast 失败] arguments 必须是独立参数词组成的数组，不能包含空白、控制符或 <占位符>；按服务端说明填写实际值'), failed: true };
+    }
+    const command = `/mycli cast ${spell}${parameters.length ? ` ${parameters.join(' ')}` : ''}`;
+    const inputError = chatInputError(command);
+    if (inputError) return { text: this.toolLog('mc_cast', args, `[mc_cast 失败] ${inputError}`), failed: true };
+    const bot = this.bridge?.bot;
+    if (!bot) return { text: this.toolLog('mc_cast', args, '[mc_cast 失败] 还没连上服务器'), failed: true };
+    const blocked = this.combatSpells.manualCastBlock(spell);
+    if (blocked) {
+      return { text: this.toolLog('mc_cast', args, `[mc_cast 暂缓] ${blocked}；该技能以新的服务端状态为准，其他技能和动作仍可选择`),
+        failed: true, endsTurn: true };
+    }
+    try {
+      bot.chat(command);
+      publishViewerCastCommand(bot, command);
+      this.combatSpells.noteManualCast(spell);
+      return this.toolLog('mc_cast', args, `[mc_cast] 已发送 ${command}；是否生效以服务端回执和现场状态为准`);
+    } catch (error) {
+      return { text: this.toolLog('mc_cast', args, `[mc_cast 失败] 命令没发出去:${String(error)}`), failed: true };
+    }
+  }
+
+  private setCombatTactic(args: Record<string, unknown>): string {
+    const tool = 'mc_combat_tactic';
+    if (Object.keys(args).length === 0) {
+      const tactic = this.combatSpells.getTactic();
+      return this.toolLog(tool, args, tactic
+        ? `当前战术：${tactic.spells?.join(' → ') ?? '默认法术顺序'}；`
+          + `生命线 ${tactic.healAtOrBelow ?? '未设置'}/20。`
+        : '当前使用默认即时战斗法术；低血撤退时尝试圣愈术。');
+    }
+    if (args.enabled === false) {
+      this.combatSpells.setTactic(null);
+      return this.toolLog(tool, args, '已清除自定战术，恢复默认即时战斗法术。');
+    }
+    const rawSpells = args.spells;
+    const rawHeal = args.healAtOrBelow;
+    if (rawSpells === undefined && rawHeal === undefined) {
+      return this.toolLog(tool, args, '未设置：请给 spells 或 healAtOrBelow；用 enabled:false 清除。');
+    }
+    if (rawSpells !== undefined && (!Array.isArray(rawSpells) || rawSpells.length < 1
+      || rawSpells.length > 8 || rawSpells.some((spell) => typeof spell !== 'string'
+        || !/^[a-z][a-z0-9_:-]{0,63}$/.test(spell) || spell === 'selfheal')
+      || new Set(rawSpells).size !== rawSpells.length)) {
+      return this.toolLog(tool, args, '未设置：spells 最多八项且不重复，填写服务端公布的英文技能 ID；selfheal 用 healAtOrBelow。');
+    }
+    if (rawHeal !== undefined && (!Number.isInteger(rawHeal) || (rawHeal as number) < 1
+      || (rawHeal as number) > 20)) {
+      return this.toolLog(tool, args, '未设置：healAtOrBelow 必须是 1–20 的整数。');
+    }
+    const spells = rawSpells as CombatSpell[] | undefined;
+    const healAtOrBelow = rawHeal as number | undefined;
+    this.combatSpells.setTactic({ spells: spells ?? null, healAtOrBelow: healAtOrBelow ?? null });
+    return this.toolLog(tool, args,
+      `已设置战术：${spells?.join(' → ') ?? '默认法术顺序'}；`
+      + (healAtOrBelow === undefined ? '治疗血线未设置。'
+        : `生命 ≤${healAtOrBelow}/20 时先尝试圣愈术。`)
+      + '只在交战时按目标、魔力和冷却尝试；是否生效以服务端回执为准。');
+  }
+
+  private onLowHealth(bot: Bot): void {
+    if ((bot.health ?? 20) >= 6 && (bot.food ?? 20) < 18) {
+      this.emit('minecraft.event', `[Minecraft] 生命 ${Math.ceil(bot.health ?? 0)}/20，${this.recoveryFoodFact(bot)}。`,
+        false, { trigger: 'piggyback' });
+    }
+    this.tryAutoSelfHeal(bot);
+  }
+
+  private tryAutoSelfHeal(bot: Bot): boolean {
+    if (!this.agentFriendEnabled || !this.selfHealAvailable || (bot.health ?? 0) <= 0) return false;
+    const now = Date.now();
+    if (this.combatSpells.manualCastBlock('selfheal', now)) return false;
+    const command = '/mycli cast selfheal';
+    try {
+      bot.chat(command);
+    } catch (error) {
+      this.diag.write({ lane: 'combat', event: 'auto-selfheal-send-failed', msg: String(error) });
+      return false;
+    }
+    this.combatSpells.noteSupportSent(now);
+    publishViewerCastCommand(bot, command);
+    this.diag.write({
+      lane: 'combat', event: 'auto-selfheal',
+      msg: `低血尝试圣愈术,生命 ${Math.ceil(bot.health ?? 0)}/20；效果待服务端确认`,
+      data: { health: bot.health, connectionGeneration: this.connectionGeneration },
+    });
+    this.emit('minecraft.event', '[Minecraft] 血低时试着施了圣愈术，是否生效等服务端回执和生命读数确认。', false, { trigger: 'piggyback' });
+    return true;
+  }
+
+  private tryAutoCombatSpell(bot: Bot): void {
+    if (!this.agentFriendEnabled || this.bridge?.bot !== bot) return;
+    const fighting = (this.combat?.fighting ?? false) || (this.executor?.attacking ?? false);
+    const underThreat = (this.combat?.active ?? false) || fighting;
+    if (underThreat && this.selfHealAvailable
+      && (this.combatSpells.wantsHeal(bot.health ?? 0) || (bot.health ?? 0) <= 6)) {
+      this.tryAutoSelfHeal(bot);
+      return;
+    }
+    const floor = this.arenaFloor;
+    const spell = this.combatSpells.next(bot, fighting, Date.now(), Boolean(floor && floor.floor < floor.total));
+    if (!spell) return;
+    this.sendAutoCombatSpell(bot, spell);
+  }
+
+  private sendAutoCombatSpell(bot: Bot, spell: CombatSpell): void {
+    const command = `/mycli cast ${spell}`;
+    try {
+      bot.chat(command);
+    } catch (error) {
+      this.diag.write({ lane: 'combat', event: 'auto-spell-send-failed', msg: `${spell}: ${String(error)}` });
+      return;
+    }
+    this.combatSpells.noteSent(spell);
+    publishViewerCastCommand(bot, command);
+    this.diag.write({
+      lane: 'combat', event: 'auto-spell', msg: `交战中尝试 ${spell}；效果待服务端确认`,
+      data: { spell, health: bot.health, connectionGeneration: this.connectionGeneration },
+    });
+    this.emit('minecraft.event', `[Minecraft] 试着施放 ${spell}，是否生效等服务端回执确认。`,
+      false, { trigger: 'piggyback' });
+  }
+
+  private recoveryFoodFact(bot: Bot): string {
+    const hunger = Math.ceil(bot.food ?? 20);
+    if (this.bridge?.invSynced === false) return `饥饿 ${hunger}/20，背包还没同步`;
+    const foods = (bot.registry?.foodsByName ?? {}) as Record<string, unknown>;
+    const stacks = bot.inventory?.items() ?? [];
+    const available = new Map<string, number>();
+    for (const item of stacks) {
+      if (item.count > 0 && foods[item.name]) {
+        available.set(item.name, (available.get(item.name) ?? 0) + item.count);
+      }
+    }
+    if (available.size === 0) return `饥饿 ${hunger}/20，包里没看到食物`;
+    return `饥饿 ${hunger}/20，包里的食物：${[...available]
+      .map(([name, count]) => `${zhName(name)}(${name})×${count}`).join('、')}`;
   }
 
   /** 一轮一答闸的账(见 round.ts);三个只读原语共用一本,各占一格 */
   private readonly readGate = new RoundOnceGate();
+  private queueReadBurst: { stamp: string; atMs: number; count: number } | null = null;
+  private rejectedTravelBurst: { key: string; atMs: number; count: number } | null = null;
+  private lastRejectedTravelEscapeAt = 0;
+  private readonly rejectedRoutes: RejectedRouteLedger;
 
   /**
    * 只读原语的公共外壳:算读数 → 与上一次比 → 决定真答还是指回上一条。
@@ -3794,16 +4430,34 @@ export class MinecraftWorld implements World {
     name: string,
     ctx: ToolCallContext | undefined,
     compute: () => { stamp: string; text: string },
-  ): string {
+  ): string | ToolOutcome {
     const { stamp, text } = compute();
     const round = roundTokenOf(ctx);
+    if (name === 'mc_queue' && round !== null) {
+      const now = Date.now();
+      const previous = this.queueReadBurst;
+      const count = previous?.stamp === stamp && now - previous.atMs <= 5_000
+        ? previous.count + 1 : 1;
+      this.queueReadBurst = { stamp, atMs: now, count };
+      if (count >= 3) {
+        return {
+          text: this.toolLog(name, {}, '[mc_queue] 队列状态未变；等任务或战斗结果事件再查。'),
+          endsTurn: true,
+        };
+      }
+      const q = this.executor?.status();
+      if (q && (q.running || q.waiting.length > 0)) {
+        const answer = this.readGate.answered(name, round, stamp) ? text : REPEATED_QUERY_RECEIPT;
+        return { text: this.toolLog(name, {}, answer), endsTurn: true };
+      }
+    }
     return this.readGate.answered(name, round, stamp)
       ? this.toolLog(name, {}, text)
       : this.toolLog(name, {}, REPEATED_QUERY_RECEIPT);
   }
 
   /** mc_bag:背包现读。与快照走同一份渲染口径(见 readouts.renderBagReadout) */
-  private bagReadout(): { stamp: string; text: string } {
+  private bagReadout(item?: string): { stamp: string; text: string } {
     const snap = this.snapshot({ scanBlocks: false });
     if (!snap) {
       return {
@@ -3811,7 +4465,22 @@ export class MinecraftWorld implements World {
         text: '[mc_bag] 还没连上服务器,看不了包(断线会自动重连,连上会有事件)',
       };
     }
-    return { stamp: bagStamp(snap), text: renderBagReadout(snap) };
+    const records = this.chests.chestsIn(snap.dimension);
+    if (item?.trim()) {
+      const bot = this.bridge?.bot;
+      const win = bot?.currentWindow;
+      const opened = win && !selectionMenuTitle(win.title)
+        ? { title: minecraftTextComponent(win.title) || '容器',
+            items: containerStacks(win, bot.registry as never).items }
+        : null;
+      const text = renderStoredItemReadout(snap, records, item, opened);
+      return { stamp: `${bagStamp(snap)}|stock:${item}|${text}`, text };
+    }
+    const storage = renderStorageReadout(snap, records);
+    return {
+      stamp: `${bagStamp(snap)}|${storage ?? ''}`,
+      text: `${renderBagReadout(snap)}${storage ? `\n${storage}` : ''}`,
+    };
   }
 
   /** mc_queue:队列现读 + 最近一单的终态 */
@@ -3981,6 +4650,8 @@ export class MinecraftWorld implements World {
     const registry = (bot.registry as { blocksByName?: Record<string, unknown> } | undefined)?.blocksByName;
     const peek = this.blockPeek(bot);
     return {
+      position: () => bot.entity
+        ? [bot.entity.position.x, bot.entity.position.y, bot.entity.position.z] : null,
       cell: (x, y, z) => {
         try {
           const b = bot.blockAt(new Vec3(x + 0.5, y + 0.5, z + 0.5));
@@ -4205,38 +4876,208 @@ export class MinecraftWorld implements World {
    * reserve 只取当前 realm 已开工版本的剩余 IR。
    * 开工要求存在施工绑定且 startedAt 非空；draft 和只 survey 的绑定不参与。
    */
-  private syncBlueprintResources(): void {
+  private syncBlueprintResources(projectConsumption: Readonly<Record<string, number>> = {}): void {
+    const settled = this.settleBlueprintOwnedConsumptions(this.stockNow().carried);
+    const consumption = { ...projectConsumption };
+    for (const [item, count] of Object.entries(settled)) consumption[item] = (consumption[item] ?? 0) + count;
     const changed = this.blueprintResources.sync(this.blueprints.list().flatMap((design) => {
       const bound = this.blueprints.binding(design.key);
       if (!bound || bound.startedAt === null) return [];
+      const remaining = this.blueprintRemainingBill(design.key);
       return [{
         key: design.key,
         versionId: design.versionId,
-        remaining: design.plan.steps.slice(bound.cursor),
+        remaining,
       }];
     }));
-    const observed = this.blueprintResources.observe(this.stockNow().carried);
+    const observed = this.blueprintResources.observe(this.stockNow().carried, Date.now(), consumption);
     this.recordBlueprintResourceObservation(observed, changed);
   }
 
+  private blueprintResourceScope(key: string, versionId: string, anchor: PositionXYZ): string {
+    return JSON.stringify([this.realmKey(), normalizeDimension(this.bridge?.bot?.game?.dimension), key, versionId, anchor]);
+  }
+
+  private blueprintRemainingBill(key: string): BlueprintStep[] {
+    const design = this.blueprints.get(key);
+    if (!design) return [];
+    const bound = this.blueprints.binding(key);
+    const reading = this.blueprintResourceReadings.get(key);
+    const fresh = !!reading && reading.bot === this.bridge?.bot && !!bound
+      && reading.scope === this.blueprintResourceScope(key, design.versionId, bound.anchor);
+    return fresh
+      ? remainingPlacementBillSteps(design.plan.steps.filter((step) => reading.remainingSteps.has(step.index)), reading.placements)
+      : design.plan.steps.slice(bound?.cursor ?? 0);
+  }
+
+  private observeBlueprintRemaining(key: string, versionId: string, anchor: PositionXYZ,
+    remainingSteps: readonly number[], placements: Readonly<Record<number, readonly PositionXYZ[]>>): void {
+    const bot = this.bridge?.bot;
+    const design = this.blueprints.get(key);
+    const bound = this.blueprints.binding(key);
+    if (!bot || design?.versionId !== versionId || !bound || bound.startedAt === null
+      || bound.anchor.some((n, index) => n !== anchor[index])) return;
+    this.blueprintResourceReadings.set(key, { bot,
+      scope: this.blueprintResourceScope(key, versionId, anchor), remainingSteps: new Set(remainingSteps),
+      placements: Object.fromEntries(Object.entries(placements).map(([index, cells]) => [index, cells.map((cell) => [...cell])])),
+    });
+    this.syncBlueprintResources();
+  }
+
+  private proveBlueprintPlacement(bot: Bot, item: string, intent: BlueprintPlacementIntent): BlueprintOwnedConsumption | null {
+    const design = this.blueprints.get(intent.key);
+    const bound = this.blueprints.binding(intent.key);
+    if (intent.aborted() || design?.versionId !== intent.versionId || !bound || bound.startedAt === null
+      || bound.anchor.some((n, index) => n !== intent.anchor[index])) return null;
+    const local = intent.at.map((n, index) => n - bound.anchor[index]);
+    const step = design.plan.steps.find((candidate) =>
+      local.every((n, index) => Number.isInteger(n) && n >= candidate.from[index] && n <= candidate.to[index])
+      && (candidate.method.kind === 'place'
+        ? candidate.item === item : candidate.method.baseItem?.includes(item)));
+    if (!step) return null;
+    const raw = worldStateAt(bot, { x: intent.at[0], y: intent.at[1], z: intent.at[2] });
+    if (raw === null || blueprintStepStateMatches(step, raw)
+      || (step.method.kind === 'place' && blockIdOf(normalizeBlockName(raw)) === blockIdOf(step.state))
+      || (step.method.kind === 'use' && blockIdOf(normalizeBlockName(raw)) === `minecraft:${item}`)) return null;
+    return { bot, life: this.blueprintPlacementLives.get(bot) ?? 0,
+      intent: { ...intent, anchor: [...intent.anchor], at: [...intent.at] }, item, step,
+      scope: this.blueprintResourceScope(intent.key, intent.versionId, intent.anchor),
+      maxAfter: (this.stockNow().carried[item] ?? 0) - 1 };
+  }
+
+  private blueprintConsumptionCurrent(fact: BlueprintOwnedConsumption): boolean {
+    const design = this.blueprints.get(fact.intent.key);
+    const bound = this.blueprints.binding(fact.intent.key);
+    return this.bridge?.bot === fact.bot && fact.life === (this.blueprintPlacementLives.get(fact.bot) ?? 0)
+      && design?.versionId === fact.intent.versionId && !!bound
+      && bound.startedAt !== null && bound.anchor.every((n, index) => n === fact.intent.anchor[index])
+      && fact.scope === this.blueprintResourceScope(fact.intent.key, fact.intent.versionId, fact.intent.anchor);
+  }
+
+  private completeBlueprintPlacement(fact: BlueprintOwnedConsumption): void {
+    const reading = this.blueprintResourceReadings.get(fact.intent.key);
+    if (!reading || reading.bot !== fact.bot || reading.scope !== fact.scope || fact.step.method.kind !== 'place') return;
+    const actual = worldStateAt(fact.bot, { x: fact.intent.at[0], y: fact.intent.at[1], z: fact.intent.at[2] });
+    if (actual === null || !this.blueprintPlacedStateMatches(fact, actual)) return;
+    const local = fact.intent.at.map((n, index) => n - fact.intent.anchor[index]);
+    const cells = reading.placements[fact.step.index];
+    if (cells) reading.placements[fact.step.index] = cells.filter((cell) => !cell.every((n, index) => n === local[index]));
+  }
+
+  private blueprintPlacedStateMatches(fact: BlueprintOwnedConsumption, actual: string): boolean {
+    const id = blockIdOf(normalizeBlockName(actual));
+    // 正式放置以编译后的目标块核验，物品名只用于库存；原地加工的基材另有明确物品契约。
+    return id === (fact.step.method.kind === 'place' ? blockIdOf(fact.step.state) : `minecraft:${fact.item}`);
+  }
+
+  /** 迟到库存只在没有后续改写的同连接内可归属到那次放置；不猜测两笔交错的扣料。 */
+  private observeBlueprintInventoryWrites(bot: Bot): void {
+    if (this.blueprintInventoryWriteDetach.has(bot)) return;
+    const client = bot._client;
+    if (typeof client?.write !== 'function') return;
+    const original = client.write;
+    const world = this;
+    const observed: typeof client.write = function (this: typeof client, name, packet) {
+      const data = packet && typeof packet === 'object' ? packet as Record<string, unknown> : {};
+      const changesInventory = ['window_click', 'block_place', 'use_item', 'creative_inventory_action'].includes(name)
+        || (name === 'block_dig' && [3, 4, 5].includes(Number(data.status)))
+        || (name === 'use_entity' && [0, 2].includes(Number(data.mouse)));
+      if (changesInventory && world.bridge?.bot === bot
+        && world.blueprintOwnedConsumptions.some((fact) => fact.bot === bot)) {
+        world.observeBlueprintResources();
+        const unresolved = world.blueprintOwnedConsumptions.filter((fact) => fact.bot === bot);
+        for (const fact of unresolved) {
+          fact.ambiguous = true;
+          world.blueprintOwnedConsumptions.splice(world.blueprintOwnedConsumptions.indexOf(fact), 1);
+        }
+        if (unresolved.length > 0) world.diag.write({ lane: 'tool', event: 'blueprint-material-unconfirmed',
+          msg: '正式施工目标已回读，库存扣料未同步前发生另一笔库存改写；未将后续数量变化认作原施工消耗',
+          data: { packet: name, targets: unresolved.map((fact) => ({ key: fact.intent.key,
+            versionId: fact.intent.versionId, at: fact.intent.at, item: fact.item })) } });
+      }
+      return original.call(this, name, packet);
+    };
+    client.write = observed;
+    const changedLife = (): void => {
+      this.blueprintPlacementLives.set(bot, (this.blueprintPlacementLives.get(bot) ?? 0) + 1);
+      for (const fact of [...this.blueprintOwnedConsumptions]) {
+        if (fact.bot === bot) this.blueprintOwnedConsumptions.splice(this.blueprintOwnedConsumptions.indexOf(fact), 1);
+      }
+      for (const [key, reading] of this.blueprintResourceReadings) {
+        if (reading.bot === bot) this.blueprintResourceReadings.delete(key);
+      }
+    };
+    bot.on?.('death', changedLife);
+    bot.on?.('respawn', changedLife);
+    const detach = (): void => {
+      if (client.write === observed) client.write = original;
+      bot.removeListener?.('death', changedLife);
+      bot.removeListener?.('respawn', changedLife);
+      this.blueprintInventoryWriteDetach.delete(bot);
+      for (const fact of [...this.blueprintOwnedConsumptions]) {
+        if (fact.bot === bot) this.blueprintOwnedConsumptions.splice(this.blueprintOwnedConsumptions.indexOf(fact), 1);
+      }
+    };
+    this.blueprintInventoryWriteDetach.set(bot, detach);
+    client.once?.('end', detach);
+  }
+
   /** 执行器每次普通放置都取得一次 permit；库存差额在 permit 收尾时统一结算。 */
-  private permitBlueprintResourcePlacement(item: string): ResourcePlacementPermit {
+  private permitBlueprintResourcePlacement(item: string, intent?: BlueprintPlacementIntent): ResourcePlacementPermit {
     const bot = this.bridge?.bot;
     if (!bot) return { ok: false, reason: '当前没连上服务器,无法核对蓝图材料 reserve' };
+    if (this.blueprintPlacementBot !== bot) {
+      this.blueprintPlacementBot = bot;
+      this.blueprintPlacementHolds = 0;
+    }
     // Executor 串行执行放置；上一块未结算时不发第二张 permit，覆盖预算不会被并发超领。
     if (this.blueprintPlacementHolds > 0) return { ok: false, reason: '上一块材料还在结算,这次放置稍后再试' };
     this.settleBlueprintInventoryNow();
-    const decision = this.blueprintResources.placementDecision(item, this.stockNow().carried);
+    this.observeBlueprintResources();
+    if (this.blueprintOwnedConsumptions.some((pending) => pending.bot === bot && pending.item === item)) {
+      return { ok: false, reason: `${item} 的上一块正式施工已回读，但材料扣减仍待同步；不能把同一份扣料用于第二块` };
+    }
+    const fact = intent ? this.proveBlueprintPlacement(bot, item, intent) : null;
+    if (intent && !fact) return { ok: false, reason: '蓝图施工身份、绑定位置或目标物品已变化，不能使用这份工程材料许可' };
+    const decision = this.blueprintResources.placementDecision(item, this.stockNow().carried, Date.now(),
+      fact ? { key: fact.intent.key, versionId: fact.intent.versionId } : undefined);
     if (!decision.ok) return decision;
+    if (fact) this.observeBlueprintInventoryWrites(bot);
     this.blueprintPlacementHolds++;
     let finished = false;
     return {
       ok: true,
-      finish: () => {
+      finish: async (placed) => {
         if (finished) return;
         finished = true;
-        this.blueprintPlacementHolds = Math.max(0, this.blueprintPlacementHolds - 1);
-        if (this.blueprintPlacementHolds === 0 && this.bridge?.bot === bot) this.observeBlueprintResources();
+        try {
+          if (!placed || !fact) return;
+          if (!this.blueprintConsumptionCurrent(fact)) throw new Aborted('施工连接或版本已变化');
+          if (!this.blueprintPlacedStateMatches(fact, worldStateAt(bot, { x: intent!.at[0], y: intent!.at[1], z: intent!.at[2] }) ?? '')) {
+            throw new SkillBlocked('正式施工目标尚未回读到该物品，没有扣减工程材料账');
+          }
+          this.completeBlueprintPlacement(fact);
+          if (bot.game.gameMode === 'creative') {
+            this.syncBlueprintResources();
+            return;
+          }
+          this.blueprintOwnedConsumptions.push(fact);
+          this.syncBlueprintResources();
+          const deadline = Date.now() + BLUEPRINT_PLACEMENT_SETTLE_MS;
+          while (true) {
+            if (!this.blueprintConsumptionCurrent(fact)) throw new Aborted('施工连接或版本已变化');
+            if (fact.ambiguous) throw new SkillBlocked('目标方块已确认，但扣料尚未同步前有另一笔库存改写；无法确认本步材料消耗');
+            this.observeBlueprintResources();
+            if (!this.blueprintOwnedConsumptions.includes(fact)) return;
+            if (intent!.aborted()) throw new Aborted('材料结算时任务已取消');
+            if (Date.now() >= deadline) break;
+            await sleep(50);
+          }
+          throw new SkillBlocked('目标方块已确认，但材料数量尚未扣减；本步材料仍待服务端同步，没有记成临时借料');
+        } finally {
+          if (this.blueprintPlacementBot === bot) this.blueprintPlacementHolds = Math.max(0, this.blueprintPlacementHolds - 1);
+          if (this.blueprintPlacementHolds === 0 && this.bridge?.bot === bot) this.observeBlueprintResources();
+        }
       },
     };
   }
@@ -4262,8 +5103,29 @@ export class MinecraftWorld implements World {
 
   /** 库存每次变动都把“盈余 → 保留料”的边界与临时预算结清。 */
   private observeBlueprintResources(): void {
-    const result = this.blueprintResources.observe(this.stockNow().carried);
+    const stock = this.stockNow().carried;
+    const projectConsumption = this.settleBlueprintOwnedConsumptions(stock);
+    if (Object.keys(projectConsumption).length > 0) {
+      this.syncBlueprintResources(projectConsumption);
+      return;
+    }
+    const result = this.blueprintResources.observe(stock);
     this.recordBlueprintResourceObservation(result, false);
+  }
+
+  private settleBlueprintOwnedConsumptions(stock: Readonly<Record<string, number>>): Record<string, number> {
+    const projectConsumption: Record<string, number> = {};
+    for (const fact of [...this.blueprintOwnedConsumptions]) {
+      if (!this.blueprintConsumptionCurrent(fact)) {
+        this.blueprintOwnedConsumptions.splice(this.blueprintOwnedConsumptions.indexOf(fact), 1);
+        continue;
+      }
+      if ((stock[fact.item] ?? 0) > fact.maxAfter) continue;
+      this.blueprintOwnedConsumptions.splice(this.blueprintOwnedConsumptions.indexOf(fact), 1);
+      this.completeBlueprintPlacement(fact);
+      projectConsumption[fact.item] = (projectConsumption[fact.item] ?? 0) + 1;
+    }
+    return projectConsumption;
   }
 
   /** 合并一次槽位事务的中间态，避免游标暂存被误判成材料借出或库存跨线。 */
@@ -4336,6 +5198,23 @@ export class MinecraftWorld implements World {
     return loaded.length === 1 ? loaded[0] : null;
   }
 
+  private blueprintPathZones(): SiteZone[] {
+    const desk = this.blueprintDesk();
+    const out: SiteZone[] = [];
+    for (const key of desk.keys()) {
+      const site = desk.get(key);
+      if (!site?.anchor) continue;
+      const [sx, sy, sz] = site.blueprint.size_xyz;
+      out.push({
+        key: site.key,
+        min: [...site.anchor],
+        max: [site.anchor[0] + sx - 1, site.anchor[1] + sy - 1, site.anchor[2] + sz - 1],
+        materials: site.plan.steps.map((s) => s.item),
+      });
+    }
+    return out;
+  }
+
   /** 执行器那一侧的蓝图取用面(照 spawnAnchor 的接法:World 持有,技能只读+写游标) */
   private blueprintDesk(): BlueprintDesk {
     return {
@@ -4345,6 +5224,7 @@ export class MinecraftWorld implements World {
         const bound = this.blueprints.binding(key);
         return {
           key: design.key,
+          versionId: design.versionId,
           name: design.name,
           blueprint: design.blueprint,
           plan: design.plan,
@@ -4360,8 +5240,18 @@ export class MinecraftWorld implements World {
       survey: (key, anchor, result) => this.blueprints.survey(key, anchor, result),
       progress: (key, cursor) => {
         this.blueprints.progress(key, cursor);
+        const design = this.blueprints.get(key);
+        const bound = this.blueprints.binding(key);
+        const reading = this.blueprintResourceReadings.get(key);
+        if (reading && reading.bot === this.bridge?.bot && design && bound
+          && reading.scope === this.blueprintResourceScope(key, design.versionId, bound.anchor)) {
+          for (const index of reading.remainingSteps) if (index < cursor) reading.remainingSteps.delete(index);
+        }
         this.syncBlueprintResources();
       },
+      observeRemaining: (key, versionId, anchor, remaining, placements) =>
+        this.observeBlueprintRemaining(key, versionId, anchor, remaining, placements),
+      remainingBill: (key) => this.blueprintRemainingBill(key),
       stored: () => this.stockNow().stored,
     };
   }
@@ -4408,8 +5298,13 @@ export class MinecraftWorld implements World {
             + `(${Math.round(progress.ratio * 100)}%${progress.layer.y === null ? '' : `,正在第 ${progress.layer.y} 层`}`
             + `,${CURSOR_AS_OF})`
         : '这个世界里还没开工(第一次 build 要给 at 锚点)';
-      const short = this.blueprints.shortest(d, bound?.cursor ?? 0);
-      const miss = short ? `;还缺${zhName(short.item)} ${short.missing}` : ';料够了';
+      const bill = billForSteps(this.blueprintRemainingBill(d.key), this.stockNow());
+      const short = bill.lines.find((line) => line.missing > 0);
+      const heldGap = bill.lines.find((line) => line.carried < line.need);
+      const miss = short ? `;按历史账还缺${zhName(short.item)} ${short.missing}`
+        : heldGap ? `;随身还需${zhName(heldGap.item)} ${heldGap.need - heldGap.carried}`
+          + `（容器历史合计 ${heldGap.stored}，需复核来源并取出）`
+          : bill.lines.length > 0 ? ';随身材料数量够' : ';无剩余放置材料';
       return `· ${d.key}${d.name ? `「${d.name}」` : ''} ${d.blueprint.size_xyz.join('×')}`
         + ` [${blueprintModeText(d.blueprint)}]`
         + ` [version:${d.versionId};hash:${d.contentHash}],`
@@ -4635,6 +5530,7 @@ export class MinecraftWorld implements World {
         + `已装载,build 就能用:{"skill":"build","blueprint":"${design.key}","at":[x,y,z]}`
         + '(at 是蓝图 [0,0,0] 落在世界的哪一格;改造图第一次只探测,'
         + '两种工地都要你审阅过冲突格、带 confirm:true 才清场)。'
+        + `\n${BLUEPRINT_MATERIAL_NOTE}`
         + (design.plan.advisories.length > 0
           ? `\n这几条得靠现场满足(编译期看不见工地):\n${renderBlueprintAdvisories(design.plan.advisories)}`
           : '')
@@ -4725,8 +5621,8 @@ export class MinecraftWorld implements World {
     try {
       result = await cognition.request({
         brief: blueprintDesignBrief(op.key, op.name, op.brief, previous, job.id),
-        tools: ['mc_blueprint'],
-        hint: { rounds: 8 },
+        tools: ['mc_blueprint', 'mc_visual'],
+        hint: { kind: 'blueprint', rounds: 8 },
       });
     } catch (e) {
       result = { error: e instanceof Error ? e.message : String(e) };
@@ -4858,35 +5754,171 @@ export class MinecraftWorld implements World {
     return { scaffold: [...this.cfg.scaffoldBlocks], light: ['torch'] };
   }
 
+  /** 同格交互前后只比较客户端可见的方块、窗口和随身状态。 */
+  private useObservation(at: readonly number[]): string | undefined {
+    const bot = this.bridge?.bot;
+    if (!bot) return undefined;
+    let target: { type: number; stateId: number } | null = null;
+    try {
+      const block = bot.blockAt(new Vec3(at[0], at[1], at[2]));
+      if (block) target = { type: block.type, stateId: block.stateId };
+    } catch { /* 未加载的目标没有可比较的方块读数。 */ }
+    return JSON.stringify({
+      generation: this.connectionGeneration,
+      dimension: bot.game?.dimension,
+      target,
+      window: bot.currentWindow ? [bot.currentWindow.id, bot.currentWindow.type] : null,
+      inventory: bot.inventory?.slots?.map((item, slot) => item
+        ? [slot, item.type, item.count, item.metadata, item.durabilityUsed] : null),
+    });
+  }
+
   /** mc_do / mc_scout 共用:校验 → 受理。参数错误优先于「World 未启动」。 */
   private enqueueTool(
     name: 'mc_do' | 'mc_scout',
     args: Record<string, unknown>,
     parse: (raw: unknown) => { steps: SkillCall[]; notes?: ParseNote[] } | { error: string },
-  ): string {
+  ): string | ToolOutcome {
     const mode = parseQueueMode(args.queue);
-    if ('error' in mode) return this.toolLog(name, args, `[${name} 失败] ${mode.error}`);
+    if ('error' in mode) return { text: this.toolLog(name, args, `[${name} 失败] ${mode.error}`), failed: true };
     const parsed = parse(args.steps);
     if ('error' in parsed) {
-      return this.toolLog(name, args, `[${name} 失败] ${parsed.error}。你写的是 ${JSON.stringify(args.steps)}`);
+      return { text: this.toolLog(name, args, `[${name} 失败] ${parsed.error}。你写的是 ${JSON.stringify(args.steps)}`), failed: true };
     }
-    if (!this.executor) return this.toolLog(name, args, `[${name} 失败] World 未启动`);
+    if (!this.executor) return { text: this.toolLog(name, args, `[${name} 失败] World 未启动`), failed: true };
+    const only = parsed.steps.length === 1 ? parsed.steps[0] : null;
+    if (name === 'mc_do' && only?.skill === 'use' && args.queue == null && this.cfg.precheck) {
+      const status = this.executor.status();
+      const bot = this.bridge?.bot;
+      if (bot && !status.running && status.waiting.length === 0 && status.hold === null) {
+        const invalid = precheckEmptyUseTarget(bot, only, {
+          resolve: (value) => resolveAt(bot, value as Parameters<typeof resolveAt>[1]),
+          blockAt: (cell) => blockAtCell(bot, cell), cellsOf: () => null,
+        });
+        if (invalid) {
+          const rejection = this.executor.noteAdmissionRejection([only], invalid.rule, invalid.text);
+          return { text: this.toolLog(name, args,
+            `[${name} 未受理] ${invalid.text} 没有发送使用，也没有导航；当前任务和待办保留。`),
+            failed: true, ...(rejection.kind === 'correction' ? {} : { endsTurn: true }) };
+        }
+      }
+    }
+    if (name === 'mc_do' && only?.skill === 'chat'
+      && (!only.text.startsWith('/') || /^\/(?:msg|tell|w)[ \t]+[\p{L}\p{N}_.-]+[ \t]+\S[^\r\n]*$/u.test(only.text))
+      && args.queue == null && only.needs === undefined && only.expect === undefined) {
+      const bot = this.bridge?.bot;
+      if (!bot) return { text: this.toolLog(name, args, `[${name} 失败] 当前没有连接服务器，聊天未发送`), failed: true };
+      try {
+        this.interruptIdle('outgoing-chat');
+        sendChat(bot, only.text);
+        const notes = parsed.notes?.map(parseNoteText) ?? [];
+        return this.toolLog(name, args, `[游戏聊天] 已发送：${only.text}。当前任务和待办保留`
+          + (notes.length > 0 ? `\n${notes.join(';')}。` : ''));
+      } catch (error) {
+        return { text: this.toolLog(name, args, `[${name} 失败] 聊天没有发出：${String(error)}`), failed: true };
+      }
+    }
+    const directUse = name === 'mc_do' && parsed.steps.length === 1 && parsed.steps[0].skill === 'use'
+      && parsed.steps[0].at?.every((n) => typeof n === 'number')
+      ? parsed.steps[0].at as number[] : null;
+    const directChat = name === 'mc_do' && parsed.steps.length === 1 && parsed.steps[0].skill === 'chat'
+      ? parsed.steps[0].text : null;
+    if (directUse) {
+      const wait = this.serverActionWait.blockReason(directUse, Date.now(), this.useObservation(directUse));
+      if (wait) return { text: this.toolLog(name, args, `[${name} 暂缓] ${wait}`), failed: true, endsTurn: true };
+    }
+    if (directChat) {
+      const wait = this.serverActionWait.blockChat(directChat);
+      if (wait) return { text: this.toolLog(name, args, `[${name} 暂缓] ${wait}`), failed: true, endsTurn: true };
+    }
     // 解析结果与她写的不一致就明说:被静默吃掉的参数是这条链上最贵的一类失败
     const notes = parsed.notes?.map(parseNoteText) ?? [];
+    const heldRoute = this.rejectedRoutes.match(parsed.steps);
+    if (heldRoute && name === 'mc_do') {
+      return { text: this.toolLog(name, args,
+        `[${name} 暂缓] 这条路线曾连续失败并触发自动脱困(${heldRoute})。本轮停止该目标，核对当前位置并换任务；15 分钟后可重新评估现场。`),
+        failed: true, endsTurn: true };
+    }
+    const repeatedSuccess = name === 'mc_do'
+      ? this.executor.repeatSuccessHold(parsed.steps,
+        this.cfg.repeatSuccessFallback ?? MINECRAFT_DEFAULTS.repeatSuccessFallback) : null;
+    if (repeatedSuccess) return {
+      text: this.toolLog(name, args, repeatedSuccess), failed: true, endsTurn: true,
+    };
     // 原文一并交过去:受理回执只回念解析+冻结之后与她所写不同的那几个字段
-    const accepted = this.executor.submit(parsed.steps, mode.mode, args.steps);
+    let admitted = true;
+    let completedImmediately = false;
+    let rejection: TaskAdmissionRejection | undefined;
+    const accepted = this.executor.submit(parsed.steps, mode.mode, args.steps, (value, _retryAfterMs, completed, rejected) => {
+      admitted = value;
+      completedImmediately = completed === true;
+      rejection = rejected;
+    }, () => this.interruptIdle('task'));
+    if (admitted && directChat) {
+      this.serverActionWait.noteChat(directChat);
+      if (!this.serverActionWait.isReadOnlyQuery(directChat)) this.recentSystemMessages.clear();
+    }
+    // 受理了查询或聊天并不代表原地打转的路线已经恢复；只按路线与时间聚合拒收。
+    const firstRejectedSkill = parsed.steps[0]?.skill;
+    // A rejected destination or repeated order is evidence about the goal, not
+    // evidence that the player is trapped. Only physical stall/support hazards
+    // can justify moving the player to a safety mark automatically.
+    const rejectedTravel = firstRejectedSkill === 'goto'
+      && /钉在原地|这条通道会经过|这片井筒刚在/.test(accepted);
+    const rejectedShaft = firstRejectedSkill === 'tunnel'
+      && /这片井筒刚在|同一整单已经连续失败|这条通道会经过/.test(accepted);
+    if (!admitted && name === 'mc_do' && (rejectedTravel || rejectedShaft)) {
+      const now = Date.now();
+      const liquidCell = /这片井筒刚在 \((-?\d+),(-?\d+),(-?\d+)\) 遇到(水|岩浆)/.exec(accepted);
+      const supportCell = /这条通道会经过 \((-?\d+),(-?\d+),(-?\d+)\)/.exec(accepted);
+      const key = liquidCell ? `shaft-liquid:${liquidCell.slice(1).join(':')}`
+        : supportCell ? `tunnel-support:${supportCell.slice(1).join(':')}` : JSON.stringify(parsed.steps);
+      const previous = this.rejectedTravelBurst;
+      const count = previous?.key === key && now - previous.atMs < 90_000 ? previous.count + 1 : 1;
+      this.rejectedTravelBurst = { key, atMs: now, count };
+      if (count >= 3 && now - this.lastRejectedTravelEscapeAt > 180_000) {
+        this.lastRejectedTravelEscapeAt = now;
+        this.rejectedTravelBurst = null;
+        this.rejectedRoutes.record(key, parsed.steps, now);
+        this.diag.write({ lane: 'task', event: 'rejected-route-escape', incident: true,
+          msg: '同一条已拒收的无进展路线仍被连续提交，启动已有安全落点逃逸',
+          data: { steps: parsed.steps, count, position: this.bridge?.bot?.entity?.position } });
+        void this.doEscape().then((escape) => {
+          this.diag.write({ lane: 'task', event: 'rejected-route-escape-result', msg: escape });
+          this.emit('minecraft.task', `[自动脱困] ${escape}`, true);
+        }, (error) => {
+          this.diag.write({ lane: 'task', event: 'rejected-route-escape-failed',
+            msg: String(error), incident: true });
+          this.emit('minecraft.task', `[自动脱困] 没成功:${String(error)}`, true);
+        });
+        return { text: this.toolLog(name, args,
+          `${accepted}\n[自动脱困] 同一无进展路线已连续拒收，正在尝试已登记的安全落点。旧路线本轮作废；先核对新位置并换目标。`),
+          failed: true, endsTurn: true };
+      }
+    }
     // 受理回执附当前队列状态，与结局回执和世界快照共用渲染。
     const queue = renderQueue(this.executor.status());
-    return this.toolLog(
+    const receipt = this.toolLog(
       name, args,
       `${accepted}${notes.length > 0 ? `\n${notes.join(';')}。` : ''}\n[队列] ${queue}`,
     );
+    return admitted
+      ? completedImmediately ? { text: receipt, endsTurn: true } : receipt
+      : { text: receipt, failed: true, ...(rejection?.kind === 'correction' ? {} : { endsTurn: true }) };
   }
 
   private onSpawn(): void {
     const bot = this.bridge?.bot;
     if (!bot) return;
+    this.visualInFlight?.controller.abort(new Error('游戏连接代次已改变'));
+    // 新连接还没有现场读数，不能沿用上一代连接的事实。
+    this.requestFactsCache = null;
     const connectionGeneration = ++this.connectionGeneration;
+    this.selfHealAvailable = false;
+    this.combatSpells.reset();
+    const initialMana = this.bridge?.agentManaState;
+    if (initialMana !== undefined) this.combatSpells.noteMana(initialMana?.current ?? null);
+    this.arenaFloor = null;
     this.resetBodyOwners();
     this.bodyLease.bindGeneration(connectionGeneration, Date.now());
     // bindGeneration 内部先作废再换代,折叠账要就地结掉:换代之后不再是作废期
@@ -4901,6 +5933,17 @@ export class MinecraftWorld implements World {
     this.setPersonalSpawn(null, '重连,基线作废');
     this.hydratePersonalSpawn();
     this.hookBotEvents(bot);
+    // 每次连接都向当前服务端核对技能。低血自愈只在服务端清单明确列出后启用。
+    if (this.agentFriendEnabled) {
+      setTimeout(() => {
+        if (this.bridge?.bot !== bot || this.connectionGeneration !== connectionGeneration) return;
+        try {
+          bot.chat('/mycli goddess skills');
+        } catch (error) {
+          this.diag.write({ lane: 'combat', event: 'skill-query-send-failed', msg: String(error) });
+        }
+      }, 1_500).unref();
+    }
     this.diag.write({
       lane: 'link', event: 'spawn',
       msg: `连入 ${this.cfg.host}:${this.cfg.port},物品栏${this.bridge?.invSynced ? '已同步' : '还没同步'}`,
@@ -4947,6 +5990,8 @@ export class MinecraftWorld implements World {
    */
   private onRespawn(): void {
     const now = Date.now();
+    const mana = this.bridge?.agentManaState;
+    if (mana !== undefined) this.combatSpells.noteMana(mana?.current ?? null);
     this.bodyLease.revive(now);
     // 新一期身体不继承旧 owner 实例:死时已清过一次,死到重生之间还可能又攒了几个
     this.resetBodyOwners();
@@ -5169,18 +6214,20 @@ export class MinecraftWorld implements World {
     this.emit('minecraft.event', `[Minecraft] ${renderDifficultyFact(fact)}`, true);
   }
 
-  /** 摄像机进程非人为退出时，记录 error 并投递画面中断事件。 */
+  /** 摄像机进程意外退出时记录故障；网页画面仍在线时不把旧客户端故障投给主播。 */
   private onCameraCrash(info: { detail: string; attempt: number; max: number; delayMs: number }): void {
+    const alreadyDown = this.cameraDown;
     this.cameraDown = true;
     this.diag.write({
       lane: 'link', event: 'camera-crash',
       msg: `观察者摄像机非人为退出(第 ${info.attempt || info.max} 次);${info.attempt > 0 ? `${Math.round(info.delayMs / 1000)} 秒后重启` : '不再重启'}`,
-      data: info,
+      data: { ...info, viewerOnline: Boolean(this.bridge?.viewerUrl) },
     });
-    this.host?.log.error(`观察者摄像机崩了: ${info.detail}`);
+    this.host?.log.error(`观察者摄像机意外退出: ${info.detail}`);
+    if (this.bridge?.viewerUrl || (alreadyDown && info.attempt > 0)) return;
     const text = info.attempt > 0
-      ? `[Minecraft] 观察者摄像机崩了(第 ${info.attempt} 次),${Math.round(info.delayMs / 1000)} 秒后自动重启;这段时间观众看到的画面是停的。`
-      : `[Minecraft] 观察者摄像机重启 ${info.max} 次都没活,画面可能黑着,需要人来看。`;
+      ? `[Minecraft] 观察者客户端意外退出(第 ${info.attempt} 次),${Math.round(info.delayMs / 1000)} 秒后自动重启。`
+      : `[Minecraft] 观察者客户端重启 ${info.max} 次仍未就绪,需要人检查。`;
     this.emit('minecraft.event', text, true);
   }
 
@@ -5291,7 +6338,7 @@ export class MinecraftWorld implements World {
         if (this.cameraDown) {
           this.cameraDown = false;
           this.diag.write({ lane: 'link', event: 'camera-recovered', msg: '摄像机重启后已重新附身', data: { cam } });
-          this.emit('minecraft.event', '[Minecraft] 观察者摄像机回来了,已重新附身,画面恢复。', true);
+          if (!this.bridge?.viewerUrl) this.emit('minecraft.event', '[Minecraft] 观察者摄像机回来了,已重新附身,画面恢复。', true);
         }
         return;
       }
@@ -5300,9 +6347,9 @@ export class MinecraftWorld implements World {
         msg: `摄像机${p ? '没进旁观模式' : '不在玩家表'}`,
         data: { cam, gamemode: p?.gamemode ?? null },
       });
-      if (Date.now() - this.lastSpectateWarnAt < 600_000) return;
+      if (this.bridge?.viewerUrl || Date.now() - this.lastSpectateWarnAt < 600_000) return;
       this.lastSpectateWarnAt = Date.now();
-      this.emit('minecraft.event', `[Minecraft] 摄像机${p ? '没进旁观模式' : '不在线'},观众看的画面可能卡在旧机位。`, true);
+      this.emit('minecraft.event', `[Minecraft] 观察者摄像机${p ? '没进旁观模式' : '不在线'}。`, true);
     }, 5_000);
     t.unref?.();
   }
@@ -5331,6 +6378,59 @@ export class MinecraftWorld implements World {
   private hookBotEvents(bot: any): void {
     if (this.hookedBots.has(bot)) return;
     this.hookedBots.add(bot);
+    this.lastServerFeedback = null;
+    this.recentSystemMessages.clear();
+    const detachUses = this.serverActionWait.observeUses(bot._client, (at) =>
+      this.bridge?.bot === bot ? this.useObservation(at) : undefined);
+    bot._client.on('end', detachUses);
+    const noteActionFeedback = (value: unknown, keyHint = ''): void => {
+      const rendered = minecraftTextComponent(value);
+      const key = keyHint || (rendered.startsWith('block.minecraft.bed.') ? rendered : '');
+      const text = key && rendered === key
+        ? (bot.registry?.language?.[key] ?? rendered) : rendered;
+      if (text && (key.startsWith('block.minecraft.bed.')
+        || /(?:床.{0,12}太远|离床.{0,8}太远|bed is too far away)/i.test(text))) {
+        this.lastServerFeedback = { text, at: Date.now() };
+      }
+    };
+    // Java 1.20.6 有独立 action_bar 包；Mineflayer 的高层 message 不一定转发它。
+    bot._client.on('action_bar', (packet: { text?: unknown }) => {
+      noteActionFeedback(packet.text);
+      if (this.agentFriendEnabled) this.combatSpells.noteServerMessage(minecraftTextComponent(packet.text));
+    });
+    bot._client.on('system_chat', (packet: { content?: unknown; isActionBar?: boolean }) => {
+      if (packet.isActionBar) {
+        noteActionFeedback(packet.content);
+        if (this.agentFriendEnabled) this.combatSpells.noteServerMessage(minecraftTextComponent(packet.content));
+      }
+    });
+
+    bot.on('physicsTick', () => {
+      if (this.idleBehavior?.active) {
+        const reason = this.idleUnavailableReason();
+        if (reason) {
+          this.diag.write({ lane: 'body', event: 'idle-unavailable', msg: reason, level: 'debug',
+            data: { reason, position: bot.entity?.position, onGround: bot.entity?.onGround,
+              velocity: bot.entity?.velocity, pathfinderMoving: bot.pathfinder?.isMoving() ?? false } });
+          this.interruptIdle('body-owner-changed');
+        }
+      }
+      this.tryArrivalIdle();
+    });
+    if (this.agentFriendEnabled) bot.on('physicsTick', () => this.tryAutoCombatSpell(bot));
+    bot.on('death', () => { this.arenaFloor = null; this.combatSpells.noteMana(null); });
+    bot._client.on('custom_payload', (packet: { channel?: unknown; data?: unknown }) => {
+      if (!this.agentFriendEnabled) return;
+      const state = parseSkillsPayload(packet.channel, packet.data);
+      if (!state) return;
+      if (packet.channel === VIEWER_STATE_CHANNEL) {
+        this.combatSpells.noteMana(state.mana?.current ?? null);
+        this.combatSpells.noteAbilities(state.abilities);
+        this.selfHealAvailable = this.combatSpells.hasAbility('selfheal');
+      } else if (state.mana) {
+        this.combatSpells.noteMana(state.mana.current);
+      }
+    });
 
     // 爆炸仅写 diag，不投递成文事件。
     bot._client.on('explosion', (packet: {
@@ -5360,7 +6460,16 @@ export class MinecraftWorld implements World {
     };
     bot.on('entityGone', forgetRangedEntity);
     bot.on('entityDead', forgetRangedEntity);
+    bot.on('entityGone', (entity: { id?: number }) => {
+      if ((!this.bridge?.bot || this.bridge.bot === bot) && typeof entity.id === 'number') {
+        this.playerObservations.forget(entity.id);
+      }
+    });
+    bot.on('entitySpawn', (entity: { type?: string }) => {
+      if (entity.type === 'player') this.playerProximityTick(bot);
+    });
     bot.on('entityHurt', (entity: { id?: number }, source?: { id?: number }) => {
+      if (entity.id === bot.entity?.id) this.interruptIdle('damage');
       if (
         this.rangedBot !== bot ||
         typeof entity.id !== 'number' ||
@@ -5380,6 +6489,7 @@ export class MinecraftWorld implements World {
     // 可能没跟上的同步屏。正常路径的关窗同步几乎总是跟手,这一脚只在竞态漏网时起效;
     // 观感成本与 resyncSec 周期重下相同(每 30s 一次,五场直播没人看出来过)。
     bot.on('windowOpen', () => {
+      this.interruptIdle('container');
       if (this.guiKickTimer) clearTimeout(this.guiKickTimer);
       this.guiKickTimer = null;
     });
@@ -5389,17 +6499,33 @@ export class MinecraftWorld implements World {
       this.scheduleGuiKick();
     });
 
-    bot.on('chat', (username: string, message: string) => {
+    const matchedChatMessages = new WeakSet<object>();
+    const mentionedInChat = (message: string): boolean => {
+      const lower = message.toLocaleLowerCase();
+      return lower.includes(this.chatName().toLocaleLowerCase())
+        || lower.includes(this.botName.toLocaleLowerCase())
+        || lower.includes('corti') || message.includes('可缇');
+    };
+    const markMatched = (jsonMsg: unknown): boolean => {
+      if (!jsonMsg || typeof jsonMsg !== 'object') return false;
+      if (matchedChatMessages.has(jsonMsg)) return true;
+      matchedChatMessages.add(jsonMsg);
+      return false;
+    };
+    bot.on('chat', (username: string, message: string, _translate: string, jsonMsg: unknown) => {
+      if (markMatched(jsonMsg)) return;
       if (username === this.chatName()) {
         // 自己说的话:落库存档,但不投递——拿自己的话叫醒自己没有意义
         this.emit('minecraft.chat', `[MC] ${username}: ${message}`, false, { deliver: false });
         return;
       }
-      const mentioned = message.includes(this.chatName()) || message.includes(this.botName);
-      this.emit('minecraft.chat', `[MC] ${username}: ${message}`, mentioned, undefined, username);
+      this.interruptIdle('chat');
+      this.emit('minecraft.chat', `[MC] ${username}: ${message}`, mentionedInChat(message), undefined, username);
     });
-    bot.on('whisper', (username: string, message: string) => {
+    bot.on('whisper', (username: string, message: string, _translate: string, jsonMsg: unknown) => {
+      if (markMatched(jsonMsg)) return;
       if (username === this.chatName()) return;
+      this.interruptIdle('whisper');
       this.emit('minecraft.chat', `[MC 私聊] ${username}: ${message}`, true, undefined, username);
     });
     bot.on('playerJoined', (player: { username: string }) => {
@@ -5419,11 +6545,15 @@ export class MinecraftWorld implements World {
     });
     bot.on('playerLeft', (player: { username: string }) => {
       if (player.username === this.chatName() || this.isCamera(player.username)) return;
+      if (!this.bridge?.bot || this.bridge.bot === bot) this.playerObservations.forgetPlayer(player.username);
       this.emit('minecraft.event', `[Minecraft] 玩家 ${player.username} 离开了服务器。`, false);
     });
+    bot.on('entitySwingArm', (entity: unknown) => this.notePlayerGesture(bot, entity, 'wave'));
+    bot.on('entityCrouch', (entity: unknown) => this.notePlayerGesture(bot, entity, 'crouch'));
     // 维度与经验的变化基准取挂钩时刻,重连不产生虚假事件
     this.lastDimension = bot.game?.dimension ? normalizeDimension(bot.game.dimension) : null;
-    this.lastLevel = typeof bot.experience?.level === 'number' ? bot.experience.level : null;
+    this.lastLevel = typeof bot.experience?.level === 'number' && Number.isFinite(bot.experience.level)
+      ? bot.experience.level : null;
     bot.on('game', () => {
       const dim = bot.game?.dimension ? normalizeDimension(bot.game.dimension) : '';
       if (dim && this.lastDimension !== null && dim !== this.lastDimension) {
@@ -5432,6 +6562,7 @@ export class MinecraftWorld implements World {
         this.lastPosForTeleport = null;
         this.snapshotArmedAt = null;
         this.proximity.clear();
+        this.playerObservations.clear();
         this.flocks.clear();
         this.matureAnnounced.clear();
         this.lastDimension = dim;
@@ -5442,6 +6573,7 @@ export class MinecraftWorld implements World {
       if (dim) this.lastDimension = dim;
     });
     bot.on('forcedMove', () => {
+      this.interruptIdle('forced-move');
       const p = bot.entity?.position;
       if (!p) return;
       const prev = this.lastPosForTeleport;
@@ -5461,15 +6593,32 @@ export class MinecraftWorld implements World {
       this.setPersonalSpawn(null, 'spawnReset 事件', { announce: false });
       this.emit('minecraft.event', `[Minecraft] 重生点失效了(床没了或被堵)。${this.worldSpawnNote(bot)}`, true);
     });
+    const sleepFacts = (sleeping: boolean): Record<string, unknown> => {
+      const ticks = (value: unknown): number | null => typeof value === 'number'
+        && Number.isSafeInteger(value) && value >= 0 ? value : null;
+      const timeOfDay = ticks(bot.time?.timeOfDay);
+      const dimension = bot.game?.dimension;
+      return {
+        sleeping,
+        world: this.worldIdentity().key,
+        dimension: typeof dimension === 'string' && dimension.trim() ? normalizeDimension(dimension) : null,
+        timeOfDay: timeOfDay !== null && timeOfDay < 24_000 ? timeOfDay : null,
+        gameDay: ticks(bot.time?.day),
+        worldAge: ticks(bot.time?.age),
+      };
+    };
     bot.on('sleep', () => {
       this.rememberPersonalSpawn(bot, 'sleep 事件');
-      this.emit('minecraft.event', '[Minecraft] 躺下睡了。', false, { trigger: 'piggyback' });
+      this.emit('minecraft.sleep', '[Minecraft] 躺下睡了。', false, { meta: sleepFacts(true) });
     });
-    bot.on('wake', () => this.emit('minecraft.event', '[Minecraft] 醒了。', false, { trigger: 'piggyback' }));
+    bot.on('wake', () => this.emit('minecraft.wake', '[Minecraft] 醒了。', false,
+      { trigger: 'piggyback', meta: sleepFacts(false) }));
     bot.on('experience', () => {
       const lvl = bot.experience?.level;
-      if (typeof lvl !== 'number') return;
-      if (this.lastLevel !== null && lvl > this.lastLevel) {
+      if (typeof lvl !== 'number' || !Number.isFinite(lvl)) return;
+      if (this.lastLevel === null) {
+        this.emit('minecraft.event', `[Minecraft] 经验已同步，当前 ${lvl} 级。`, false, { trigger: 'piggyback' });
+      } else if (lvl > this.lastLevel) {
         this.emit('minecraft.event', `[Minecraft] 升到 ${lvl} 级了。`, false, { trigger: 'piggyback' });
       }
       this.lastLevel = lvl;
@@ -5502,39 +6651,117 @@ export class MinecraftWorld implements World {
       if (typeof entity.id === 'number' && (this.executor?.claimsCombat(entity.id) || this.combat?.claims(entity.id))) return;
       const d = entity.position.distanceTo(bot.entity.position);
       if (d > PROXIMITY_EXIT) return;
-      this.emit('minecraft.event', `[Minecraft] ${zhEntity(entity.name)}死了(${Math.round(d)} 格外)。`, false);
+      this.emit('minecraft.event', `[Minecraft] ${zhEntity(entity.name)}死了(${Math.round(d)} 格外)。`, false,
+        { trigger: 'piggyback' });
     });
     bot.on('title', (text: unknown) => {
-      const t = String((text as { toString?(): string })?.toString?.() ?? text ?? '').trim();
+      const t = minecraftTextComponent(text);
       if (t) this.emit('minecraft.event', `[Minecraft] 屏幕大字:${t}`, false);
     });
-    // 其他玩家的死亡广播与成就走系统消息;自己的死亡/聊天已有专报
-    bot.on('message', (jsonMsg: { translate?: string; toString(): string }, position: string) => {
+    // 高层 chat/whisper 由 Mineflayer 的英文格式正则识别；没匹配上的聊天由 message 补送。
+    bot.on('message', (jsonMsg: { translate?: string; with?: Array<{ toString(): string }>; toString(): string }, position: string) => {
       const key = String(jsonMsg?.translate ?? '');
       if (key === SET_SPAWN_TRANSLATE) {
         this.lastSetSpawnAt = Date.now();
         this.rememberPersonalSpawn(bot, `${SET_SPAWN_TRANSLATE} 系统消息`);
+      }
+      if (position === 'game_info') {
+        // 动作栏也承载不断刷新的 HUD；只保存明确的交互拒绝理由。
+        noteActionFeedback(jsonMsg, key);
+        if (this.agentFriendEnabled) this.combatSpells.noteServerMessage(jsonMsg.toString());
         return;
       }
-      if (position !== 'system') return;
-      if (!key.startsWith('death.') && key !== 'chat.type.advancement') return;
-      const text = jsonMsg.toString();
-      if (!text) return;
-      if (text.includes(this.chatName())) {
-        // 自身死亡和成就广播不单独投递；官方死因先挂起，随死亡专报发送。
-        // 死因广播晚到时补入死亡账本。
-        if (key.startsWith('death.')) {
-          this.diag.write({
-            lane: 'world', event: 'death-cause',
-            msg: `官方死因:${text}`,
-            data: { translate: key, text, position: bot.entity?.position ?? null, health: bot.health ?? null },
-          });
-          this.pendingDeathCause = { text, key, at: Date.now() };
-          this.deaths.noteCause(text);
+      if (position !== 'chat' && position !== 'system') return;
+      let unchangedQueryFeedback = false;
+      if (position === 'system') {
+        const reply = jsonMsg.toString().trim();
+        // AgentFriend 的机器可读权限回执由 Bridge 消费，避免注入主播聊天与记忆。
+        if (this.agentFriendEnabled && reply.includes('MC_PROTECT ')) return;
+        unchangedQueryFeedback = this.serverActionWait.noteFeedback(reply);
+        if (this.agentFriendEnabled) {
+          this.combatSpells.noteServerMessage(reply);
+          if (/^(?:可用咏唱|守护\/恢复)[：:]/.test(reply))
+            this.selfHealAvailable = /\bselfheal\b/i.test(reply);
+          const arenaEntry = /(?:进入第|已恢复第|^第)\s*(\d+)\s*\/\s*(\d+)\s*层(?=[：:试炼]|$)/.exec(reply);
+          if (arenaEntry) {
+            this.arenaFloor = { floor: Number(arenaEntry[1]), total: Number(arenaEntry[2]) };
+            if (this.arenaFloor.floor === this.arenaFloor.total) {
+              const spell = this.combatSpells.finalArenaOpening();
+              if (spell) this.sendAutoCombatSpell(bot, spell);
+            }
+          }
+          if (/第\s*(\d+)\s*\/\s*\1\s*层已通关/.test(reply)) this.arenaFloor = null;
         }
-        return;
       }
-      this.emit('minecraft.event', `[Minecraft] ${text}`, false);
+      if (position === 'system') {
+        // 其他玩家的死亡广播与成就走系统消息；自己的死亡由专报处理。
+        if (key.startsWith('death.') || key === 'chat.type.advancement') {
+          const text = jsonMsg.toString();
+          if (!text) return;
+          if (text.includes(this.chatName())) {
+            if (key.startsWith('death.')) {
+              this.diag.write({
+                lane: 'world', event: 'death-cause',
+                msg: `官方死因:${text}`,
+                data: { translate: key, text, position: bot.entity?.position ?? null, health: bot.health ?? null },
+              });
+              this.pendingDeathCause = { text, key, at: Date.now() };
+              this.deaths.noteCause(text);
+            }
+          } else {
+            this.emit('minecraft.event', `[Minecraft] ${text}`, false);
+          }
+          return;
+        }
+        // 玩家进出已有 playerJoined/playerLeft 事件；动作栏由 position 过滤。
+        if (key.startsWith('multiplayer.player.joined') || key === 'multiplayer.player.left') return;
+      }
+      // Mineflayer 在 message 后同步触发 messagestr，再由格式正则触发 chat/whisper。
+      queueMicrotask(() => {
+        if (matchedChatMessages.has(jsonMsg)) return;
+        const text = jsonMsg.toString().trim();
+        if (!text) return;
+        if (unchangedQueryFeedback) return;
+        const privateMessage = key === 'commands.message.display.incoming'
+          || /^\S+ whispers(?: to you)?:? /i.test(text)
+          || /^\[[^\]]+ -> [^\]]+\] /.test(text);
+        if (key === 'commands.message.display.outgoing') {
+          this.emit('minecraft.chat', `[MC 私聊发出] ${text}`, false);
+          return;
+        }
+        if (position === 'chat') {
+          const sender = jsonMsg.with?.[0]?.toString();
+          const self = this.chatName();
+          const fromSelf = sender === self || text.startsWith(`<${self}> `)
+            || text.startsWith(`${self}: `) || text.startsWith(`[${self}] `);
+          this.emit('minecraft.chat', `[MC${privateMessage ? ' 私聊' : ''}] ${text}`,
+            !fromSelf && (privateMessage || mentionedInChat(text)), fromSelf ? { deliver: false } : undefined);
+          return;
+        }
+        // 明确的方块保护拒绝会终止当前任务；其他插件回执按文本识别并即时投递。
+        if (/can't break that block here|你不能破坏这里的方块|不能在这里破坏方块|不许破坏|不允许破坏|这块属于村庄原有建筑|受保护.*(?:破坏|挖掘)/i.test(text)) {
+          const notice = `[MC 系统] ${text}`;
+          this.bridge?.noteServerBreakDenied(text);
+          if (this.executor?.currentTask) {
+            this.emit('minecraft.chat', notice, false, { trigger: 'piggyback' });
+            this.executor.blockCurrentFromServer(text);
+          } else {
+            this.emit('minecraft.chat', notice, true);
+          }
+          return;
+        }
+        const agentFriendPrefixes = [
+          '可用咏唱：', '可学习：', '每项可用原版经验', '魔力统一使用', '已领取技能罗盘', '命格书',
+          '✦ 探矿定位',
+          'Sacred healing restores your health.', // str-cast-self 成功族（英文）
+          'You are already at full health.', // str-max-health 拒绝族（英文，扁平组件）
+          '没有这项技能。', // 非法咒语名（中文，extra[] 包装）
+        ];
+        const agentFriend = this.agentFriendEnabled && !key && agentFriendPrefixes.some((p) => text.includes(p));
+        if (!privateMessage && !agentFriend && this.suppressRepeatedSystemMessage(text)) return;
+        this.emit('minecraft.chat', `[MC ${privateMessage ? '私聊' : agentFriend ? '插件' : '系统'}] ${text}`,
+          privateMessage || agentFriend, undefined, agentFriend ? 'AgentFriend' : undefined);
+      });
     });
     bot.on('soundEffectHeard', (soundName: string, position: { x: number; z: number } | null) => {
       if (!/explode|lightning_bolt/.test(String(soundName))) return;
@@ -5547,29 +6774,41 @@ export class MinecraftWorld implements World {
       this.emit('minecraft.event', `[Minecraft] 听见${what}${dir ? ',在' + DIRECTION_ZH[dir] + '边' : ''}。`, true);
     });
     bot.on('bossBarCreated', (bar: { title?: unknown }) => {
-      const title = String((bar?.title as { toString?(): string })?.toString?.() ?? '');
+      const title = minecraftTextComponent(bar?.title);
+      const kind = classifyBossBarTitle(title);
+      if (kind === 'skillExperience') {
+        // Transient XP ticks belong in the viewer HUD, not the language-model event stream.
+        this.diag.write({ lane: 'world', event: 'skill-experience-hud', msg: title });
+        return;
+      }
       this.bossQuarter.set(title, 4);
-      this.emit('minecraft.event', `[Minecraft] 出现了 Boss 血条:${title}。`, true);
+      this.emit('minecraft.event', `[Minecraft] 出现了${kind === 'boss' ? ' Boss 血条' : '顶部状态条'}:${title}。`, true);
     });
     bot.on('bossBarUpdated', (bar: { title?: unknown; health?: number }) => {
-      const title = String((bar?.title as { toString?(): string })?.toString?.() ?? '');
+      const title = minecraftTextComponent(bar?.title);
+      const kind = classifyBossBarTitle(title);
+      if (kind === 'skillExperience') return;
       const health = typeof bar?.health === 'number' ? bar.health : 1;
-      // 每跌破一个 25% 档报一次,逐点血量变化不吵
+      // 每跌破一个 25% 档报一次,逐点进度变化不吵。
       const quarter = Math.ceil(health * 4);
       const prev = this.bossQuarter.get(title) ?? 4;
       if (quarter < prev) {
         this.bossQuarter.set(title, quarter);
-        this.emit('minecraft.event', `[Minecraft] ${title} 血量剩 ${Math.round(health * 100)}%。`, false);
+        this.emit('minecraft.event', `[Minecraft] ${title} ${kind === 'boss' ? '血量剩' : '状态条进度为'} ${Math.round(health * 100)}%。`, false);
       }
     });
     bot.on('bossBarDeleted', (bar: { title?: unknown }) => {
-      const title = String((bar?.title as { toString?(): string })?.toString?.() ?? '');
+      const title = minecraftTextComponent(bar?.title);
       this.bossQuarter.delete(title);
-      this.emit('minecraft.event', `[Minecraft] ${title} 的血条消失了(打完了或脱离)。`, false);
+      const kind = classifyBossBarTitle(title);
+      if (kind !== 'skillExperience') {
+        this.emit('minecraft.event', `[Minecraft] ${title} 的${kind === 'boss' ? '血条' : '顶部状态条'}已移除。`, false);
+      }
     });
     bot.on('death', () => {
       // death 是 terminal 边界：先撤掉旧技能、冻结任务、队列与 path goal，再记录/播报。
       // CombatSession 自己随后收到同一事件，只负责释放身体，不得恢复这些旧任务。
+      this.interruptIdle('death');
       this.bodyLease.invalidate('death', Date.now());
       this.resetBodyOwners();
       this.executor?.cancelForDeath();
@@ -5611,7 +6850,6 @@ export class MinecraftWorld implements World {
         `[Minecraft] 你死了(今天第 ${toll.today} 次)。${causeLine}${this.deathNote(bot, dropAt)}${hereLine}`,
         true,
       );
-      if (dropAt) this.scheduleDespawnNotice(dropAt);
       // 死亡会把摄像机的附身甩掉,重生后重下;同一拍用实测坐标复核重生落点
       setTimeout(() => {
         this.syncSpectator('bot 重生');
@@ -5619,14 +6857,111 @@ export class MinecraftWorld implements World {
       }, 3_000);
     });
     bot.on('health', () => {
-      const h = bot.health ?? 20;
+      const h = bot.health;
+      if (typeof h !== 'number' || !Number.isFinite(h)) return;
+      if (this.lastHealth === null) {
+        const food = typeof bot.food === 'number' && Number.isFinite(bot.food)
+          ? `饥饿 ${Math.round(bot.food)}/20` : '饥饿正在从服务器同步';
+        this.emit('minecraft.event', `[Minecraft] 身体状态已同步：生命 ${Math.ceil(h)}/20，${food}。`,
+          false, { trigger: 'piggyback' });
+      }
+      if (this.lastHealth !== null && h < this.lastHealth) this.interruptIdle('health-loss');
       this.noticeDamage(h);
+      if (h > 0 && h <= 6) this.tryAutoSelfHeal(bot);
       if (h > 0 && h < 6 && Date.now() - this.lastLowHealthAt > 15_000) {
         this.lastLowHealthAt = Date.now();
         // 向上取整:0.1 血活着时报 1,与 HUD 的半颗心一致;四舍五入会在她活着时报出「0/20」
-        this.emit('minecraft.event', `[Minecraft] 濒死!生命只剩 ${Math.ceil(h)}/20。`, true);
+        this.emit('minecraft.event', `[Minecraft] 濒死!生命只剩 ${Math.ceil(h)}/20；${this.recoveryFoodFact(bot)}。`, true);
       }
     });
+  }
+
+  private interruptIdle(reason: string): void {
+    this.idleActivityVersion++;
+    this.idleQuietUntil = Date.now() + 3_000;
+    this.idleQuietReason = reason;
+    this.idleArrival = null;
+    this.idleBehavior?.cancel(reason);
+    this.idleSceneCache = null;
+  }
+
+  private idleGeneration(): string {
+    return `${this.connectionGeneration}:${this.idleActivityVersion}:${this.bridge?.bot?.game?.dimension ?? ''}`;
+  }
+
+  /** Wait for stable physics after arrival before handing the view to a small idle action. */
+  private tryArrivalIdle(): void {
+    const pending = this.idleArrival;
+    if (!pending) return;
+    const config = this.cfg.idle ?? MINECRAFT_DEFAULTS.idle;
+    const now = Date.now();
+    if (!config.enabled || !config.afterArrival || this.idleGeneration() !== pending.generation
+      || now > pending.expiresAtMs) {
+      this.idleArrival = null;
+      return;
+    }
+    if (this.idleQuietReason === 'task') this.idleQuietUntil = 0;
+    const reason = this.idleUnavailableReason();
+    if (reason) {
+      pending.readyAtMs = undefined;
+      if (pending.blockedBy !== reason) {
+        pending.blockedBy = reason;
+        this.diag.write({ lane: 'body', event: 'idle-arrival-wait', msg: reason, level: 'debug', data: { reason } });
+      }
+      return;
+    }
+    pending.blockedBy = undefined;
+    pending.readyAtMs ??= now + MinecraftWorld.IDLE_ARRIVAL_SETTLE_MS;
+    if (now < pending.readyAtMs) return;
+    if (this.idleBehavior?.startAfterArrival([
+      'scan', 'look_left', 'look_right', 'look_sky', 'look_horizon', 'look_ground',
+    ])) this.idleArrival = null;
+  }
+
+  private canIdle(): boolean {
+    return this.idleUnavailableReason() === null;
+  }
+
+  private idleUnavailableReason(): string | null {
+    const bot = this.bridge?.bot;
+    const queue = this.executor?.status();
+    if (this.shuttingDown || !this.host || !(this.cfg.idle ?? MINECRAFT_DEFAULTS.idle).enabled) return 'world-unavailable';
+    if (!this.bridge?.connected || !this.bridge.invSynced || !bot?.entity || !queue) return 'connection-unavailable';
+    if (queue.running || queue.waiting.length || queue.hold) return 'task';
+    if (this.combat?.active) return 'combat';
+    if (this.reflexes?.envActive || Date.now() < this.escapeHoldUntil) return 'reflex';
+    if (Date.now() < this.idleQuietUntil) return 'quiet-period';
+    if (bot.health <= 0 || bot.isSleeping) return 'inactive';
+    if (bot.usingHeldItem) return 'using-item';
+    if (bot.currentWindow) return 'container';
+    if (!bot.entity.onGround) return 'airborne';
+    if (bot.pathfinder?.isMoving()) return 'pathfinder-moving';
+    if (hazardTouch(bot).touching) return 'hazard';
+    // The idle action may own a short walk; other movement must settle first.
+    if (!this.idleBehavior?.active) {
+      const velocity = bot.entity.velocity;
+      if (velocity && Math.hypot(velocity.x, velocity.z) > 0.035) return 'residual-motion';
+      if (['forward', 'back', 'left', 'right', 'jump', 'sprint'].some((control) =>
+        bot.getControlState(control as Parameters<Bot['getControlState']>[0]))) return 'movement-control';
+    }
+    return null;
+  }
+
+  private idleScene(): IdleBehaviorScene | null {
+    if (!this.canIdle()) {
+      this.idleSceneCache = null;
+      return null;
+    }
+    const generation = this.idleGeneration();
+    if (this.idleBehavior?.active && this.idleSceneCache?.generation === generation) return this.idleSceneCache;
+    const bot = this.bridge!.bot!;
+    const sample = sampleIdleActions(bot, { allowMovement: (this.cfg.idle ?? MINECRAFT_DEFAULTS.idle).allowMovement });
+    this.idleSceneCache = {
+      generation, candidates: sample.candidates,
+      state: { ...sample.state, health: bot.health, food: bot.food, timeOfDay: bot.time?.timeOfDay,
+        situation: '当前没有身体任务；可选择一个短暂的小动作，也可以保持不动。' },
+    };
+    return this.idleSceneCache;
   }
 
   private worldTick(): void {
@@ -5634,7 +6969,24 @@ export class MinecraftWorld implements World {
     void this.syncManagedServerLifecycle();
     const bot = this.bridge?.bot;
     if (!bot?.entity || !this.host) return;
+    const viewerUrl = this.bridge?.viewerUrl;
+    if (this.cfg.viewerAssetsDir && viewerUrl) {
+      const key = `${this.connectionGeneration}:${viewerUrl}`;
+      if (key !== this.visualWarmKey) {
+        this.visualWarmKey = key;
+        void warmMinecraftViewCapture(viewerUrl).then(() => {
+          if (!this.shuttingDown && this.visualWarmKey === key)
+            this.diag.write({ lane: 'world', event: 'visual-warm', msg: '截图场景已就绪' });
+        }, (error) => {
+          if (!this.shuttingDown && this.visualWarmKey === key)
+            this.diag.write({ lane: 'world', event: 'visual-warm-failed', msg: String(error), level: 'debug' });
+        });
+      }
+    }
     this.observeBodyControl();
+    this.autoEatTick(bot);
+    this.tryArrivalIdle();
+    this.idleBehavior?.tick();
     const time = bot.time?.timeOfDay ?? 0;
     if (this.lastTickTime !== null) {
       const transition = dayNightTransition(this.lastTickTime, time);
@@ -5672,6 +7024,24 @@ export class MinecraftWorld implements World {
     if (this.lastWorldEmitAt === 0) this.lastWorldEmitAt = now;
     if (now - this.lastWorldEmitAt < this.cfg.world.tickSec * 1000) return;
     this.reportWorldDelta();
+  }
+
+  /** Routine food fallback uses the executor's safe handoff and preserves current work. */
+  private autoEatTick(bot: Bot): void {
+    const now = Date.now();
+    if (now - this.lastAutoEatAttemptAt < 30_000 || this.bridge?.invSynced === false
+      || this.combat?.active || this.reflexes?.envActive || now < this.escapeHoldUntil
+      || !this.executor || !bot.entity?.onGround) return;
+    if (this.executor.hasPendingEat() || this.executor.status().hold) return;
+    const foods = (bot.registry?.foodsByName ?? {}) as Record<string, { foodPoints?: number; saturation?: number }>;
+    const item = chooseRoutineFood(bot.food ?? 20, bot.inventory?.items() ?? [], foods);
+    if (!item) return;
+    if (hazardTouch(bot).touching) return;
+    this.lastAutoEatAttemptAt = now;
+    this.interruptIdle('eat');
+    const result = this.executor.submitDetailed([{ skill: 'eat', item }], 'afterCheckpoint');
+    this.diag.write({ lane: 'body', event: result.accepted ? 'auto-eat' : 'auto-eat-refused',
+      msg: result.receipt, data: { item, food: bot.food, connectionGeneration: this.connectionGeneration } });
   }
   /**
    * expectedDoneAt 到期后推送估计完成事件，不单独唤醒。
@@ -5783,6 +7153,8 @@ export class MinecraftWorld implements World {
     seen: boolean;
     extended: boolean;
   }>();
+  /** 玩家活动单独跟踪；在线名单不代表人就在身旁。 */
+  private readonly playerObservations = new PlayerObservations();
   private proximityBot: unknown = null;
   /** 牲畜种类当前在不在感知圈(种类级,不逐只) */
   private readonly flocks = new Map<string, boolean>();
@@ -5793,17 +7165,40 @@ export class MinecraftWorld implements World {
   private pendingDeathCause: { text: string; key: string; at: number } | null = null;
   /** 最近一条 set_spawn 系统消息的时刻;床的右键回执据此捎带重生点变更 */
   private lastSetSpawnAt = 0;
-  /** 在途的掉落物到期播报;World 停机一并清掉 */
-  private readonly despawnTimers = new Set<ReturnType<typeof setTimeout>>();
+  private lastServerFeedback: { text: string; at: number } | null = null;
+  private readonly serverActionWait = new ServerActionWait();
   /** 个人重生点(床/重生锚)。spawnReset 清掉;没设过则 escape 走世界出生点。 */
   private personalSpawn: SpawnTarget | null = null;
   /** 自己发起的传送:这段时间里 forcedMove 不急报,反射也不抢寻路。 */
   private escapeHoldUntil = 0;
   private lastDimension: string | null = null;
   private lastLevel: number | null = null;
-  /** Boss 血条已报过的 25% 档位(按标题) */
+  /** 顶部状态条已报过的 25% 档位(按标题) */
   private readonly bossQuarter = new Map<string, number>();
   private lastBoomAt = 0;
+
+  private suppressRepeatedSystemMessage(text: string): boolean {
+    const now = Date.now();
+    for (const [key, seen] of this.recentSystemMessages) {
+      if (now - seen.at >= 60_000) this.recentSystemMessages.delete(key);
+    }
+    const seen = this.recentSystemMessages.get(text);
+    if (seen) {
+      seen.repeats++;
+      if (seen.repeats === 1 || seen.repeats % 10 === 0) {
+        this.diag.write({ lane: 'event', event: 'system-message-repeat',
+          msg: `相同服务端系统提示 60 秒内重复 ${seen.repeats} 次，未再次唤醒 Agent`,
+          data: { text, repeats: seen.repeats } });
+      }
+      return true;
+    }
+    this.recentSystemMessages.set(text, { at: now, repeats: 0 });
+    if (this.recentSystemMessages.size > 64) {
+      const oldest = this.recentSystemMessages.keys().next().value;
+      if (oldest !== undefined) this.recentSystemMessages.delete(oldest);
+    }
+    return false;
+  }
 
   /**
    * 实体接近报告:16 格进、24 格出的滞回状态机,1s 采样。
@@ -5817,6 +7212,7 @@ export class MinecraftWorld implements World {
       this.flocks.clear();
       this.proximityBot = bot;
     }
+    this.playerProximityTick(bot);
     const me = bot.entity.position;
     const enterSeen: string[] = [];
     const enterHeard: string[] = [];
@@ -5903,9 +7299,12 @@ export class MinecraftWorld implements World {
       if (!present.has(eid)) this.proximity.delete(eid);
     }
     const hostileParts = [...enterSeen, ...enterHeard, ...revealed];
-    if (hostileParts.length > 0) this.emit('minecraft.event', `[Minecraft] ${hostileParts.join('、')}。`, true);
-    if (left.length > 0) this.emit('minecraft.event', `[Minecraft] ${[...new Set(left)].join('、')}走远了。`, false);
-    if (notable.length > 0) this.emit('minecraft.event', `[Minecraft] ${notable.join('、')}。`, false);
+    if (hostileParts.length > 0) this.emit('minecraft.event', `[Minecraft] ${hostileParts.join('、')}。`, true,
+      this.executor?.currentTask || this.combat?.active ? { trigger: 'piggyback' } : undefined);
+    if (left.length > 0) this.emit('minecraft.event', `[Minecraft] ${[...new Set(left)].join('、')}走远了。`, false,
+      { trigger: 'piggyback' });
+    if (notable.length > 0) this.emit('minecraft.event', `[Minecraft] ${notable.join('、')}。`, false,
+      { trigger: 'piggyback' });
     for (const [name, count] of flockSeen) {
       if (this.flocks.get(name)) continue;
       this.flocks.set(name, true);
@@ -5916,12 +7315,35 @@ export class MinecraftWorld implements World {
     }
   }
 
+  /** Two nearby animations form one factual observation; intent remains the agent's judgment. */
+  private notePlayerGesture(bot: any, raw: unknown, kind: 'wave' | 'crouch'): void {
+    if (!raw || !bot.entity || (this.bridge?.bot && this.bridge.bot !== bot)) return;
+    const fact = this.playerObservations.gesture(bot, raw as Bot['entity'], kind,
+      (name) => name === this.chatName() || this.isCamera(name));
+    if (fact) this.emitPlayerObservation(fact);
+  }
+
+  /** Player facts are delivered independently of the full world snapshot cadence. */
+  private playerProximityTick(bot: any): void {
+    if (!bot.entity || (this.bridge?.bot && this.bridge.bot !== bot)) return;
+    for (const fact of this.playerObservations.sample(bot,
+      (name) => name === this.chatName() || this.isCamera(name))) this.emitPlayerObservation(fact);
+  }
+
+  private emitPlayerObservation(fact: PlayerObservation): void {
+    const urgent = fact.kind === 'appearance' || fact.kind === 'approach'
+      || (fact.kind === 'gesture' && (fact.motion === 'crouch' || !fact.handItemName));
+    this.emit('minecraft.event', `[Minecraft] ${renderPlayerObservation(fact)}。`, urgent,
+      { meta: { minecraftPlayerObservation: playerObservationMeta(fact) } }, fact.playerName);
+  }
+
   /**
    * 世界摘要:与上一次报过的快照比,变化值得说就推一条。
    *
    * 只有物品栏增减的那种摘要走搭车档:采集途中每个节流窗都在多几格土,单独
-   * 叫醒她只换来一句无话可说。位移、群系、天候、饥饿照常合批唤醒。搭车不丢帧
-   * ——积压随下一次唤醒整批送达,长任务的物品栏进度一条不少。
+   * 叫醒她只换来一句无话可说。执行任务期间的普通位移也搭车:容器技能会自己找箱子,
+   * 中途挪窝不是走错路,不该为此唤醒主循环重新决策。搭车不丢帧——积压随下一次
+   * 唤醒整批送达；空闲时位移、群系、天候、饥饿照常合批唤醒。
    */
   private reportWorldDelta(): void {
     const snap = this.snapshot();
@@ -5936,12 +7358,22 @@ export class MinecraftWorld implements World {
       snap,
       this.cfg.world.moveThreshold,
     );
-    if (notes.length === 0) return;
+    if (notes.length === 0) {
+      // 首份身体、经验读数只建立基线；位置仍从上次已报告的落点累计。
+      this.lastReported = {
+        ...this.lastReported,
+        health: this.lastReported.health ?? snap.health,
+        food: this.lastReported.food ?? snap.food,
+        xpLevel: this.lastReported.xpLevel ?? snap.xpLevel,
+      };
+      return;
+    }
     this.emit(
       'minecraft.world',
       `[Minecraft] ${notes.join(';')}`,
       false,
-      inventoryOnly ? { trigger: 'piggyback' } : undefined,
+      inventoryOnly || this.executor?.currentTask || this.combat?.active
+        ? { trigger: 'piggyback' } : undefined,
     );
     this.lastReported = snap;
   }
@@ -5951,6 +7383,7 @@ export class MinecraftWorld implements World {
    * session 里也有,但那份要跟事件、执行器轨迹分头对时间戳才拼得起来。
    */
   private async doEscape(): Promise<string> {
+    this.interruptIdle('escape');
     if (!this.executor) return '[mc_escape 失败] World 未启动';
     const bot = this.bridge?.bot;
     if (!bot?.entity) return '[mc_escape 失败] 未连接服务器';
@@ -5983,6 +7416,7 @@ export class MinecraftWorld implements World {
       clearQueue: () => this.executor!.clear(),
       sendConsole: (line) => this.mcServer.command(line),
       chat: (text) => { bot.chat(text); },
+      playerCommand: this.cfg.escapeCommand,
       hold: (ms) => { this.escapeHoldUntil = Date.now() + ms; },
       waitMove: (ms) => this.waitForcedMove(bot, ms),
       timeoutMs: ESCAPE_TP_MS,
@@ -6067,7 +7501,7 @@ export class MinecraftWorld implements World {
   }
 
   /**
-   * 死亡回执附重生点、距死亡点的距离和掉落剩余时间。
+   * 死亡回执附重生点和距死亡点的距离。背包是否保留由服务端规则决定。
    * 死亡点只关联 MARK_NEAR_MAX 内最近的一处路标。
    */
   private deathNote(bot: { spawnPoint?: Vec3like }, dropAt: DimensionPoint | null): string {
@@ -6087,7 +7521,7 @@ export class MinecraftWorld implements World {
         + `重生${far(bot.spawnPoint, 'minecraft:overworld')}。`;
     }
     else back = '会在出生点重生。';
-    return `${died}${back}掉的东西留在死亡点,${DROP_DESPAWN_MIN} 分钟后消失。`;
+    return `${died}${back}重生后核对背包和装备。`;
   }
 
   /** 世界出生点在哪、离她多远:重生点失效那一刻她最需要知道的两件事 */
@@ -6104,23 +7538,6 @@ export class MinecraftWorld implements World {
       ? `,离你现在的位置 ${Math.round(Math.hypot(me.x - w.x, me.y - w.y, me.z - w.z))} 格`
       : me ? ',与你现在的位置不在同一个维度,不计算直线距离' : '';
     return `从现在起死了会回世界出生点 [主世界] (${Math.round(w.x)}, ${Math.round(w.y)}, ${Math.round(w.z)})${far}。`;
-  }
-
-  /**
-   * 掉落到期由系统自己收回那句承诺。措辞只陈述规则到点了,不断言她捡没捡 ——
-   * 她可能早回去捡走了,那样这条也仍然是真话。
-   */
-  private scheduleDespawnNotice(at: DimensionPoint): void {
-    const timer = setTimeout(() => {
-      this.despawnTimers.delete(timer);
-      this.emit(
-        'minecraft.event',
-        `[Minecraft] 死亡点 [${zhDimension(at.dimension)}] (${Math.round(at.x)}, ${Math.round(at.y)}, ${Math.round(at.z)}) 那堆掉落物`
-          + `到 ${DROP_DESPAWN_MIN} 分钟了,没捡的已经消失。`,
-        false,
-      );
-    }, DROP_DESPAWN_MS);
-    this.despawnTimers.add(timer);
   }
 
   /**
@@ -6165,6 +7582,12 @@ export class MinecraftWorld implements World {
     return `但重生点已经记下了${at}`;
   }
 
+  private freshServerFeedback(startedAt: number): string | null {
+    const feedback = this.lastServerFeedback;
+    if (!feedback || feedback.at < startedAt || Date.now() - feedback.at > 3_000) return null;
+    return feedback.text;
+  }
+
   private waitForcedMove(bot: any, ms: number): Promise<boolean> {
     return new Promise((resolve) => {
       const onMove = () => {
@@ -6188,6 +7611,30 @@ export class MinecraftWorld implements World {
     return receipt;
   }
 
+  /** 只给当前尾步空队列一份现读事实；任务结束或新增待办后不投递陈旧提示。 */
+  private onQueueTail(notice: TaskQueueTail): void {
+    const executor = this.executor;
+    const host = this.host;
+    const generation = this.connectionGeneration;
+    if (!executor || !host) return;
+    host.pushDeferred({
+      type: 'minecraft.task.queue', senderKey: 'minecraft', tags: ['snapshot'],
+      meta: { minecraftQueueTail: { schemaVersion: 1, ...notice } },
+      render: () => {
+        if (this.host !== host || this.executor !== executor
+          || generation !== this.connectionGeneration || !this.bridge?.connected) return null;
+        const queue = executor.queueTailStatus(notice);
+        if (!queue) return null;
+        const snapshot = this.renderSnapshotEvent();
+        const text = `[执行器/队列] 当前任务正在执行最后一步，后面没有待办。\n[队列] ${renderQueue(queue)}`
+          + (snapshot ? `\n${snapshot}` : '');
+        this.diag.write({ lane: 'event', event: 'minecraft.task.queue', msg: text,
+          data: { trigger: 'debounce', connectionGeneration: generation, taskId: notice.taskId } });
+        return text;
+      },
+    }, { trigger: 'debounce' });
+  }
+
   /**
    * 执行器与反射的汇报一律立刻投递:任务的结局正是agent停下来等的那件事,
    * 压在合批的地板里只会让agent以为没动静,转头再发一条。
@@ -6196,14 +7643,37 @@ export class MinecraftWorld implements World {
    * 说要agent自己拼,拼错了就会往一个已经在做的队列上再排一条。
    */
   private onTaskReport(r: TaskReport): void {
+    if (r.kind === 'suspended' || r.kind === 'resumed') {
+      this.diag.write({ lane: 'task', event: `task-${r.kind}`, taskId: r.taskId, msg: r.text });
+      this.emit(`minecraft.task.${r.kind}`, `[执行器] ${r.text}`, false,
+        { trigger: 'piggyback', meta: { taskId: r.taskId } });
+      return;
+    }
     // 反射汇报里已经写明了掉血的来由,紧接着的掉血播报就是复述
     if (r.kind === 'reflex' && r.hurt) this.lastReflexHurtAt = Date.now();
     if (r.kind === 'reflex') {
       this.emit('minecraft.task', r.text, true);
       return;
     }
+    const reportVersion = ++this.taskReportVersion;
+    if (r.taskId !== undefined) {
+      this.taskReportVersions.set(r.taskId, reportVersion);
+      if (this.taskReportVersions.size > 64) {
+        this.taskReportVersions.delete(this.taskReportVersions.keys().next().value!);
+      }
+    }
+    const repeatEvidence = r.repeatFailure
+      ? `\n[重复尝试记录] ${r.repeatFailure.scope === 'target' ? '同一坐标目标' : '同形状任务'}在 15 分钟内第 ${r.repeatFailure.attempts} 次尝试；`
+        + `${r.repeatFailure.observation === 'unchanged'
+          ? r.repeatFailure.scope === 'target'
+            ? '本次起止位置、背包物品数量与目标方块读数未变'
+            : '本次起止位置与背包物品数量未变'
+          : '部分现场读数不可比'}；回执是否证明原目标达成需核对。`
+        + `${r.repeatFailure.previousReceipt ? `上次回执：${r.repeatFailure.previousReceipt}` : ''}`
+      : '';
+    const reportText = `${r.text}${repeatEvidence}`;
     // 「最近一单是什么下场」的单槽:mc_queue 现读它(见 lastFinishedTask)
-    this.lastFinishedTask = { at: Date.now(), kind: r.kind, text: r.text };
+    this.lastFinishedTask = { at: Date.now(), kind: r.kind, text: reportText };
     // 任务终态只是采样时机；里程碑仍由独立世界现读判定，并先搭同一批事件。
     this.publishGoalPlanEdges('piggyback');
     // 「在干活却没记账」的分子:做完与做了一半都算干了活,受阻/顶替/撤单不算
@@ -6214,7 +7684,123 @@ export class MinecraftWorld implements World {
     const q = this.executor?.status();
     const queue = q && (q.running || q.waiting.length > 0) ? `\n[队列] ${renderQueue(q)}` : '';
     // cancelled 进入事件流并随批次投递，不单独唤醒。
-    this.emit('minecraft.task', `[执行器] ${r.text}${queue}`, r.kind !== 'cancelled');
+    this.emit('minecraft.task', `[执行器] ${reportText}${queue}`, r.kind !== 'cancelled',
+      r.repeatFailure ? { meta: { repeatFailure: {
+        taskId: r.taskId, attempts: r.repeatFailure.attempts, scope: r.repeatFailure.scope,
+        observation: r.repeatFailure.observation,
+      } } } : undefined);
+    if (r.kind === 'blocked' && r.taskId !== undefined) {
+      void this.adviseBlockedTask(r.taskId, r.text, reportVersion).catch((error) => {
+        this.diag.write({ lane: 'task', event: 'decision-error', taskId: r.taskId,
+          msg: `辅助判断失败: ${String(error)}`, data: { reason: 'unexpected' } });
+      });
+    }
+    if (r.kind === 'done' && r.lastSkill === 'goto'
+      && (this.cfg.idle ?? MINECRAFT_DEFAULTS.idle).afterArrival
+      && q && !q.running && q.waiting.length === 0 && !q.hold) {
+      const now = Date.now();
+      const quietUntil = this.idleQuietReason === 'task' ? now : this.idleQuietUntil;
+      this.idleArrival = {
+        generation: this.idleGeneration(),
+        expiresAtMs: Math.min(now + MinecraftWorld.IDLE_ARRIVAL_MAX_WAIT_MS,
+          Math.max(now, quietUntil) + MinecraftWorld.IDLE_ARRIVAL_WINDOW_MS),
+      };
+      queueMicrotask(() => this.tryArrivalIdle());
+    }
+  }
+
+  private async adviseBlockedTask(taskId: number, receipt: string, reportVersion: number): Promise<void> {
+    const config = this.cfg.decision;
+    const endpoint = config?.endpoint?.trim() ?? '';
+    const host = this.host;
+    if (!config?.enabled || !endpoint || !host || this.shuttingDown) return;
+    const adviserKey = `${endpoint}\0${config.timeoutMs}\0${config.minIntervalMs}`;
+    if (!this.decisionAdviser || this.decisionAdviserKey !== adviserKey) {
+      this.decisionAdviser = createDecisionAdviser({
+        endpoint, timeoutMs: config.timeoutMs, minIntervalMs: config.minIntervalMs,
+      });
+      this.decisionAdviserKey = adviserKey;
+    }
+    const generation = this.connectionGeneration;
+    const bot = this.bridge?.bot;
+    const bounded = (value: string, max: number): string => value.slice(0, max);
+    const dimension = bot?.game?.dimension ? bounded(normalizeDimension(bot.game.dimension), 80) : null;
+    const position = bot?.entity?.position;
+    const finite = (value: unknown): number | null => typeof value === 'number' && Number.isFinite(value) ? value : null;
+    const state: Record<string, unknown> = {
+      task: { id: taskId, receipt: bounded(receipt, 1200), outcome: 'blocked' },
+      player: {
+        health: finite(bot?.health), food: finite(bot?.food), dimension,
+        position: position ? { x: finite(position.x), y: finite(position.y), z: finite(position.z) } : null,
+      },
+      queue: (() => {
+        const status = this.executor?.status();
+        if (!status) return null;
+        return {
+          running: status.running ? {
+            id: status.running.id,
+            label: bounded(status.running.label, 120),
+            step: bounded(status.running.step, 160),
+            stepIndex: status.running.stepIndex,
+            stepCount: status.running.stepCount,
+          } : null,
+          waiting: status.waiting.slice(0, 4).map((task) => ({ id: task.id, label: bounded(task.label, 120) })),
+          waitingCount: status.waiting.length,
+          hold: status.hold ? bounded(status.hold, 120) : null,
+        };
+      })(),
+    };
+    const receiptKey = createHash('sha256').update(bounded(receipt.replace(/#\d+/g, '#'), 1200))
+      .digest('hex').slice(0, 16);
+    const sceneKey = `${dimension ?? 'unknown'}:${position
+      ? `${Math.round(position.x)},${Math.round(position.y)},${Math.round(position.z)}` : 'unknown'}:${receiptKey}`;
+    const staleReason = (): string | null => {
+      if (this.shuttingDown || this.host !== host) return 'stopped';
+      if (this.taskReportVersions.get(taskId) !== reportVersion) return 'task-updated';
+      if (this.connectionGeneration !== generation || (bot && this.bridge?.bot !== bot)) return 'connection-changed';
+      const currentDimension = this.bridge?.bot?.game?.dimension
+        ? bounded(normalizeDimension(this.bridge.bot.game.dimension), 80) : null;
+      if (currentDimension !== dimension) return 'dimension-changed';
+      if (!this.cfg.decision?.enabled || this.cfg.decision.endpoint.trim() !== endpoint) return 'disabled';
+      return null;
+    };
+    try {
+      const result = await this.decisionAdviser.advise(state, sceneKey);
+      const stale = staleReason();
+      if (stale) {
+        this.diag.write({ lane: 'task', event: 'decision-stale', taskId,
+          msg: `辅助判断迟到: ${stale}`, data: { sceneKey, reason: stale, result: result.kind } });
+        return;
+      }
+      if (result.kind === 'skipped') return;
+      if (result.kind === 'error') {
+        this.diag.write({ lane: 'task', event: 'decision-error', taskId,
+          msg: `辅助判断失败: ${result.reason}`,
+          data: { sceneKey, reason: result.reason, status: result.status } });
+        return;
+      }
+      const advice = result.advice;
+      if (this.lastDecisionAdviceSceneKey === sceneKey) return;
+      this.lastDecisionAdviceSceneKey = sceneKey;
+      this.diag.write({ lane: 'task', event: 'decision-advice', taskId,
+        msg: '辅助判断已返回建议', durMs: advice.latencyMs,
+        data: { sceneKey, choice: advice.choice, confidence: advice.confidence,
+          riskScore: advice.riskScore, latencyMs: advice.latencyMs } });
+      this.emit('minecraft.event', this.renderDecisionAdvice(taskId, advice), false, { trigger: 'piggyback' });
+    } catch (error) {
+      this.diag.write({ lane: 'task', event: 'decision-error', taskId,
+        msg: `辅助判断失败: ${String(error)}`, data: { sceneKey, reason: 'unexpected' } });
+    }
+  }
+
+  private renderDecisionAdvice(taskId: number, advice: DecisionAdvice): string {
+    const suggestion = {
+      inspect: '核对现场和受阻原因',
+      replan: '重新规划当前路线或步骤',
+      resupply: '补足当前任务所需资源',
+      pause: '暂缓当前任务',
+    }[advice.choice];
+    return `[Minecraft][小模型辅助判断，未经核验] 任务#${taskId}建议先${suggestion}；估计继续原任务的风险 ${advice.riskScore.toFixed(1)}/3。`;
   }
 
   private lastHealth: number | null = null;
@@ -6333,24 +7919,40 @@ export class MinecraftWorld implements World {
     // 同一个待遇,由持有它们的 World 自己拼进段表与比对键
     const goals = goalSnapshotLine(this.goals().list, (k) => this.blueprints.noteOf(k));
     const marks = mapSnapshotLine(this.markTable().list);
+    const foodReserve = renderFoodReserveReadout(snap.inventory,
+      this.bridge?.bot?.registry?.foodsByName ?? {}, snap.invSynced === true, zhName);
     const anchorDue = this.snapshotBaseline === null
       || this.snapshotAnchorPending
       || now - this.lastSnapshotFullAt >= this.cfg.world.snapshotAnchorSec * 1000;
+    const near = this.nearMarkNote(snap.position);
     const segs = [
       // 位置相对路标的描述参与 place 段比对。背包相对上一份已发快照只报变化，
       // 全量锚则报告完整背包。
-      ...narrateWorldSegments(snap, this.nearMarkNote(snap.position), anchorDue ? null : this.snapshotBagBase),
+      ...narrateWorldSegments(snap, near, anchorDue ? null : this.snapshotBagBase),
       { key: 'queue' as const, text: queue, cmp: queue },
       { key: 'goals' as const, text: goals, cmp: goals },
       { key: 'marks' as const, text: marks, cmp: marks },
+      { key: 'foodReserve' as const, text: foodReserve, cmp: foodReserve },
     ];
+    // 请求用事实必须自足：增量背包仅属于事件，不能拿来替换历史快照。
+    // 复用刚取得的 snap，不追加扫描；即使这拍变化被抑制，采样时间仍是本次读数。
+    const fullSegments = anchorDue ? segs : [
+      ...narrateWorldSegments(snap, near, null),
+      ...segs.filter((segment) => segment.key === 'queue'
+        || segment.key === 'goals' || segment.key === 'marks' || segment.key === 'foodReserve'),
+    ];
+    this.requestFactsCache = {
+      text: `[Minecraft 当前读数；采样 ${snap.realTime}]\n`
+        + fullSegments.map((segment) => segment.text).filter(Boolean).join('\n'),
+      snapshotTypes: ['minecraft.world.snapshot', 'minecraft.task.queue'],
+    };
     // 按变化量发:与上一拍比没有实质变化、人也没挪窝,这一拍整条不发(基线不动,
     // 下一次真变了照样按段差分)。全量锚那一拍不受这道闸管,漂移由它兜住。
     // 队列状态一起进比对键 —— 手上在做什么变了就是实质变化。
     const quietKey = `${snapshotFingerprint(snap)}|${queue}` +
       `|spawn:${this.personalSpawn ? `${this.personalSpawn.x},${this.personalSpawn.y},${this.personalSpawn.z}` : 'none'}` +
       // 两张暂态表也进比对键:表变了就是实质变化,那一拍该发
-      `|goals:${goals}|marks:${marks}`;
+      `|goals:${goals}|marks:${marks}|foodReserve:${foodReserve}`;
     const prev = this.snapshotQuiet;
     const moved = prev
       ? Math.hypot(snap.position.x - prev.pos.x, snap.position.y - prev.pos.y, snap.position.z - prev.pos.z)
@@ -6379,6 +7981,8 @@ export class MinecraftWorld implements World {
   }
   /** 各段比对键的基线;null=还没发过全量,下一份必发全量 */
   private snapshotBaseline: Map<string, string> | null = null;
+  /** 只在已有世界快照采样时刷新；断线时不对外提供。 */
+  private requestFactsCache: WorldRequestFacts | null = null;
   /** 上一条真发出去的快照的实质指纹与站位(跳拍闸的基准) */
   private snapshotQuiet: { key: string; pos: { x: number; y: number; z: number } } | null = null;
   /** 上一份真发出去的快照里的背包(gear 段增量的基准);null=还没有基线,下一份整份印 */
@@ -6409,7 +8013,7 @@ export class MinecraftWorld implements World {
     type: string,
     text: string,
     urgent: boolean,
-    opts?: { deliver?: boolean; trigger?: TriggerMode; tags?: readonly EventTag[] },
+    opts?: { deliver?: boolean; trigger?: TriggerMode; tags?: readonly EventTag[]; meta?: Record<string, unknown> },
     senderKey?: string,
   ): void {
     if (!this.host) return;
@@ -6421,7 +8025,8 @@ export class MinecraftWorld implements World {
       lane: 'event',
       event: type,
       msg: text,
-      data: { trigger, deliver: opts?.deliver !== false, connectionGeneration: this.connectionGeneration },
+      data: { trigger, deliver: opts?.deliver !== false, connectionGeneration: this.connectionGeneration,
+        ...(opts?.meta ? { meta: opts.meta } : {}) },
     });
     this.host.pushEvent(
       {
@@ -6431,6 +8036,7 @@ export class MinecraftWorld implements World {
         text,
         senderKey: senderKey ?? 'minecraft',
         tags: opts?.tags,
+        meta: opts?.meta,
       },
       { trigger, deliver: opts?.deliver },
     ).catch((e) => this.host?.log.warn('事件投递失败', { type, err: String(e) }));

@@ -8,7 +8,7 @@ import {
   type NormalizedBlueprint,
   type SizeXYZ,
 } from './blueprint.ts';
-import { BLUEPRINT_MC_VERSION, completeBlockStateDefaults } from './blueprint-registry.ts';
+import { blueprintMcVersion, completeBlockStateDefaults } from './blueprint-registry.ts';
 
 const REPAIR_POLICY_VERSION = 'blueprint-repair-v1' as const;
 
@@ -228,7 +228,7 @@ export function completeBlueprintStateDefaults(
     blueprint: { size_xyz: [...blueprint.size_xyz], site_mode: blueprint.site_mode, layers },
     action: cells === 0 ? null : {
       code: 'default-state-completion',
-      message: `漏写的方块属性按 Minecraft ${BLUEPRINT_MC_VERSION} 官方默认状态补齐。`,
+      message: `漏写的方块属性按 Minecraft ${blueprintMcVersion()} 官方默认状态补齐。`,
       count: cells,
       samples: [...samples],
     },

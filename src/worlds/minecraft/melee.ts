@@ -5,7 +5,7 @@
  */
 import { piglinIsHostile } from './piglin.ts';
 import { sleep, type TaskAttackLease } from './skill-context.ts';
-import { headInWater } from './terrain.ts';
+import { canSeeEntity, headInWater } from './terrain.ts';
 import {
   HYBRID_MELEE_AT, KITE_MAX_RANGE, KITE_MIN_RANGE, bestRangedWeapon, hasRangedLos, hasUsableArrows,
   type BowShotResult, type RangedTarget,
@@ -15,7 +15,7 @@ import type { Bot } from 'mineflayer';
 import pathfinderPkg from 'mineflayer-pathfinder';
 import { Aborted, SkillBlocked, SkillNoop, checkAbort, type SkillContext } from './skill-context.ts';
 import { isKnownTarget } from './entity-facts.ts';
-import { dropGoal, findEntity, gotoGoal, levelTravelGoal } from './travel.ts';
+import { dropGoal, findEntity, gotoGoal, levelTravelGoal, walkOnlyPath } from './travel.ts';
 import { zhEntity } from './names.ts';
 import { chooseHybridWeapon, type HybridWeapon } from './ranged.ts';
 import { zhErrorText } from './receipt.ts';
@@ -26,6 +26,25 @@ export type HurtSource = Parameters<Bot['attack']>[0];
 
 /** entityHurt 不带 source 时(旧协议路径)回退猜攻击者的距离上限,沿用旧判据的 6 格 */
 export const REFLEX_HURT_FALLBACK_RANGE = 6;
+
+/** Unattributed projectile damage can come from archers well outside melee range. */
+export const REFLEX_RANGED_HURT_RANGE = 20;
+const RANGED_HOSTILE = new Set(['skeleton', 'stray', 'bogged', 'pillager', 'witch',
+  'blaze', 'ghast', 'illusioner', 'breeze']);
+
+/** Candidate only: the protocol did not prove which distant mob fired. */
+export function nearestRangedHostileWithin(bot: Bot, radius: number): HurtSource | null {
+  let best: HurtSource | null = null;
+  let bestD = radius;
+  for (const entity of Object.values(bot.entities)) {
+    if (!entity?.position || entity.isValid === false || entity === bot.entity ||
+        !RANGED_HOSTILE.has(entity.name ?? '') ||
+        Math.abs(entity.position.y - bot.entity.position.y) > 6) continue;
+    const distance = entity.position.distanceTo(bot.entity.position);
+    if (distance < bestD) { bestD = distance; best = entity as HurtSource; }
+  }
+  return best;
+}
 
 /** 半径内最近的敌对生物；排除玩家和自身，没有则返回 null。 */
 export function nearestHostileWithin(bot: Bot, radius: number): HurtSource | null {
@@ -235,9 +254,9 @@ export async function skillAttack(
   if (!isKnownTarget(bot, target)) {
     throw new SkillBlocked(`不认识「${target}」这种东西,认不出要打谁`);
   }
-  const entity = findEntity(bot, target, 32);
+  const entity = findEntity(bot, target, 32, (candidate) => canSeeEntity(bot, candidate));
   // 要打的东西不在场 = 无事可做:没打输,是没得打(见 SkillNoop)
-  if (!entity) throw new SkillNoop(`附近 32 格内没有${zhEntity(target)}`);
+  if (!entity) throw new SkillNoop(`附近 32 格内没看见${zhEntity(target)}，不能隔墙选它作攻击目标`);
   const ranged = ctx.attack.ranged;
   const forcedRanged = mode === 'ranged' || mode === 'kite';
   if (forcedRanged) {
@@ -261,16 +280,33 @@ export async function skillAttack(
   let weapon: HybridWeapon = forcedRanged ? 'ranged' : 'melee';
   let desperate = false;
   let retreatFailed = false;
+  let chaseWithoutProgress = 0;
+  let rangedRetryAfter = 0;
+  let outOfSightSince = 0;
   const equipMelee = async (): Promise<void> => {
     ranged?.abort();
     const best = bestWeapon(bot);
     if (best) await bot.equip(best, 'hand').catch(() => undefined);
   };
-  if (weapon === 'melee') await equipMelee();
+  const releaseWalkOnly = walkOnlyPath(bot);
   try {
+    if (weapon === 'melee') await equipMelee();
     while (!stats.dead && entity.isValid && Date.now() < deadline) {
+      // 某些寻路/弓回执会立即返回；每轮让出一个游戏 tick，避免空转饿死协议 keepalive。
+      await sleep(50);
       checkAbort(ctx);
       if (stats.disconnected) throw new SkillBlocked(`连接断了,主动攻击已取消;${attackStats(stats)}`);
+      if (!canSeeEntity(bot, entity)) {
+        outOfSightSince ||= Date.now();
+        releaseMelee(bot);
+        ranged?.abort();
+        dropGoal(bot, 'task', '目标离开视线', ctx.diag);
+        if (Date.now() - outOfSightSince >= 1_500) {
+          throw new SkillBlocked(`${zhEntity(target)}离开视线，停止攻击;${attackStats(stats)}`);
+        }
+        continue;
+      }
+      outOfSightSince = 0;
       const floor = ctx.fleeHealth();
       if (!desperate && dangerous && floor > 0 && (bot.health ?? 20) < floor) {
         // 撤退是任务的一部分:走完再汇报,不能丢下一个方向就报错收工
@@ -314,7 +350,7 @@ export async function skillAttack(
         continue;
       }
       const d = entity.position.distanceTo(bot.entity.position);
-      const rangedReady = Boolean(ranged?.ready(bot));
+      const rangedReady = Date.now() >= rangedRetryAfter && Boolean(ranged?.ready(bot));
       const nextWeapon = forcedRanged
         ? 'ranged'
         : mode === 'melee' ? 'melee' : chooseHybridWeapon(weapon, d, rangedReady);
@@ -365,6 +401,8 @@ export async function skillAttack(
         ) {
           throw new SkillBlocked(`${rangedBlockedText(result)};${attackStats(stats)}`);
         }
+        // 自动模式下无射线等即时失败，先尝试靠近，别在同一位置立即切回弓。
+        rangedRetryAfter = Date.now() + 5_000;
         weapon = 'melee';
         await equipMelee();
         continue;
@@ -373,9 +411,28 @@ export async function skillAttack(
       if (d > MELEE_CHASE) {
         inMelee = false;
         releaseMelee(bot);
-        await gotoGoal(bot, new goals.GoalFollow(entity, 2), ctx).catch(() => undefined);
+        const before = bot.entity.position.clone();
+        try {
+          await gotoGoal(bot, new goals.GoalFollow(entity, 2), ctx);
+        } catch (error) {
+          if (error instanceof Aborted) throw error;
+          const why = error instanceof Error ? zhErrorText(error.message) : String(error);
+          throw new SkillBlocked(`追不上${zhEntity(target)}: ${why};${attackStats(stats)}`);
+        }
+        if (entity.isValid && !stats.dead && entity.position.distanceTo(bot.entity.position) > MELEE_CHASE
+          && bot.entity.position.distanceTo(before) < 0.3) {
+          chaseWithoutProgress++;
+          if (chaseWithoutProgress >= 2) {
+            throw new SkillBlocked(`追不上${zhEntity(target)}: 寻路返回了但位置没有前进;${attackStats(stats)}`);
+          }
+          // pathfinder 可以在空路径上立刻 resolve；让协议与战斗事件有处理时间。
+          await sleep(150);
+        } else {
+          chaseWithoutProgress = 0;
+        }
         continue;
       }
+      chaseWithoutProgress = 0;
       if (!inMelee) {
         dropGoal(bot, 'task', '够得着了,自己打', ctx.diag);
         inMelee = true;
@@ -402,6 +459,7 @@ export async function skillAttack(
     ranged?.abort();
     ctx.escape.active = false;
     ctx.attack.release(stats);
+    releaseWalkOnly();
   }
   if (stats.dead) {
     return `打死了${zhEntity(target)}(${attackStats(stats)})${retreatFailed ? ';撤退没走开后回身打完' : ''}${underwaterOxygenNote(bot)}`;
@@ -416,4 +474,3 @@ export async function skillAttack(
   }
   throw new SkillBlocked(`没有确认${zhEntity(target)}死亡;${attackStats(stats)}`);
 }
-

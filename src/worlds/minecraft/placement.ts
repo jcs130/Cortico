@@ -11,7 +11,7 @@ import { blockStateItem } from './blueprint-registry.ts';
 import { BLOCK_FACES, cellOnFace, resolveAnchors, type BlockFace, type Cell } from './geometry.ts';
 import { isDark, isNight, pocketScan, sampleLight } from './terrain.ts';
 import {
-  BUILD_CELL_CAP, FACE_TRY_ORDER, LIQUIDS, NO_PLACE_REFERENCE, PLACE_REACH, blockAtCell, cellKeyOf,
+  AIR_NAMES, BUILD_CELL_CAP, FACE_TRY_ORDER, LIQUIDS, NO_PLACE_REFERENCE, PLACE_REACH, blockAtCell, cellKeyOf,
   cellText, chebyshev, dimensionOf, feetOf, refCellOf, shapeCells, skyBlocked, solidAt,
 } from './cell-facts.ts';
 import {
@@ -25,6 +25,9 @@ import { forgetPlaced } from './placed-ledger.ts';
 import { contentsText, type PlaceCall, zhErrorText } from './receipt.ts';
 import { FALLBACK_DEFAULTS, isGravityBlock } from './policy.ts';
 import { type PositionXYZ } from './blueprint.ts';
+import { isStableScaffoldMaterial } from './scaffold-material.ts';
+import { prepareTemporaryScaffoldPlacement, recordTemporaryScaffold } from './temporary-scaffold.ts';
+import { flightState } from './flight.ts';
 
 const { goals } = pathfinderPkg;
 
@@ -73,15 +76,24 @@ export async function jumpPlaceBelow(bot: Bot, ctx: SkillContext, material?: str
   for (let attempt = 0; attempt < 3; attempt++) {
     checkAbort(ctx);
     await bot.lookAt(feet.offset(0.5, 0, 0.5), true);
-    bot.setControlState('jump', true);
-    const airborne = Date.now() + 1_200;
-    while (bot.entity.position.y - feet.y < 0.95 && Date.now() < airborne) await sleep(50);
     try {
-      await bot.placeBlock(below, new Vec3(0, 1, 0));
-    } catch {
+      bot.setControlState('jump', true);
+      const airborne = Date.now() + 1_200;
+      // The target is the original feet cell. At +0.95 the player's hitbox still
+      // overlaps it, so Paper rejects the placement even though the bot is airborne.
+      while (bot.entity.position.y - feet.y < 1.05 && Date.now() < airborne) {
+        checkAbort(ctx);
+        await sleep(25);
+      }
+      if (bot.entity.position.y - feet.y >= 1.05) {
+        await bot.placeBlock(below, new Vec3(0, 1, 0));
+      }
+    } catch (err) {
+      if (err instanceof Aborted) throw err;
       /* 时机不对就再跳一次 */
+    } finally {
+      bot.setControlState('jump', false);
     }
-    bot.setControlState('jump', false);
     await sleep(400);
     const now = bot.blockAt(feet);
     if (!now) continue;
@@ -151,7 +163,10 @@ export async function placeIntoCell(
       const [dx, dy, dz] = BLOCK_FACES[f];
       try {
         await bot.placeBlock(ref, new Vec3(dx, dy, dz));
-      } catch {
+      } catch (error) {
+        // 服务端已明确拒绝或暂不能确认目标格，换面不会改变该格的保护判决。
+        // 直接交还结构化受阻，避免把保护错误伪装成「服务端没认」。
+        if (error instanceof SkillBlocked) throw error;
         continue;
       }
       await sleep(150);
@@ -226,14 +241,17 @@ export type PermittedStock =
   | { item: InvItem; permit: Extract<ResourcePlacementPermit, { ok: true }> }
   | { why: string };
 
-export function permitPlacement(ctx: SkillContext, item: string, preview = false): ResourcePlacementPermit {
+export function permitPlacement(ctx: SkillContext, item: string, preview = false, target?: Cell): ResourcePlacementPermit {
   // 试算不动世界:走只读判据,不取 permit —— 取了会在放置结算期把"上一块材料还在
   // 结算,这次放置稍后再试"塞进预览文案,而预览本来就不放任何东西
   if (preview) {
     const decision = ctx.previewResourcePlacement?.(item) ?? { ok: true };
     return decision.ok ? { ok: true, finish: () => {} } : { ok: false, reason: decision.reason ?? '' };
   }
-  return ctx.permitResourcePlacement?.(item) ?? { ok: true, finish: () => {} };
+  const intent = target && ctx.blueprintPlacement
+    ? { ...ctx.blueprintPlacement, at: [target.x, target.y, target.z] as PositionXYZ, aborted: ctx.aborted }
+    : undefined;
+  return ctx.permitResourcePlacement?.(item, intent) ?? { ok: true, finish: () => {} };
 }
 
 /** 按策略优先级选择有库存且获放置许可的第一种材料。 */
@@ -256,7 +274,8 @@ export function permittedStockFor(
   }
   return denied
     ? { why: denied }
-    : { why: `${label}名单里的方块包里都没有(${names.map((n) => zhName(n)).join('、')})` };
+    : { why: `${label}名单里的方块包里都没有(${names.map((n) => zhName(n)).join('、')})`
+      + (label === '垫脚' ? '；若随身有其他可垫的方块，可用 mc_policy 将其物品名加入 scaffold 名单，或换路线' : '') };
 }
 
 /**
@@ -305,7 +324,7 @@ export class Upkeep {
       this.missed.set('footing', `${cellText(cell)} 被我自己的身子压着一角,退不开半步,放不进方块`);
       return false;
     }
-    const stock = permittedStockFor(this.bot, scaffoldNames(this.ctx), '垫脚', this.ctx);
+    const stock = permittedStockFor(this.bot, scaffoldNames(this.ctx, this.bot), '垫脚', this.ctx);
     if ('why' in stock) {
       this.missed.set('footing', stock.why);
       return false;
@@ -315,7 +334,7 @@ export class Upkeep {
       await this.bot.equip(stock.item, 'hand');
       placed = (await placeIntoCell(this.bot, cell, stock.item.name, this.ctx)) !== null;
     } finally {
-      stock.permit.finish(placed);
+      await stock.permit.finish(placed);
     }
     if (!placed) {
       this.missed.set('footing', placeReferenceFace(this.bot, cell) === null
@@ -336,17 +355,20 @@ export class Upkeep {
       this.missed.set('climb', siteRefusalText(site, feet));
       return false;
     }
-    const stock = permittedStockFor(this.bot, scaffoldNames(this.ctx), '垫脚', this.ctx);
+    const stock = permittedStockFor(this.bot, scaffoldNames(this.ctx, this.bot), '垫脚', this.ctx);
     if ('why' in stock) {
       this.missed.set('climb', stock.why);
       return false;
     }
     let placed = false;
+    const proof = prepareTemporaryScaffoldPlacement(this.bot, blockAtCell(this.bot, feet));
     try {
       await this.bot.equip(stock.item, 'hand');
       placed = await jumpPlaceBelow(this.bot, this.ctx, stock.item.name);
+      const support = blockAtCell(this.bot, feet);
+      if (placed && support) recordTemporaryScaffold(this.bot, proof, support);
     } finally {
-      stock.permit.finish(placed);
+      await stock.permit.finish(placed);
     }
     if (!placed) {
       this.missed.set('climb', padFailure(this.bot));
@@ -397,7 +419,7 @@ export class Upkeep {
         if (on) break;
       }
     } finally {
-      stock.permit.finish(on !== null);
+      await stock.permit.finish(on !== null);
     }
     if (!on) {
       this.lastLightMiss = feet;
@@ -515,6 +537,35 @@ export function footprintScene(bot: Bot, center: Cell, material: string, fp: Foo
   ];
 }
 
+/**
+ * 指定单格已被占时，报告附近实测为空、脚下有支撑的候选格。
+ * 这是几何读数，不声称服务端保护许可或放置动作一定成功。
+ */
+export function singlePlaceScene(bot: Bot, center: Cell, material: string): string[] {
+  const R = 5;
+  const me = bot.entity?.position ?? { x: center.x, y: center.y, z: center.z };
+  const fits: Array<{ cell: Cell; d: number }> = [];
+  for (let dx = -R; dx <= R; dx++) {
+    for (let dz = -R; dz <= R; dz++) {
+      for (const dy of [0, -1, 1]) {
+        const cell = { x: center.x + dx, y: center.y + dy, z: center.z + dz };
+        const block = blockAtCell(bot, cell);
+        // 没有碰撞箱的装饰物仍占据方块格；这里只报告已经读到的空气。
+        if (!block || !AIR_NAMES.has(block.name)) continue;
+        if (!solidAt(bot, { x: cell.x, y: cell.y - 1, z: cell.z })) continue;
+        if (materialCollides(bot, material) && hitboxBlocks(bot, cell)) continue;
+        fits.push({ cell, d: Math.hypot(cell.x + 0.5 - me.x, cell.y - me.y, cell.z + 0.5 - me.z) });
+      }
+    }
+  }
+  if (fits.length === 0) return [`${R} 格内没读到脚下有支撑的空位；请换地方或先清障`];
+  fits.sort((a, b) => a.d - b.d);
+  const shown = fits.slice(0, FOOTPRINT_SPOTS_MAX);
+  return [`${R} 格内实测几何空位 ${fits.length} 处:${shown.map((f) => cellText(f.cell)).join('、')}`
+    + (fits.length > shown.length ? `(按距离只列前 ${shown.length} 处)` : '')
+    + `；仅是空位，放置前仍要核对服务端保护许可`];
+}
+
 /** 候选位置一次列几处;排序判据是离她多远,越靠前越近 */
 export const FOOTPRINT_SPOTS_MAX = 5;
 
@@ -560,15 +611,26 @@ export async function gotoPlaceable(bot: Bot, s: BuildSpot, ctx: SkillContext): 
     const [dx, dy, dz] = BLOCK_FACES[s.face];
     opts.faces = [new Vec3(-dx, -dy, -dz)];
   }
-  try {
-    await gotoGoal(
-      bot,
-      new goals.GoalPlaceBlock(
-        new Vec3(s.cell.x, s.cell.y, s.cell.z), bot.world,
-        opts as unknown as ConstructorParameters<typeof goals.GoalPlaceBlock>[2],
-      ),
-      ctx,
+  const placementGoal = () => new goals.GoalPlaceBlock(
+    new Vec3(s.cell.x, s.cell.y, s.cell.z), bot.world,
+    opts as unknown as ConstructorParameters<typeof goals.GoalPlaceBlock>[2],
+  );
+  if (flightState(bot).flying) {
+    checkAbort(ctx);
+    const goal = placementGoal();
+    // The upstream node test adds a ground-cell offset; airborne positions need the actual eyes.
+    const eyeHeight = (bot.entity as typeof bot.entity & { eyeHeight?: number }).eyeHeight ?? 1.62;
+    const atEye = bot.entity.position.offset(0, eyeHeight, 0);
+    const face = (goal as typeof goal & {
+      getFaceAndRef(position: Vec3): { face: Vec3; to: Vec3; ref: Vec3 } | null;
+    }).getFaceAndRef(atEye);
+    if (!hitboxBlocks(bot, s.cell) && face !== null) return true;
+    throw new SkillBlocked(
+      `当前悬停位置放不到 ${cellText(s.cell)}；先用 flight 调整空中位置，或 land 落地后再施工`,
     );
+  }
+  try {
+    await gotoGoal(bot, placementGoal(), ctx);
     return true;
   } catch (err) {
     if (err instanceof Aborted) throw err;
@@ -714,13 +776,14 @@ export function nearestBoat(bot: Bot, near: Cell): Cell | null {
  * 垫脚材料名单；显式空名单返回 null，表示禁用。
  * 未设置时使用 policy.defaults()，与寻路器共用 cfg.scaffoldBlocks；未接 World 才用 FALLBACK_DEFAULTS。
  */
-export function scaffoldNames(ctx: SkillContext): string[] | null {
+export function scaffoldNames(ctx: SkillContext, bot?: Bot): string[] | null {
   const listed = ctx.policy?.get().scaffold;
   if (listed && listed.length === 0) return null;
   const names = listed ?? (ctx.policy?.defaults() ?? FALLBACK_DEFAULTS).scaffold;
   // 重力方块剔掉,与寻路器那一半同源(bridge 给 scafoldingBlocks 时也剔):垫下去失去支撑
   // 就整块落地,垫不住。分叉的代价是受阻回执把沙砾、红沙当合法垫脚料原样念给她。
-  const usable = names.filter((n) => !isGravityBlock(n));
+  const usable = names.filter((n) => !isGravityBlock(n)
+    && (!bot || isStableScaffoldMaterial(bot.registry, n)));
   if (usable.length === 0) return null;
   // 在建工地材料软降到末位，其他候选耗尽时仍可使用。
   const material = siteMaterials(ctx);
@@ -732,7 +795,7 @@ export function scaffoldNames(ctx: SkillContext): string[] | null {
  * 在建的蓝图工地:已绑定锚点、游标还没走完的那些。
  *
  * 它们同时是三条规矩的取数口(全部只管"垫",不管走、挖、有意放置):工地建材垫脚
- * 降位(`scaffoldNames`)、工地体积禁垫(`siteAtCell`)、收工回收(`reclaimSiteScaffold`)。
+ * 降位(`scaffoldNames`)、工地体积禁垫(`siteAtCell`)。
  */
 export function activeSites(ctx: SkillContext): BlueprintSite[] {
   const desk = ctx.blueprints?.();
@@ -771,7 +834,7 @@ export function inBox(box: { min: PositionXYZ; max: PositionXYZ }, c: { x: numbe
  * 蓝图施工与显式放置不使用此约束。
  */
 export function siteAtCell(ctx: SkillContext, cell: { x: number; y: number; z: number }): BlueprintSite | null {
-  // escape.active 时允许在工地内垫脚，放置仍记入 reclaimSiteScaffold 回收账。
+  // escape.active 时允许在工地内垫脚；临时放置仍由严格来源台账跟踪。
   if (ctx.escape.active) return null;
   return siteAtCellAnywhere(ctx, cell);
 }
@@ -804,7 +867,7 @@ export function lightNames(ctx: SkillContext): string[] | null {
  * 必然回读不到,还在别处留一块。
  */
 export async function padAdjacent(bot: Bot, ctx: SkillContext, block: string, station: Station | null): Promise<boolean> {
-  const stock = permittedStockFor(bot, scaffoldNames(ctx), '垫脚', ctx);
+  const stock = permittedStockFor(bot, scaffoldNames(ctx, bot), '垫脚', ctx);
   // 垫脚是"腾位置"这条路的最后一手:它也走不通时,受阻文案要说的是整件事
   // (在放什么、为谁放、该怎么办),不是"垫脚料没有"这半句
   if ('why' in stock) {
@@ -824,6 +887,7 @@ export async function padAdjacent(bot: Bot, ctx: SkillContext, block: string, st
       if (!at || at.name !== 'air' || !below || below.boundingBox === 'block') continue;
       // 落的是 spot 下面那一格;在建工地体积里不垫
       if (siteAtCell(ctx, { x: spot.x, y: spot.y - 1, z: spot.z })) continue;
+      const proof = prepareTemporaryScaffoldPlacement(bot, below);
       try {
         await bot.placeBlock(stand, new Vec3(dx, 0, dz));
       } catch {
@@ -832,13 +896,14 @@ export async function padAdjacent(bot: Bot, ctx: SkillContext, block: string, st
       await sleep(200);
       const now = bot.blockAt(spot.offset(0, -1, 0));
       if (now && now.boundingBox === 'block') {
+        recordTemporaryScaffold(bot, proof, now);
         placed = true;
         return true;
       }
     }
     return false;
   } finally {
-    stock.permit.finish(placed);
+    await stock.permit.finish(placed);
   }
 }
 
@@ -945,6 +1010,14 @@ export const FURNACE_STATION: Station = {
   kinds: ['furnace', 'smoker', 'blast_furnace'], label: '炉子', hint: '先 craft 一个熔炉(8 个圆石)',
 };
 
+/** 走不到的工作站属于本次连接的现场事实；短期避开，到期或重连后可重试。 */
+const stationFailures = new WeakMap<Bot, Map<string, number>>();
+const STATION_RETRY_MS = 120_000;
+
+function stationFailureKey(bot: Bot, at: { x: number; y: number; z: number; name: string }): string {
+  return `${dimensionOf(bot)}:${at.name}:${at.x},${at.y},${at.z}`;
+}
+
 export function findStations(
   bot: Bot,
   range: number,
@@ -990,38 +1063,57 @@ export async function ensureStation(
   const { kinds, label, hint } = station;
   const stock = (): number => kinds.reduce((n, k) => n + invCount(bot, (x) => x === k), 0);
   const skipped: string[] = [];
-  let near: ReturnType<typeof findStations>[number] | null = null;
+  const failures = stationFailures.get(bot) ?? new Map<string, number>();
+  stationFailures.set(bot, failures);
+  const candidates: ReturnType<typeof findStations> = [];
   for (const s of findStations(bot, 32, kinds)) {
     const why = opts?.skip?.(s) ?? null;
     if (why) { skipped.push(why); continue; }
-    near = s;
-    break;
+    const until = failures.get(stationFailureKey(bot, s)) ?? 0;
+    if (until > Date.now()) {
+      skipped.push(`${label} (${s.x}, ${s.y}, ${s.z}) 上次走不过,${Math.ceil((until - Date.now()) / 1000)} 秒内先试别处`);
+      continue;
+    }
+    if (until > 0) failures.delete(stationFailureKey(bot, s));
+    candidates.push(s);
   }
-  const skipNote = skipped.length > 0 ? `${skipped.join(';')};` : '';
+  const near = candidates[0] ?? null;
   const nearWhere = near ? `(${near.x}, ${near.y}, ${near.z}),约 ${Math.round(near.d)} 格外` : null;
   const carried = kinds.find((k) => invCount(bot, (n) => n === k) > 0) ?? null;
-  const inReach = near !== null && near.d <= PLACE_REACH;
-  if (near && (carried === null || inReach)) {
-    await gotoGoal(bot, new goals.GoalNear(near.x, near.y, near.z, 2), ctx);
-    const block = bot.blockAt(new Vec3(near.x, near.y, near.z));
+  let attempted = false;
+  for (const candidate of candidates) {
+    if (carried !== null && candidate.d > PLACE_REACH) break;
+    attempted = true;
+    try {
+      await gotoGoal(bot, new goals.GoalNear(candidate.x, candidate.y, candidate.z, 2), ctx);
+    } catch (err) {
+      checkAbort(ctx);
+      if (!(err instanceof SkillBlocked)) throw err;
+      failures.set(stationFailureKey(bot, candidate), Date.now() + STATION_RETRY_MS);
+      skipped.push(`${label} (${candidate.x}, ${candidate.y}, ${candidate.z}) 走不过去:${err.message}`);
+      continue;
+    }
+    const block = bot.blockAt(new Vec3(candidate.x, candidate.y, candidate.z));
     if (block && kinds.includes(block.name)) {
       ctx.diag?.write({
         lane: 'craft', event: 'station-reuse', taskId: ctx.taskId,
-        msg: `用现成的${zhName(block.name)} (${near.x}, ${near.y}, ${near.z})`,
-        data: { at: { x: near.x, y: near.y, z: near.z }, name: block.name, dist: near.d, carried: stock() },
+        msg: `用现成的${zhName(block.name)} (${candidate.x}, ${candidate.y}, ${candidate.z})`,
+        data: { at: { x: candidate.x, y: candidate.y, z: candidate.z }, name: block.name, dist: candidate.d, carried: stock() },
       });
+      const where = `(${candidate.x}, ${candidate.y}, ${candidate.z}),约 ${Math.round(candidate.d)} 格外`;
       return {
-        x: near.x, y: near.y, z: near.z, name: block.name, block, placed: false,
-        note: skipNote + (inReach
-          ? `用了手边现成的${zhName(block.name)} ${nearWhere}(包里还有 ${stock()} 个,没动)`
-          : `包里没有${label},走过去用了现成的那个 ${nearWhere}`),
+        x: candidate.x, y: candidate.y, z: candidate.z, name: block.name, block, placed: false,
+        note: (skipped.length > 0 ? `${skipped.join(';')};` : '') + (carried !== null && candidate.d <= PLACE_REACH
+          ? `用了手边现成的${zhName(block.name)} ${where}(包里还有 ${stock()} 个,没动)`
+          : `包里没有${label},走过去用了现成的那个 ${where}`),
       };
     }
+    skipped.push(`${label} (${candidate.x}, ${candidate.y}, ${candidate.z}) 到了却已不在`);
   }
   if (!carried) {
-    throw new SkillBlocked(skipNote + (near
-      ? `走到 (${near.x}, ${near.y}, ${near.z}) 那一格,${label}已经不在了;包里也没有。${hint}`
-      : `32 格内没有${skipped.length > 0 ? '别的' : ''}${kinds.map((k) => zhName(k)).join('或')},包里也没有。${hint}`));
+    throw new SkillBlocked((skipped.length > 0 ? `${skipped.join(';')};` : '') + (near || skipped.length > 0
+      ? `目前没有可走到的${label},包里也没有。${hint}，或找另一座`
+      : `32 格内没有${kinds.map((k) => zhName(k)).join('或')},包里也没有。${hint}`));
   }
   const spot = await placeBlockNearby(bot, carried, ctx, true, station);
   if (spot.name !== carried) {
@@ -1031,8 +1123,8 @@ export async function ensureStation(
   ctx.chests?.rememberStation(dimensionOf(bot), spot, spot.name, Date.now());
   return {
     x: spot.x, y: spot.y, z: spot.z, name: spot.name, block: spot.block, placed: true,
-    note: skipNote + `放下了一个${zhName(spot.name)} (${spot.x}, ${spot.y}, ${spot.z})(包里还有 ${stock()} 个;` +
-      `${nearWhere ? `附近现成的那个在 ${nearWhere},这趟没去` : `32 格内没有现成的${label}`})`,
+    note: (skipped.length > 0 ? `${skipped.join(';')};` : '') + `放下了一个${zhName(spot.name)} (${spot.x}, ${spot.y}, ${spot.z})(包里还有 ${stock()} 个;` +
+      `${nearWhere ? `附近现成的那个在 ${nearWhere},这趟${attempted ? '没走到' : '没去'}` : `32 格内没有可用的现成${label}`})`,
   };
 }
 

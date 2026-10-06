@@ -22,6 +22,8 @@ import {
   chestBot,
   enchantBot,
   fakePathfinder,
+  withBotEvents,
+  withMinecraftCollisionShapes,
 } from './executor-harness.ts';
 
 beforeEach(() => {
@@ -43,6 +45,13 @@ describe('parseSteps:mc_do 的入参校验', () => {
     if (!('error' in r)) throw new Error('本该被退回却通过了');
     return r.error;
   };
+
+  it('take 可明确从当前打开的窗口取物，且不能同时指定世界容器', () => {
+    expect(ok([{ skill: 'take', item: 'furnace', count: 1, from: 'open' }]))
+      .toEqual([{ skill: 'take', item: 'furnace', count: 1, from: 'open' }]);
+    expect(err([{ skill: 'take', item: 'furnace', count: 1, from: 'open', at: [2, 64, 0] }]))
+      .toContain('不能与 at');
+  });
 
   it('认下合法序列,缺省的 count/distance 用默认值', () => {
     expect(ok([{ skill: 'collect', block: 'oak_log' }, { skill: 'flee' }]))
@@ -141,7 +150,7 @@ describe('走不到与挖不动:失败要说出来,不能静默挂着', () => {
   function mineBot(opts: { reachable: boolean; digHangs?: boolean; harvestable?: boolean; visible?: boolean }) {
     const ore = { name: 'coal_ore', position: new V(-8, 50, 8) };
     const bag: Array<{ name: string; count: number }> = [];
-    return {
+    return withBotEvents({
       entity: { id: 9, position: new V(0.5, 63, 0.5) },
       entities: {},
       health: 20,
@@ -171,7 +180,7 @@ describe('走不到与挖不动:失败要说出来,不能静默挂着', () => {
       },
       stopDigging: () => {},
       pathfinder: { stop() {}, setGoal() {}, goto: async () => {} },
-    };
+    });
   }
 
   /**
@@ -334,6 +343,8 @@ describe('走不到与挖不动:失败要说出来,不能静默挂着', () => {
   // buried 处理看得见但走不过去的目标：先过视线闸，再允许挖通路径。
   it('collect buried:看得见但走不过去,挖条路过去照常采到', async () => {
     const bot = mineBot({ reachable: true, visible: true });
+    // Unlike the old always-true stub, the visible distant ore is not diggable before arrival.
+    bot.canDigBlock = () => bot.entity.position.distanceTo(new V(-8, 50, 8)) <= 5.1;
     let tries = 0;
     bot.pathfinder.goto = async () => {
       if (tries++ === 0) throw new Error('走不过去');
@@ -362,9 +373,11 @@ describe('走不到与挖不动:失败要说出来,不能静默挂着', () => {
       health: 20,
       players: {},
       inventory: { items: () => (bag[0].count > 0 ? bag : []) },
+      registry: withMinecraftCollisionShapes({ blocksByName: {} }, ['stone', 'dirt', 'cobblestone']),
       heldItem: bag[0],
       equip: async () => {},
       lookAt: async () => {},
+      world: { getBlock: (p: V) => bot.blockAt(p) },
       setControlState: (name: string, on: boolean) => {
         // 跳跃:立刻离地一格,松开落回(若脚下已被垫上则站在新高度)
         if (name !== 'jump') return;
@@ -385,6 +398,7 @@ describe('走不到与挖不动:失败要说出来,不能静默挂着', () => {
           name,
           position: p,
           boundingBox: solid.has(k) ? 'block' : 'empty',
+          shapes: solid.has(k) ? [[0, 0, 0, 1, 1, 1]] : [],
           diggable: true,
           canHarvest: () => true,
         };
@@ -418,7 +432,7 @@ describe('走不到与挖不动:失败要说出来,不能静默挂着', () => {
       anchors: [['~', '~', '~'], ['~', '~2', '~']],
     }]);
     await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('done');
+    expect(reports[0].kind, reports[0].text).toBe('done');
     expect(reports[0].text).toContain('放好了 3 块圆石');
     // 三块都垫在自己脚下,人跟着上了 3 格
     expect(bot.placedAt).toEqual(['0,64,0', '0,65,0', '0,66,0']);
@@ -434,7 +448,7 @@ describe('走不到与挖不动:失败要说出来,不能静默挂着', () => {
     }]);
     await waitUntil(() => reports.length === 1, 8000);
     // 放上 2 块、还差 3 块属于部分完成。
-    expect(reports[0].kind).toBe('partial');
+    expect(reports[0].kind, reports[0].text).toBe('partial');
     expect(reports[0].text).toContain('放了 2/5 块');
     expect(reports[0].text).toContain('圆石用完了');
     // 缺口点名:差几处、差在哪几格
@@ -568,6 +582,10 @@ describe('走不到与挖不动:失败要说出来,不能静默挂着', () => {
       .toEqual({ steps: [{ skill: 'toss', item: 'cobblestone', count: 64 }] });
     expect(parseSteps([{ skill: 'stow', item: 'cobblestone' }]))
       .toEqual({ steps: [{ skill: 'stow', item: 'cobblestone', count: 1 }] });
+    expect(parseSteps([{ skill: 'stow', item: 'cobblestone', count: 8, at: [2, 64, 0] }]))
+      .toEqual({ steps: [{ skill: 'stow', item: 'cobblestone', count: 8, at: [2, 64, 0] }] });
+    expect(parseSteps([{ skill: 'stow', item: 'cobblestone', at: [2, 64] }]))
+      .toHaveProperty('error');
     expect(parseSteps([{ skill: 'take', item: 'coal', count: 16 }]))
       .toEqual({ steps: [{ skill: 'take', item: 'coal', count: 16 }] });
     const gone = parseSteps([{ skill: 'peek' }]);
@@ -941,6 +959,7 @@ describe('needs:缺省因果闸,独立性显式声明', () => {
       lookAt: async () => {},
       attack: () => { pig.isValid = false; noteDead(); },
       blockAt: () => null,
+      world: { raycast: () => null },
       setControlState: () => {},
       consume: async () => { bag.pop(); },
       pathfinder: { stop() {}, setGoal() {}, goto: async () => {} },
@@ -1074,6 +1093,17 @@ describe('expect:在场时即为裁决', () => {
     expect(reports[0].text).toContain('该步按「距 (0,64,0) 2 格内」核验:达成(实测 水平 0 格,读于 ');
   });
 
+  it('goto 未达到真实半径一目标时受阻，不附加两格已达回显', async () => {
+    const bot = combatBot({ goto: async () => { throw new Error('No path to the goal!'); } });
+    const { exec, reports } = makeExecutorOn(bot);
+    exec.submit([{ skill: 'goto', at: [2, 64, 0] }]);
+    await waitUntil(() => reports.length === 1, 5000);
+    expect(reports[0].kind).toBe('blocked');
+    expect(reports[0].text).toContain('走不过去');
+    expect(reports[0].text).not.toContain('核验:达成');
+    expect(reports[0].text).not.toContain('这个条件现在本来就是满足的');
+  });
+
   it('block:锚点按评估时刻脚下解析,落空报该格实际方块', async () => {
     const bot = combatBot({});
     bot.blockAt = (p: V) => ({ name: p.y < 64 ? 'stone' : 'air' });
@@ -1092,16 +1122,16 @@ describe('expect:在场时即为裁决', () => {
     expect(reports[1].text).toContain('该步按「(~,~,~) 为箱子」核验:落空(实测 空气,读于 ');
   });
 
-  /**
-   * 自动推导的判据在达成时也须回显。
-   */
-  it('自动推导的期望达成时也回显:她没声明,判据照样出声', async () => {
+  it('goto 半砖落脚按实际寻路目标报告到达', async () => {
     const bot = combatBot({});
+    bot.pathfinder.goto = async () => { bot.entity.position = new V(10.5, 64.5625, 10.5); };
     const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'goto', at: [10, 64, 10] }]);
+    exec.submit([{ skill: 'goto', at: [10, 66, 10] }]);
     await waitUntil(() => reports.length === 1, 5000);
     expect(reports[0].kind).toBe('done');
-    expect(reports[0].text).toContain('该步按「距 (10,64,10) 2 格内」核验:达成(实测 水平 0 格,读于 ');
+    expect(reports[0].text).toContain('到了 (10, 64, 10)');
+    expect(reports[0].text).not.toContain('核验');
+    expect(bot.entity.position.y).toBe(64.5625);
   });
 
   /** 判据出不来的技能(use 的裁决住在自己那儿)不硬凑一句核验 */
@@ -1114,15 +1144,16 @@ describe('expect:在场时即为裁决', () => {
     expect(reports[0].text).not.toContain('核验');
   });
 
-  /** 回显是一行,不是一段:多步任务里每步只多这一句 */
-  it('达成回显只占一行,跟在这一步的结果后面', async () => {
+  it('多步 goto 逐步报告实际到达，不附加通用位置验收', async () => {
     const bot = combatBot({});
     const { exec, reports } = makeExecutorOn(bot);
     exec.submit([{ skill: 'goto', at: [10, 64, 10] }, { skill: 'goto', at: [20, 64, 20] }]);
     await waitUntil(() => reports.length === 1, 5000);
-    const lines = reports[0].text.split('\n').filter((l) => l.includes('核验'));
+    const lines = reports[0].text.split('\n').filter((l) => l.includes('到了 ('));
     expect(lines).toHaveLength(2);
-    for (const l of lines) expect(l).toContain('核验:达成');
+    expect(lines[0]).toContain('到了 (10, 64, 10)');
+    expect(lines[1]).toContain('到了 (20, 64, 20)');
+    expect(reports[0].text).not.toContain('核验');
   });
 });
 
@@ -1273,6 +1304,39 @@ describe('容器分账:开窗期间 bot.inventory 是旧账', () => {
     expect(reports[0].text).toContain('没回灌确认');
     // 东西是真进箱子了,只是包里那本账还没跟上——回执不能把这个说成没存
     expect(box.get('cobblestone')).toBe(64);
+  });
+
+  it('stow:点击后服务端撤回物品时，箱内回读不能把这一单记作完成', async () => {
+    const { bot, box, inv } = chestBot({ inv: { cobblestone: 1 }, noCopyBack: true, rejectAfterDeposit: true });
+    const { exec, reports } = makeExecutorOn(bot);
+    exec.submit([{ skill: 'stow', item: 'cobblestone', count: 1 }]);
+    await waitUntil(() => reports.length === 1, 12000);
+    expect(reports[0].kind).toBe('blocked');
+    expect(reports[0].text).toContain('箱内同类物品只多了 0 个');
+    expect(box.get('cobblestone')).toBeUndefined();
+    expect(inv.get('cobblestone')).toBe(1);
+  });
+
+  it('同窗第二种物品被拒绝时沿用窗口回执，不再立刻重开或误报缺货', async () => {
+    const { bot, box, inv } = chestBot({ inv: { cobblestone: 2, coal: 1 }, rejectItem: 'coal' });
+    const open = bot.openContainer;
+    let openings = 0;
+    bot.openContainer = async (...args: Parameters<typeof open>) => {
+      openings++;
+      return open(...args);
+    };
+    const { exec, reports } = makeExecutorOn(bot);
+    exec.submit([
+      { skill: 'stow', item: 'cobblestone', count: 2 },
+      { skill: 'stow', item: 'coal', count: 1 },
+    ]);
+    await waitUntil(() => reports.length === 1, 12000);
+    expect(reports[0].kind).toBe('blocked');
+    expect(reports[0].text).toContain('那一边没空位了');
+    expect(reports[0].text).not.toContain('包里没有煤炭');
+    expect(openings).toBe(1);
+    expect(box.get('cobblestone')).toBe(2);
+    expect(inv.get('coal')).toBe(1);
   });
 
   it('take:照窗口读进度,关窗对上账就报取出多少', async () => {
@@ -1428,10 +1492,16 @@ describe('take:差多少说多少 + at 寻址', () => {
   it('take at 指着不是容器的一格:直说那是什么', async () => {
     const { bot } = chestBot({});
     const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'take', at: [0, 63, 0], all: true }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('不是箱子、炉子或酿造台');
+    const opening = vi.spyOn(bot, 'openContainer');
+    const before = exec.status();
+    const refusal = exec.submitDetailed([{ skill: 'take', at: [0, 63, 0], all: true }]);
+    expect(refusal).toMatchObject({ accepted: false, rejection: { rule: 'take.not-container' } });
+    expect(refusal.receipt).toContain('目标格 (0,63,0) 当前是空气');
+    expect(refusal.receipt).toContain('不是可取物容器');
+    expect(refusal.receipt).toContain('本单不入队');
+    expect(exec.status()).toEqual(before);
+    expect(reports).toEqual([]);
+    expect(opening).not.toHaveBeenCalled();
   });
 
   it('parse:定量取物与清空容器是两种显式形状', () => {
@@ -1447,6 +1517,39 @@ describe('take:差多少说多少 + at 寻址', () => {
 });
 
 describe('第一步的相对锚点入队即冻结', () => {
+  it.each([
+    { at: [10, 5], publicAt: [10, 5], groundY: true },
+    { at: [10, 0, 5], publicAt: [10, 0, 5], groundY: false },
+    { at: ['~5', '~-2'], publicAt: [5, -2], groundY: true },
+  ])('goto 回执保留公开坐标语义: $at', ({ at, publicAt, groundY }) => {
+    const source = [{ skill: 'goto', at }];
+    const parsed = parseSteps(source);
+    if ('error' in parsed) throw new Error(parsed.error);
+    const before = structuredClone(parsed.steps);
+    for (const wrote of [source, undefined]) {
+      const bot = combatBot({});
+      const exec = new Executor({ getBot: () => bot as never, report() {}, log,
+        nextId: nextTaskId(), busyWith: () => 'test' });
+      try {
+        const receipt = exec.submit(parsed.steps, 'append', wrote);
+        expect(receipt).not.toContain('groundY');
+        if (!wrote) {
+          const publicCall = JSON.parse(receipt.match(/\{"skill":"goto"[^}]+\}/)![0]);
+          expect(publicCall.at).toEqual(publicAt);
+          const replay = parseSteps([publicCall]);
+          if ('error' in replay) throw new Error(replay.error);
+          expect(replay.steps[0]).toMatchObject({ at: [publicAt[0], 0, publicAt.at(-1)] });
+          expect((replay.steps[0] as Extract<SkillCall, { skill: 'goto' }>).groundY === true).toBe(groundY);
+        } else if (typeof at[0] === 'number') {
+          expect(receipt).not.toContain('跟你写的不一样');
+        } else {
+          expect(receipt).toContain('我按 [5,-2] 跑');
+        }
+      } finally { exec.shutdown(); }
+    }
+    expect(parsed.steps).toEqual(before);
+  });
+
   it('第一步的 ~ 按受理时脚下解析并在回执点破;第二步保留到执行时再解析', async () => {
     const bot = combatBot({});
     const { exec, reports } = makeExecutorOn(bot);
@@ -1499,14 +1602,14 @@ describe('第一步的相对锚点入队即冻结', () => {
     const { exec, reports } = makeExecutorOn(bot);
     const wrote = [{ skill: 'goto', at: ['~5', '~', '~-2'] }];
     const receipt = exec.submit(
-      [{ skill: 'goto', at: ['~5', '~', '~-2'], groundY: true } as never],
+      [{ skill: 'goto', at: ['~5', '~', '~-2'], dryRun: true }],
       'replace',
       wrote,
     );
     // `~` 折算排在受理句之前的 ⚠ 段里
     expect(receipt.indexOf('相对锚点已折成绝对坐标')).toBeLessThan(receipt.indexOf('任务#1 收下了'));
     // 缺省填充不说"我按 X 跑"(那读起来像改写了她的话),说"我按 X 理解"
-    expect(receipt).toContain('groundY 你没写,我按 true 理解');
+    expect(receipt).toContain('dryRun 你没写,我按 true 理解');
     await waitUntil(() => reports.length === 1, 5000);
   });
 
@@ -1712,20 +1815,16 @@ describe('Reflexes 受击', () => {
     expect((bot.pf.goal as FakeGoal).z).toBe(0);
   });
 
-  /**
-   * 1.20+ damage_event 自带 source；animation/entity_status 路径的 entityHurt 不带 source，须使用无来源事件的备用判据。
-   */
-  it('entityHurt 不带 source:退回「6 格内最近敌对生物」,反击不哑火', async () => {
+  it('entityHurt 不带 source:附近生物不是确证来源,不打断低血自救任务', async () => {
     const bot = hurtBot(6);
     const { reflexes, reports, preempts } = reflexesOn(bot, false);
     reflexes.start();
     await waitUntil(() => bot.hooked(), 3000);
     bot.hurt(undefined); // 旧协议路径:一个 source 都没有
-    await waitUntil(() => reports.length === 1, 3000);
+    await sleep(300);
     reflexes.stop();
-    expect(reports[0].text).toContain('zombie');
-    expect(reports[0].text).toContain('脱离战斗');
-    expect(preempts[0]).toContain('血量过低');
+    expect(reports).toEqual([]);
+    expect(preempts).toEqual([]);
   });
 
   it('没有 source 且 6 格内没有敌对生物:照旧判环境伤害,不拿远处的乱猜', async () => {
@@ -1738,6 +1837,36 @@ describe('Reflexes 受击', () => {
     await sleep(300);
     reflexes.stop();
     expect(reports.some((r) => r.text.includes('脱离战斗'))).toBe(false);
+  });
+
+  it('没有 source 的远程受击:不把可见远程怪候选说成实际射手', async () => {
+    const bot = hurtBot(18);
+    bot.entities['2'].position = new V(30, 64, 0.5);
+    bot.entities['3'] = { id: 3, name: 'skeleton', type: 'mob',
+      position: new V(13, 64, 0.5), isValid: true };
+    const combatHurt = vi.fn(() => true);
+    const { reflexes } = reflexesOn(bot, true, undefined, combatHurt);
+    reflexes.start();
+    await waitUntil(() => bot.hooked(), 3000);
+    bot.hurt();
+    await sleep(300);
+    reflexes.stop();
+    expect(combatHurt).not.toHaveBeenCalled();
+  });
+
+  it('中毒持续掉血且受击包没有 source:不误把旁边的骷髅当施害者', async () => {
+    const bot = hurtBot(18);
+    bot.entities['3'] = { id: 3, name: 'skeleton', type: 'mob',
+      position: new V(13, 64, 0.5), isValid: true };
+    (bot.entity as typeof bot.entity & { effects: Record<number, unknown> }).effects = { 18: { id: 18 } };
+    const combatHurt = vi.fn(() => true);
+    const { reflexes } = reflexesOn(bot, true, undefined, combatHurt);
+    reflexes.start();
+    await waitUntil(() => bot.hooked(), 3000);
+    bot.hurt();
+    await sleep(300);
+    reflexes.stop();
+    expect(combatHurt).not.toHaveBeenCalled();
   });
 
   it('反击关着且血还够:什么都不做', async () => {
@@ -1782,19 +1911,16 @@ describe('Reflexes 受击', () => {
     expect(seen).toEqual([{ id: 3, name: 'skeleton' }]);
   });
 
-  /**
-   * 有 source 时按 source 判断；animation/entity_status 无 source 时取 6 格内最近敌对生物，玩家不计入。
-   */
-  it('事件没有 source 时退回 6 格内最近敌对生物;玩家不算攻击者', async () => {
+  it('事件没有 source 时保留来源未知,不凭距离制造攻击事实', async () => {
     const bot = hurtBot(18);
     const combatHurt = vi.fn(() => true);
     const { reflexes } = reflexesOn(bot, true, undefined, combatHurt);
     reflexes.start();
     await waitUntil(() => bot.hooked(), 3000);
     bot.hurt();
-    await waitUntil(() => combatHurt.mock.calls.length === 1, 3000);
+    await sleep(300);
     reflexes.stop();
-    expect(combatHurt).toHaveBeenCalledWith(2, 'zombie');
+    expect(combatHurt).not.toHaveBeenCalled();
   });
 
   it('没有 source 且 6 格内只有玩家:仍按环境伤害走,不把人当攻击者', async () => {
@@ -1814,7 +1940,7 @@ describe('Reflexes 受击', () => {
 });
 
 /**
- * 长途 goto 在受理时报告空间代价，不拆分航点或阻止调用。
+ * 长途 goto 在受理时报告空间代价，执行时分段寻找已加载的近路。
  */
 describe('长途 goto 的空间代价', () => {
   it('直线超过 100 格:受理刻就报直线距离与步行时长', () => {
@@ -1829,6 +1955,26 @@ describe('长途 goto 的空间代价', () => {
     const { exec } = makeExecutorOn(combatBot({}));
     expect(exec.submit([{ skill: 'goto', at: [50, 64, 0] }])).not.toContain('步行约');
     exec.clear();
+  });
+
+  it('执行长途时按近段推进，最后才向精确终点寻路', async () => {
+    const bot = combatBot({});
+    const destinations: number[] = [];
+    bot.pathfinder.goto = async (goal: FakeGoal) => {
+      destinations.push(goal.x ?? NaN);
+      bot.entity.position = new V(goal.x ?? bot.entity.position.x, goal.y ?? bot.entity.position.y,
+        goal.z ?? bot.entity.position.z);
+    };
+    const { exec, reports } = makeExecutorOn(bot);
+    exec.submit([{ skill: 'goto', at: [250, 64, 0] }]);
+    await waitUntil(() => reports.length === 1);
+    expect(reports[0].kind).toBe('done');
+    expect(destinations[0]).toBeLessThanOrEqual(50);
+    expect(destinations.at(-1)).toBe(250);
+    expect(destinations.length).toBeGreaterThan(2);
+    for (let i = 1; i < destinations.length - 1; i++) {
+      expect(destinations[i] - destinations[i - 1]).toBeLessThanOrEqual(50);
+    }
   });
 
   it('这一趟里有格子连续挖不动被绕开:受阻回执照实说是哪一格', async () => {
@@ -2116,6 +2262,7 @@ describe('Reflexes 环境伤害', () => {
       entity: { id: 1, position: new V(0.5, 64, 0.5), metadata: [0] },
       entities: {} as Record<string, HurtSource>,
       health: 16,
+      world: { raycast: () => null },
       food: 20,
       inventory: { items: () => [] as never[] },
       equip: async () => {},
@@ -2206,6 +2353,7 @@ describe('use:(item × 目标方块) 效果表', () => {
     for (const n of opts.known ?? []) known[n] = {};
     Object.assign(known, opts.entityDefs ?? {});
     const bot = {
+      _client: Object.assign(new EventEmitter(), { write() {} }),
       world,
       bag,
       activated,
@@ -2281,6 +2429,21 @@ describe('use:(item × 目标方块) 效果表', () => {
     return reports[0];
   }
 
+  function rejectUse(bot: ReturnType<typeof effectBot>, call: SkillCall) {
+    const { exec, reports } = makeExecutorOn(bot);
+    const before = exec.status();
+    const bagBefore = structuredClone(bot.bag);
+    const refusal = exec.submitDetailed([call]);
+    expect(refusal).toMatchObject({ accepted: false, rejection: { rule: 'farm.soil' } });
+    expect(refusal.receipt).toContain('这单未入队');
+    expect(exec.status()).toEqual(before);
+    expect(reports).toEqual([]);
+    expect(bot.activated).toEqual([]);
+    expect(bot.itemActivated).toBe(0);
+    expect(bot.bag).toEqual(bagBefore);
+    return refusal;
+  }
+
   function piglinEntity(id: number, baby = false) {
     return {
       id, name: 'piglin', type: 'mob', position: new V(1.5, 64, 0.5),
@@ -2306,15 +2469,53 @@ describe('use:(item × 目标方块) 效果表', () => {
     expect(r.text).toContain('那一格现在是耕地');
   });
 
+  it.each([64, 65])('上方空气锄地后种植到 y=%s 的同一土格，按服务端更新完成整单', async (seedY) => {
+    const bot = effectBot({
+      cells: { ...FLOOR, '1,64,0': 'grass_block' },
+      bag: [{ name: 'iron_hoe', count: 1 }, { name: 'wheat_seeds', count: 3 }],
+      onUse: (b) => {
+        if (b.heldItem?.name === 'iron_hoe') b.world.set('1,64,0', { name: 'farmland' });
+        if (b.heldItem?.name === 'wheat_seeds') b.world.set('1,65,0', { name: 'wheat', props: { age: '0' } });
+      },
+    });
+    const { exec, reports } = makeExecutorOn(bot);
+    expect(exec.submitDetailed([
+      { skill: 'use', item: 'hoe', at: [1, 65, 0] },
+      { skill: 'use', item: 'wheat_seeds', at: [1, seedY, 0] },
+    ]).accepted).toBe(true);
+    await waitUntil(() => reports.length === 1, 8000);
+    expect(reports[0].kind).toBe('done');
+    expect(bot.world.get('1,64,0')?.name).toBe('farmland');
+    expect(bot.world.get('1,65,0')?.name).toBe('wheat');
+    expect(bot.activated).toEqual(['1,64,0', '1,64,0']);
+  });
+
+  it('同单锄地未生效时，种子重查实际土格且不发送无效种植包', async () => {
+    const bot = effectBot({
+      cells: { ...FLOOR, '1,64,0': 'grass_block' },
+      bag: [{ name: 'iron_hoe', count: 1 }, { name: 'wheat_seeds', count: 3 }],
+    });
+    const { exec, reports } = makeExecutorOn(bot);
+    expect(exec.submitDetailed([
+      { skill: 'use', item: 'hoe', at: [1, 65, 0] },
+      { skill: 'use', item: 'wheat_seeds', at: [1, 64, 0] },
+    ]).accepted).toBe(true);
+    await waitUntil(() => reports.length === 1, 8000);
+    expect(reports[0].kind).toBe('blocked');
+    expect(bot.world.get('1,64,0')?.name).toBe('grass_block');
+    expect(bot.world.has('1,65,0')).toBe(false);
+    expect(bot.activated).toEqual(['1,64,0']);
+  });
+
   // 目标格上方非空气时原版不执行锄地，前置回执须点明遮挡方块。
   it('锄头 + 草方块:头顶压着方块,右键之前就受阻并点名盖子', async () => {
     const bot = effectBot({
       cells: { ...FLOOR, '1,64,0': 'grass_block', '1,65,0': 'stone' },
       bag: [{ name: 'iron_hoe', count: 1 }],
     });
-    const r = await runUse(bot, { skill: 'use', item: 'iron_hoe', at: [1, 64, 0] });
-    expect(r.kind).toBe('blocked');
-    expect(r.text).toContain('(1, 64, 0) 头上盖着石头,锄不动;先把它清掉');
+    const r = rejectUse(bot, { skill: 'use', item: 'iron_hoe', at: [1, 64, 0] });
+    expect(r.receipt).toContain('(1,64,0) 上方 (1,65,0) 是石头');
+    expect(r.receipt).toContain('当前不能锄地');
   });
 
   // 没碰撞箱的照样拦:原版判的是 isAir,矮草/火把/雪都算盖子
@@ -2323,9 +2524,9 @@ describe('use:(item × 目标方块) 效果表', () => {
       cells: { ...FLOOR, '1,64,0': 'grass_block', '1,65,0': 'short_grass' },
       bag: [{ name: 'iron_hoe', count: 1 }],
     });
-    const r = await runUse(bot, { skill: 'use', item: 'iron_hoe', at: [1, 64, 0] });
-    expect(r.kind).toBe('blocked');
-    expect(r.text).toContain('头上盖着');
+    const r = rejectUse(bot, { skill: 'use', item: 'iron_hoe', at: [1, 64, 0] });
+    expect(r.receipt).toContain('(1,64,0) 上方 (1,65,0) 是草');
+    expect(r.receipt).toContain('当前不能锄地');
   });
 
   // 根泥翻成泥土在原版里不看头顶,这一条不能跟着拦
@@ -2388,6 +2589,40 @@ describe('use:(item × 目标方块) 效果表', () => {
     const r = await runUse(bot, { skill: 'use', item: 'wheat_seeds', at: [1, 64, 0] });
     expect(r.kind).toBe('blocked');
     expect(r.text).toContain('要看到的是:(1, 65, 0) 长出小麦');
+  });
+
+  it('种子点普通土格:不发无效右键，也不把库存未变记作成功', async () => {
+    const bot = effectBot({
+      cells: { ...FLOOR, '1,64,0': 'dirt' },
+      bag: [{ name: 'wheat_seeds', count: 3 }],
+    });
+    const r = rejectUse(bot, { skill: 'use', item: 'wheat_seeds', at: [1, 64, 0] });
+    expect(r.receipt).toContain('要对耕地使用');
+  });
+
+  it('关闭受理刻试算后，附近连续三次真实耕种失败仍暂停无效目标并放行耕地', async () => {
+    const bot = effectBot({
+      cells: { ...FLOOR, '1,64,0': 'dirt', '1,64,1': 'grass_block', '1,64,-1': 'stone',
+        '2,64,0': 'dirt', '2,64,1': 'farmland' },
+      bag: [{ name: 'wheat_seeds', count: 5 }, { name: 'iron_hoe', count: 1 }],
+      onUse: (b) => b.world.set('2,65,1', { name: 'wheat', props: { age: '0' } }),
+    });
+    const reports: TaskReport[] = [];
+    const exec = new Executor({ getBot: () => withBotEvents(bot) as never,
+      report: (report) => reports.push(report), log, nextId: nextTaskId(), precheck: () => false });
+    for (const [i, z] of [0, 1, -1].entries()) {
+      expect(exec.submit([{ skill: 'use', item: i === 2 ? 'hoe' : 'wheat_seeds', at: [1, 64, z] }])).toContain('收下了');
+      await waitUntil(() => reports.length === i + 1, 8000);
+      expect(reports.at(-1)?.kind).toBe('blocked');
+    }
+    const refusal = exec.submitDetailed([{ skill: 'use', item: 'wheat_seeds', at: [2, 64, 0] }]);
+    expect(refusal.accepted).toBe(false);
+    expect(refusal.receipt).toContain('连续失败 3 次');
+    expect(refusal.retryAfterMs).toBe(8_000);
+    expect(exec.submit([{ skill: 'use', item: 'wheat_seeds', at: [2, 64, 1] }])).toContain('收下了');
+    await waitUntil(() => reports.length === 4, 8000);
+    expect(reports[3].kind).toBe('done');
+    expect(bot.activated).toHaveLength(1);
   });
 
   it('空桶 + 水:走「使用物品」,读包里多没多出一个水桶', async () => {
@@ -2545,6 +2780,27 @@ describe('use:(item × 目标方块) 效果表', () => {
     expect(r.text).toContain('没躺下(现在 dayTime 6000)');
     // 没接 set_spawn 的场子一个字不加:不无中生有
     expect(r.text).not.toContain('重生点');
+  });
+
+  it('床:服务端动作栏拒绝理由进入受阻回执', async () => {
+    let feedbackAt = 0;
+    const bot = effectBot({
+      cells: { ...FLOOR, '1,64,0': 'red_bed' },
+      onUse: () => { feedbackAt = Date.now(); },
+    });
+    const reports: TaskReport[] = [];
+    const exec = new Executor({
+      getBot: () => bot as never,
+      report: (r) => reports.push(r),
+      log,
+      nextId: nextTaskId(),
+      serverFeedbackSince: (startedAt) => feedbackAt >= startedAt
+        ? 'You may not rest now; the bed is too far away' : null,
+    });
+    exec.submit([{ skill: 'use', at: [1, 64, 0] }]);
+    await waitUntil(() => reports.length === 1, 8000);
+    expect(reports[0].kind).toBe('blocked');
+    expect(reports[0].text).toContain('服务端提示:You may not rest now; the bed is too far away');
   });
 
   /**
@@ -2843,14 +3099,22 @@ describe('use:(item × 目标方块) 效果表', () => {
     expect(off[0].data).toEqual({ item: null, target: 'stone_button' });
   });
 
-  it('锄头 + 石头:表里没这一对,不判成受阻', async () => {
+  it('锄头 + 非土方块:不发无效右键，也不记为完成', async () => {
     const bot = effectBot({
       cells: { ...FLOOR, '1,64,0': 'stone' },
       bag: [{ name: 'iron_hoe', count: 1 }],
     });
-    const r = await runUse(bot, { skill: 'use', item: 'iron_hoe', at: [1, 64, 0] });
-    expect(r.kind).toBe('done');
-    expect(r.text).toContain('右键了 (1, 64, 0) 的石头');
+    const r = rejectUse(bot, { skill: 'use', item: 'iron_hoe', at: [1, 64, 0] });
+    expect(r.receipt).toContain('不是锄头能翻的土格');
+  });
+
+  it('锄头点到草植株且 times=16:第一下之前就受阻', async () => {
+    const bot = effectBot({
+      cells: { ...FLOOR, '1,64,0': 'grass_block', '1,65,0': 'grass' },
+      bag: [{ name: 'wooden_hoe', count: 1 }],
+    });
+    const r = rejectUse(bot, { skill: 'use', item: 'wooden_hoe', at: [1, 65, 0], times: 16 });
+    expect(r.receipt).toContain('不是锄头能翻的土格');
   });
 
   // 唱片机、篝火、贴面与告示牌写字
@@ -2985,7 +3249,7 @@ describe('use:(item × 目标方块) 效果表', () => {
       bag: [{ name: 'blue_dye', count: 1 }],
       hold: 'blue_dye',
     });
-    const r = await runUse(bot, { skill: 'use', at: [1, 64, 0], text: '喂' });
+    const r = await runUse(bot, { skill: 'use', item: 'blue_dye', at: [1, 64, 0], text: '喂' });
     expect(r.kind).toBe('blocked');
     expect(r.text).toContain('equip');
   });
@@ -3038,7 +3302,7 @@ describe('use:(item × 目标方块) 效果表', () => {
   });
 
   // 骨头消耗与驯服成功不是同一判据；驯服具有随机性，回执同时报告当前主人状态。
-  it('骨头 + 狼:没驯上不算失败,回执说清它还没有主人以及这事是随机的', async () => {
+  it('骨头 + 狼:未读到主人或驯服位时只报已知事实', async () => {
     const bot = effectBot({
       cells: { ...FLOOR },
       bag: [{ name: 'bone', count: 4 }],
@@ -3047,8 +3311,9 @@ describe('use:(item × 目标方块) 效果表', () => {
     });
     const r = await runUse(bot, { skill: 'use', item: 'bone', target: 'wolf' });
     expect(r.kind).toBe('done');
-    expect(r.text).toContain('还没有主人');
-    expect(r.text).toContain('随机');
+    expect(r.text).not.toContain('还没有主人');
+    expect(r.text).not.toContain('每次都会');
+    expect(r.text).toContain('库存变化');
   });
 
   it('骨头 + 狼:驯上了就说它认你当主人了', async () => {
@@ -3061,11 +3326,10 @@ describe('use:(item × 目标方块) 效果表', () => {
       onUse: () => { wolf.metadata[WOLF_KEYS.indexOf('owneruuid')] = 'me-uuid'; },
     });
     const r = await runUse(bot, { skill: 'use', item: 'bone', target: 'wolf' });
-    expect(r.text).toContain('认你当主人');
+    expect(r.text).toMatch(/你|自己|本人/);
   });
 
-  // 原版喂不进去就不消耗 —— 这条规则本身要写进回执,她才判得了"要不要再喂一次"
-  it('小麦 + 牛:附上"喂不进去就不消耗"这条规则', async () => {
+  it('小麦 + 牛:库存与生长、繁殖结果分开报告', async () => {
     const bot = effectBot({
       cells: { ...FLOOR },
       bag: [{ name: 'wheat', count: 8 }],
@@ -3074,7 +3338,8 @@ describe('use:(item × 目标方块) 效果表', () => {
     });
     const r = await runUse(bot, { skill: 'use', item: 'wheat', target: 'cow' });
     expect(r.kind).toBe('done');
-    expect(r.text).toContain('不会消耗');
+    expect(r.text).toContain('库存变化');
+    expect(r.text).toContain('后续观察');
   });
 
   /**
@@ -3210,6 +3475,26 @@ describe('use target=villager:菜单只看不买,带 index 成交并按差分报
     rig.bot._client.emit('trade_list', {});
     await sleep(300);
   }, 20000);
+
+  it('服务端打开自定义村民菜单时给出窗口事实并清理报价监听', async () => {
+    const rig = tradeRig({ trades: [T()] });
+    const menu = { type: 'minecraft:generic_9x3', title: '{"text":"千灯纪商店"}' };
+    (rig.bot as unknown as { currentWindow: typeof menu }).currentWindow = menu;
+    rig.bot.openVillager = async () => {
+      rig.bot._client.on('trade_list', async () => {});
+      throw new Error('Expected minecraft:villager or minecraft:mechant type, but got minecraft:generic_9x3');
+    };
+    const { exec, reports } = makeExecutorOn(rig.bot);
+    exec.submit([{ skill: 'use', target: 'villager' }]);
+    await waitUntil(() => reports.length === 1);
+    expect(reports[0].kind).toBe('blocked');
+    expect(reports[0].text).toContain('千灯纪商店');
+    expect(reports[0].text).toContain('不是原版村民报价窗口');
+    expect(reports[0].text).not.toContain('技能内部错误');
+    expect(rig.closedOf()).toBe(1);
+    expect(rig.tradeListeners()).toBe(0);
+    expect(rig.villager.entityType).toBe(77);
+  });
 
   it('无 index:报价菜单原样报出,关窗不成交;借道的 entityType 用后还原', async () => {
     const rig = tradeRig({

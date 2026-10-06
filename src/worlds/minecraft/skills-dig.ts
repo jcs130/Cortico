@@ -20,7 +20,7 @@ import { worksNote } from './works.ts';
 import { zhName } from './names.ts';
 import { invCount, invSnapshot, lootNote } from './inventory.ts';
 import { rasterize, type Cell } from './geometry.ts';
-import { digBlock, gotoGoal, settleOnGround } from './travel.ts';
+import { breakPermissionNote, digBlock, gotoGoal, settleOnGround } from './travel.ts';
 import { LEDGER_GUARD_BLOCKS, ledgerBlockFact } from './placed-ledger.ts';
 import { CONTAINER_FIND, FURNACE_KINDS } from './chests.ts';
 import { chooseTool, equipToolFor, miningToolPlan, nearBreak } from './tools.ts';
@@ -28,12 +28,24 @@ import { UNTIL_DIG_RADIUS, type UntilHit, untilBlockIds, untilHit, untilUnknownN
 
 const { goals } = pathfinderPkg;
 
+function firstProtectedBreak(bot: Bot, cells: readonly Cell[]): string | null {
+  for (const cell of cells) {
+    const block = blockAtCell(bot, cell);
+    if (!block || AIR_NAMES.has(block.name) || LIQUIDS.has(block.name)) continue;
+    const note = breakPermissionNote(bot, block);
+    if (note) return note;
+  }
+  return null;
+}
+
 /** 按形状清空间:自上而下、近的先;液体不按方块挖。 */
 export async function skillExcavate(bot: Bot, call: Extract<SkillCall, { skill: 'excavate' }>, ctx: SkillContext): Promise<string> {
   const cells = shapeCells(bot, call.shape, call.anchors, call.fill, EXCAVATE_CELL_CAP);
   if (call.dryRun) {
     const reading = readRegion(bot, cells);
     const lines = [`试算${SHAPE_ZH[call.shape]}(共 ${cells.length} 格): ${compositionText(reading)}。`];
+    const permission = firstProtectedBreak(bot, cells);
+    if (permission) lines.push(`${permission}。`);
     const noDrop = noDropMaterials(bot, reading);
     if (noDrop.length > 0) lines.push(`现在的家伙挖 ${noDrop.join('、')} 不掉东西,挖碎就没了。`);
     lines.push(...miningToolPlanNotes(bot, reading, ctx, call.tool));
@@ -54,6 +66,8 @@ export async function skillExcavate(bot: Bot, call: Extract<SkillCall, { skill: 
     })
     .sort((a, b) => b.y - a.y
       || (Math.hypot(a.x - me.x, a.z - me.z) - Math.hypot(b.x - me.x, b.z - me.z)));
+  const permission = firstProtectedBreak(bot, targets);
+  if (permission) throw new SkillBlocked(permission);
   if (targets.length === 0) {
     // 液体不是挖掘目标；整片只有液体时必须明确受阻，不能报已经清空。
     const reading = readRegion(bot, cells);
@@ -106,7 +120,7 @@ export async function skillExcavate(bot: Bot, call: Extract<SkillCall, { skill: 
   // 这一片里的格子火把一律不贴:还没挖的贴上去回头连火把一起挖掉,已经挖空的那些
   // 本来就该空着,贴进去等于自己给自己造障碍
   const inRegion = new Set(targets.map(cellKeyOf));
-  for (const c of targets) {
+  for (const [index, c] of targets.entries()) {
     checkAbort(ctx);
     await settleOnGround(bot, ctx, 1_500);
     let b = blockAtCell(bot, c);
@@ -152,12 +166,19 @@ export async function skillExcavate(bot: Bot, call: Extract<SkillCall, { skill: 
       noDrop++;
       noDropSample = b.name;
     }
+    checkAbort(ctx);
     await digBlock(bot, b, ctx);
     // 挖掉了就从登记上划掉:留着它下一趟会拿一格空气冒充她的成果
     ctx.works?.forget(dimensionOf(bot), c.x, c.y, c.z);
     dug++;
     ctx.progress?.(dug, targets.length);
     await keep.light((cc) => inRegion.has(cellKeyOf(cc)));
+    if (index + 1 < targets.length) {
+      await ctx.checkpoint?.(async () => {
+        await sweepDrops(bot, { ...ctx, checkpoint: undefined });
+        await settleOnGround(bot, ctx, 1_500);
+      });
+    }
   }
   // 收尾走一趟掉落物:挖是站在坑外挖的,东西落进坑里没人捡。不扫的话 5×5×5 那种体量
   // 只有七成进包 —— 挖掉了不等于到手,而回执报的是到手那个数。
@@ -354,6 +375,8 @@ export async function skillTunnel(bot: Bot, call: Extract<SkillCall, { skill: 't
         `绕 (${Math.min(...xs)}..${Math.max(...xs)}, ${Math.min(...zs)}..${Math.max(...zs)}) 的 2×2 井筒转,` +
         `要挖 ${carve.length} 格)` +
         `: ${compositionText(reading)}。`];
+      const permission = firstProtectedBreak(bot, carve);
+      if (permission) lines.push(`${permission}。`);
       const noDrop = noDropMaterials(bot, reading);
       if (noDrop.length > 0) lines.push(`现在的家伙挖 ${noDrop.join('、')} 不掉东西。`);
       lines.push(...miningToolPlanNotes(bot, reading, ctx, call.tool));
@@ -369,12 +392,14 @@ export async function skillTunnel(bot: Bot, call: Extract<SkillCall, { skill: 't
       ? `试算${kind}(${planned} 格,要挖 ${carve.length} 格)`
       : `试算通道(${planned} 步,连头顶共 ${carve.length} 格)`;
     const lines = [`${head}: ${compositionText(reading)}。`];
+    const permission = firstProtectedBreak(bot, carve);
+    if (permission) lines.push(`${permission}。`);
     if (rise > 0 && vertical) {
-      const stock = permittedStockFor(bot, scaffoldNames(ctx), '垫脚', ctx, true);
+      const stock = permittedStockFor(bot, scaffoldNames(ctx, bot), '垫脚', ctx, true);
       if ('why' in stock) {
         lines.push(`要垫 ${planned} 格,${stock.why}。`);
       } else {
-        stock.permit.finish(false);
+        await stock.permit.finish(false);
         lines.push(`要垫 ${planned} 格,包里有 ${invCount(bot, (n) => n === stock.item.name)} 个${zhName(stock.item.name)}。`);
       }
     }
@@ -393,6 +418,8 @@ export async function skillTunnel(bot: Bot, call: Extract<SkillCall, { skill: 't
   const digCell = async (c: Cell): Promise<void> => {
     const b = blockAtCell(bot, c);
     if (!b || b.boundingBox !== 'block') return;
+    const permission = breakPermissionNote(bot, b);
+    if (permission) stop(permission);
     // 挖开前检查六个正邻格的岩浆，覆盖侧面和后方。
     if (nearLavaAt(bot, c)) stop(`(${c.x}, ${c.y}, ${c.z}) 紧贴着岩浆,不敢挖,停在这。`);
     await equipToolFor(bot, b, ctx, miningToolPlan(call.tool));
@@ -417,8 +444,8 @@ export async function skillTunnel(bot: Bot, call: Extract<SkillCall, { skill: 't
   const arrive = !vertical ? '挖通' : rise > 0 ? '到顶' : '到底';
   const through = (): string => `${facts().join(';')}。${arrive}了`;
   /**
-   * 早停名单:每挖完一格看一眼周身。命中是**正常收束**不是受阻 —— 她要的就是
-   * 「往下挖到碰见铁矿为止」,碰见了这一单就做完了(终点判据随之作废,见 deriveExpect)。
+   * 早停名单:每挖完一格看一眼周身。只有目标已经露出、与 collect 的可见性
+   * 判据一致时才收束；区块索引能查到的埋藏矿石不能当成已经碰到。
    */
   const stop2 = call.until && call.until.length > 0 ? untilBlockIds(bot, call.until) : null;
   const stopNote = stop2 ? untilUnknownNote(stop2.unknown) : '';
@@ -426,7 +453,7 @@ export async function skillTunnel(bot: Bot, call: Extract<SkillCall, { skill: 't
     `${facts().join(';')}。在 (${h.x}, ${h.y}, ${h.z}) 碰到了${h.what},停在这` +
     `(没${arrive},until 说到这儿为止)${stopNote}`;
   const early = (): UntilHit | null =>
-    (stop2 ? untilHit(bot, stop2.ids, UNTIL_DIG_RADIUS, false) : null);
+    (stop2 ? untilHit(bot, stop2.ids, UNTIL_DIG_RADIUS) : null);
   /** 未到终点即受阻，分别报告实际挖掘位置、垫脚量和停止原因。 */
   const stop = (why: string): never => {
     throw new SkillBlocked(`${kind}没${arrive}:${why}`, facts());
@@ -468,10 +495,12 @@ export async function skillTunnel(bot: Bot, call: Extract<SkillCall, { skill: 't
         const guard = ledgerBlockFact(bot, ctx, cc);
         if (guard) return stop(`挖到${guard}跟前,里头的东西不能跟着挖没,停在这。`);
       }
+      const permission = firstProtectedBreak(bot, carve);
+      if (permission) return stop(permission);
       const under = { x: next.x, y: next.y - 1, z: next.z };
       const below = blockAtCell(bot, under);
       if (!below) return stop(`落脚 (${under.x}, ${under.y}, ${under.z}) 的区块还没加载出来。`);
-      if (LIQUIDS.has(below.name)) return stop(`下一级台阶底下就是${zhName(below.name)},停在这。`);
+      if (LIQUIDS.has(below.name)) return stop(`下一级台阶底下 (${under.x}, ${under.y}, ${under.z}) 碰上${zhName(below.name)},停在这。`);
       if (below.boundingBox !== 'block' && !(await keep.footing(under))) {
         // 螺旋垫的是井筒里侧邻格,要一个贴得住的参照面;塔垫的是自己脚下那一格
         // (跳起来放,参照是脚底那一块),悬空里上行只有塔走得通
@@ -524,11 +553,13 @@ export async function skillTunnel(bot: Bot, call: Extract<SkillCall, { skill: 't
         const guard = ledgerBlockFact(bot, ctx, cc);
         if (guard) return stop(`挖到${guard}跟前,里头的东西不能跟着挖没,停在这。`);
       }
+      const permission = firstProtectedBreak(bot, carve);
+      if (permission) return stop(permission);
       if (!up) {
         const under = { x: next.x, y: next.y - 1, z: next.z };
         const below = blockAtCell(bot, under);
         if (!below) return stop(`再往下 (${under.x}, ${under.y}, ${under.z}) 的区块还没加载出来。`);
-        if (LIQUIDS.has(below.name)) return stop(`再往下就是${zhName(below.name)},停在这。`);
+        if (LIQUIDS.has(below.name)) return stop(`再往下 (${under.x}, ${under.y}, ${under.z}) 碰上${zhName(below.name)},停在这。`);
         if (below.boundingBox !== 'block' && !(await keep.footing(under))) {
           return stop(`挖开 (${next.x}, ${next.y}, ${next.z}) 下面就是空的,垫也没垫上(${keep.why('footing')}),再挖就是往下掉。`);
         }
@@ -591,6 +622,8 @@ export async function skillTunnel(bot: Bot, call: Extract<SkillCall, { skill: 't
       const guard = ledgerBlockFact(bot, ctx, cc);
       if (guard) return stop(`挖到${guard}跟前,里头的东西不能跟着挖没,停在这。`);
     }
+    const permission = firstProtectedBreak(bot, carve);
+    if (permission) return stop(permission);
     for (const cc of carve) await digCell(cc);
     try {
       await gotoGoal(bot, new goals.GoalBlock(next.x, next.y, next.z), ctx);

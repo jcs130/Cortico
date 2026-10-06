@@ -71,9 +71,10 @@ interface Rig {
  * 两个 World 提供不同工具，用于检查工具归属。
  * Persona 钩子不注入文本，因此 FakeLLM 调用仅来自 fork。
  */
-async function rig(cognition?: PersonaCognition): Promise<Rig> {
+async function rig(cognition?: PersonaCognition, acceptsImages = false): Promise<Rig> {
   const tmp = makeTmpDir();
   const config = makeCfg();
+  config.providers[config.activeProvider].multimodal = acceptsImages;
   config.worlds.qq.enabled = false;
   const loaded = makeLoaded({
     config,
@@ -173,6 +174,33 @@ describe('认知外包 · 注入与开关', () => {
     const out = await live.host().cognition!.request({ brief: '   ' });
     expect(out).toHaveProperty('error');
     expect(called).toBe(0);
+  });
+
+  it('任务附件落库后以句柄交给 Persona，任务提示保留且不携带原始字节', async () => {
+    let seen: { req: CognitionRequest; ctx: CognitionContext } | undefined;
+    live = await rig({ request: async (req, ctx) => { seen = { req, ctx }; return { text: '观察完成' }; } }, true);
+    const bytes = new Uint8Array([137, 80, 78, 71]);
+    const result = await live.host().cognition!.request({ brief: '查看当前入口',
+      blobs: [{ bytes, mime: 'image/png', name: 'scene.png', fallbackText: '当前入口画面' }],
+      hint: { context: 'task', rounds: 1 } });
+    expect(result).toEqual({ text: '观察完成' });
+    expect(seen?.req.blobs).toBeUndefined();
+    expect(seen?.req.hint).toEqual({ context: 'task', rounds: 1 });
+    expect(seen?.ctx.blobs).toEqual([{ handle: expect.stringMatching(/^log:/),
+      mime: 'image/png', name: 'scene.png', fallbackText: '当前入口画面' }]);
+    expect(live.core.resolveBlob(seen!.ctx.blobs![0].handle)?.bytes).toEqual(Buffer.from(bytes));
+    expect(live.core.cognitionInFlight()).toEqual({});
+  });
+
+  it('模型不接受本次附件时返回明确错误，不把缺图的判断交给 Persona', async () => {
+    let called = false;
+    live = await rig({ request: async () => { called = true; return { text: '不应产生视觉结论' }; } });
+    const result = await live.host().cognition!.request({ brief: '查看画面',
+      blobs: [{ bytes: new Uint8Array([137, 80, 78, 71]), mime: 'image/png', fallbackText: '当前画面' }],
+      hint: { context: 'task' } });
+    expect(result).toEqual({ error: '当前模型通道不支持本次附件格式：image/png' });
+    expect(called).toBe(false);
+    expect(live.core.cognitionInFlight()).toEqual({});
   });
 
   it("Persona 抛错时返回错误给 World", async () => {

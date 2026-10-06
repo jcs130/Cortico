@@ -230,6 +230,8 @@ export interface ToolOutcome {
   blobs?: BlobInput[];
   /** 执行失败；工具调用记录据此标记 failed。 */
   failed?: true;
+  /** 本次工具结果足以结束当前唤醒；下一批事件可重新唤醒。 */
+  endsTurn?: true;
 }
 
 /** handler 异常由 Core 转为失败回执。 */
@@ -423,8 +425,24 @@ export interface OutputTap {
 }
 
 export interface ForkOptions {
-  /** 已声明的 session id；默认工具和轮数上限来自该声明，模型来自当前 provider。 */
+  /** 已声明的 session id；默认工具和轮数上限来自该声明。 */
   id: string;
+  /** 已注册的 provider 名称；缺省使用当前 provider，创建时绑定其端点与模型配置。 */
+  provider?: string;
+  /** 可选：覆盖 fork 模型（缺省=当前 provider 模型）。梦整理等巨上下文支路路由 bulk 慢速道用。 */
+  model?: string;
+  /** 单次模型输出上限；只作用于这条 fork。 */
+  maxOutputTokens?: number;
+  /** 取消模型请求并阻止后续工具及轮次；正在执行的工具完成后检查。 */
+  signal?: AbortSignal;
+  /** Background generations yield to foreground batches sharing this provider instance; model aliases share the same resource. */
+  generationPriority?: 'background';
+  /** Maximum wait for a shared provider to become idle, in milliseconds; defaults to 60 seconds per wait. */
+  generationWaitTimeoutMs?: number;
+  /** Request-only projection of the settled round context; invalid records or tool pairing use the complete context. */
+  prepareRequest?: (ctx: { round: number; messages: readonly ContextRecord[] }) => ContextRecord[] | null | undefined;
+  /** 达到输出上限却没有工具调用时，追加这一条继续提示。 */
+  incompleteHint?: string;
   /** 完整的初始上下文，由 Persona 构造。 */
   messages: ContextRecord[];
   tools?: ToolDef[];
@@ -577,12 +595,14 @@ export interface PushOptions {
 
 /**
  * World 向 Persona 请求认知任务。World 提供任务说明和本 World 的工具名；
- * Persona 决定上下文、轮数、token 预算、超时及是否受理，模型配置来自当前 provider。
+ * Persona 决定上下文、轮数、token 预算、超时、provider 及是否受理；模型配置归 provider。
  * Core 校验请求工具、转交请求方身份并统计并发数。World 自带模型的调用不经过此接口。
  */
 export interface CognitionRequest {
   /** 任务说明；不指定身份、模型或执行预算。 */
   brief: string;
+  /** 本次任务的附件；Core 落库后通过 CognitionContext.blobs 交给 Persona。 */
+  blobs?: BlobInput[];
   /**
    * 仅可引用请求方 World.tools() 中的工具；越界请求以 error 返回，不交给 Persona。
    * 缺省为空；Persona 仍可自行提供 Memory 等自有工具。
@@ -590,6 +610,10 @@ export interface CognitionRequest {
   tools?: string[];
   /** 供 Persona 参考的任务规模；不强制执行。 */
   hint?: {
+    /** World 声明的任务类别；Persona 可据此选择认知通道，Core 只转交。 */
+    kind?: string;
+    /** task 建议仅读取本次任务；是否采用及常驻指引由 Persona 决定。 */
+    context?: 'task';
     /** 建议的工具循环轮数。 */
     rounds?: number;
   };
@@ -607,6 +631,8 @@ export interface CognitionHost {
 /** Core 提供的请求方身份、已校验工具和并发数。 */
 export interface CognitionContext {
   worldId: string;
+  /** 已落库的本次附件，不包含原始字节。 */
+  blobs?: readonly BlobRef[];
   /** req.tools 对应的已校验定义；未指定工具时为空。 */
   tools: ToolDef[];
   /** 该 World 的在途请求数，包含本次请求；并发限制由 Persona 决定。 */
@@ -819,6 +845,12 @@ export interface ShutdownExternalCheck {
   manualAction: string;
 }
 
+/** 已观察的完整读数及其可替代的增量事件类型；正文包含观察时间。 */
+export interface WorldRequestFacts {
+  text: string;
+  snapshotTypes: readonly string[];
+}
+
 /** World 的环境描述、事件和工具契约。 */
 export interface World {
   id: string;
@@ -828,6 +860,10 @@ export interface World {
    * 每次前缀重建（包括上下文交接）时重新调用。
    */
   envPromptVars(): Record<string, string> | null | Promise<Record<string, string> | null>;
+  /** Short, read-only external facts for context summaries; null when no fact is verified. Include evidence time when it matters. */
+  verifiedFacts?(): string | null | Promise<string | null>;
+  /** 同步读取已缓存的完整状态，不扫描环境或等待网络；未有读数时返回 null。 */
+  requestFacts?(): WorldRequestFacts | null;
   /** 工具定义和用法由 World 提供；使用时机与跨工具指导写入环境提示词。 */
   tools(): ToolDef[];
   /**
@@ -917,6 +953,12 @@ export interface Persona {
    */
   onDelivery?(ctx: { events: EventEnvelope[] }): void | Promise<void>;
   /**
+   * 工具 handler 正常返回结果（包括失败回执）并记录后同步调用，主会话与 fork 均提供发起的 role。
+   * 返回非空文本时追加到原回执正文；不改 failed/endsTurn/附件或工具日志。
+   * 钩子不得等待网络；异常只记告警，原回执照常保存。
+   */
+  onToolOutcome?(ctx: { role: string; tool: string; args: Readonly<Record<string, unknown>>; outcome: Readonly<ToolOutcome> }): string | null | undefined;
+  /**
    * 一批事件处理结束时调用；Persona 可查询 sessionInfo 并决定是否请求交接。
    * Core 在超过 hardTokens 时强制交接。
    */
@@ -940,6 +982,12 @@ export interface Persona {
    * 计入 hardTokens。内容只应随 Persona 自己的输入变化;每次不同就每次打穿前缀缓存。
    */
   sessionHead?(): Item[];
+  /**
+   * 同步选择本轮模型请求的上下文；messages 是完整请求视图的独立副本。
+   * 返回 null/undefined 使用完整视图。返回记录只用于本轮请求，Core 修复工具配对；
+   * session、事件投递水位、交接和 fork 快照保持完整。钩子不得等待网络。
+   */
+  prepareRequest?(ctx: { sessionId: string; round: number; messages: readonly ContextRecord[] }): ContextRecord[] | null | undefined;
   /** Memory 实例。Core 不读它的内容;bot 没给 memoryName 时控制台以它的类名作 Memory 页标题。 */
   memory?: object;
   /** Memory 目录的绝对路径。 */
@@ -1031,6 +1079,8 @@ export interface LogRecord extends LogAnchorFields {
   run: string;
   /** 当前日志流内递增的序号。 */
   seq: number;
+  /** 产生日志的进程 ID；子进程经 IPC 保留原 PID。 */
+  pid?: number;
   level: LogLevel;
   /** 子系统路径。 */
   area: string;
@@ -1043,6 +1093,8 @@ export interface LogRecord extends LogAnchorFields {
   repeat?: number;
   data?: unknown;
   err?: LogError;
+  /** 主动异常触发；会留下可回放的上下文快照。 */
+  incident?: boolean;
 }
 
 /** 写入日志的条目；sink 分配 ts/run/seq，子进程可提供自身时间戳和关联字段。 */
@@ -1055,6 +1107,8 @@ export interface LogInput extends LogAnchorFields {
   data?: unknown;
   err?: unknown;
   ts?: string;
+  incident?: boolean;
+  pid?: number;
 }
 
 export interface LogEmitOptions extends LogAnchorFields {
@@ -1063,6 +1117,8 @@ export interface LogEmitOptions extends LogAnchorFields {
   data?: unknown;
   err?: unknown;
   ts?: string;
+  incident?: boolean;
+  pid?: number;
 }
 
 export interface Logger {

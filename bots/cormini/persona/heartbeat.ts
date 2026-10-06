@@ -26,6 +26,7 @@ export class Heartbeat {
   noteActivity(): void {
     this.lastActivity = Date.now();
     this.idleTicks = 0;
+    if (this.running) this.armNext();
   }
 
   quietSeconds(): number {

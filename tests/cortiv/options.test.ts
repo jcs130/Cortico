@@ -143,12 +143,29 @@ describe('CortiV 实时参数化', () => {
     p.onDelivery({
       events: [{ cursor: 1, type: 't', ts: '', source: 's', origin: 'external', text: 'a' }],
     });
-    await vi.advanceTimersByTimeAsync(40);
+    await vi.advanceTimersByTimeAsync(29);
+    expect(fires).toBe(2);
+    await vi.advanceTimersByTimeAsync(1);
     expect(fires).toBe(3);
     await vi.advanceTimersByTimeAsync(29);
     expect(fires).toBe(3);
     await vi.advanceTimersByTimeAsync(1);
     expect(fires).toBe(4);
+    p.stopRhythm();
+  });
+
+  it('外部事件重计静默时间，活动期间不额外唤醒', async () => {
+    vi.useFakeTimers();
+    let fires = 0;
+    const p = new Cormini({ memoryDir: dir, tickDelayMs: () => 30 });
+    p.attach(makeFakeHarnessApi({ injectDeferred: () => { fires++; } }));
+    p.startRhythm();
+    await vi.advanceTimersByTimeAsync(20);
+    p.onDelivery({ events: [{ cursor: 1, type: 't', ts: '', source: 's', origin: 'external', text: 'a' }] });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(fires).toBe(0);
+    await vi.advanceTimersByTimeAsync(20);
+    expect(fires).toBe(1);
     p.stopRhythm();
   });
 

@@ -223,6 +223,7 @@ describe('runEscape', () => {
     dimension?: string;
     moveDimension?: string;
     consoleOk?: boolean;
+    playerCommand?: string;
   } = {}) {
     const pos = { ...(over.pos ?? { x: 100, y: 12, z: -30 }) };
     const bot = {
@@ -247,6 +248,7 @@ describe('runEscape', () => {
         return over.consoleOk === true;
       },
       chat: (text) => { chats.push(text); },
+      playerCommand: over.playerCommand,
       hold: (ms) => { held = ms; },
       waitMove: async () => {
         if (over.moveTo) Object.assign(pos, over.moveTo);
@@ -410,6 +412,24 @@ describe('runEscape', () => {
     expect(r.consoles[0]).toBe('execute in minecraft:overworld run tp corti 20.5 70 4.5');
     expect(r.chats).toEqual([]);
     expect(r.held).toBeGreaterThan(0);
+  });
+
+  it('远程服用普通玩家指令脱困，按实际位移核验且不尝试管理员传送', async () => {
+    const r = rig({ playerCommand: '/mycli goto arena', moveTo: { x: -590, y: 91, z: -322 } });
+    const out = await r.p;
+    expect(r.chats).toEqual(['/mycli goto arena']);
+    expect(r.consoles).toEqual([]);
+    expect(out).toContain('已通过玩家指令脱困');
+    expect(out).toContain('(-590, 91, -322)');
+  });
+
+  it('远程服玩家指令未使位置改变时不谎报成功，也不退回管理员传送', async () => {
+    const r = rig({ playerCommand: '/mycli goto arena' });
+    const out = await r.p;
+    expect(r.chats).toEqual(['/mycli goto arena']);
+    expect(r.consoles).toEqual([]);
+    expect(out).toContain('位置未确认改变');
+    expect(out).not.toContain('已通过玩家指令脱困');
   });
 
   /**

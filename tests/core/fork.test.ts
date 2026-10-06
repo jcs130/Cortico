@@ -2,9 +2,13 @@ import { FixtureClient } from './fixture-protocol.ts';
 /** runForkLoop 的软提醒与硬轮数上限。 */
 import { describe, expect, it } from 'vitest';
 import { runForkLoop } from "./fixture-fork.ts";
+import { runForkLoop as runNativeForkLoop } from '../../src/core/fork.ts';
+import { createResponse } from '../../src/protocol/open-responses/index.ts';
+import { message } from '../../src/protocol/open-responses/context.ts';
 import { nullLogger } from '../../src/core/util.ts';
 import type { ChatMessage, LLMChatOptions, LLMResult } from './fixture-types.ts';
 import type { ModelSpec, ToolDef, ToolSchema } from '../../src/core/types.ts';
+import type { ResponseClient } from '../../src/core/generation.ts';
 
 const SPEC: ModelSpec = { model: 'test', thinking: false };
 
@@ -45,6 +49,35 @@ function toolTexts(seen: ChatMessage[][]): string[] {
 }
 
 describe('runForkLoop 回合契约', () => {
+  it('输出上限截在推理阶段时继续下一轮，直到拿到完成响应', async () => {
+    const requests: string[] = [];
+    const llm: ResponseClient = {
+      respond: async (request) => {
+        requests.push(JSON.stringify(request.input));
+        const response = createResponse(`r${requests.length}`, request);
+        response.status = requests.length === 1 ? 'incomplete' : 'completed';
+        if (requests.length === 2) {
+          response.output = [{
+            type: 'message', id: 'answer', status: 'completed', role: 'assistant',
+            content: [{ type: 'output_text', text: '整理完了', annotations: [] }],
+          }];
+        }
+        return {
+          response,
+          origin: { instance: 'fixture', module: 'fixture', model: 'test', compatibilityDomain: 'fixture' },
+          attempts: [],
+        };
+      },
+    };
+    const out = await runNativeForkLoop({
+      id: 'dream', llm, spec: SPEC, messages: [message('user', '开始')],
+      tools: [], maxRounds: 3, incompleteHint: '先写笔记', log: nullLogger(),
+    });
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toContain('先写笔记');
+    expect(out).toBe('整理完了');
+  });
+
   it("收尾提醒出现在声明的 soft 轮", async () => {
     const llm = new ScriptedLLM(10);
     await runForkLoop({

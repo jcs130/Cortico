@@ -25,6 +25,41 @@ export function dropHeadMark(m: NativeChatMessage): NativeChatMessage {
 export interface CompatMediaOptions {
   enabled: () => boolean;
   read: (ref: string) => Buffer | null;
+  /** Unset = unlimited; configured budgets select newest unique handles at their last occurrence. */
+  maxContextImages?: number;
+  /** Inline preserves source placement; tail keeps rolling image selection after text history. */
+  imageReplayPlacement?: 'inline' | 'tail';
+  /** History replays old pictures; fresh sends only images following the latest model output. */
+  imageReplayScope?: 'history' | 'fresh';
+}
+
+/**
+ * Select saved images before reading bytes. Unset preserves all occurrences; a configured budget
+ * retains at most N distinct handles, only at their last occurrence, in chronological order.
+ * Missing retained bytes do not cause older pictures to be read as replacements.
+ */
+export function selectContextImageGroups<T extends { handle: string }>(
+  groups: readonly (readonly T[])[], maxContextImages?: number,
+): T[][] {
+  if (maxContextImages === undefined) return groups.map(group => [...group]);
+  if (!Number.isSafeInteger(maxContextImages) || maxContextImages < 0)
+    throw new RangeError('maxContextImages must be a non-negative safe integer');
+  const selected = groups.map(() => new Set<number>());
+  const handles = new Set<string>();
+  for (let group = groups.length - 1; group >= 0 && handles.size < maxContextImages; group--) {
+    for (let index = groups[group].length - 1; index >= 0 && handles.size < maxContextImages; index--) {
+      const handle = groups[group][index].handle;
+      if (handles.has(handle)) continue;
+      handles.add(handle);
+      selected[group].add(index);
+    }
+  }
+  return groups.map((refs, group) => refs.filter((_ref, index) => selected[group].has(index)));
+}
+
+/** Only saved image attachments are expanded into image content parts. */
+export function imageBlobs<T extends { mime: string }>(refs: readonly T[] | undefined): T[] {
+  return (refs ?? []).filter(ref => ref.mime.startsWith('image/'));
 }
 
 /** OpenAI function 格式的 tools 段(各 chat 方言共用)。 */
@@ -46,8 +81,9 @@ export function renderMessagesWithMedia(
   opts?: { keepReasoning?: boolean },
 ): Array<Record<string, unknown>> {
   const renderMedia = media?.enabled() === true ? media : undefined;
-  return messages.map((m) => {
-    const refs = m.blobs;
+  const images = selectContextImageGroups(messages.map(m => imageBlobs(m.blobs)), renderMedia?.maxContextImages);
+  return messages.map((m, index) => {
+    const refs = images[index];
     const { reasoning_content: _r, parts: _parts, ...rest } = dropHeadMark(m);
     const base = { ...rest, content: m.parts ?? m.content } as Record<string, unknown>;
     if (opts?.keepReasoning && m.reasoning_content) base.reasoning_content = m.reasoning_content;

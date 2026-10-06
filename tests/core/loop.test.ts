@@ -52,7 +52,7 @@ interface RigOptions {
   /** 对模型隐藏但仍挂载运行的 World id。 */
   hiddenWorlds?: string[];
   /** 时机钩子,直接装到假Persona上 */
-  hooks?: Pick<Persona, 'onTurnEnded' | 'onIdle' | 'onStallsRecovered' | 'onDelivery'>;
+  hooks?: Pick<Persona, 'onTurnEnded' | 'onIdle' | 'onStallsRecovered' | 'onDelivery' | 'onToolOutcome'>;
   /** 记录 schedule_wake 对 timers 原语的调用。 */
   onTimerSet?: (atIso: string, payload: Record<string, unknown>) => void;
   /** fork 工具的执行函数。 */
@@ -2461,6 +2461,58 @@ describe("MainLoop endsTurn", () => {
     assertPairing(rig.session.messages);
   });
 
+  it('工具结果可在运行时结束本次唤醒', async () => {
+    const refused: ToolDef = {
+      name: 'refuse', description: '拒绝当前动作', tags: ['act'],
+      parameters: { type: 'object', properties: {} },
+      handler: async () => ({ text: '当前动作未受理', failed: true, endsTurn: true }),
+    };
+    rig = makeRig({ worlds: [makeFakeIO('qq', [refused])] });
+    rig.start();
+    await until(() => rig.llm.calls.length >= 1);
+    rig.llm.script(toolReply([{ name: 'refuse', id: 'r1' }]));
+    const callsBefore = rig.llm.calls.length;
+    rig.pushEvent('触发');
+    await until(() => rig.session.messages.some((m) => m.tool_call_id === 'r1'));
+    await sleep(150);
+    expect(rig.llm.calls.length).toBe(callsBefore + 1);
+    expect(rig.session.messages.find((m) => m.tool_call_id === 'r1')?.content).toContain('未受理');
+    assertPairing(rig.session.messages);
+  });
+
+  it('失败意图结束本次唤醒后工具 schema 保持稳定，新聊天和任务仍能调用同一工具', async () => {
+    const effects: string[] = [];
+    // Legacy World metadata must never suppress a multifunction tool in Core.
+    const refused = { text: '同一区域重复 find 未受理', failed: true as const,
+      endsTurn: true as const, retryAfterMs: 45_000 };
+    const action: ToolDef = {
+      name: 'mc_do', description: '多用途动作', tags: ['act'],
+      parameters: { type: 'object', properties: { intent: { type: 'string' } } },
+      handler: async args => {
+        if (args.intent === 'find') return refused;
+        effects.push(String(args.intent));
+        return { text: `已执行 ${args.intent}`, endsTurn: true };
+      },
+    };
+    rig = makeRig({ worlds: [makeFakeIO('qq', [action, endTurn])] });
+    rig.start();
+    await until(() => rig.llm.calls.length >= 1);
+    const schemas = rig.llm.calls.at(-1)?.tools;
+    const before = rig.llm.calls.length;
+    rig.llm.script(toolReply([{ name: 'mc_do', id: 'find', args: { intent: 'find' } }]));
+    rig.pushEvent('查找没有新线索');
+    await until(() => rig.session.messages.some(m => m.tool_call_id === 'find'));
+    expect(rig.llm.calls).toHaveLength(before + 1);
+    for (const intent of ['chat', 'fish']) {
+      rig.llm.script(toolReply([{ name: 'mc_do', id: intent, args: { intent } }]));
+      rig.pushEvent(`新的观察 ${intent}`);
+      await until(() => rig.session.messages.some(m => m.tool_call_id === intent));
+      expect(rig.llm.calls.at(-1)?.tools).toEqual(schemas);
+    }
+    expect(effects).toEqual(['chat', 'fish']);
+    assertPairing(rig.session.messages);
+  });
+
   it('end_turn之后的调用走barrier回执,不执行', async () => {
     rig = makeRig({ worlds: [makeFakeIO('qq', [makeTool('send', '已发送'), endTurn])] });
     rig.start();
@@ -2564,6 +2616,54 @@ describe('MainLoop 工具调用流水', () => {
     expect(row.receipt).toBe('已排上');
     expect(typeof row.durMs).toBe('number');
     expect(row.failed).toBeUndefined();
+    s.tmp.cleanup();
+  });
+
+  it('同步工具解释追加真实失败回执，流水、附件、结束行为和工具声明保留', async () => {
+    const s = sink();
+    const original = { text: '实际失败，进展以现场为准', failed: true as const, endsTurn: true as const,
+      blobs: [{ bytes: new Uint8Array([1, 2]), mime: 'image/png', fallbackText: '现场图片' }] };
+    const contexts: Array<Parameters<NonNullable<Persona['onToolOutcome']>>[0]> = [];
+    rig = makeRig({ toolLog: s.log, worlds: [makeFakeIO('qq', [{ name: 'act', description: '动作',
+      tags: ['act'], parameters: {}, handler: async () => original }])],
+      hooks: { onToolOutcome: context => { contexts.push(context); return '[反思] 核对失败前提'; } } });
+    rig.start();
+    await until(() => rig.llm.calls.length >= 1);
+    const schema = rig.llm.calls.at(-1)?.tools;
+    const before = rig.llm.calls.length;
+    rig.llm.script(toolReply([{ name: 'act', id: 'explained', args: { at: [1, 2, 3] } }]));
+    rig.pushEvent('新观察');
+    await until(() => rig.session.messages.some(m => m.tool_call_id === 'explained'));
+    await sleep(30);
+    expect(rig.llm.calls).toHaveLength(before + 1);
+    expect(rig.llm.calls.at(-1)?.tools).toEqual(schema);
+    expect(contexts).toEqual([{ role: 'main', tool: 'act', args: { at: [1, 2, 3] }, outcome: original }]);
+    const receipt = rig.session.records.find(record => record.item.type === 'function_call_output'
+      && record.item.call_id === 'explained')!;
+    expect(receipt.item).toMatchObject({ output: expect.stringMatching(/^实际失败，进展以现场为准\n\[反思\] 核对失败前提\n\[blob log:[^\]]+ image\/png\] 现场图片$/) });
+    expect(receipt.context?.blobs).toHaveLength(1);
+    expect(s.rows()[0]).toMatchObject({ receipt: original.text, failed: true, blobs: 1 });
+    expect(original.text).toBe('实际失败，进展以现场为准');
+    assertPairing(rig.session.messages);
+    s.tmp.cleanup();
+  });
+
+  it('同步工具解释抛错保留原回执字节和动态结束，不新增事件', async () => {
+    const s = sink();
+    rig = makeRig({ toolLog: s.log, worlds: [makeFakeIO('qq', [{ name: 'act', description: '动作',
+      tags: ['act'], parameters: {}, handler: async () => ({ text: 'Original.\n', failed: true, endsTurn: true }) }])],
+      hooks: { onToolOutcome: () => { throw new Error('Hook error.'); } } });
+    rig.start();
+    await until(() => rig.llm.calls.length >= 1);
+    const before = rig.llm.calls.length;
+    rig.llm.script(toolReply([{ name: 'act', id: 'untouched' }]));
+    rig.pushEvent('新观察');
+    await until(() => rig.session.messages.some(m => m.tool_call_id === 'untouched'));
+    await sleep(30);
+    expect(rig.llm.calls).toHaveLength(before + 1);
+    expect(rig.session.messages.find(m => m.tool_call_id === 'untouched')?.content).toBe('Original.\n');
+    expect(s.rows()[0]).toMatchObject({ receipt: 'Original.\n', failed: true });
+    assertPairing(rig.session.messages);
     s.tmp.cleanup();
   });
 

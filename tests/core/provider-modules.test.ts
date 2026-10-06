@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -8,19 +8,30 @@ import { nullLogger } from '../../src/core/util.ts';
 
 describe('Provider module discovery', () => {
   it('loads each native implementation through the common base and isolates deployment instances', () => {
-    const entries = {
-      first: { kind: 'openai-responses-compat', baseUrl: 'https://one.test' },
-      second: { kind: 'openai-responses-compat', baseUrl: 'https://two.test', options: { preset: 'openrouter' } },
-    };
+    const root = join(import.meta.dirname, '../../src/providers');
+    const nativeIds = readdirSync(root, { withFileTypes: true })
+      .filter(dir => dir.isDirectory() && existsSync(join(root, dir.name, 'index.ts')))
+      .map(dir => dir.name).sort();
+    expect(nativeIds.length).toBeGreaterThan(0);
+    expect(providerModules.map(module => module.id).sort()).toEqual(nativeIds);
+    const entries = Object.fromEntries(providerModules.flatMap(module => [
+      [`${module.id}-first`, { kind: module.id, baseUrl: 'https://one.test' }],
+      [`${module.id}-second`, { kind: module.id, baseUrl: 'https://two.test' }],
+    ]));
     const registry = new ProviderRegistry(() => entries, {
       stateRoot: join(tmpdir(), 'unused-provider-state'), readBlob: () => null,
       keepThinking: () => true, log: nullLogger(),
     });
-    for (const name of Object.keys(entries)) expect(registry.resolve(name).client).toBeInstanceOf(BaseProvider);
-    expect(registry.resolve('first')).toBe(registry.resolve('first'));
-    expect(registry.resolve('first')).not.toBe(registry.resolve('second'));
+    for (const module of providerModules) {
+      const first = registry.resolve(`${module.id}-first`);
+      const second = registry.resolve(`${module.id}-second`);
+      expect(first.client).toBeInstanceOf(BaseProvider);
+      expect(second.client).toBeInstanceOf(BaseProvider);
+      expect(registry.resolve(`${module.id}-first`)).toBe(first);
+      expect(first).not.toBe(second);
+      expect(first.client).not.toBe(second.client);
+    }
     expect(() => registry.resolve('missing')).toThrow('没有这个 LLM provider');
-    expect(providerModules.map(module => module.id)).toEqual(['llamacpp', 'openai-responses-compat']);
   });
 
   it('discovers an added module by directory and rejects a mismatched namespace', async () => {

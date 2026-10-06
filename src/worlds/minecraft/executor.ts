@@ -10,6 +10,7 @@
  * 调用方不必分辨两处。
  */
 import type { Bot } from 'mineflayer';
+import { observeDamage, type DamageEvidence } from './damage-evidence.ts';
 import pathfinderPkg from 'mineflayer-pathfinder';
 import { Vec3 } from 'vec3';
 import type { Logger } from '../../core/types.ts';
@@ -42,7 +43,7 @@ import {
   type Direction, type HazardCell, type ItemStack,
 } from './terrain.ts';
 import {
-  FIND_STATIC_MAX, NEAR_DEFAULT, PROBE_WHERE_SHOWN, UNTIL_CATEGORIES, UNTIL_CATEGORY_DOC,
+  chatInputError, FIND_STATIC_MAX, NEAR_DEFAULT, PROBE_WHERE_SHOWN, UNTIL_CATEGORIES, UNTIL_CATEGORY_DOC,
   type AttackMode, type Expectation, type QueueMode, type SkillCall,
 } from './skills.ts';
 import {
@@ -55,6 +56,17 @@ import {
   PLAYER_SLOTS, edibleInBag, notFoodText, precheckSteps, renderPrecheckNotes, type PrecheckDeps,
 } from './precheck.ts';
 import { normalizeDimension } from './escape.ts';
+import { InspectionGuard } from './inspection-guard.ts';
+import { DirectionalSweepBook } from './directional-sweeps.ts';
+import { farmingClickCell, isHoeUseItem } from './farming-target.ts';
+import { publishViewerCastCommand } from './viewer-cast.ts';
+import { skillGesture } from './skills-social.ts';
+import { skillLook } from './skills-look.ts';
+import { flyToLanding, flyToPosition, landFlight, flightState } from './flight.ts';
+import { promoteTemporaryScaffold, reclaimPendingTemporaryScaffold } from './temporary-scaffold.ts';
+import { inventoryReadConfirmed } from './inventory-window-sync.ts';
+import { assertInventoryClicksReady, isInventoryClickError } from './inventory-click-sync.ts';
+import { ContainerWindowOwnership } from './container-window-ownership.ts';
 import { isBabyPiglin, piglinIsHostile } from './piglin.ts';
 import {
   blockIdOf, normalizeBlockName, renderLayerMap,
@@ -73,7 +85,7 @@ import {
 } from './ranged.ts';
 import { FindObservationCache, type FindKind, type SearchScope } from './search-observation.ts';
 import {
-  Aborted, SkillBlocked, SkillNoop, checkAbort, dangerNoteText, sleep,
+  Aborted, Yielded, SkillBlocked, SkillNoop, checkAbort, dangerNoteText, sleep,
   type BlueprintDesk, type BlueprintSite, type BlueprintSurvey, type BodyStateProbe,
   type MarkDesk, type ProbeMemo, type ReserveHit, type ResourcePlacementGate,
   type ResourcePlacementPermit, type ResourcePlacementPreview, type RouteProbe,
@@ -93,6 +105,16 @@ export type {
   Expectation, MarkLookup, ParseNote, QueueMode, SkillCall, StepBounds,
 } from './skills.ts';
 export { dangerNoteText } from './skill-context.ts';
+
+type UsedBlockState = { name: string; stateId: number; open: string | null };
+
+/** 开关门是双向操作：关门不能抹掉刚记录的寻路失败。 */
+export function useChangeMayClearRouteFailure(before: UsedBlockState | null, after: UsedBlockState | null): boolean {
+  if (!before || !after || before.stateId === after.stateId) return false;
+  const isDoor = before.name.endsWith('_door') || before.name.endsWith('_fence_gate');
+  if (isDoor && before.name === after.name) return before.open === 'false' && after.open === 'true';
+  return true;
+}
 export { describeSkill, zhErrorText } from './receipt.ts';
 export { dropOwnedGoal, goalOwnerKind, releaseBody, renderRouteMenu, setOwnedGoal } from './travel.ts';
 export { HOSTILE, bestWeapon, meleeCooldownMs } from './melee.ts';
@@ -107,7 +129,7 @@ import {
   AIR_NAMES, BUILD_CELL_CAP, EXCAVATE_CELL_CAP, FACE_TRY_ORDER, FACE_ZH, LIQUIDS, NEIGHBORS6,
   NO_PLACE_REFERENCE, PLACE_REACH, PROBE_CELLWISE_MAX, PROBE_CELL_CAP, PROBE_WHERE_CELL_CAP,
   SHAPE_ZH, blockAtCell, blockNamesOf, cellKeyOf, cellText, chebyshev, cropAgeOfCell, faceText,
-  feetOf, fnv32, nearLavaAt, readRegion, refAt, refCellOf, resolveAt, shapeCells, skyBlocked,
+  feetOf, fnv32, nearLavaAt, readRegion, refAt, refCellOf, resolveAt, shapeCells, skyVisibleAt,
   solidAt, surfaceFeetAt, type RegionReading,
 } from './cell-facts.ts';
 import {
@@ -130,14 +152,15 @@ import { dimensionOf } from './cell-facts.ts';
 import { fmtDur } from './receipt.ts';
 import {
   FLEE_DEADLINE_MS, clearEscapeGoalOwner, digBackoffScene, digBlock, dropGoal, escapeIntent,
-  findEntity, fmtDist, gotoGoal, levelTravelGoal, matchBlockIds, readStamp, releaseBody,
-  renderRouteMenu, routeNote, setOwnedGoal, type DistanceMetric, withRouteScene,
+  findEntity, fmtDist, gotoGoal, goalOwnerKind, levelTravelGoal, nextLongTravelLeg, matchBlockIds, readStamp, releaseBody,
+  renderRouteMenu, routeNote, setOwnedGoal, travelGoalReached, type DistanceMetric, walkOnlyPath, withRouteScene,
 } from './travel.ts';
 import {
-  HOSTILE, MELEE_CHASE, MELEE_REACH, REFLEX_HURT_FALLBACK_RANGE, STRAFE_MS, aimAt,
+  HOSTILE, MELEE_CHASE, MELEE_REACH,
+  STRAFE_MS, aimAt,
   attackCooldownMs, attackStats, bestWeapon, forcedRangedIssue, hostilesAround, meleeSwing,
-  nearestHostileTo, nearestHostileWithin, pressMelee, pressRanged, rangedBlockedText,
-  rangedTargetOf, releaseMelee, type HostileRead, type HurtSource, underwaterOxygenNote,
+  nearestHostileTo, pressMelee, pressRanged, rangedBlockedText,
+  rangedTargetOf, releaseMelee, type HostileRead, underwaterOxygenNote,
 } from './melee.ts';
 import {
   LEDGER_GUARD_BLOCKS, SEED_CROP, forgetPlaced, lastAteOf, ledgerBlockFact, noteAte, noteTilled,
@@ -152,6 +175,8 @@ import {
   type BuildSpot, type Station, type StationAt,
 } from './placement.ts';
 import { contentsText } from './receipt.ts';
+import { itemCustomName } from './item-display.ts';
+import { consumesOpenWindow, selectionMenuTitle, storageWindow } from './window-semantics.ts';
 import {
   UNTIL_DIG_RADIUS, UNTIL_TRAVEL_RADIUS, type UntilHit, untilBlockIds, untilHit, untilUnknownNote,
 } from './until.ts';
@@ -159,7 +184,7 @@ import { blockProp } from './cell-facts.ts';
 import { compositionText, noDropMaterials } from './receipt.ts';
 import { settleOnGround } from './travel.ts';
 import {
-  findFishingWater, skillCollect, skillFind, skillFish, skillProbe, skillTrade,
+  collectVisible, findFishingWater, skillCollect, skillFind, skillFish, skillProbe, skillTrade,
 } from './skills-gather.ts';
 import { CONTAINER_FIND, FURNACE_KINDS } from './chests.ts';
 import { skillExcavate, skillTunnel } from './skills-dig.ts';
@@ -168,6 +193,7 @@ import {
   ANVIL_BLOCKS, STATION_FIND_R, WINDOW_SETTLE_MS, containerStacks, findContainers, findStationCell,
   furnaceDoneAt, knownChestNote, noContainerNearby, openNearbyContainer, openStationWindow,
   openWindowGuarded, orderForStow, orderForTake, putIntoStation, rememberChest, rememberWindow,
+  recentStorageRouteFailure, storageSkipReason,
   slotStack, smeltPerItemMs, stationItemFacts, type GenericWindow,
 } from './containers.ts';
 import {
@@ -180,7 +206,7 @@ import {
   LEAD_ITEM, isBoat, skillAnvil, skillGrindstone, skillLead, skillRide, skillUse,
 } from './skills-interact.ts';
 import {
-  LAPIS, skillBrew, skillEnchant, skillPickup, skillSmelt, skillStow, skillTake, skillToss,
+  LAPIS, protectedTossItem, reacquiredTossNote, skillBrew, skillCompact, skillEnchant, skillPickup, skillSmelt, skillStow, skillTake, skillToss,
   skillTransit,
 } from './skills-container.ts';
 import {
@@ -194,7 +220,7 @@ import {
  */
 function evaluateExpect(bot: Bot, e: Expectation, gainBase?: number): ExpectVerdict {
   if ('has' in e) {
-    const n = invCount(bot, (name) => matchItemName(e.has.item, name));
+    const n = invCountIn(playerInvIn(bot, bot.currentWindow), (name) => matchItemName(e.has.item, name));
     if (gainBase !== undefined) {
       const got = n - gainBase;
       return {
@@ -387,14 +413,8 @@ function craftInputNames(bot: Bot, item: string): string[] {
 export function deriveExpect(bot: Bot, call: SkillCall): Expectation | null {
   if ('dryRun' in call && call.dryRun) return null; // 试算不动世界,没有后置状态
   switch (call.skill) {
-    case 'goto': {
-      const [x, y, z] = call.at;
-      if (typeof x !== 'number' || typeof z !== 'number') return null;
-      // [x,z] 形态的 y 是执行那一刻的地表读数、调用里根本没有;`~` 让它按脚下解析,
-      // 判定就收成了纯水平距离。缺省半径 2 对 goto 自己的 GoalNear(1) 留一格余量
-      if (call.groundY) return { near: [x, '~', z] };
-      return typeof y === 'number' ? { near: [x, y, z] } : null;
-    }
+    // goto 已按寻路目标核验到达，不另推位置判据。
+    case 'goto': return null;
     case 'tunnel': {
       // 声明了 until:终点不再是判据 —— 碰到名单里的东西提前收束是这一单的正常结局,
       // 拿「人到终点」去核验会把她要的那个结果判成落空
@@ -497,6 +517,58 @@ const PROGRESS_EVERY_MS = 30_000;
 
 /** 「同一件事上次什么下场」的有效期:再往前的账她多半已经换了打法 */
 const PRIOR_OUTCOME_WINDOW_MS = 15 * 60_000;
+const MAX_REPEAT_SUCCESS_WINDOW_MS = 60 * 60_000;
+const EXACT_FAILURE_WINDOW_MS = 10 * 60_000;
+const EXACT_FAILURE_RETRY_DISTANCE = 4;
+const NAVIGATION_BURST_WINDOW_MS = 120_000;
+const NAVIGATION_BURST_COOLDOWN_MS = 45_000;
+const NAVIGATION_BURST_RESET_DISTANCE = 12;
+const EMPTY_FIND_WINDOW_MS = 180_000;
+const EMPTY_FIND_HOLD_MS = 5 * 60_000;
+const EMPTY_FIND_REGION_DISTANCE = 32;
+const DIRECTIONAL_SWEEP_HOLD_MS = 24 * 60 * 60_000;
+const DIRECTIONAL_SWEEP_REPEAT_MS = 2 * 60_000;
+const DIRECTIONAL_SWEEP_EVIDENCE_RADIUS = 64;
+const IMMATURE_FIND_HOLD_MS = 120_000;
+const LOCAL_BUILD_FAILURE_WINDOW_MS = 90_000;
+const LOCAL_BUILD_FAILURE_DISTANCE = 8;
+const BUILD_FAILURE_BURST_WINDOW_MS = 3 * 60_000;
+const BUILD_FAILURE_BURST_COUNT = 5;
+const NEARBY_GOAL_DISTANCE = 4;
+const PROVEN_TARGET_DISTANCE = 1.5;
+const GOAL_PROGRESS_SAMPLE_MS = 2_000;
+const STALLED_CANCEL_MS = 15_000;
+const retryGuardApplies = (steps: readonly SkillCall[]): boolean => steps.some((step) =>
+  step.skill === 'goto' || step.skill === 'tunnel' || step.skill === 'stow'
+  || step.skill === 'craft'
+  || (step.skill === 'take' && (step.from === 'open' || Boolean(step.at))));
+function lastAbsoluteGoto(steps: readonly SkillCall[]): { x: number; y: number; z: number } | null {
+  const step = [...steps].reverse().find((item) => item.skill === 'goto');
+  if (!step || step.skill !== 'goto' || !Array.isArray(step.at)
+    || step.at.length !== 3 || !step.at.every((value) => typeof value === 'number' && Number.isFinite(value))) return null;
+  return { x: step.at[0] as number, y: step.at[1] as number, z: step.at[2] as number };
+}
+
+function firstAbsoluteGoto(steps: readonly SkillCall[]): { x: number; y: number; z: number } | null {
+  const step = steps[0];
+  if (step?.skill !== 'goto') return null;
+  return step ? lastAbsoluteGoto([step]) : null;
+}
+
+/** 已开的门不会改变通路；跳过这类前置 use，仍需核对后面的同一路线。 */
+function firstRouteAfterOpenDoors(steps: readonly SkillCall[], bot: Bot): { x: number; y: number; z: number } | null {
+  let skippedOpenDoor = false;
+  for (const step of steps) {
+    if (step.skill === 'goto') return skippedOpenDoor ? lastAbsoluteGoto([step]) : null;
+    if (step.skill !== 'use' || !step.at || step.item || step.target) return null;
+    const cell = targetCellOf(bot, step);
+    const block = cell ? blockAtCell(bot, cell) : null;
+    if (!block || (!block.name.endsWith('_door') && !block.name.endsWith('_fence_gate'))
+      || blockProp(block, 'open') !== 'true') return null;
+    skippedOpenDoor = true;
+  }
+  return null;
+}
 
 /** 受阻头名的统计窗口与起报门槛(见 Executor.blockedHeadline) */
 const BLOCKED_HEADLINE_WINDOW_MS = 60 * 60_000;
@@ -541,7 +613,40 @@ function fleeTimeoutText(
     + `人在 ${cellText(feetOf(bot))};${chaser};${around}`;
 }
 
+export function sendChat(bot: Bot, text: string): void {
+  const error = chatInputError(text);
+  if (error) throw new SkillBlocked(error);
+  bot.chat(text);
+}
+
+function gotoArrivalGoal(call: Extract<SkillCall, { skill: 'goto' }>, target: Cell): InstanceType<typeof goals.Goal> {
+  return call.groundY
+    ? levelTravelGoal(target.x, target.z)
+    : new goals.GoalNear(target.x, target.y, target.z, 1);
+}
+
 async function runSkill(bot: Bot, call: SkillCall, ctx: SkillContext): Promise<string> {
+  // An unresolved click is a protocol transaction barrier, independent of item
+  // dependencies. Observing, walking and speaking remain available; the lower
+  // click guard also covers inventory changes initiated by background actions.
+  let inventoryMutation = false;
+  switch (call.skill) {
+    case 'craft': case 'take': case 'stow': case 'compact': case 'toss':
+    case 'equip': case 'eat': case 'smelt': case 'brew': case 'enchant':
+    case 'anvil': case 'grindstone':
+      inventoryMutation = true;
+      break;
+    case 'use':
+      inventoryMutation = call.index !== undefined || call.item !== undefined;
+      break;
+  }
+  if (inventoryMutation) {
+    try { assertInventoryClicksReady(bot); }
+    catch (err) {
+      if (!isInventoryClickError(err)) throw err;
+      throw new SkillBlocked((err as Error).message, [], 'server', 'inventory-click-sync');
+    }
+  }
   switch (call.skill) {
     case 'goto': {
       if (call.dimension
@@ -552,22 +657,44 @@ async function runSkill(bot: Bot, call: SkillCall, ctx: SkillContext): Promise<s
         );
       }
       const target = call.groundY ? surfaceFeetAt(bot, call.at) : resolveAt(bot, call.at);
+      // [x,z] chooses a reachable X/Z arrival; the highest block in the column
+      // may be a roof above a valid entrance. Keep probes and movement aligned.
+      const finalGoal = gotoArrivalGoal(call, target);
       if (call.dryRun) {
-        const probes = ctx.probeRoutes?.(target);
+        const probes = ctx.probeRoutes?.(target, call.groundY ? finalGoal : undefined);
         if (!probes || probes.length === 0) throw new SkillBlocked('探路器不可用(没连上服务器)');
         const me = bot.entity.position;
-        const startDist = Math.hypot(me.x - target.x, me.y - target.y, me.z - target.z);
-        return renderRouteMenu(probes, target, { startDist, diag: ctx.probeTarget?.(target) ?? null });
+        const startDist = call.groundY
+          ? Math.hypot(me.x - target.x, me.z - target.z)
+          : Math.hypot(me.x - target.x, me.y - target.y, me.z - target.z);
+        return renderRouteMenu(probes, target, {
+          startDist, diag: call.groundY ? null : ctx.probeTarget?.(target) ?? null,
+        });
       }
-      const note = routeNote(bot, ctx, target);
+      const note = routeNote(bot, ctx, target, call.groundY ? finalGoal : undefined);
       const startedAt = Date.now();
+      let sceneTarget = target;
       try {
-        await gotoGoal(bot, new goals.GoalNear(target.x, target.y, target.z, 1), ctx);
+        let legs = 0;
+        for (;;) {
+          const from = { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z };
+          const leg = nextLongTravelLeg(from, target);
+          if (!leg) break;
+          if (++legs > 64) throw new SkillBlocked('长途分段超过 64 段仍未到目标附近，停止这条路线');
+          sceneTarget = { x: leg.x, y: Math.floor(from.y), z: leg.z };
+          await gotoGoal(bot, levelTravelGoal(leg.x, leg.z), ctx);
+          const moved = Math.hypot(bot.entity.position.x - from.x, bot.entity.position.z - from.z);
+          if (moved < 4) throw new SkillBlocked('长途这一段没有足够位移，停止原路线');
+        }
+        sceneTarget = target;
+        await gotoGoal(bot, finalGoal, ctx);
       } catch (err) {
-        // 失败回执同时保留出发点的三档试算与当前位置的 withRouteScene 诊断，标明各自位置。
+        // 长途失败只试算当前短段，避免再次用远处终点耗尽寻路预算。
         throw withRouteScene(
-          bot, ctx, err, target,
-          [...digBackoffScene(ctx, startedAt), ...(note ? [note] : [])],
+          bot, ctx, err, sceneTarget,
+          [...digBackoffScene(ctx, startedAt), ...(note ? [note] : []),
+            ...(sceneTarget !== target ? [`长途最终目标 ${cellText(target)}，这一段先去 ${cellText(sceneTarget)}`] : [])],
+          call.groundY ? (sceneTarget === target ? finalGoal : levelTravelGoal(sceneTarget.x, sceneTarget.z)) : undefined,
         );
       }
       return `到了 ${cellText(feetOf(bot))}${note ? `。\n${note}` : ''}`;
@@ -604,6 +731,9 @@ async function runSkill(bot: Bot, call: SkillCall, ctx: SkillContext): Promise<s
       const x = Math.round(me.x + (away.x / flat) * call.distance);
       const z = Math.round(me.z + (away.z / flat) * call.distance);
       const fleeGoal = levelTravelGoal(x, z);
+      // 脱险只沿现有通路移动。边跑边挖/搭会在保护区反复预检，
+      // 还会让寻路器停在原地换工具，正好耽误逃命。
+      const releaseWalkOnly = walkOnlyPath(bot);
       try {
         // 这一步自己的时限(见 FLEE_DEADLINE_MS):到点撤目标、按事实收工,
         // 不熬满 gotoGoal 借来的两分钟。迟到的 gotoGoal 拒绝单独接住,
@@ -619,6 +749,8 @@ async function runSkill(bot: Bot, call: SkillCall, ctx: SkillContext): Promise<s
         // 试算与行军判同一个目标(见 levelTravelGoal):逃跑受阻的现场要说得出
         // 这条路到底能推进到哪儿
         throw withRouteScene(bot, ctx, err, { x, y: feetOf(bot).y, z }, [], fleeGoal);
+      } finally {
+        releaseWalkOnly();
       }
       const at = bot.entity.position;
       return `甩开了${zhEntity(nearest.e.name ?? '它')},现在在 (${Math.round(at.x)}, ${Math.round(at.y)}, ${Math.round(at.z)})`;
@@ -660,8 +792,9 @@ async function runSkill(bot: Bot, call: SkillCall, ctx: SkillContext): Promise<s
           throw new SkillBlocked(`${head};我游到了岸边但没有稳定站上干燥落脚格,还没有脱离液体`);
         }
         const feet = feetOf(bot);
-        const skyVisible = !skyBlocked(bot, feet.x, feet.y + 2, feet.z);
+        const skyVisible = skyVisibleAt(bot, feet.x, feet.y + 2, feet.z);
         const state = surfaceStateText(bot);
+        if (skyVisible === null) return `我脱离液体并站稳了,头顶柱未加载完,天空读数未知;${state}`;
         return skyVisible
           ? `我脱离液体并站稳了,这里能看见天空;${state}`
           : `我脱离液体并站稳了,这里仍有遮盖,没有回到露天;${state}`;
@@ -669,6 +802,14 @@ async function runSkill(bot: Bot, call: SkillCall, ctx: SkillContext): Promise<s
         bot.setControlState('jump', false);
       }
     }
+    case 'look': return skillLook(bot, call, ctx);
+    case 'flight': {
+      const at = resolveAt(bot, call.at);
+      return call.land === false
+        ? flyToPosition(bot, { x: at.x + 0.5, y: at.y, z: at.z + 0.5 }, () => ctx.aborted())
+        : flyToLanding(bot, at, () => ctx.aborted());
+    }
+    case 'land': return landFlight(bot, () => ctx.aborted());
     case 'collect':
       return withBlueprintGain(bot, ctx, () =>
         skillCollect(bot, call.block, call.count, ctx, call.buried === true, call.mature === true, call.tool));
@@ -693,10 +834,54 @@ async function runSkill(bot: Bot, call: SkillCall, ctx: SkillContext): Promise<s
     case 'toss': return skillToss(bot, call, ctx);
     case 'lead': return skillLead(bot, call, ctx);
     case 'stow': return skillStow(bot, call, ctx);
+    case 'compact': return skillCompact(bot, ctx);
     case 'take': return withBlueprintGain(bot, ctx, () => skillTake(bot, call, ctx));
+    case 'server_travel': {
+      if (!call.command.startsWith('/')) throw new SkillBlocked('server_travel 只接受 / 开头的服务端命令');
+      const target = resolveAt(bot, call.at);
+      const distance = (): number => bot.entity.position.distanceTo(new Vec3(target.x, target.y, target.z));
+      if (distance() <= call.within) return `已在服务端传送落点 ${cellText(target)} 附近，无需重复传送`;
+      sendChat(bot, call.command);
+      const until = Date.now() + 6_000;
+      while (Date.now() < until) {
+        checkAbort(ctx);
+        if (distance() <= call.within) return `服务端传送已核验:来到 ${cellText(feetOf(bot))}`;
+        await sleep(100);
+      }
+      throw new SkillBlocked(`已发 ${call.command}，但 6 秒内没有抵达 ${cellText(target)} 附近；查看服务端回执再决定下一步`);
+    }
+    case 'gesture': return skillGesture(bot, call, ctx);
     case 'chat': {
-      bot.chat(call.text);
-      return `说了: ${call.text}`;
+      const next = ctx.batch?.steps[(ctx.batch.index ?? 0) + 1];
+      const needsWindow = call.text.startsWith('/') && consumesOpenWindow(next);
+      const beforeWindow = bot.currentWindow;
+      sendChat(bot, call.text);
+      publishViewerCastCommand(bot, call.text);
+      if (needsWindow && bot.currentWindow !== beforeWindow && storageWindow(bot.currentWindow)) {
+        ctx.holdWindow?.(bot.currentWindow!);
+      }
+      if (needsWindow) {
+        const until = Date.now() + 2_000;
+        while ((!bot.currentWindow || bot.currentWindow === beforeWindow) && Date.now() < until) {
+          checkAbort(ctx);
+          await sleep(50);
+          if (!ctx.aborted() && bot.currentWindow !== beforeWindow && storageWindow(bot.currentWindow)) {
+            ctx.holdWindow?.(bot.currentWindow!);
+          }
+        }
+      }
+      let windowNote = '';
+      if (needsWindow) {
+        const win = bot.currentWindow !== beforeWindow ? bot.currentWindow : null;
+        const menu = win && selectionMenuTitle(win.title);
+        if (menu) windowNote = `；服务端打开的是${menu}选择菜单，不能当储物箱`;
+        else if (win) {
+          const snap = containerStacks(win);
+          windowNote = `；服务端已打开容器窗口，${snap.usedSlots}/${snap.slots} 格占用，内容:${contentsText(snap.items.slice(0, 12))}`
+            + (snap.items.length > 12 ? `等 ${snap.items.length} 类` : '');
+        } else windowNote = '；2 秒内未打开窗口';
+      }
+      return `已向游戏聊天发送: ${call.text}${windowNote}；实际广播、命令或私聊结果以服务端回执为准`;
     }
   }
 }
@@ -705,10 +890,14 @@ async function runSkill(bot: Bot, call: SkillCall, ctx: SkillContext): Promise<s
 export interface TaskReport {
   /** partial 表示动作已有成果，但声明的量未完成。 */
   /** cancelled 表示被叫停、顶替或停机取消，未经过正常 finish 的任务终态。 */
-  kind: 'done' | 'partial' | 'blocked' | 'superseded' | 'reflex' | 'cancelled';
+  kind: 'done' | 'partial' | 'blocked' | 'superseded' | 'reflex' | 'cancelled' | 'suspended' | 'resumed';
   text: string;
   /** 这条汇报说的是哪个任务;反射不属于任何任务,没有 */
   taskId?: number;
+  /** Last completed step of a successful task. */
+  lastSkill?: SkillCall['skill'];
+  /** 同形状任务在短时间内再次未达整体目标时，附上上一回的受阻事实。 */
+  repeatFailure?: { attempts: number; previousReceipt: string; scope: 'target' | 'shape'; observation: 'unchanged' | 'unavailable' };
   /** 这条汇报已经讲明了掉血的来由;World 据此不再复述一遍掉血播报 */
   hurt?: boolean;
 }
@@ -784,15 +973,31 @@ function shortWhy(why: string | null | undefined): string | null {
   return head.length > 40 ? `${head.slice(0, 40)}…` : head;
 }
 
+interface TaskObservation {
+  key: string;
+  scope: 'target' | 'shape';
+  dimension: string;
+  position: { x: number; y: number; z: number } | null;
+  orientationOnly: boolean;
+  rotation: { yaw: number; pitch: number } | null;
+  inventory: string | null;
+  targetBlock: string | null;
+}
+
 /** 排着队还没轮到的一件事 */
 interface QueuedTask {
   id: number;
   steps: SkillCall[];
+  startObservation?: TaskObservation;
+  /** 每个定向 find 真正开跑的位置；前面的 goto 完成后才知道起点。 */
+  findOrigins?: Map<number, Cell>;
   /**
    * 已经落地的各步终态。挂在任务上而不是 ctx 上:战斗/环境挂起会重建 RunningTask,
    * 挂在 ctx 上的话断点续做之后前半程的账就没了。
    */
   stepLog?: StepLanding[];
+  /** 尾步空队列提示每单至多一次；战斗/环境挂起后不重新唤醒。 */
+  queueTailNotified?: boolean;
   /** 受理那一刻;与 startedAt 之差就是排队等了多久,结局回执分开报两段 */
   enqueuedAt: number;
   /** 首次开跑时刻。断点续做的单带着它:结局回执的时刻段与排队时长按第一次开跑算 */
@@ -816,9 +1021,17 @@ interface QueuedTask {
    * 被更早一步顺手做掉的步 → 那一步的回执。挂在任务上而不是 ctx 上,是因为战斗
    * 挂起会重建 ctx:东西已经进箱子了,恢复后那一步再跑一遍只会报「包里没有X」。
    */
-  absorbed?: Map<number, string>;
+  absorbed?: Map<number, { receipt: string; ok: boolean }>;
   /** 冻结断点的拥有者；仅同一组可恢复。战斗通过 busyWith 持有断点，深坠 hold 的释放不得恢复它。 */
   frozenBy?: QueueFreezeOwner;
+  /** 等待这个逻辑任务的安全检查点；排队请求不立即夺手。 */
+  checkpointOwnerId?: number;
+  /** afterCheckpoint 优先队列成员，包括身体空闲但环境冻结时受理的请求。 */
+  checkpointRequest?: boolean;
+  /** 检查点让位保存的原任务；queue:now 可单独撤销该断点。 */
+  checkpointContinuation?: boolean;
+  /** 断点坐标属于让位时的维度，短任务不能把它改投另一维度。 */
+  resumeDimension?: string;
 }
 
 /**
@@ -879,6 +1092,8 @@ function resumedCollect(
 }
 
 interface RunningTask extends QueuedTask {
+  /** 当前执行实例的尾步提示；恢复后的新实例不继承旧提示。 */
+  queueTailNotice?: TaskQueueTail;
   /** 在跑的那一件账本一定在场(pump 建的时候补齐) */
   stepLog: StepLanding[];
   flag: AbortFlag;
@@ -889,8 +1104,36 @@ interface RunningTask extends QueuedTask {
   stepIndex: number;
   /** 当前这一步是什么时候开始的 */
   stepStartedAt: number;
+  /** 当前 goto 最近一次让目标距离至少缩短一格的时刻。 */
+  goalProgressAt?: number;
+  bestGoalDistance?: number;
   /** 当前步骤的计数进度(collect/build/excavate/tunnel);非计数类为 null */
   count: { done: number; total: number } | null;
+}
+
+interface CheckpointDrain {
+  task: RunningTask;
+  bot: Bot;
+  resumeFrom: number;
+  boundary: boolean;
+  phase: 'settling' | 'yielded';
+  continuation: QueuedTask | null;
+}
+
+/** 当前步骤重放时仍有固定空间目标，或按实际采集计数扣除已完成量。 */
+function checkpointReplayable(call: SkillCall): boolean {
+  const fixed = (at: readonly unknown[] | undefined): boolean =>
+    at !== undefined && at.every((value) => typeof value === 'number' && Number.isFinite(value));
+  switch (call.skill) {
+    case 'collect': return true;
+    case 'goto': return fixed(call.at);
+    case 'excavate': return call.anchors.every(fixed);
+    case 'build':
+      return 'blueprint' in call ? fixed(call.at)
+        : 'on' in call ? call.on.every((point) => fixed(point.at))
+          : call.anchors.every(fixed);
+    default: return false;
+  }
 }
 
 /**
@@ -952,12 +1195,18 @@ function labelOf(task: QueuedTask): string {
   return task.steps.map((c) => describeSkill(c)).join(';');
 }
 
-/** 被新单顶替的任务须说明是否一步未执行，以及已执行到哪一步。 */
-function cancelledNote(who: string, stepIndex: number, total: number, step: string): string {
-  if (stepIndex <= 0) {
-    return `⚠ 已叫停${who},它**一步都没跑过**就被这一单顶掉了 —— 它卡在第 1/${total} 步「${step}」`;
-  }
-  return `已叫停${who},它做到第 ${stepIndex + 1}/${total} 步`;
+/** 步骤尚未结束时，账本不能用于断言这一步没有发生效果。 */
+function cancelledNote(
+  who: string,
+  task: QueuedTask,
+  step: number | null,
+  phase: 'running' | 'frozen',
+): string {
+  const done = (task.stepLog ?? []).filter((entry) => entry.outcome === 'ok').length;
+  const head = `已叫停${who},已做成 ${done}/${task.steps.length} 步`;
+  if (step === null) return head;
+  const where = phase === 'running' ? '叫停前正在执行' : '断点记录在';
+  return `${head};${where}第 ${step}/${task.steps.length} 步「${describeSkill(task.steps[step - 1])}」`;
 }
 
 /** 任务同类签名由技能名和主目标原始 id 组成，不含坐标与数量。 */
@@ -969,6 +1218,40 @@ function taskSignature(steps: readonly SkillCall[]): string {
       .find((v) => typeof v === 'string');
     return what ? `${c.skill}:${what as string}` : c.skill;
   }).join('>');
+}
+
+/** Short approach moves, direction and radius changes do not make a fresh search of the same target. */
+function navigationIntentKey(steps: readonly SkillCall[]): string {
+  const search = steps.some((step) => step.skill === 'find')
+    && steps.every((step) => step.skill === 'find' || step.skill === 'goto')
+    ? steps.filter((step) => step.skill === 'find') : steps;
+  return JSON.stringify(search.map((step) => step.skill === 'find'
+    ? { ...step, direction: undefined, distance: undefined } : step));
+}
+
+/** 与失败归并签名不同：在途去重必须包含坐标、数量和选项。 */
+function exactTaskKey(steps: readonly SkillCall[]): string {
+  return JSON.stringify(steps.map((step) =>
+    Object.keys(step).sort().map((key) => [key, (step as unknown as Record<string, unknown>)[key]])));
+}
+
+/** 同一来源窗口取同一物品，前面是否多了一段赶路不改变失败原因。 */
+function openTakeRetryKey(steps: readonly SkillCall[]): string | null {
+  const take = steps.at(-1);
+  if (!take || take.skill !== 'take' || take.from !== 'open') return null;
+  const opener = [...steps.slice(0, -1)].reverse().find((step) => step.skill === 'chat' || step.skill === 'use');
+  return opener ? `open-take:${JSON.stringify({ opener, take })}` : null;
+}
+
+/** Pointed takes keep the same source when count or an earlier route changes. */
+function namedTakeRetryKey(steps: readonly SkillCall[], bot: Bot | null): string | null {
+  const take = steps.at(-1);
+  if (!bot || !take || take.skill !== 'take' || !take.at || !take.item) return null;
+  if (steps.slice(0, -1).some((step) => step.skill !== 'goto')) return null;
+  try {
+    const cell = resolveAt(bot, take.at);
+    return JSON.stringify(['take-at', dimensionOf(bot), cell.x, cell.y, cell.z, take.item]);
+  } catch { return null; }
 }
 
 /** 同类任务的上次未达成终态：blocked、partial 或 noop。 */
@@ -1009,17 +1292,16 @@ function priorOutcomeNote(prev: PriorOutcome, now: number, round: RoundaboutSnap
   return `${when}下过同类的单(按技能和目标算,不看坐标),${how}:${maskCoords(prev.why)}${tail}`;
 }
 
+/** 成功的同类任务没有失败旧账，仍把重复提交次数交给模型判断。 */
+function repeatedSubmissionNote(round: RoundaboutSnapshot): string | null {
+  if (round.times < 3) return null;
+  const spanMin = Math.round(round.spanMs / 60_000);
+  const span = spanMin >= 1 ? `${spanMin} 分钟内` : '这几分钟里';
+  return `这是${span}第 ${round.times} 次提交同类任务(按技能和目标算,不看坐标)`;
+}
+
 /** 拦截重生锚破坏后，在此窗口内原样重发同一任务视为确认。 */
 const SPAWN_CONFIRM_WINDOW_MS = 10 * 60_000;
-
-/** 原版 1.20.6 的中毒食物后果；首次只报告并拒单，确认窗口内原样重发才受理。 */
-const POISON_FOODS: Readonly<Record<string, string>> = {
-  pufferfish: '河豚吃了会中毒 60 秒(血一路掉到只剩 1 才停)、饥饿 15 秒、反胃 15 秒',
-  spider_eye: '蜘蛛眼吃了会中毒 5 秒(掉 4 点血,最低到 1)',
-  poisonous_potato: '毒马铃薯吃了有六成概率中毒 5 秒(掉 4 点血,最低到 1)',
-};
-/** 毒食确认窗口:比重生锚短 —— 「刚被拦、马上重发」才算她拍板要吃 */
-const POISON_CONFIRM_WINDOW_MS = 3 * 60_000;
 
 /** 重力方块头顶保护高度，单位为格；只限制自身列贴近身体的这一段。 */
 const GRAVITY_OVERHEAD = 3;
@@ -1207,9 +1489,18 @@ interface EchoParts {
   tail: string | null;
 }
 
+/** Receipts use public goto coordinates while execution retains its normalized anchor. */
+function receiptStep(step: SkillCall): Record<string, unknown> {
+  if (step.skill !== 'goto' || !step.groundY) return step as unknown as Record<string, unknown>;
+  const publicStep: Record<string, unknown> = { ...step, at: [step.at[0], step.at[2]] };
+  delete publicStep.groundY;
+  return publicStep;
+}
+
 function echoDiff(steps: readonly SkillCall[], wrote: unknown): EchoParts {
   if (!Array.isArray(wrote) || wrote.length !== steps.length) {
-    return { hoist: null, tail: steps.length === 1 ? JSON.stringify(steps[0]) : JSON.stringify(steps) };
+    const publicSteps = steps.map(receiptStep);
+    return { hoist: null, tail: JSON.stringify(publicSteps.length === 1 ? publicSteps[0] : publicSteps) };
   }
   const hoisted: string[] = [];
   const parts: string[] = [];
@@ -1221,7 +1512,7 @@ function echoDiff(steps: readonly SkillCall[], wrote: unknown): EchoParts {
       : {};
     const at = steps.length > 1 ? `第 ${i + 1} 步的 ` : '';
     const fields: string[] = [];
-    for (const [key, val] of Object.entries(step as unknown as Record<string, unknown>)) {
+    for (const [key, val] of Object.entries(receiptStep(step))) {
       // skill 名必须一字不差才解析得出这一步,不可能有差别
       if (val === undefined || key === 'skill') continue;
       const hers = one[key];
@@ -1322,6 +1613,27 @@ export function renderQueue(q: QueueStatus): string {
   return `${head};后面排着 ${q.waiting.map((t) => `任务#${t.id}「${t.label}」`).join('、')}`;
 }
 
+/** 当前任务已开跑尾步且后面没有待办；只描述队列，不安排下一件事。 */
+export interface TaskQueueTail {
+  taskId: number;
+  stepIndex: number;
+  stepCount: number;
+}
+
+export interface TaskAdmissionRejection {
+  /** A fresh correction permits replanning; known refusals and waits end this turn. */
+  kind: 'correction' | 'repeat' | 'wait';
+  rule: string;
+}
+
+export interface TaskAdmissionDecision {
+  receipt: string;
+  accepted: boolean;
+  retryAfterMs?: number;
+  completedImmediately?: true;
+  rejection?: TaskAdmissionRejection;
+}
+
 /** 运行中任务的一份进度(周期捎带投递;计数过半那份升为常规攒批) */
 export interface TaskProgress {
   taskId: number;
@@ -1334,6 +1646,8 @@ export interface TaskProgress {
   /** 距上一份进度的净位移(格);第一份从步骤起点算。原地打转时这个数接近 0 */
   movedBlocks: number | null;
   count: { done: number; total: number } | null;
+  /** 技能提供的当前阶段与现场读数。 */
+  detail?: string;
   /** 计数刚过半的那一份 */
   half: boolean;
   /** 这一刻人正躺在床上等醒:进度文案换一句说,别把"没挪窝"报成卡住 */
@@ -1363,10 +1677,16 @@ interface ExecutorOptions {
    * 早被交接压掉了。关掉退回旧行为(受理单只说这一单)。
    */
   priorOutcome?: () => boolean;
+  /** 可选的同类成功任务兜底；在每个步骤开跑前现读，排队任务也遵守热配置。 */
+  repeatSuccessFallback?: () => {
+    enabled: boolean; skillsCsv: string; maxSuccesses: number; windowMinutes: number;
+  };
   /** World 日志;不给就不记 */
   diag?: MinecraftLog;
   /** 运行中步骤的进度快照(30s 周期 + 计数过半) */
   onProgress?: (p: TaskProgress) => void;
+  /** 尾步开始且等待队列为空时至多一次；World 在投递时重新核验当前状态。 */
+  onQueueTail?: (p: TaskQueueTail) => void;
   /** 常驻规矩(mc_policy;World 持有并落盘) */
   policy?: SkillContext['policy'];
   /** 普通放置逐块取得许可；用于执行器外部持有的数量保留账。 */
@@ -1388,6 +1708,8 @@ interface ExecutorOptions {
   onHoldsReleased?: () => void;
   /** 开过的箱子账本 */
   chests?: ChestBook;
+  /** Persist completed empty directional routes across World restarts. */
+  directionalSweeps?: DirectionalSweepBook;
   /** 成果登记(World 持久化) */
   works?: WorksBook;
   /** 探索覆盖账本落账(World 持久化) */
@@ -1403,6 +1725,7 @@ interface ExecutorOptions {
   onDrain?: () => void;
   /** 白天点床时重生点已经悄悄搬走了没有(World 持有 set_spawn 的时刻) */
   spawnNote?: SkillContext['spawnNote'];
+  serverFeedbackSince?: SkillContext['serverFeedbackSince'];
   /** 个人重生点那一格(World 持有);受理刻的重生锚闸与技能回执共读一份 */
   spawnAnchor?: SkillContext['spawnAnchor'];
   /** 蓝图施工面(World 持有);build 的蓝图形态、两道受理刻的闸与采集搭车共读一份 */
@@ -1450,15 +1773,99 @@ export class Executor {
   private activeAttack: TaskAttackLease | null = null;
   /** 战斗挂起中的任务(断点冻结,战后 resume 放回队头续做) */
   private frozen: QueuedTask | null = null;
+  /** 让位收尾涵盖整个旧 run；清请求不能提前解除这道执行屏障。 */
+  private checkpointDrain: CheckpointDrain | null = null;
+  private readonly runningInstances = new Map<RunningTask, Bot | null>();
   /** probe 差分单槽:mc_stop 不清,换执行器(重启)才清 */
-  private readonly probeMemo: { last: ProbeMemo | null } = { last: null };
+  private readonly probeMemo: { last: ProbeMemo | null; entries: Map<number, ProbeMemo> } = {
+    last: null, entries: new Map(),
+  };
+  private readonly emptyProbeReads = new Map<string, {
+    at: number; dimension: string; from: Cell;
+  }>();
   /**
    * 每种「同一件事」上一次的下场。键是整单的技能+目标序列(见 taskSignature),
    * 只留没做成/做了一半的那些 —— 成功不入账,受理刻也就不会为它出声。
    */
   private readonly priorOutcomes = new Map<string, PriorOutcome>();
+  private readonly unresolvedIntents = new Map<string, {
+    attempts: number; at: number; evidence: string; after: TaskObservation | null;
+  }>();
   /** 同类签名在 15 分钟内的提交时刻及开跑首步次数；与 priorOutcomes 共用键和窗口。 */
   private readonly roundabout = new Map<string, { submits: number[]; ran: number }>();
+  /** 实际成功的步骤按目标技能归并；启用 fallback 前也保留窗口内事实。 */
+  private readonly successfulIntents = new Map<string, number[]>();
+  /** 原样重试的失败账；换目标、站位或维度后重新计数。 */
+  private readonly exactFailures = new Map<string, {
+    count: number; at: number; why: string;
+    from: { x: number; y: number; z: number; dimension: string } | null;
+    inventoryStamp: string | null;
+    takeProof?: 'not-container' | 'missing-item';
+    admissionRule?: string;
+    admissionInventoryStamp?: string | null;
+    admissionTargetBlock?: string | null;
+  }>();
+  /** 同一片区域反复采集不可见目标的短期账；仅由结构化受阻码写入。 */
+  private readonly unseenCollects = new Map<string, {
+    count: number; at: number; from: Cell;
+  }>();
+  /** 每片农田分别记账；在家与远处田之间往返不能覆盖上一片的未成熟观察。 */
+  private readonly immatureCollects = new Map<string, Array<{ at: number; from: Cell }>>();
+  private tunnelLiquidStops: Array<{
+    at: number; dimension: string; cell: Cell; name: 'water' | 'lava';
+  }> = [];
+  private tunnelSupportStops: Array<{ at: number; dimension: string; cell: Cell }> = [];
+  /** 已实际走完的竖向通道：允许首次折返，但拦住同段反复上下来回。 */
+  private verticalTunnelTraversals: Array<{
+    at: number; dimension: string; from: Cell; to: Cell;
+  }> = [];
+  /** Full virtual/open containers: a successful stow of another item does not free a slot. */
+  private readonly fullOpenStorageFailures = new Map<string, { count: number; at: number; why: string }>();
+  private localBuildFailures: Array<{
+    material: string; at: number; why: string;
+    from: { x: number; y: number; z: number; dimension: string };
+  }> = [];
+  /** 已知耕种操作在同片区域的失败账；换地点或找到可核验土格后放行。 */
+  private localFarmFailures: Array<{
+    at: number; why: string; from: { x: number; y: number; z: number; dimension: string };
+  }> = [];
+  /** 已明确无效的静态落点反复变换写法时，暂挂这一片的同材料施工意图。 */
+  private readonly buildSiteRefusals = new Map<string, {
+    count: number; firstAt: number; until: number; from: Cell;
+  }>();
+  /** 相邻目标从同一站位反复走不通；不可站的目标格跨站位记忆。 */
+  private spatialFailures: Array<{
+    count: number; at: number; why: string; dimension: string;
+    target: { x: number; y: number; z: number };
+    from: { x: number; y: number; z: number };
+  }> = [];
+  /** 同一格重复提交同一个单步 goto 的短窗口；避免“已在水平容差内”被当作新进展。 */
+  private readonly recentGotoRequests = new Map<string, number>();
+  private readonly inspections = new InspectionGuard();
+  /** 定向 find 在起点命中同一可见物、实际未行军时，不让同地重复观测刷成进展。 */
+  private readonly unmovedFindHits = new Map<string, {
+    at: number; dimension: string; from: { x: number; y: number; z: number };
+  }>();
+  /** 已看见但尚未成熟的同一片作物；龄期变化或移动到新田地便重新观察。 */
+  private readonly immatureFindHits = new Map<string, {
+    at: number; stamp: string; from: { x: number; y: number; z: number };
+  }>();
+  private readonly navigationBursts = new Map<string, {
+    times: number[]; dimension: string; from: { x: number; y: number; z: number }; lastAlertAt: number;
+  }>();
+  /** Repeated negative observations are evidence that a nearby search area is exhausted. */
+  private readonly emptyFinds = new Map<string, {
+    count: number; at: number; until: number; from: { x: number; y: number; z: number };
+  }>();
+  /** Tests and deployments without a data directory keep the same in-memory guard. */
+  private readonly directionalSweeps: DirectionalSweepBook;
+  /** 同一目的地反复快速自停的短期账；仅限制再次受理，不妨碍 mc_stop 本身。 */
+  private readonly rapidStops = new Map<string, { times: number[]; until: number }>();
+  /** 跨任务的过早叫停滚动账；一次改主意后先让下一单跑出结局。 */
+  private earlyStops: number[] = [];
+  /** 同一容器同种物品的反向转移账。 */
+  private storageIntents: Array<{ kind: 'take' | 'stow'; item: string; source: string; at: number; x: number; y: number; z: number; dimension: string }> = [];
+  private storageOscillationHold: Array<{ item: string; source: string; until: number; x: number; y: number; z: number; dimension: string }> = [];
   /** 受阻理由的滚动账:归并键 → 发生时刻(见 blockedHeadline;头条只报次数,不留原文) */
   private readonly blockedReasons = new Map<string, { at: number[] }>();
   /**
@@ -1473,15 +1880,15 @@ export class Executor {
    * 原样重发即确认(见 SPAWN_CONFIRM_WINDOW_MS);换了单就换这一槽。
    */
   private spawnConfirm: { key: string; at: number } | null = null;
-  /** 毒食闸的确认单槽,语义同 spawnConfirm(窗口见 POISON_CONFIRM_WINDOW_MS) */
-  private poisonConfirm: { key: string; at: number } | null = null;
   /**
    * 「包快满了」这条提醒的击发状态:true = 还没报过,跌破就报;报完置 false,
    * 空位回到 BAG_LOW_FREE 以上再重新上膛(见 `bagLowNote`)。
    */
   private bagLowArmed = true;
 
-  constructor(private readonly opts: ExecutorOptions) {}
+  constructor(private readonly opts: ExecutorOptions) {
+    this.directionalSweeps = opts.directionalSweeps ?? new DirectionalSweepBook(null);
+  }
 
   /** 当前任务在做什么;空闲为 null */
   get current(): string | null {
@@ -1492,6 +1899,12 @@ export class Executor {
   get currentTask(): { id: number; label: string; elapsedMs: number } | null {
     const t = this.task;
     return t ? { id: t.id, label: labelOf(t), elapsedMs: Date.now() - t.startedAt } : null;
+  }
+
+  /** Routine nutrition must not queue another meal behind an existing eat step. */
+  hasPendingEat(): boolean {
+    return [this.task, this.frozen, ...this.queue].some((task) =>
+      task?.steps.some((step) => step.skill === 'eat'));
   }
 
   status(): QueueStatus {
@@ -1513,11 +1926,24 @@ export class Executor {
         : null,
       waiting: [
         ...(this.frozen ? [{ id: this.frozen.id, label: `${labelOf(this.frozen)}(被打断,待续)` }] : []),
-        ...this.queue.map((q) => ({ id: q.id, label: labelOf(q) })),
+        ...this.queue.map((q) => ({ id: q.id, label: labelOf(q)
+          + (q.checkpointContinuation ? '(检查点待续)' : q.checkpointOwnerId !== undefined ? '(等待检查点)' : '') })),
+        ...(this.checkpointDrain?.continuation
+          ? [{ id: this.checkpointDrain.continuation.id,
+            label: `${labelOf(this.checkpointDrain.continuation)}(检查点收尾后待续)` }] : []),
       ],
       // 与受理句读同一份来源(见 submit 里的 hold),两处不再各说各的
       hold: this.holdReason() ?? this.opts.busyWith?.() ?? null,
     };
+  }
+
+  /** 延迟提示只属于原执行实例；完工、追加、冻结或取消后旧提示失效。 */
+  queueTailStatus(notice: TaskQueueTail): QueueStatus | null {
+    const task = this.task;
+    if (this.stopped || !task || task.queueTailNotice !== notice || task.flag.aborted
+      || task.flag.epoch !== this.executionEpoch || task.stepIndex !== task.steps.length - 1
+      || this.queue.length > 0 || this.frozen || this.holdReason() !== null || this.opts.busyWith?.()) return null;
+    return this.status();
   }
 
   /** 挂钟时刻 HH:MM:SS。一场就是一天,不带日期 */
@@ -1525,37 +1951,200 @@ export class Executor {
     return nowIso(this.opts.timezone ?? 'Asia/Shanghai', new Date(ms)).slice(11, 19);
   }
 
+  /** 仅供 mc_do 受理前使用；不改队列，也不为其他工具设置全局退避。 */
+  repeatSuccessHold(steps: readonly SkillCall[], config: {
+    enabled: boolean; skillsCsv: string; maxSuccesses: number; windowMinutes: number;
+  }, now = Date.now()): string | null {
+    if (!config.enabled || typeof config.skillsCsv !== 'string'
+      || !Number.isFinite(config.windowMinutes) || config.windowMinutes <= 0
+      || !Number.isFinite(config.maxSuccesses) || config.maxSuccesses < 1) return null;
+    const allowed = new Set(config.skillsCsv.split(',').map((skill) => skill.trim()));
+    const windowMs = config.windowMinutes * 60_000;
+    for (const target of steps) {
+      if (!allowed.has(target.skill)
+        || ['attack', 'flee', 'surface', 'eat', 'chat'].includes(target.skill)) continue;
+      const recent = (this.successfulIntents.get(taskSignature([target])) ?? [])
+        .filter((at) => now - at < windowMs);
+      if (recent.length < config.maxSuccesses) continue;
+      const until = recent[recent.length - config.maxSuccesses] + windowMs;
+      const localUntil = nowIso(this.opts.timezone ?? 'Asia/Shanghai', new Date(until))
+        .replace('T', ' ').slice(0, 19);
+      return `[mc_do 暂缓] ${config.windowMinutes} 分钟内目标技能「${describeSkill(target)}」成功 ${recent.length} 次，`
+        + `同类新任务到 ${localUntil} 可再受理。当前任务和队列保留，其他目标技能照常可用`;
+    }
+    return null;
+  }
+
+  private noteSuccessfulIntent(step: SkillCall, at: number): void {
+    for (const [key, times] of this.successfulIntents) {
+      const recent = times.filter((time) => at - time < MAX_REPEAT_SUCCESS_WINDOW_MS);
+      if (recent.length > 0) this.successfulIntents.set(key, recent);
+      else this.successfulIntents.delete(key);
+    }
+    if ('dryRun' in step && step.dryRun === true) return;
+    const key = taskSignature([step]);
+    this.successfulIntents.set(key, [...(this.successfulIntents.get(key) ?? []), at]);
+  }
+
+  /** Records a proven admission failure without modifying or starting queued work. */
+  noteAdmissionRejection(steps: readonly SkillCall[], rule: string, text: string): TaskAdmissionRejection {
+    const p = this.opts.getBot()?.entity?.position;
+    const calls = p ? freezeFirstStep([...steps], {
+      x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z),
+    })?.steps ?? steps : steps;
+    const count = this.recordExactOutcome(calls, true, text, rule);
+    return { kind: count && count > 1 ? 'repeat' : 'correction', rule };
+  }
+
   /**
- * replace 撤销待办并接在当前任务后；append 排尾；now 中断当前任务并排首。
- * 回执说明撤销与中断对象；身体仍被自保持有时继续排队。
- * wrote 仅用于与解析、冻结后的步骤比较，差异按字段回念，无原文则完整回念。
- */
-  submit(steps: SkillCall[], mode: QueueMode = 'replace', wrote?: unknown): string {
-    if (this.stopped) return '[mc_do 失败] World 未启动';
-    const id = this.opts.nextId();
+   * replace 撤销待办并接在当前任务后；append 排尾；now 中断当前任务并排首。
+   * afterCheckpoint 在原子动作检查点让位，短任务之后以原任务 ID 续做。
+   * 回执说明撤销与中断对象；身体仍被自保持有时继续排队。
+   * wrote 仅用于与解析、冻结后的步骤比较，差异按字段回念，无原文则完整回念。
+   */
+  submit(steps: SkillCall[], mode: QueueMode = 'replace', wrote?: unknown,
+    onDecision?: (accepted: boolean, retryAfterMs?: number, completedImmediately?: true,
+      rejection?: TaskAdmissionRejection) => void, beforeEnqueue?: () => void): string {
+    const decision = this.submitDetailed(steps, mode, wrote, beforeEnqueue);
+    onDecision?.(decision.accepted, decision.retryAfterMs, decision.completedImmediately, decision.rejection);
+    return decision.receipt;
+  }
+
+  submitDetailed(steps: SkillCall[], mode: QueueMode = 'replace', wrote?: unknown,
+    beforeEnqueue?: () => void): TaskAdmissionDecision {
+    if (this.stopped) return { receipt: '[mc_do 失败] World 未启动', accepted: false,
+      rejection: { kind: 'wait', rule: 'world.stopped' } };
     const at = Date.now();
     // 首步的相对锚点按受理位置冻结；后续步骤仍按各自执行时的位置解析。
     const p = this.opts.getBot()?.entity?.position;
     const frozen = p ? freezeFirstStep(steps, { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) }) : null;
-    const task: QueuedTask = { id, steps: [...(frozen?.steps ?? steps)], enqueuedAt: at };
-    // 两道受理刻驳回排在入队之前:队列一个字都不动,任务号也不发出去。
-    // 它们与前置试算不同档 —— 试算只报否定不改变执行,这两条是"这一单不能受理"。
-    const refused = this.spawnGuardNote(task.steps, at) ?? this.gravityGuardNote(task.steps)
-      ?? this.poisonGuardNote(task.steps, at);
+    const calls = frozen?.steps ?? steps;
+    const satisfiedGoto = this.satisfiedGotoReceipt(calls);
+    if (satisfiedGoto) return {
+      receipt: `[${this.clock(at)}] ${satisfiedGoto}`, accepted: true, completedImmediately: true,
+    };
+    const id = this.opts.nextId();
+    const task: QueuedTask = { id, steps: [...calls], enqueuedAt: at };
+    const emptyFindHold = this.emptyFindNote(task.steps, at);
+    const directionalSweep = this.directionalSweepNote(task.steps, at);
+    const directionalSweepHold = directionalSweep?.refuse ? directionalSweep.text : null;
+    const immatureFindHold = this.immatureFindNote(task.steps, at);
+    const unmovedFindHold = this.unmovedFindNote(task.steps, at);
+    const navigationBurst = emptyFindHold || directionalSweepHold || immatureFindHold || unmovedFindHold
+      ? null : this.navigationBurstNote(task.steps, at);
+    const botForInspection = this.opts.getBot();
+    const inspectionHold = botForInspection
+      ? this.inspections.block(task.steps, normalizeDimension(dimensionOf(botForInspection)), at) : null;
+    const farmingHold = this.localFarmFailureNote(task.steps, at);
+    // 对当前已加载且不会被前置步骤改变的土格，试算已有确定的否定结论。
+    // 直接拒收，避免把一次已知必败的锄地+种地拆成两条零秒失败，再驱动快速重试。
+    const soilPrecheckHold = this.definiteSoilPrecheckNote(task.steps);
+    const takeEvidenceHold = this.takeEvidenceNote(task.steps, at);
+    const namedTakeHold = namedTakeRetryKey(task.steps, this.opts.getBot())
+      ? this.repeatFailedTaskNote(task.steps, at) : null;
+    const storageCycleHold = this.storageCycleNote(task.steps);
+    const storageAccessHold = storageCycleHold ? null : this.storageAccessNote(task.steps);
+    // 受理刻驳回排在入队之前：队列一个字都不动；前置试算只报现场否定，不改变执行。
+    const refusal = (text: string | null | undefined, rule: string,
+      kind: TaskAdmissionRejection['kind'] = 'wait') => text ? { text, rule, kind } : null;
+    const refused = refusal(emptyFindHold?.text, 'find.empty', 'repeat')
+      ?? refusal(directionalSweepHold, 'find.sweep', 'repeat')
+      ?? refusal(immatureFindHold, 'find.immature')
+      ?? refusal(unmovedFindHold, 'find.unmoved', 'repeat')
+      ?? refusal(navigationBurst, 'navigation.burst', 'repeat')
+      ?? refusal(inspectionHold?.text, 'inspection.wait')
+      ?? refusal(farmingHold, 'farm.failed', 'repeat')
+      ?? refusal(soilPrecheckHold?.text, 'farm.soil', 'correction')
+      ?? refusal(namedTakeHold, 'task.failed', 'repeat')
+      ?? refusal(takeEvidenceHold?.text, `take.${takeEvidenceHold?.proof}`, 'correction')
+      ?? refusal(storageCycleHold, 'storage.cycle', 'repeat')
+      ?? refusal(this.duplicatePendingNote(task.steps), 'queue.pending')
+      ?? refusal(this.storageOscillationNote(task.steps, at), 'storage.oscillation', 'repeat')
+      ?? refusal(this.fullOpenStorageNote(task.steps, at), 'storage.full', 'repeat')
+      ?? refusal(this.spawnGuardNote(task.steps, at), 'spawn.protected')
+      ?? refusal(this.gravityGuardNote(task.steps), 'build.gravity')
+      ?? refusal(this.rapidStopNote(task.steps, at), 'task.rapidStop', 'repeat')
+      ?? refusal(this.activeCombatAttackNote(task.steps, mode), 'combat.active')
+      ?? refusal(this.immediateAttackTargetNote(task.steps, mode), 'attack.noTarget', 'correction')
+      ?? refusal(this.pendingAttackPlanNote(task.steps, mode), 'combat.pending')
+      ?? refusal(this.repeatStationaryGotoNote(task.steps, p, at), 'goto.stationary', 'repeat')
+      ?? refusal(this.spatialFailureNote(task.steps, at), 'navigation.failed', 'repeat')
+      ?? refusal(storageAccessHold, 'storage.access')
+      ?? refusal(this.staleKnownContainerUseNote(task.steps), 'use.staleContainer', 'correction')
+      ?? refusal(this.portableStorageMisuseNote(task.steps), 'storage.portable', 'correction')
+      ?? refusal(this.protectedTossNote(task.steps), 'toss.protected')
+      ?? refusal(this.reacquiredTossNote(task.steps), 'toss.reacquired', 'repeat')
+      ?? refusal(this.bulkUnanchoredTossNote(task.steps), 'toss.unanchored')
+      ?? refusal(this.missingStowItemNote(task.steps), 'stow.missingItem', 'correction')
+      ?? refusal(this.missingUseItemNote(task.steps), 'use.missingItem', 'correction')
+      ?? refusal(this.impossibleCraftStartNote(task.steps), 'craft.invalid', 'correction')
+      ?? refusal(this.fullInventoryGridCraftNote(task.steps), 'craft.capacity', 'correction')
+      ?? refusal(this.fullInventoryTakeNote(task.steps), 'take.capacity', 'correction')
+      ?? refusal(this.localBuildFailureNote(task.steps, at), 'build.failed', 'repeat')
+      ?? refusal(this.buildSiteNote(task.steps, at), 'build.site')
+      ?? refusal(this.tunnelLiquidStopNote(task.steps, at), 'tunnel.liquid', 'repeat')
+      ?? refusal(this.tunnelSupportStopNote(task.steps, at), 'tunnel.support', 'repeat')
+      ?? refusal(this.verticalTunnelOscillationNote(task.steps, at), 'tunnel.oscillation', 'repeat')
+      ?? refusal(this.repeatEmptyProbeNote(task.steps, at), 'probe.empty', 'repeat')
+      ?? refusal(this.unseenCollectNote(task.steps, at), 'collect.unseen', 'repeat')
+      ?? refusal(this.immatureCollectNote(task.steps, at), 'collect.immature')
+      ?? refusal(this.repeatFailedTaskNote(task.steps, at), 'task.failed', 'repeat');
     const echo = echoDiff(task.steps, wrote);
     const echoText = [echo.hoist, echo.tail].filter(Boolean).join('。');
-    if (refused) return `[${this.clock(at)}] 这一单我没接:${refused}${echoText ? `\n${echoText}` : ''}`;
+    if (refused) {
+      let kind = refused.kind;
+      if (kind === 'correction') {
+        const evidenceSteps = soilPrecheckHold && refused.rule === 'farm.soil'
+          ? [soilPrecheckHold.step]
+          : takeEvidenceHold && refused.rule === `take.${takeEvidenceHold.proof}`
+            ? [takeEvidenceHold.step] : task.steps;
+        kind = this.noteAdmissionRejection(evidenceSteps, refused.rule, refused.text).kind;
+      }
+      return {
+      receipt: `[${this.clock(at)}] 这一单我没接:${refused.text}${echoText ? `\n${echoText}` : ''}`,
+      accepted: false,
+      rejection: { kind, rule: refused.rule },
+      ...(emptyFindHold ? { retryAfterMs: emptyFindHold.retryAfterMs }
+        : directionalSweepHold ? { retryAfterMs: 45_000 }
+        : immatureFindHold ? { retryAfterMs: 45_000 }
+        : navigationBurst ? { retryAfterMs: NAVIGATION_BURST_COOLDOWN_MS }
+        : inspectionHold ? { retryAfterMs: inspectionHold.retryAfterMs }
+          : farmingHold ? { retryAfterMs: 8_000 }
+          : soilPrecheckHold ? {}
+          : takeEvidenceHold ? { retryAfterMs: takeEvidenceHold.retryAfterMs }
+             : storageCycleHold || storageAccessHold ? { retryAfterMs: 5_000 } : {}),
+      };
+    }
     // 受理了才进打转账;没接的那几单不算她"下过一次"。快照要在 pump 之前取
-    const round = this.noteSubmitted(taskSignature(task.steps), at);
+    const sig = taskSignature(task.steps);
+    const round = this.noteSubmitted(sig, at);
+    this.noteStorageIntent(task.steps, at);
+    if ([3, 6, 10].includes(round.times)) {
+      this.opts.diag?.write({ lane: 'task', event: 'repeated-intent', taskId: id,
+        msg: `15 分钟内第 ${round.times} 次提交同类任务，保留现场供复盘`, incident: true,
+        data: { signature: sig, times: round.times, spanMs: round.spanMs,
+          ranBefore: round.ranBefore, position: p ? { x: p.x, y: p.y, z: p.z } : null } });
+    }
     // 受理刻试算必须冻结在开工前。equip 会同步把装备移出背包，开工后重读会误报缺货。
     const precheck = this.precheckNote(task.steps);
+    // Release an idle body only after admission, before the new task can start.
+    beforeEnqueue?.();
     const dropped = mode === 'replace' ? this.queue.splice(0) : [];
     // queue:"now" = 手上的事全放下,战斗也一样。先让战斗交还身体(挂起的那件会被
     // resume 放回队头),再 interrupt 掐掉手上这件,最后这一单插到队头 —— 顺序反了
     // 就会是"刚解冻的旧任务排在急件前面"。
     const combatCut = mode === 'now' ? this.opts.stopCombat?.() ?? null : null;
     const cut = mode === 'now' ? this.interrupt() : null;
-    if (mode === 'now') this.queue.unshift(task);
+    if (mode === 'afterCheckpoint') {
+      const owner = this.task ?? this.frozen;
+      task.checkpointRequest = true;
+      task.checkpointOwnerId = owner?.id;
+      const last = this.queue.reduce((found, queued, index) => queued.checkpointRequest ? index : found, -1);
+      this.queue.splice(last + 1, 0, task);
+      if (owner) this.opts.diag?.write({ lane: 'task', event: 'yield-pending', taskId: owner.id,
+        msg: `任务#${id} 等待任务#${owner.id} 的安全检查点`,
+        data: { requestId: id, ownerTaskId: owner.id } });
+    } else if (mode === 'now') this.queue.unshift(task);
     else this.queue.push(task);
     const ahead = this.queue.indexOf(task) + (this.task ? 1 : 0) + (this.frozen ? 1 : 0);
     this.opts.diag?.write({
@@ -1567,14 +2156,16 @@ export class Executor {
       },
     });
     // 缺省的 replace 撤掉的那几件各补一条结局:受理回执点名只活在这一个上下文窗口里
-    for (const d of dropped) this.reportCancelled(d, `新任务#${id} 顶替`, null);
+    for (const d of dropped) this.reportCancelled(d, `新任务#${id} 顶替`, Executor.frozenProgress(d));
     this.pump();
     // 身体被战斗占着时如实说"排上了":此刻队列闸着,说"已开始"就是说假话。
     // queue:"now" 可以打断普通交战，但低血或尚未安全结束的撤退仍会持有身体。
     // 交还动作之后重读 busyWith，避免把实际仍在排队的急件说成已经开跑。
     const hold = this.holdReason() ?? this.opts.busyWith?.() ?? null;
     /* 受理回执只说明收下或排队状态，不宣称完成，也不估计无依据的任务时长。 */
-    const place = hold !== null
+    const place = task.checkpointOwnerId !== undefined
+      ? `任务#${id} 收下了,等待任务#${task.checkpointOwnerId} 的安全检查点;短任务之后原任务续做`
+      : hold !== null
       ? `任务#${id} 排上了(${hold},腾出手就做${ahead > 0 ? `,前面还有 ${ahead} 件` : ''})`
       : ahead === 0
         // 入队回执注明首步内容；各步实际结果由后续事件报告。
@@ -1588,9 +2179,11 @@ export class Executor {
       // 战斗被这一单打断了:照实说一句,别让"怎么突然不打了"成为她要自己解释的事
       combatCut ? `战斗被这单打断了(刚才${combatCut},已经放开手)` : null,
       cut,
-      // 排着的那几件按定义一步都没跑过:点破它,别让"撤掉了"读起来像"做完换下一件"
       dropped.length > 0
-        ? `撤掉了排在后面的 ${dropped.map((d) => `任务#${d.id}「${labelOf(d)}」`).join('、')}(都还没轮到跑第 1 步)`
+        ? `撤掉了排在后面的 ${dropped.map((d) => `任务#${d.id}「${labelOf(d)}」`
+          + (dropped.every((queued) => queued.startedAt === undefined) ? ''
+            : d.startedAt === undefined ? '(还没轮到跑第 1 步)' : '(已执行断点已撤)')).join('、')}`
+          + (dropped.every((queued) => queued.startedAt === undefined) ? '(都还没轮到跑第 1 步)' : '')
         : null,
       // 差异回念之外，注明首步冻结所用原点及后续步骤仍延迟解析。
       frozen?.changed
@@ -1598,6 +2191,7 @@ export class Executor {
         : null,
       // 带 direction 的 find 会行军；受理时报告距离及走满后的重生点距离。
       this.marchNote(task.steps),
+      directionalSweep?.refuse === false ? directionalSweep.text : null,
       // 长途 goto 的空间代价:直线多远、走路要多久。原点用她下这一单时站的那一格
       // (与第 1 步锚点冻结同源),不是 pump 之后的位置
       this.hikeNote(task.steps, frozen?.origin ?? null),
@@ -1607,13 +2201,1581 @@ export class Executor {
       // 受理试算只读并报告否定结果，不改变执行。
       precheck,
       // 同一件事上次的下场:补的是已经滑出上下文的那一段
-      this.priorNote(task.steps, at, round),
+      this.priorNote(task.steps, at, round) ?? repeatedSubmissionNote(round),
       // 相对锚点转为绝对坐标的差异优先呈现。
       echo.hoist,
     ].filter(Boolean);
-    return `[${this.clock(at)}] ${warn.length > 0 ? `⚠ ${warn.join(';')} → ` : ''}` +
+    const receipt = `[${this.clock(at)}] ${warn.length > 0 ? `⚠ ${warn.join(';')} → ` : ''}` +
       `${place}。${echo.tail ?? ''}` +
       `${notes.length > 0 ? `\n${notes.join(';')}。` : ''}`;
+    return { receipt, accepted: true };
+  }
+
+  /** 同一整单已经在途时不再入队；换坐标或数量的修正计划照常受理。 */
+  private duplicatePendingNote(steps: readonly SkillCall[]): string | null {
+    const key = exactTaskKey(steps);
+    const active = this.task;
+    if (active && exactTaskKey(active.steps) === key) {
+      return `任务#${active.id} 正在做同一整单；等完成或受阻回执后再决定。原任务与队列保留`;
+    }
+    const pending = [this.frozen, this.checkpointDrain?.continuation, ...this.queue]
+      .find((task) => task && exactTaskKey(task.steps) === key);
+    return pending ? `任务#${pending.id} 已在队列里；等它执行后再决定。原任务与队列保留` : null;
+  }
+
+  private navigationBurstNote(steps: readonly SkillCall[], now: number): string | null {
+    if (!steps.some((step) => step.skill === 'find')) return null;
+    const bot = this.opts.getBot();
+    const pos = bot?.entity?.position;
+    if (!bot || !pos) return null;
+    const planned = lastAbsoluteGoto(steps);
+    if (planned && Math.hypot(planned.x - pos.x, planned.y - pos.y, planned.z - pos.z)
+      >= NAVIGATION_BURST_RESET_DISTANCE) return null;
+    for (const [key, entry] of this.navigationBursts) {
+      if (now - entry.times.at(-1)! > NAVIGATION_BURST_WINDOW_MS) this.navigationBursts.delete(key);
+    }
+    const key = navigationIntentKey(steps);
+    const dimension = dimensionOf(bot);
+    let entry = this.navigationBursts.get(key);
+    if (!entry || entry.dimension !== dimension
+      || Math.hypot(pos.x - entry.from.x, pos.y - entry.from.y, pos.z - entry.from.z) >= NAVIGATION_BURST_RESET_DISTANCE) {
+      entry = { times: [], dimension, from: { x: pos.x, y: pos.y, z: pos.z }, lastAlertAt: 0 };
+      this.navigationBursts.set(key, entry);
+    }
+    entry.times = entry.times.filter((time) => now - time <= NAVIGATION_BURST_WINDOW_MS);
+    entry.times.push(now);
+    const rapid = entry.times.filter((time) => now - time <= 20_000).length;
+    if (rapid < 3 && entry.times.length < 6) return null;
+    if (now - entry.lastAlertAt > NAVIGATION_BURST_COOLDOWN_MS) {
+      entry.lastAlertAt = now;
+      this.opts.diag?.write({ lane: 'task', event: 'navigation-burst', incident: true,
+        msg: '同一位置连续提交同一寻路或观察计划，暂缓新任务',
+        data: { key, attempts: entry.times.length, rapid, position: entry.from, dimension } });
+    }
+    return `同一寻路或观察计划从这片区域已提交 ${entry.times.length} 次，位置仍未移动 ${NAVIGATION_BURST_RESET_DISTANCE} 格；这次不改队列。等原任务结局，或换目标/实际站位后再试`;
+  }
+
+  private emptyFindKey(target: string, dimension: string): string {
+    return `${dimension}\0${target.trim().toLowerCase()}`;
+  }
+
+  /** 搜索历史注明实际路线；仅短期同起点、同方向且未延长的请求暂缓。 */
+  private directionalSweepNote(steps: readonly SkillCall[], now: number): { text: string; refuse: boolean } | null {
+    const i = steps.findIndex((step) => step.skill === 'find');
+    if (i < 0 || steps.slice(0, i).some((step) => step.skill !== 'goto')) return null;
+    const find = steps[i];
+    const bot = this.opts.getBot();
+    if (!bot?.entity || find.skill !== 'find') return null;
+    const prefix = steps.slice(0, i);
+    const precedingGoto = [...prefix].reverse().find((step) => step.skill === 'goto');
+    const from = i === 0 ? feetOf(bot)
+      : precedingGoto?.skill === 'goto' && !precedingGoto.groundY ? lastAbsoluteGoto(prefix) : null;
+    // 后续相对锚点和二维目的地的到达位置尚未确定，不能套用当前位置的历史。
+    if (!from) return null;
+    const recent = this.directionalSweeps.recent(now, DIRECTIONAL_SWEEP_HOLD_MS);
+    const nearby = recent.filter((entry) =>
+      entry.dimension === dimensionOf(bot)
+      && entry.target === find.target.trim().toLowerCase()
+      && Math.hypot(from.x - entry.from.x, from.z - entry.from.z) <= DIRECTIONAL_SWEEP_EVIDENCE_RADIUS);
+    if (nearby.length === 0) return null;
+    const stamp = (at: number): string => nowIso(this.opts.timezone ?? 'Asia/Shanghai', new Date(at))
+      .replace('T', ' ').slice(0, 19);
+    const evidence = (entry: typeof nearby[number]): string =>
+      `${stamp(entry.at)} 从 ${cellText(entry.from)} 朝${DIRECTION_ZH[entry.direction]}走满 ${entry.distance} 格，未命中${zhThing(find.target)}`;
+    const prior = [...nearby].reverse().find((entry) =>
+      now - entry.at < DIRECTIONAL_SWEEP_REPEAT_MS
+      && entry.direction === find.direction
+      && find.distance <= entry.distance
+      && from.x === entry.from.x && from.y === entry.from.y && from.z === entry.from.z);
+    if (prior) return { refuse: true,
+      text: `计划起点 ${cellText(from)}；${evidence(prior)}。本次同起点、同方向且声明距离未扩大，`
+        + `暂缓相同路线至 ${stamp(prior.at + DIRECTIONAL_SWEEP_REPEAT_MS)}；原队列保留` };
+    const shown = [...nearby].reverse().slice(0, 3);
+    return { refuse: false,
+      text: `搜索历史（计划起点 ${cellText(from)}，附近 ${nearby.length} 条记录${nearby.length > shown.length ? '，列最近 3 条' : ''}）：`
+        + shown.map(evidence).join('；') + '。这些是已完成路线的历史读数' };
+  }
+
+  private recordDirectionalSweeps(task: RunningTask): void {
+    const bot = this.opts.getBot();
+    if (!bot) return;
+    const now = Date.now();
+    for (const landed of task.stepLog) {
+      const i = landed.step - 1;
+      const step = task.steps[i];
+      const from = task.findOrigins?.get(i);
+      if (step?.skill !== 'find' || !step.direction || !from || landed.outcome !== 'ok'
+        || !landed.line.includes('走满了') || !landed.line.includes('一路没看见')) continue;
+      this.directionalSweeps.record({
+        at: now, dimension: dimensionOf(bot), target: step.target.trim().toLowerCase(),
+        direction: step.direction, from, distance: step.distance,
+      }, now, DIRECTIONAL_SWEEP_HOLD_MS);
+    }
+  }
+
+  private emptyFindNote(steps: readonly SkillCall[], now: number): { text: string; retryAfterMs: number } | null {
+    const find = steps.find((step): step is Extract<SkillCall, { skill: 'find' }> => step.skill === 'find');
+    const bot = this.opts.getBot();
+    const pos = bot?.entity?.position;
+    if (!find || !bot || !pos) return null;
+    const key = this.emptyFindKey(find.target, dimensionOf(bot));
+    const entry = this.emptyFinds.get(key);
+    if (!entry || entry.until <= now) return null;
+    const outside = (point: { x: number; y: number; z: number }): boolean =>
+      Math.hypot(point.x - entry.from.x, point.y - entry.from.y, point.z - entry.from.z)
+      >= EMPTY_FIND_REGION_DISTANCE;
+    const planned = lastAbsoluteGoto(steps);
+    if (outside(pos) || (planned && outside(planned))) return null;
+    // The hold applies only to this search intent; other tasks remain available.
+    const retryAfterMs = Math.min(entry.until - now, 8_000);
+    return {
+      text: `这片区域已连续 ${entry.count} 次没找到${zhThing(find.target)}，继续逐格移动或改变搜索半径不会得到新线索。`
+        + `暂缓在周围 ${EMPTY_FIND_REGION_DISTANCE} 格内重复找它；去建筑入口、远处新区域，或改做其他任务`,
+      retryAfterMs,
+    };
+  }
+
+  private recordEmptyFindOutcomes(task: RunningTask): void {
+    const bot = this.opts.getBot();
+    if (!bot?.entity?.position) return;
+    const now = Date.now();
+    const dimension = dimensionOf(bot);
+    for (const landed of task.stepLog) {
+      const stepIndex = landed.step - 1;
+      const step = task.steps[stepIndex];
+      if (step?.skill !== 'find' || landed.outcome !== 'ok') continue;
+      const key = this.emptyFindKey(step.target, dimension);
+      if (!landed.line.includes('没看见')) {
+        this.emptyFinds.delete(key);
+        continue;
+      }
+      // A directional find may finish 64 blocks from its start. Count searches
+      // from the origin so returning home does not erase the failed sweep.
+      const pos = task.findOrigins?.get(stepIndex) ?? bot.entity.position;
+      const prior = this.emptyFinds.get(key);
+      const nearby = prior && now - prior.at <= EMPTY_FIND_WINDOW_MS
+        && Math.hypot(pos.x - prior.from.x, pos.y - prior.from.y, pos.z - prior.from.z)
+          < EMPTY_FIND_REGION_DISTANCE;
+      const count = nearby ? prior.count + 1 : 1;
+      this.emptyFinds.set(key, {
+        count, at: now, until: count >= 3 ? now + EMPTY_FIND_HOLD_MS : 0,
+        from: nearby ? prior.from : { x: pos.x, y: pos.y, z: pos.z },
+      });
+      if (this.emptyFinds.size > 64) this.emptyFinds.delete(this.emptyFinds.keys().next().value!);
+    }
+  }
+
+  private storageIntentsOf(steps: readonly SkillCall[], at: number) {
+    // 开窗前可以有 goto，开窗后也可能连续存多样物品；逐步找实际来源，
+    // 才能识别「开包→取出→开包→存回」及夹着其他存物步骤的倒货循环。
+    const bot = this.opts.getBot();
+    const pos = bot?.entity?.position;
+    if (!bot || !pos) return [];
+    let source = 'local';
+    const intents: typeof this.storageIntents = [];
+    for (const step of steps) {
+      if (step.skill === 'use') {
+        source = step.item ? `item:${step.item.toLowerCase()}`
+          : step.at ? `block:${JSON.stringify(step.at)}` : 'local';
+      } else if (step.skill === 'chat' && step.text.startsWith('/')) {
+        source = `command:${step.text.toLowerCase()}`;
+      } else if ((step.skill === 'take' || step.skill === 'stow') && step.item) {
+        const fromOpen = step.skill === 'take' ? step.from === 'open' : step.into === 'open';
+        if (fromOpen && source === 'local') continue;
+        intents.push({ kind: step.skill, item: step.item, source: fromOpen ? source : 'local',
+          at, x: pos.x, y: pos.y, z: pos.z, dimension: normalizeDimension(dimensionOf(bot)) });
+      }
+    }
+    return intents;
+  }
+
+  /** A take followed by an equal or smaller stow into the same container frees no bag slot. */
+  private storageCycleNote(steps: readonly SkillCall[]): string | null {
+    const bot = this.opts.getBot();
+    if (!bot || steps.some((step) => step.skill === 'compact')) return null;
+    const containerAt = (at: Anchor): string | null => {
+      try {
+        const p = resolveAt(bot, at);
+        return `block:${normalizeDimension(dimensionOf(bot))}:${p.x},${p.y},${p.z}`;
+      } catch { return null; }
+    };
+    let opened: string | null = null;
+    const taken = new Map<string, Array<{ source: string; count: number }>>();
+    for (const step of steps) {
+      if (step.skill === 'use') {
+        opened = step.at ? containerAt(step.at) : step.item ? `item:${step.item.toLowerCase()}` : null;
+      } else if (step.skill === 'chat' && step.text.startsWith('/')) {
+        opened = `command:${step.text.toLowerCase()}`;
+      } else if (step.skill === 'take' && step.item) {
+        const source = step.at ? containerAt(step.at) : step.from === 'open' ? opened : null;
+        if (source) taken.set(step.item, [...(taken.get(step.item) ?? []),
+          { source, count: step.count ?? 1 }]);
+      } else if (step.skill === 'stow') {
+        const destination = step.at ? containerAt(step.at) : step.into === 'open' ? opened : null;
+        const prior = taken.get(step.item) ?? [];
+        if (destination && prior.length > 0 && prior.every((part) => part.source === destination)
+          && prior.reduce((sum, part) => sum + part.count, 0) >= step.count) {
+          return `本单从同一容器取出${zhName(step.item)}又存回不多于取出的数量，无法保证随身净腾出一格。若要压缩容器请用 compact；若要腾随身格，直接把原本随身的物品存到有余量的容器；原队列保留`;
+        }
+      }
+    }
+    return null;
+  }
+
+  private storageOscillationNote(steps: readonly SkillCall[], at: number): string | null {
+    const items = this.opts.getBot()?.inventory?.items?.();
+    const free = items ? Math.max(0, PLAYER_SLOTS - items.length) : null;
+    const recovery = free !== null && free >= 6
+      ? `随身还有 ${free} 格空位；若收纳目标只是腾出至少 6 格，现在已经达标，应结束收纳去做别的事。`
+      : '若仍需腾位，先检查随身空格，再选另一处有空位的容器。';
+    for (const next of this.storageIntentsOf(steps, at)) {
+      const nearby = (other: { x: number; y: number; z: number; dimension: string }) =>
+        other.dimension === next.dimension && Math.hypot(other.x - next.x, other.y - next.y, other.z - next.z) <= 5;
+      this.storageOscillationHold = this.storageOscillationHold.filter((hold) => at < hold.until);
+      if (this.storageOscillationHold.some((hold) => hold.item === next.item && hold.source === next.source && nearby(hold))) {
+        return `同一地点的${zhName(next.item)}刚出现取出/存回循环，暂缓 10 分钟。${recovery}不要再从这口容器取出同种物品给它腾位`;
+      }
+      const recent = this.storageIntents.filter((entry) => at - entry.at < 30_000
+        && entry.item === next.item && entry.source === next.source && nearby(entry));
+      const last = recent.at(-1);
+      if (last?.kind === 'take' && next.kind === 'stow') {
+        this.storageOscillationHold.push({ item: next.item, source: next.source, until: at + 600_000,
+          x: next.x, y: next.y, z: next.z, dimension: next.dimension });
+        this.opts.diag?.write({ lane: 'task', event: 'storage-oscillation', incident: true,
+          msg: `同一地点的${zhName(next.item)}出现取出/存回交替，暂停这类操作 10 分钟`,
+          data: { item: next.item, source: next.source, position: { x: next.x, y: next.y, z: next.z }, dimension: next.dimension } });
+        return `同一地点的${zhName(next.item)}已连续取出/存回，暂缓 10 分钟。${recovery}不要再从这口容器取出同种物品给它腾位`;
+      }
+    }
+    return null;
+  }
+
+  private noteStorageIntent(steps: readonly SkillCall[], at: number): void {
+    const intents = this.storageIntentsOf(steps, at);
+    if (intents.length === 0) return;
+    this.storageIntents = this.storageIntents.filter((entry) => at - entry.at < 30_000);
+    this.storageIntents.push(...intents);
+    if (this.storageIntents.length > 32) this.storageIntents.splice(0, this.storageIntents.length - 32);
+  }
+
+  /** An immediate attack needs a current target before it may cancel unrelated work. */
+  private immediateAttackTargetNote(steps: readonly SkillCall[], mode: QueueMode): string | null {
+    const first = steps[0];
+    if (mode !== 'now' || first?.skill !== 'attack') return null;
+    const bot = this.opts.getBot();
+    if (!bot?.entity) return null;
+    const target = findEntity(bot, first.target, 32, candidate => canSeeEntity(bot, candidate));
+    return target ? null : `附近 32 格内没看见${zhEntity(first.target)}；即时攻击没有可执行目标，本次不打断当前任务或撤销待办。目标出现后再按现场决定`;
+  }
+
+  /** 反射战斗占着身体时，排尾攻击会在战后读到过时目标。 */
+  private activeCombatAttackNote(steps: readonly SkillCall[], mode: QueueMode): string | null {
+    return mode !== 'now' && steps.length > 0 && steps.every((step) => step.skill === 'attack')
+      && this.opts.bodyState?.().combatActive
+      ? '反射战斗正在处理附近敌人；主动攻击任务现在不接。等战斗结束后再观察现场，原队列保留'
+      : null;
+  }
+
+  /** 一张攻击计划尚未结案时，新的排尾攻击只能堆积过时目标。 */
+  private pendingAttackPlanNote(steps: readonly SkillCall[], mode: QueueMode): string | null {
+    if (mode === 'now' || steps.length === 0 || !steps.every((step) => step.skill === 'attack')) return null;
+    const active = this.task?.steps.every((step) => step.skill === 'attack') ? this.task : null;
+    const pending = [this.frozen, ...this.queue].find((task) => task?.steps.every((step) => step.skill === 'attack'));
+    const prior = active ?? pending;
+    return prior ? `攻击任务#${prior.id} 还没结案；等它完成或受阻后重看敌人位置。原任务与队列保留` : null;
+  }
+
+  /** 已观测到的窗口和访问失败，不再作为当前存物计划的可用目标。 */
+  private storageAlternativeNote(bot: Bot, wrong: Cell): string {
+    const visible = findContainers(bot, 32)
+      .filter((spot) => spot.x !== wrong.x || spot.y !== wrong.y || spot.z !== wrong.z)
+      .slice(0, 3);
+    if (visible.length) return `附近实际看见的容器: ${visible.map((spot) =>
+      `${zhName(spot.name)}(${spot.x},${spot.y},${spot.z})`).join('、')}；请先核验容量与访问权限，不要逐格猜坐标`;
+    const known = knownChestNote(bot, this.opts.chests);
+    return known
+      ? `32 格内没观察到容器；${known}。先去现场核验，不要逐格猜坐标`
+      : '32 格内没观察到容器；先寻找或制作并放置储物箱，不要逐格猜坐标';
+  }
+
+  private storageAccessNote(steps: readonly SkillCall[]): string | null {
+    const bot = this.opts.getBot();
+    if (!bot) return null;
+    let canHaveOpenWindow = Boolean(bot.currentWindow);
+    for (const step of steps) {
+      if ((step.skill === 'compact'
+        || (step.skill === 'stow' && step.into === 'open')
+        || (step.skill === 'take' && step.from === 'open')) && !canHaveOpenWindow) {
+        return '当前没有打开容器窗口；单独 use 查看的窗口会在任务结束时自动关闭。请把 use 和 take/stow/compact 写在同一单连续步骤里，再操作 into/from:"open"；原队列保留';
+      }
+      if (step.skill === 'use' || (step.skill === 'chat' && step.text.startsWith('/'))) {
+        canHaveOpenWindow = true;
+      }
+    }
+    if (!steps.some((step) => step.skill === 'stow')) return null;
+    let openedAt: { x: number; y: number; z: number } | null = null;
+    for (const [stepIndex, step] of steps.entries()) {
+      if (step.skill === 'use' && step.at) {
+        try { openedAt = resolveAt(bot, step.at); }
+        catch { openedAt = null; }
+      }
+      if (step.skill !== 'stow') continue;
+      if (step.at !== undefined && step.into === 'open') {
+        return 'stow 的 at 与 into:open 只能选一个；原队列保留';
+      }
+      if (step.at !== undefined) {
+        try {
+          const target = resolveAt(bot, step.at);
+          const position = new Vec3(target.x, target.y, target.z);
+          // 目标已在身边时先看真实方块；不要为了一个不可确认的箱子反复穿门寻路。
+          // 若本单会先造容器，执行时再核验，不能用施工前的空气误拒收。
+          if (!steps.some((part) => part.skill === 'build')
+            && bot.entity?.position?.distanceTo(position) <= 16
+            && typeof bot.blockAt === 'function') {
+            const block = bot.blockAt(position);
+            if (!block) {
+              return `指定位置 (${target.x},${target.y},${target.z}) 已在附近，但方块还不可读，不能确认有储物箱；${this.storageAlternativeNote(bot, target)}；原队列保留`;
+            }
+            if (!CONTAINER_FIND.includes(block.name)) {
+              this.opts.chests?.forget(dimensionOf(bot), target);
+              return `指定位置 (${target.x},${target.y},${target.z}) 实际是${zhName(block.name)}，不是储物箱；${this.storageAlternativeNote(bot, target)}；原队列保留`;
+            }
+          }
+          const earlier = steps.slice(0, stepIndex);
+          const full = this.recentFullChestNote(bot, target, step.item, step.count, earlier);
+          if (full) return full;
+          const reason = storageSkipReason(bot, target,
+            this.plannedFreeSlots(bot, target, earlier) > 0 ? undefined : step.item);
+          if (reason) return `指定容器${reason}，当前不能存${zhName(step.item)}；原队列保留`;
+        } catch { /* 坐标读数待执行时确认 */ }
+        continue;
+      }
+      if (step.into === 'open' && openedAt) {
+        const earlier = steps.slice(0, stepIndex);
+        const full = this.recentFullChestNote(bot, openedAt, step.item, step.count, earlier);
+        if (full) return full;
+        const reason = storageSkipReason(bot, openedAt,
+          this.plannedFreeSlots(bot, openedAt, earlier) > 0 ? undefined : step.item);
+        if (reason) return `指定容器${reason}，当前不能存${zhName(step.item)}；原队列保留`;
+      }
+      if (step.into !== 'open') {
+        const found = findContainers(bot, 32);
+        if (found.length > 0 && found.every((spot) => storageSkipReason(bot, spot, step.item))) {
+          return `附近可见容器都已有访问或存入失败记录，当前不能自动存${zhName(step.item)}。换站位或容器后可重试；原队列保留`;
+        }
+      }
+    }
+    return null;
+  }
+
+  /** 开旧箱前核对现场，避免账本残影把空手右键引向已经消失的容器。 */
+  private staleKnownContainerUseNote(steps: readonly SkillCall[]): string | null {
+    const bot = this.opts.getBot();
+    if (!bot?.entity?.position || typeof bot.blockAt !== 'function') return null;
+    for (const step of steps) {
+      if (step.skill !== 'use' || !step.at || step.item) continue;
+      let target: { x: number; y: number; z: number };
+      try { target = resolveAt(bot, step.at); }
+      catch { continue; }
+      const dimension = dimensionOf(bot);
+      if (!this.opts.chests?.get(dimension, target)) continue;
+      const position = new Vec3(target.x, target.y, target.z);
+      if (bot.entity.position.distanceTo(position) > 16) continue;
+      const block = bot.blockAt(position);
+      if (!block || CONTAINER_FIND.includes(block.name) || FURNACE_KINDS.has(block.name)) continue;
+      this.opts.chests.forget(dimension, target);
+      return `账本里的容器 (${target.x},${target.y},${target.z}) 现场已是${zhName(block.name)}；已清除过期记录，本单不右键，也不再为它寻路。重新 find chest 找真实容器，或换目标；原队列保留`;
+    }
+    return null;
+  }
+
+  /** A named take target must agree with loaded block data and a fresh window read. */
+  private takeEvidenceNote(steps: readonly SkillCall[], now: number): {
+    text: string; retryAfterMs: number; step: Extract<SkillCall, { skill: 'take' }>;
+    proof: 'not-container' | 'missing-item';
+  } | null {
+    const bot = this.opts.getBot();
+    if (!bot?.entity?.position || typeof bot.blockAt !== 'function') return null;
+    for (const [index, step] of steps.entries()) {
+      if (step.skill !== 'take' || !step.at) continue;
+      // Earlier construction or item use may change this block or its contents.
+      if (steps.slice(0, index).some((before) => before.skill === 'build'
+        || before.skill === 'excavate' || before.skill === 'tunnel'
+        || (before.skill === 'use' && Boolean(before.item))
+        || before.skill === 'stow')) continue;
+      let target: Cell;
+      try { target = resolveAt(bot, step.at); }
+      catch { continue; }
+      if (Math.hypot(bot.entity.position.x - target.x, bot.entity.position.y - target.y,
+        bot.entity.position.z - target.z) > 16) continue;
+      const block = bot.blockAt(new Vec3(target.x, target.y, target.z));
+      if (!block) continue; // An unloaded chunk is unknown, not proof of absence.
+      if (!CONTAINER_FIND.includes(block.name) && !FURNACE_KINDS.has(block.name)
+        && block.name !== 'brewing_stand') {
+        this.opts.chests?.forget(dimensionOf(bot), target);
+        return { text: `目标格 (${target.x},${target.y},${target.z}) 当前是${zhName(block.name)}，不是可取物容器。先 find chest 核对实际方块坐标；本单不入队，原队列保留`,
+          retryAfterMs: 8_000, step, proof: 'not-container' };
+      }
+      if (!step.item) continue;
+      const rec = this.opts.chests?.get(dimensionOf(bot), target);
+      if (!rec?.observedAt || now - rec.observedAt > 30_000 || hasItem(rec, step.item)) continue;
+      return { text: `容器 (${target.x},${target.y},${target.z}) 最近开窗确认没有${zhName(step.item)}。先查看其他容器或重新核验内容；本单不入队，原队列保留`,
+        retryAfterMs: 8_000, step, proof: 'missing-item' };
+    }
+    return null;
+  }
+
+  /** 只拒绝开工前已可证明失败的合成；后续取料、加工仍交给逐步试算。 */
+  private impossibleCraftStartNote(steps: readonly SkillCall[]): string | null {
+    for (const step of steps) {
+      if (step.skill === 'craft' && step.grid && step.item) {
+        return `合成同时写了 item 和 grid；实际只会按 grid 摆，item 会被忽略。若要做${zhName(step.item)}，只写 item 走官方配方；若要试自摆配方，只写 grid。原队列保留`;
+      }
+    }
+    const first = steps[0];
+    if (first?.skill !== 'craft' || this.opts.precheck?.() === false) return null;
+    const bot = this.opts.getBot();
+    if (!bot) return null;
+    if (first.grid) {
+      // A queued task may still supply ingredients before this task starts.
+      if (this.task || this.queue.length > 0 || this.frozen) return null;
+      const needed = new Map<string, number>();
+      for (const name of first.grid.flat()) {
+        if (name) needed.set(name, (needed.get(name) ?? 0) + 1);
+      }
+      const missing = [...needed].filter(([name, count]) => invCount(bot, (item) => item === name) < count)
+        .map(([name, count]) => `${zhName(name)}要 ${count} 个,包里 ${invCount(bot, (item) => item === name)} 个`);
+      return missing.length > 0
+        ? `第一步自摆合成当前做不了：${missing.join('；')}。先取得材料或换格子，再提交整单；原队列保留`
+        : null;
+    }
+    const hit = precheckSteps(bot, [first], this.precheckDeps(bot))[0]?.note;
+    if (hit?.level !== 'hard' || !['craft.short', 'craft.unknownItem'].includes(hit.rule)) return null;
+    const product = first.item ? bot.registry?.itemsByName?.[first.item] : null;
+    if (product && invCountById(bot, product.id) >= first.count) return null;
+    return `第一步合成当前做不了：${hit.text}。先取得材料或换配方，再提交整单；原队列保留`;
+  }
+
+  /** 用物品名识别功能性随身容器；不要把它当普通玩家头存掉或拿它点地面箱子。 */
+  private portableStorageMisuseNote(steps: readonly SkillCall[]): string | null {
+    const bot = this.opts.getBot();
+    if (!bot?.inventory?.items) return null;
+    const portable = bot.inventory.items().find((item) => item.name === 'player_head'
+      && /背包|backpack|rucksack|satchel/i.test((itemCustomName(item) ?? '').replace(/§./g, '')));
+    if (!portable) return null;
+    const name = itemCustomName(portable) ?? zhName(portable.name);
+    const opener = steps[0];
+    if (opener?.skill === 'use' && opener.item && !opener.at
+      && matchItemName(opener.item, portable.name)) {
+      for (const step of steps.slice(1)) {
+        if (step.skill !== 'stow' || step.into !== 'open') continue;
+        const held = invCount(bot, itemPredOf(bot, step.item, step.pick));
+        if (held < step.count) {
+          return `${name}窗口里的物品还不在随身栏；stow 是把随身物品放进窗口，包里只有${zhName(step.item)}×${held}，本单却要存×${step.count}。想清空随身容器，请在同一单用 use item + take from:"open"，再另起一单存进地面箱；原队列保留`;
+        }
+      }
+    }
+    for (const step of steps) {
+      if (step.skill === 'stow' && matchItemName(step.item, portable.name)) {
+        return `${name}是随身容器，不要把它当普通玩家头存入箱子。要整理内容，先在同一单执行 use item:${portable.name} + take from:"open"，把物品取到随身栏；再另起一单 stow 到地面箱。窗口在每单结束时自动关闭；原队列保留`;
+      }
+      if (step.skill === 'use' && step.item && matchItemName(step.item, portable.name) && step.at) {
+        try {
+          const target = resolveAt(bot, step.at);
+          const block = bot.blockAt?.(new Vec3(target.x, target.y, target.z));
+          if (block && CONTAINER_FIND.includes(block.name)) {
+            return `${name}点地面箱只会打开那个箱子，不会整理随身容器。打开地面箱用 use at；打开随身容器用 use item 且不带 at；原队列保留`;
+          }
+        } catch { /* 坐标未加载时交给执行期校验 */ }
+      }
+    }
+    return null;
+  }
+
+  /** 账本合并了同类槽位；仅计入能保证腾出的格数，再扣除本单先前存物。 */
+  private plannedFreeSlots(bot: Bot, target: { x: number; y: number; z: number },
+    earlierSteps: readonly SkillCall[]): number {
+    const rec = this.opts.chests?.get(dimensionOf(bot), target);
+    if (!rec?.observedAt || Date.now() - rec.observedAt > 120_000) return 0;
+    let openedAt: { x: number; y: number; z: number } | null = null;
+    const taken = new Map<string, number>();
+    const credited = new Map<string, number>();
+    let free = 0;
+    for (const step of earlierSteps) {
+      if (step.skill === 'use' && step.at) {
+        try { openedAt = resolveAt(bot, step.at); }
+        catch { openedAt = null; }
+      }
+      let from: { x: number; y: number; z: number } | null = null;
+      if ('at' in step && step.at) {
+        try { from = resolveAt(bot, step.at); }
+        catch { /* not a known container yet */ }
+      } else if ((step.skill === 'take' && step.from === 'open')
+        || (step.skill === 'stow' && step.into === 'open')) from = openedAt;
+      if (!from || from.x !== target.x || from.y !== target.y || from.z !== target.z) continue;
+      if (step.skill === 'take' && step.item) {
+        const total = rec.items.filter((stack) => matchItemName(step.item!, stack.name))
+          .reduce((sum, stack) => sum + stack.count, 0);
+        if (total <= 0) continue;
+        const stackMax = bot.registry.itemsByName?.[step.item]?.stackSize ?? 64;
+        const next = Math.min(total, (taken.get(step.item) ?? 0) + (step.count ?? 1));
+        taken.set(step.item, next);
+        const guaranteed = stackMax === 1 ? next
+          : next >= total ? Math.ceil(total / stackMax) : 0;
+        free += guaranteed - (credited.get(step.item) ?? 0);
+        credited.set(step.item, guaranteed);
+      } else if (step.skill === 'stow' && step.item) {
+        const stackMax = bot.registry.itemsByName?.[step.item]?.stackSize ?? 64;
+        free -= Math.ceil((step.count ?? 1) / stackMax);
+      }
+    }
+    return free;
+  }
+
+  /** 刚开窗证实已满的箱子，只有同一单保证腾格时才允许接着存。 */
+  private recentFullChestNote(bot: Bot, target: { x: number; y: number; z: number },
+    item: string, count: number, earlierSteps: readonly SkillCall[]): string | null {
+    if (earlierSteps.some((step) => step.skill === 'build')) return null;
+    const rec = this.opts.chests?.get(dimensionOf(bot), target);
+    if (!rec?.observedAt || Date.now() - rec.observedAt > 120_000
+      || rec.slots <= 0) return null;
+    // A cross-container transfer first increases the carried count. Do not take
+    // that stack out when a recent destination snapshot proves the requested
+    // amount cannot fit, even if a smaller partial merge would still succeed.
+    const transfer = earlierSteps.some((step) => step.skill === 'take'
+      && !!step.item && matchItemName(step.item, item));
+    if (transfer && this.plannedFreeSlots(bot, target, earlierSteps) <= 0) {
+      const stackMax = bot.registry.itemsByName?.[item]?.stackSize ?? 64;
+      const otherMinSlots = rec.items.filter((stack) => !matchItemName(item, stack.name))
+        .reduce((slots, stack) => slots + Math.ceil(stack.count
+          / (bot.registry.itemsByName?.[stack.name]?.stackSize ?? 64)), 0);
+      const itemCount = rec.items.filter((stack) => matchItemName(item, stack.name))
+        .reduce((sum, stack) => sum + stack.count, 0);
+      // Merged records may hide several partial stacks. This is an upper bound
+      // on possible room, so rejecting below it cannot mistake a usable box for full.
+      const upperRoom = Math.max(0, (rec.slots - otherMinSlots) * stackMax - itemCount);
+      if (upperRoom < count) {
+        return `目标箱子 (${target.x},${target.y},${target.z}) 最近开窗读数最多只能再容纳${zhName(item)}×${upperRoom}，本单却要从别处取出后存入×${count}；这会把物品留在随身而不会净腾格。先换有足够容量的容器，或直接存随身已有的物品；原队列保留`;
+      }
+    }
+    if (rec.usedSlots < rec.slots) return null;
+    // 同名物品可能有可并堆的槽；无法确认 NBT 相同时保守放行，执行时再核对。
+    const stackMax = bot.registry.itemsByName?.[item]?.stackSize ?? 64;
+    if (hasRoom(rec, item, stackMax)) return null;
+    const free = this.plannedFreeSlots(bot, target, earlierSteps);
+    const needed = Math.ceil(count / stackMax);
+    if (free >= needed) return null;
+    const before = earlierSteps.filter((step) => step.skill === 'take');
+    const hint = before.length > 0
+      ? `本单前序取物扣除已计划存物后只保证空出 ${Math.max(0, free)} 格，本步至少需 ${needed} 格；只从一堆取走一件通常仍占原格。`
+      : '只从一堆取走一件通常仍占原格。';
+    return `指定箱子 (${target.x},${target.y},${target.z}) 最近开窗证实已满 ${rec.usedSlots}/${rec.slots} 格，且没有${zhName(item)}可并堆；${hint}先整堆取走物品并转存到另一处，勿再存回原箱；开窗确认出现空格后再存，或直接改用其他容器。原队列保留`;
+  }
+
+  private openStorageKey(steps: readonly SkillCall[]): string | null {
+    if (!steps.some((step) => step.skill === 'stow' && step.into === 'open')) return null;
+    const opener = steps.find((step) => step.skill === 'chat' && step.text.startsWith('/'))
+      ?? steps.find((step) => step.skill === 'use');
+    return JSON.stringify(opener ?? { skill: 'open' });
+  }
+
+  private fullOpenStorageNote(steps: readonly SkillCall[], now: number): string | null {
+    for (const [key, entry] of this.fullOpenStorageFailures) {
+      if (now - entry.at >= 120_000) this.fullOpenStorageFailures.delete(key);
+    }
+    const key = this.openStorageKey(steps);
+    const entry = key ? this.fullOpenStorageFailures.get(key) : null;
+    if (!entry || entry.count < 2) return null;
+    return `同一打开方式的容器最近 ${entry.count} 次存入都因没有空位失败；换物品不会腾出格子。先从该容器取走物品、整理出可并堆格，或换另一处容器；原队列保留。上次:${entry.why}`;
+  }
+
+  /** 批量原地抛物只会被自动捡回，或把有用物品丢失；不让它成为腾背包格的计划。 */
+  private protectedTossNote(steps: readonly SkillCall[]): string | null {
+    const bot = this.opts.getBot();
+    if (!bot) return null;
+    for (const step of steps) {
+      if (step.skill !== 'toss') continue;
+      const note = protectedTossItem(bot, step.item);
+      if (note) return `${note}；原队列保留`;
+    }
+    return null;
+  }
+
+  private reacquiredTossNote(steps: readonly SkillCall[]): string | null {
+    const bot = this.opts.getBot();
+    if (!bot) return null;
+    for (const step of steps) {
+      if (step.skill !== 'toss') continue;
+      const note = reacquiredTossNote(bot, step.item);
+      if (note) return `${note}；原队列保留`;
+    }
+    return null;
+  }
+
+  /** 批量原地抛物只会被自动捡回，或把有用物品丢失；不让它成为腾背包格的计划。 */
+  private bulkUnanchoredTossNote(steps: readonly SkillCall[]): string | null {
+    const loose = steps.filter((step) => step.skill === 'toss' && step.at === undefined);
+    const firstLoose = steps.findIndex((step) => step.skill === 'toss' && step.at === undefined);
+    if (firstLoose >= 0 && steps.slice(firstLoose + 1).some((step) => step.skill === 'pickup')) {
+      return '这单要在原地抛物后捡另一件；抛出的东西可能自动捡回，也可能丢失。先把要腾出的物品存进容器，再单独捡取；原队列保留';
+    }
+    return loose.length >= 2
+      ? `这单要原地抛出 ${loose.length} 类物品，容易自动捡回或丢失；没有受理。整理背包请去普通储物箱，暂时没有箱子就先做其他事`
+      : null;
+  }
+
+  /** 空闲时已达成的单步 goto 直接返回事实，不创建任务或投递完成事件。 */
+  private satisfiedGotoReceipt(steps: readonly SkillCall[]): string | null {
+    if (this.task || this.frozen || this.queue.length > 0
+      || this.holdReason() !== null || this.opts.busyWith?.()) return null;
+    const call = steps.length === 1 ? steps[0] : undefined;
+    const bot = this.opts.getBot();
+    if (!bot?.entity?.position || call?.skill !== 'goto' || call.dryRun || call.expect
+      || (call.dimension && normalizeDimension(dimensionOf(bot)) !== normalizeDimension(call.dimension))) return null;
+    const p = bot.entity.position;
+    const here = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) };
+    const resolved = resolveAnchors([call.at], here);
+    if (!Array.isArray(resolved)) return null;
+    const target = resolved[0];
+    if (!travelGoalReached(bot, gotoArrivalGoal(call, target))) return null;
+    const where = call.groundY ? `水平 (${target.x},${target.z})` : cellText(target);
+    return `goto 已达成：当前位置已满足目标 ${where} 的寻路到达条件，实测脚下 ${cellText(here)}；`
+      + '本次无移动、未创建新任务。';
+  }
+
+  /** 同目标且下单位置未变，十五秒内再下同一条单步 goto 不会增加位移。 */
+  private repeatStationaryGotoNote(
+    steps: readonly SkillCall[],
+    pos: { x: number; y: number; z: number } | undefined,
+    now: number,
+  ): string | null {
+    for (const [key, at] of this.recentGotoRequests) {
+      if (now - at >= 15_000) this.recentGotoRequests.delete(key);
+    }
+    if (steps.length !== 1 || steps[0].skill !== 'goto') return null;
+    const same = [this.task, this.frozen, ...this.queue].find(
+      (task) => task !== null && task.steps.length === 1
+        && task.steps[0].skill === 'goto'
+        && JSON.stringify(task.steps[0]) === JSON.stringify(steps[0]),
+    );
+    if (same) {
+      return `同一个 goto 已在任务#${same.id} 执行或排队；新单未接，原队列保留。等那单的结局再判断`;
+    }
+    if (!pos) return null;
+    const here = `${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)}`;
+    const key = `${JSON.stringify(steps[0])}@${here}`;
+    if (this.recentGotoRequests.has(key)) {
+      return `同一个 goto 刚从 (${here}) 提交过，现在仍在同一格；重复走这个目标不会增加进展。先核对现场，换可站的三维落点或另一条路线`;
+    }
+    this.recentGotoRequests.set(key, now);
+    return null;
+  }
+
+  private unmovedFindKey(step: Extract<SkillCall, { skill: 'find' }>, dimension: string): string {
+    return JSON.stringify({ target: step.target, direction: step.direction, dimension });
+  }
+
+  private unmovedFindNote(steps: readonly SkillCall[], now: number): string | null {
+    const bot = this.opts.getBot();
+    const pos = bot?.entity?.position;
+    if (!bot || !pos) return null;
+    for (const [key, entry] of this.unmovedFindHits) {
+      if (now - entry.at > 120_000) this.unmovedFindHits.delete(key);
+    }
+    const i = steps.findIndex((step) => step.skill === 'find' && step.direction !== undefined);
+    if (i < 0) return null;
+    const find = steps[i] as Extract<SkillCall, { skill: 'find' }>;
+    const prior = this.unmovedFindHits.get(this.unmovedFindKey(find, dimensionOf(bot)));
+    if (!prior || Math.hypot(pos.x - prior.from.x, pos.z - prior.from.z) > 4
+      || Math.abs(pos.y - prior.from.y) > 3) return null;
+    // 先走出当前观察范围再找，是有进展的新计划；已在容差内的 goto 不算。
+    if (steps.slice(0, i).some((step) => {
+      if (step.skill === 'server_travel') return true;
+      if (step.skill !== 'goto' || !Array.isArray(step.at) || step.at.length !== 3) return false;
+      return Math.hypot(Number(step.at[0]) - pos.x, Number(step.at[2]) - pos.z) > 3;
+    })) return null;
+    return `刚才从这里朝${DIRECTION_ZH[find.direction!]}找${zhThing(find.target)}时，出发点就命中同一可见目标，人并未沿指定方向走；原地重找不会产生新信息。先走离这处至少几格，或改查不同目标；原队列保留`;
+  }
+
+  private recordUnmovedFindHits(task: RunningTask): void {
+    const bot = this.opts.getBot();
+    const pos = bot?.entity?.position;
+    if (!bot || !pos) return;
+    for (const landed of task.stepLog) {
+      const step = task.steps[landed.step - 1];
+      if (step?.skill !== 'find' || !step.direction || landed.outcome !== 'ok'
+        || !landed.line.includes('行军尚未发生')) continue;
+      this.unmovedFindHits.set(this.unmovedFindKey(step, dimensionOf(bot)), {
+        at: Date.now(), dimension: dimensionOf(bot),
+        from: { x: pos.x, y: pos.y, z: pos.z },
+      });
+    }
+    while (this.unmovedFindHits.size > 32) this.unmovedFindHits.delete(this.unmovedFindHits.keys().next().value!);
+  }
+
+  /** 从客户端当前可见的作物读坐标和 age；任何读不到的格都不推断为未成熟。 */
+  private cropFindStamp(bot: Bot, step: Extract<SkillCall, { skill: 'find' }>): string | null {
+    if (step.direction || CROP_MAX_AGE[step.target] === undefined) return null;
+    const id = bot.registry?.blocksByName?.[step.target]?.id;
+    if (id === undefined) return null;
+    try {
+      const radius = Math.min(step.distance ?? FIND_STATIC_MAX, FIND_STATIC_MAX);
+      const hits = bot.findBlocks({ matching: [id], maxDistance: radius, count: 64 })
+        .filter((p) => canSeeBlockAt(bot, p));
+      if (hits.length === 0) return null;
+      const reads = hits.map((p) => ({ p, age: cropAgeAt(bot, p) }));
+      if (reads.some(({ age }) => !age || age.value >= age.max)) return null;
+      return reads.map(({ p, age }) => `${p.x},${p.y},${p.z}:${age!.value}`)
+        .sort().join(';');
+    } catch { return null; }
+  }
+
+  private immatureFindKey(bot: Bot, step: Extract<SkillCall, { skill: 'find' }>): string {
+    return `${dimensionOf(bot)}/${step.target}/${Math.min(step.distance ?? FIND_STATIC_MAX, FIND_STATIC_MAX)}`;
+  }
+
+  private immatureFindNote(steps: readonly SkillCall[], now: number): string | null {
+    const i = steps.findIndex((step) => step.skill === 'find' && !step.direction
+      && CROP_MAX_AGE[step.target] !== undefined);
+    if (i < 0 || steps.slice(0, i).some((step) => step.skill !== 'goto')) return null;
+    const bot = this.opts.getBot();
+    const pos = bot?.entity?.position;
+    const step = steps[i];
+    if (!bot || !pos || step.skill !== 'find') return null;
+    const key = this.immatureFindKey(bot, step);
+    const prior = this.immatureFindHits.get(key);
+    if (!prior || now - prior.at >= IMMATURE_FIND_HOLD_MS) return null;
+    const intended = steps.slice(0, i).find((s): s is Extract<SkillCall, { skill: 'goto' }> => s.skill === 'goto');
+    if (intended && Array.isArray(intended.at) && intended.at.every((n) => typeof n === 'number')
+      && Math.hypot(Number(intended.at[0]) - prior.from.x, Number(intended.at[2]) - prior.from.z) >= 8) return null;
+    if (Math.hypot(pos.x - prior.from.x, pos.z - prior.from.z) >= 8) return null;
+    const current = this.cropFindStamp(bot, step);
+    if (current !== prior.stamp) {
+      this.immatureFindHits.delete(key);
+      return null;
+    }
+    const left = Math.ceil((IMMATURE_FIND_HOLD_MS - (now - prior.at)) / 1000);
+    return `这片${zhName(step.target)}上次已看见，但都未成熟；坐标和生长阶段仍相同，${left} 秒内不再重复原地 find。随机生长期间先做其他事；若作物长了一阶段、成熟或去了另一片田，立即可查`;
+  }
+
+  private recordImmatureFindHits(task: RunningTask): void {
+    const bot = this.opts.getBot();
+    const pos = bot?.entity?.position;
+    if (!bot || !pos) return;
+    for (const landed of task.stepLog) {
+      const step = task.steps[landed.step - 1];
+      if (step?.skill !== 'find' || step.direction || CROP_MAX_AGE[step.target] === undefined
+        || landed.outcome !== 'ok') continue;
+      const key = this.immatureFindKey(bot, step);
+      const stamp = this.cropFindStamp(bot, step);
+      if (stamp) this.immatureFindHits.set(key, {
+        at: Date.now(), stamp, from: { x: pos.x, y: pos.y, z: pos.z },
+      });
+      else this.immatureFindHits.delete(key);
+    }
+    while (this.immatureFindHits.size > 32) this.immatureFindHits.delete(this.immatureFindHits.keys().next().value!);
+  }
+
+  /** 对连续快速自停作限时受理兜底；坐标变化中的同一目的地也计入。 */
+  private rapidStopKey(steps: readonly SkillCall[]): string {
+    const lastGoto = [...steps].reverse().find(
+      (step): step is Extract<SkillCall, { skill: 'goto' }> => step.skill === 'goto',
+    );
+    return lastGoto
+      ? JSON.stringify({ skill: 'goto', at: lastGoto.at, dimension: lastGoto.dimension ?? null })
+      : JSON.stringify(steps);
+  }
+
+  private rapidStopNote(steps: readonly SkillCall[], now: number): string | null {
+    for (const [key, entry] of this.rapidStops) {
+      if (entry.until <= now && entry.times.every((at) => now - at >= 20_000)) this.rapidStops.delete(key);
+    }
+    const entry = this.rapidStops.get(this.rapidStopKey(steps));
+    if (!entry || entry.until <= now) return null;
+    const left = Math.ceil((entry.until - now) / 1000);
+    return `同一目的地最近被你连续快速叫停 ${entry.times.length} 次，${left} 秒内不再受理这个目的地的新单；原队列保留。先换别的目标或任务`;
+  }
+
+  private noteRapidStop(task: RunningTask, now: number): void {
+    if (now - task.startedAt > 3_000) return;
+    const key = this.rapidStopKey(task.steps);
+    const prior = this.rapidStops.get(key);
+    const times = [...(prior?.times ?? []).filter((at) => now - at < 20_000), now];
+    this.rapidStops.set(key, { times, until: times.length >= 6 ? now + 120_000 : prior?.until ?? 0 });
+  }
+
+  /** 没有点名包里物品的存物计划在受理时驳回。 */
+  private missingUseItemNote(steps: readonly SkillCall[]): string | null {
+    const first = steps[0];
+    if (first?.skill !== 'use' || !first.item || first.at || first.target) return null;
+    const bot = this.opts.getBot();
+    if (!bot?.inventory?.items || invItemNamed(bot, first.item)) return null;
+    return `包里没有${first.item}，第一步无法使用；原队列保留。先核对背包，改用仍在身上的物品`;
+  }
+
+  /** 没有点名包里物品的存物计划在受理时驳回。 */
+  private missingStowItemNote(steps: readonly SkillCall[]): string | null {
+    const stow = steps.length === 1 && steps[0].skill === 'stow' ? steps[0]
+      : steps.length === 2 && steps[0].skill === 'use' && steps[1].skill === 'stow' ? steps[1] : null;
+    // 只赶路再存物也不会凭空得到东西；在出发前拒收，避免白走到另一口箱子。
+    const travelStow = steps.length > 1 && steps.at(-1)?.skill === 'stow'
+      && steps.slice(0, -1).every((step) => step.skill === 'goto' || step.skill === 'server_travel')
+      ? steps.at(-1) as Extract<SkillCall, { skill: 'stow' }> : null;
+    const planned = stow ?? travelStow;
+    if (!planned) return null;
+    const bot = this.opts.getBot();
+    if (!bot?.inventory?.items || bot.inventory.items().length === 0) return null;
+    if (invCount(bot, itemPredOf(bot, planned.item, planned.pick)) > 0) return null;
+    return `${noSuchItem(bot, planned.item, planned.pick).message}；先用背包读数里的工具物品名核对，原单未入队`;
+  }
+
+  private fullInventoryTakeNote(steps: readonly SkillCall[]): string | null {
+    // Earlier queued work may change the inventory before this task starts.
+    if (this.task || this.queue.length > 0 || this.frozen) return null;
+    const bot = this.opts.getBot();
+    const held = bot?.inventory?.items();
+    if (!held || held.length < 36) return null;
+    const preservesCapacity = (part: SkillCall): boolean => {
+      if ('dryRun' in part && part.dryRun) return true;
+      if (part.skill === 'chat') return !part.text.trimStart().startsWith('/');
+      return part.skill === 'probe' || part.skill === 'gesture';
+    };
+    for (const [index, step] of steps.entries()) {
+      if (step.skill !== 'take' || !step.item) continue;
+      // A consuming, moving or custom-item operation makes later capacity unknown.
+      // Its success does not promise a free slot; the actual transfer checks the window.
+      if (steps.slice(0, index).some((part) => !preservesCapacity(part))) continue;
+      const canMerge = held.some((item) => item.name === step.item
+        && item.count < (item.stackSize ?? 1));
+      if (!canMerge) {
+        return `随身 36/36 格已满，${zhName(step.item)}没有可合并的现有堆；第 ${index + 1} 步取物一定放不进背包。先存放、用完或整堆丢弃一格低价值物品，确认出现空格后再单独开窗取物；只丢一件堆叠物不会腾格。原队列保留`;
+      }
+    }
+    return null;
+  }
+
+  /** 满包自摆配方若第一轮不会耗尽任何材料栈，未知产物没有可验证的落袋空间。 */
+  private fullInventoryGridCraftNote(steps: readonly SkillCall[]): string | null {
+    const first = steps[0];
+    if (first?.skill !== 'craft' || !first.grid) return null;
+    const held = this.opts.getBot()?.inventory?.items();
+    if (!held || held.length < 36) return null;
+    const needed = new Map<string, number>();
+    for (const row of first.grid) for (const name of row) {
+      if (name) needed.set(name, (needed.get(name) ?? 0) + 1);
+    }
+    if (needed.size === 0) return null;
+    // 一轮材料全部耗尽某一堆才可能空出原位；其他步骤尚未执行，不能预支其空位。
+    for (const [name, count] of needed) {
+      if (held.some((item) => item.name === name && item.count <= count)) return null;
+    }
+    return '随身 36/36 格已满，这次自摆配方的第一轮不会耗尽任何材料堆，产物没有可验证的空格。先存放、用完或整堆丢弃一格低价值物品；只丢一件圆石之类的堆叠物仍占一格。空格出现后再合成，原队列保留';
+  }
+
+  /** 同一整单在相同现场连续失败后暂缓；换站位、维度或做法即可重新尝试。 */
+  private repeatFailedTaskNote(steps: readonly SkillCall[], now: number): string | null {
+    if (!retryGuardApplies(steps)) return null;
+    for (const [key, entry] of this.exactFailures) {
+      if (now - entry.at >= EXACT_FAILURE_WINDOW_MS) this.exactFailures.delete(key);
+    }
+    const bot = this.opts.getBot();
+    const namedTake = namedTakeRetryKey(steps, bot);
+    const key = namedTake ?? openTakeRetryKey(steps) ?? JSON.stringify(steps);
+    const entry = this.exactFailures.get(key);
+    if (!entry || entry.count < 2) return null;
+    if (entry.admissionRule && (entry.admissionInventoryStamp !== this.retryInventoryStamp(bot)
+      || entry.admissionTargetBlock !== this.admissionBlockStamp(steps))) {
+      this.exactFailures.delete(key);
+      return null;
+    }
+    if (namedTake && bot && typeof bot.blockAt === 'function') {
+      const take = steps.at(-1);
+      if (take?.skill === 'take' && take.at && take.item) {
+        const cell = resolveAt(bot, take.at);
+        const block = bot.blockAt(new Vec3(cell.x, cell.y, cell.z));
+        const isContainer = block && (CONTAINER_FIND.includes(block.name)
+          || FURNACE_KINDS.has(block.name) || block.name === 'brewing_stand');
+        const rec = this.opts.chests?.get(dimensionOf(bot), cell);
+        const evidence = entry.admissionRule ? this.takeEvidenceNote(steps, now) : null;
+        if ((evidence && entry.admissionRule !== `take.${evidence.proof}`)
+          || (entry.takeProof === 'not-container' && isContainer)
+          || (rec?.observedAt && rec.observedAt >= entry.at && hasItem(rec, take.item))) {
+          this.exactFailures.delete(key);
+          return null;
+        }
+      }
+    }
+    if (steps.some((step) => step.skill === 'craft')
+      && entry.inventoryStamp !== this.retryInventoryStamp(bot)) {
+      this.exactFailures.delete(key);
+      return null;
+    }
+    const here = bot?.entity?.position;
+    // 取当前打开的服务端容器取不到东西，换站位不会让同一窗口凭空添货。
+    const windowTake = Boolean(namedTake) || steps.some((step) => step.skill === 'take' && step.from === 'open');
+    if (!windowTake && entry.from && here && (entry.from.dimension !== dimensionOf(bot!)
+      || Math.hypot(here.x - entry.from.x, here.y - entry.from.y, here.z - entry.from.z) >= EXACT_FAILURE_RETRY_DISTANCE)) {
+      this.exactFailures.delete(key);
+      return null;
+    }
+    const left = Math.ceil((EXACT_FAILURE_WINDOW_MS - (now - entry.at)) / 1000);
+    if (namedTake) {
+      return `同一目标取同一物品已经连续失败 ${entry.count} 次；${left} 秒内原样重试不受理。上次卡在:${entry.why}。先换来源或重新核验目标内容`;
+    }
+    if (windowTake) {
+      return `同一来源窗口取同一物品已经连续失败 ${entry.count} 次；${left} 秒内换站位或多走几步再取也不会受理。上次卡在:${entry.why}。先核对窗口实际内容，改取现有物品或换来源`;
+    }
+    return `同一整单已经连续失败 ${entry.count} 次，现场位置没明显变化；${left} 秒内原样重下不会受理。上次卡在:${entry.why}。请换站位、目标或做法`;
+  }
+
+  /** 前一段路线不能预支“采集目标已露出”；先让 agent 改变地形，再单独采集。 */
+  private unseenCollectNote(steps: readonly SkillCall[], now: number): string | null {
+    const bot = this.opts.getBot();
+    if (!bot?.entity) return null;
+    for (const call of steps) {
+      if (call.skill !== 'collect') continue;
+      const key = `${dimensionOf(bot)}/${call.block}`;
+      const miss = this.unseenCollects.get(key);
+      if (!miss || miss.count < 2 || now - miss.at >= 90_000) continue;
+      const here = feetOf(bot);
+      if (Math.hypot(here.x - miss.from.x, here.y - miss.from.y, here.z - miss.from.z) > 16) continue;
+      try {
+        const ids = matchBlockIds(bot, call.block);
+        if (ids.length > 0 && bot.findBlocks({ matching: ids, maxDistance: 48, count: 16 })
+          .some((p) => collectVisible(bot, p))) {
+          this.unseenCollects.delete(key);
+          continue;
+        }
+      } catch { continue; } // 感知读数不可用时交给技能本身裁决
+      return `附近连续 ${miss.count} 次没有看得见的${zhName(call.block)}，现在仍未露出；`
+        + '这单的 collect 暂不受理。先单独挖开障碍、探索另一处，或走到 16 格外找露出的目标；不要连着重复提交采集';
+    }
+    return null;
+  }
+
+  private noteUnseenCollect(block: string, bot: Bot): void {
+    const key = `${dimensionOf(bot)}/${block}`;
+    const now = Date.now();
+    const from = feetOf(bot);
+    const previous = this.unseenCollects.get(key);
+    const nearby = previous && now - previous.at < 90_000
+      && Math.hypot(from.x - previous.from.x, from.y - previous.from.y, from.z - previous.from.z) <= 16;
+    this.unseenCollects.set(key, { count: nearby ? previous.count + 1 : 1, at: now, from });
+  }
+
+  private clearUnseenCollect(block: string, bot: Bot): void {
+    this.unseenCollects.delete(`${dimensionOf(bot)}/${block}`);
+  }
+
+  private immatureCollectNote(steps: readonly SkillCall[], now: number): string | null {
+    const bot = this.opts.getBot();
+    if (!bot?.entity) return null;
+    const holdMs = 5 * 60_000;
+    for (const [key, entries] of this.immatureCollects) {
+      const fresh = entries.filter((entry) => now - entry.at < holdMs);
+      if (fresh.length) this.immatureCollects.set(key, fresh);
+      else this.immatureCollects.delete(key);
+    }
+    for (const step of steps) {
+      if (step.skill !== 'collect' || (!step.mature && CROP_MAX_AGE[step.block] === undefined)) continue;
+      const key = `${dimensionOf(bot)}/${step.block}`;
+      const destination = lastAbsoluteGoto(steps) ?? bot.entity.position;
+      const prior = this.immatureCollects.get(key)?.find((entry) =>
+        Math.hypot(destination.x - entry.from.x, destination.z - entry.from.z) <= 32);
+      if (!prior) continue;
+      // 只用当前确实可见、且属于这片田的成熟作物解除暂缓；远处田的作物
+      // 或走向另一片田之前看到的成熟作物，不能证明目标农田已成熟。
+      try {
+        const ids = matchBlockIds(bot, step.block);
+        if (ids.length > 0 && bot.findBlocks({ matching: ids, maxDistance: 48, count: 64 })
+          .some((p) => {
+            if (Math.hypot(p.x - prior.from.x, p.z - prior.from.z) > 32 || !collectVisible(bot, p)) return false;
+            const age = cropAgeAt(bot, p);
+            return age !== null && age.value >= age.max;
+          })) {
+          const fresh = (this.immatureCollects.get(key) ?? []).filter((entry) => entry !== prior);
+          if (fresh.length) this.immatureCollects.set(key, fresh);
+          else this.immatureCollects.delete(key);
+          continue;
+        }
+      } catch { /* 现场读不到时保留刚才的失败事实，短时暂缓 */ }
+      return `这片区域的${zhName(step.block)}刚核实都未成熟；同一农田的 mature collect 暂缓。`
+        + '等观察到成熟作物，或换到 32 格外的另一片农田；不要在原地与农田之间反复往返';
+    }
+    return null;
+  }
+
+  private noteImmatureCollect(block: string, bot: Bot): void {
+    const key = `${dimensionOf(bot)}/${block}`;
+    const from = feetOf(bot);
+    const entries = (this.immatureCollects.get(key) ?? []).filter((entry) =>
+      Math.hypot(from.x - entry.from.x, from.z - entry.from.z) > 32);
+    entries.push({ at: Date.now(), from });
+    this.immatureCollects.set(key, entries.slice(-16));
+  }
+
+  private tunnelLiquidStopNote(steps: readonly SkillCall[], now: number): string | null {
+    const bot = this.opts.getBot();
+    const pos = bot?.entity?.position;
+    if (!bot || !pos) return null;
+    const dimension = dimensionOf(bot);
+    this.tunnelLiquidStops = this.tunnelLiquidStops.filter((stop) => now - stop.at < EXACT_FAILURE_WINDOW_MS);
+    let start = { x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) };
+    for (const step of steps) {
+      if (step.skill === 'goto') {
+        const goal = lastAbsoluteGoto([step]);
+        if (goal) start = goal;
+        continue;
+      }
+      if (step.skill !== 'tunnel' || step.dryRun) continue;
+      const resolved = resolveAnchors([step.at], start);
+      if (!Array.isArray(resolved)) continue;
+      const end = resolved[0];
+      if (end.y >= start.y) continue;
+      for (const stop of this.tunnelLiquidStops) {
+        if (stop.dimension !== dimension || stop.cell.y < end.y || stop.cell.y > start.y + 2
+          || Math.hypot(stop.cell.x - start.x, stop.cell.z - start.z) > 4) continue;
+        const block = bot.blockAt(new Vec3(stop.cell.x, stop.cell.y, stop.cell.z));
+        if (block?.name !== stop.name) {
+          if (block) this.tunnelLiquidStops = this.tunnelLiquidStops.filter((entry) => entry !== stop);
+          continue;
+        }
+        return `这片井筒刚在 (${stop.cell.x},${stop.cell.y},${stop.cell.z}) 遇到${zhName(stop.name)}，该格现在仍是${zhName(stop.name)}；附近下行通道会再碰上它。先排水、封水或换到水平 5 格外的井位；原队列保留`;
+      }
+    }
+    return null;
+  }
+
+  private verticalTunnelOscillationNote(steps: readonly SkillCall[], now: number): string | null {
+    const bot = this.opts.getBot();
+    const pos = bot?.entity?.position;
+    if (!bot || !pos) return null;
+    const dimension = dimensionOf(bot);
+    this.verticalTunnelTraversals = this.verticalTunnelTraversals.filter((row) => now - row.at < 180_000);
+    let start = { x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) };
+    const near = (a: Cell, b: Cell): boolean => Math.abs(a.y - b.y) <= 1
+      && Math.hypot(a.x - b.x, a.z - b.z) <= 2;
+    for (const step of steps) {
+      if (step.skill === 'goto') {
+        const goal = lastAbsoluteGoto([step]);
+        if (goal) start = goal;
+        continue;
+      }
+      if (step.skill !== 'tunnel' || step.dryRun) continue;
+      const resolved = resolveAnchors([step.at], start);
+      if (!Array.isArray(resolved)) continue;
+      const end = resolved[0];
+      if (Math.abs(end.y - start.y) < 3 || Math.hypot(end.x - start.x, end.z - start.z) > 2) continue;
+      const traversals = this.verticalTunnelTraversals.filter((row) => row.dimension === dimension);
+      const went = traversals.find((row) => near(row.from, start) && near(row.to, end));
+      const returned = traversals.find((row) => row !== went && row.at >= (went?.at ?? Infinity)
+        && near(row.from, end) && near(row.to, start));
+      if (went && returned) {
+        return `这段竖向通道刚走过 (${went.from.x},${went.from.y},${went.from.z}) → (${went.to.x},${went.to.y},${went.to.z})，又原路折回；短时间内再走同段只是上下打转。先选不同目的地或路线，原队列保留`;
+      }
+    }
+    return null;
+  }
+
+  private noteVerticalTunnelTraversal(from: Cell, to: Cell, dimension: string): void {
+    if (Math.abs(to.y - from.y) < 3 || Math.hypot(to.x - from.x, to.z - from.z) > 2) return;
+    this.verticalTunnelTraversals.push({ at: Date.now(), dimension, from, to });
+    if (this.verticalTunnelTraversals.length > 16) this.verticalTunnelTraversals.shift();
+  }
+
+  private repeatEmptyProbeNote(steps: readonly SkillCall[], now: number): string | null {
+    if (steps.length === 0 || !steps.every((step) => step.skill === 'probe' && step.where?.length)) return null;
+    const bot = this.opts.getBot();
+    const pos = bot?.entity?.position;
+    if (!bot || !pos) return null;
+    for (const [key, entry] of this.emptyProbeReads) {
+      if (now - entry.at >= 30_000) this.emptyProbeReads.delete(key);
+    }
+    const dimension = dimensionOf(bot);
+    const repeated = steps.every((step) => {
+      const entry = this.emptyProbeReads.get(exactTaskKey([step]));
+      return entry && entry.dimension === dimension && now - entry.at < 30_000
+        && Math.hypot(pos.x - entry.from.x, pos.y - entry.from.y, pos.z - entry.from.z) < 3;
+    });
+    return repeated ? '同一范围的点名探查刚回报一样都没有，站位也没有明显变化；30 秒内不再原样重查。可先移动或换探查范围，原队列保留' : null;
+  }
+
+  private recordEmptyProbeReads(steps: readonly SkillCall[], landings: readonly StepLanding[]): void {
+    const bot = this.opts.getBot();
+    const pos = bot?.entity?.position;
+    if (!bot || !pos) return;
+    const from = { x: pos.x, y: pos.y, z: pos.z };
+    for (const landing of landings) {
+      const step = steps[landing.step - 1];
+      if (step?.skill !== 'probe' || !step.where?.length || landing.outcome !== 'ok'
+        || !landing.line.includes(':一样都没有')) continue;
+      this.emptyProbeReads.set(exactTaskKey([step]), { at: Date.now(), dimension: dimensionOf(bot), from });
+    }
+  }
+
+  private recordTunnelLiquidStop(steps: readonly SkillCall[], landings: readonly StepLanding[]): void {
+    const bot = this.opts.getBot();
+    if (!bot) return;
+    const dimension = dimensionOf(bot);
+    for (const landing of landings) {
+      if (landing.outcome !== 'fail' || steps[landing.step - 1]?.skill !== 'tunnel') continue;
+      const match = /\((-?\d+),\s*(-?\d+),\s*(-?\d+)\) 碰上(水|岩浆)/.exec(landing.why ?? '');
+      if (!match) continue;
+      const cell = { x: Number(match[1]), y: Number(match[2]), z: Number(match[3]) };
+      const name = match[4] === '水' ? 'water' : 'lava';
+      this.tunnelLiquidStops = this.tunnelLiquidStops.filter((entry) => entry.dimension !== dimension
+        || entry.cell.x !== cell.x || entry.cell.y !== cell.y || entry.cell.z !== cell.z);
+      this.tunnelLiquidStops.push({ at: Date.now(), dimension, cell, name });
+    }
+  }
+
+  private tunnelSupportStopNote(steps: readonly SkillCall[], now: number): string | null {
+    const bot = this.opts.getBot();
+    const pos = bot?.entity?.position;
+    if (!bot || !pos) return null;
+    const dimension = dimensionOf(bot);
+    this.tunnelSupportStops = this.tunnelSupportStops.filter((row) => now - row.at < EXACT_FAILURE_WINDOW_MS);
+    let start = { x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) };
+    for (const step of steps) {
+      if (step.skill === 'goto') {
+        const goal = lastAbsoluteGoto([step]);
+        if (goal) start = goal;
+        continue;
+      }
+      if (step.skill !== 'tunnel' || step.dryRun) continue;
+      const resolved = resolveAnchors([step.at], start);
+      if (!Array.isArray(resolved)) continue;
+      const end = resolved[0];
+      const dx = end.x - start.x, dy = end.y - start.y, dz = end.z - start.z;
+      const len2 = dx * dx + dy * dy + dz * dz;
+      if (len2 < 1) continue;
+      for (const stop of this.tunnelSupportStops) {
+        if (stop.dimension !== dimension) continue;
+        const support = bot.blockAt(new Vec3(stop.cell.x, stop.cell.y - 1, stop.cell.z));
+        if (!support) continue;
+        if (support.boundingBox === 'block') {
+          this.tunnelSupportStops = this.tunnelSupportStops.filter((row) => row !== stop);
+          continue;
+        }
+        const t = Math.max(0, Math.min(1, ((stop.cell.x - start.x) * dx
+          + (stop.cell.y - start.y) * dy + (stop.cell.z - start.z) * dz) / len2));
+        if (t <= 0.1) continue;
+        const distance = Math.hypot(stop.cell.x - (start.x + dx * t),
+          stop.cell.y - (start.y + dy * t), stop.cell.z - (start.z + dz * t));
+        if (distance > 1.5) continue;
+        return `这条通道会经过 (${stop.cell.x},${stop.cell.y},${stop.cell.z})，那里刚因脚下悬空且垫脚未获服务端确认而停工，底下仍没有实心支撑。先换路线或修好该格支撑；原队列保留`;
+      }
+      start = end;
+    }
+    return null;
+  }
+
+  private recordTunnelSupportStop(steps: readonly SkillCall[], landings: readonly StepLanding[]): void {
+    const bot = this.opts.getBot();
+    if (!bot) return;
+    const dimension = dimensionOf(bot);
+    for (const landing of landings) {
+      if (landing.outcome !== 'fail' || steps[landing.step - 1]?.skill !== 'tunnel') continue;
+      const match = /(?:前面|下一级台阶|挖开) \((-?\d+),\s*(-?\d+),\s*(-?\d+)\) (?:脚下悬空|底下塌空|下面就是空的)/.exec(landing.why ?? '');
+      if (!match) continue;
+      const cell = { x: Number(match[1]), y: Number(match[2]), z: Number(match[3]) };
+      this.tunnelSupportStops = this.tunnelSupportStops.filter((row) => row.dimension !== dimension
+        || row.cell.x !== cell.x || row.cell.y !== cell.y || row.cell.z !== cell.z);
+      this.tunnelSupportStops.push({ at: Date.now(), dimension, cell });
+    }
+  }
+
+  /** 只看 goto 前缀之后的首个 build；前置施工会改变地形，不能按旧现场拒单。 */
+  private inspectableBuild(steps: readonly SkillCall[]): PlaceCall | null {
+    const index = steps.findIndex((step) => step.skill === 'build');
+    if (index < 0 || steps.slice(0, index).some((step) => step.skill !== 'goto')) return null;
+    const call = steps[index];
+    return call.skill === 'build' && 'material' in call && !call.dryRun ? call : null;
+  }
+
+  /** 从已加载的邻近方块给出一处可核验的落点，避免模型反复猜坐标。 */
+  private nearbySupportedBuildCell(bot: Bot): Cell | null {
+    const feet = feetOf(bot);
+    for (const y of [feet.y, feet.y - 1, feet.y + 1]) {
+      for (let radius = 1; radius <= 4; radius++) {
+        for (let dx = -radius; dx <= radius; dx++) for (let dz = -radius; dz <= radius; dz++) {
+          if (Math.max(Math.abs(dx), Math.abs(dz)) !== radius || (dx === 0 && dz === 0)) continue;
+          const cell = { x: feet.x + dx, y, z: feet.z + dz };
+          const block = blockAtCell(bot, cell);
+          if (!block || !AIR_NAMES.has(block.name)) continue;
+          if (!refAt(bot, { x: cell.x, y: cell.y - 1, z: cell.z })) continue;
+          return cell;
+        }
+      }
+    }
+    return null;
+  }
+
+  /** 已加载的静态落点若全被占或无贴附面，绕着它换站位也不会让它变得可放。 */
+  private buildSiteNote(steps: readonly SkillCall[], now: number): string | null {
+    const call = this.inspectableBuild(steps);
+    const bot = this.opts.getBot();
+    if (!call || !bot || 'blueprint' in call) return null;
+    const key = `${dimensionOf(bot)}:${call.material}`;
+    const pos = feetOf(bot);
+    const previous = this.buildSiteRefusals.get(key);
+    if (previous && (now - previous.firstAt > 3 * 60_000
+      || Math.hypot(pos.x - previous.from.x, pos.y - previous.from.y, pos.z - previous.from.z) >= 24)) {
+      this.buildSiteRefusals.delete(key);
+    }
+    // 单步 build 平时由技能解释现场；同材料已有连续无效落点时也核对新坐标，
+    // 以免换成单步绕过冷却，同时允许真正有支撑的新落点立即恢复施工。
+    if (steps.length < 2 && !this.buildSiteRefusals.has(key)) return null;
+    const cells = shapeFootprint(bot, call);
+    if (!cells?.length || cells.length > 16) return null;
+    let occupied = 0;
+    let unsupported = 0;
+    for (let i = 0; i < cells.length; i++) {
+      const cell = cells[i];
+      const block = blockAtCell(bot, cell);
+      if (!block) return null; // 未加载，不猜。
+      if (matchPlacedMaterialName(bot, call.material, block.name)) return null; // 已有目标材料，交给技能核验。
+      if (block.boundingBox === 'block') { occupied++; continue; }
+      const face = 'on' in call ? call.on[i]?.face : null;
+      const hasRef = isGravityBlock(call.material)
+        ? refAt(bot, { x: cell.x, y: cell.y - 1, z: cell.z })
+        : face ? refAt(bot, refCellOf(cell, face))
+          : NEIGHBORS6.some(([dx, dy, dz]) => refAt(bot, { x: cell.x + dx, y: cell.y + dy, z: cell.z + dz }));
+      if (!hasRef) unsupported++;
+    }
+    // 冷却针对的是无效落点，不是整个 build 工具。新坐标有空格和实心支撑时立即放行。
+    if (occupied + unsupported !== cells.length) {
+      this.buildSiteRefusals.delete(key);
+      return null;
+    }
+    const candidate = cells.length === 1 && 'anchors' in call
+      ? this.nearbySupportedBuildCell(bot) : null;
+    const candidateHint = candidate
+      ? `；已加载的附近可核验落点 ${cellText(candidate)} 为空、正下方有实心支撑（仍须保护预检）`
+      : '';
+    const held = this.buildSiteRefusals.get(key);
+    if (held && held.until > now) {
+      const left = Math.ceil((held.until - now) / 1000);
+      return `这片位置用${zhName(call.material)}的落点已连续 ${held.count} 次不可施工，${left} 秒内暂停重复的无效落点；请先做其他任务，或找已加载、空着且有实心支撑的新位置${candidateHint}`;
+    }
+    const reason = occupied === cells.length ? '目标格全被其他方块占着'
+      : unsupported === cells.length ? '目标格都没有能贴附的实心面'
+        : `目标格 ${occupied} 处被占、${unsupported} 处无实心贴附面`;
+    const current = this.buildSiteRefusals.get(key);
+    const count = current && now - current.firstAt < 3 * 60_000 ? current.count + 1 : 1;
+    const from = current?.from ?? pos;
+    this.buildSiteRefusals.set(key, { count, firstAt: current?.firstAt ?? now,
+      until: count >= 3 ? now + 3 * 60_000 : 0, from });
+    const next = count >= 3
+      ? `这片位置已连续 ${count} 次选到无效落点，本次${zhName(call.material)}施工暂停 3 分钟；先换一件与放置无关的事，或离开此处至少 24 格后重新探查。`
+      : '先探查新的空位和支撑，再改目标。';
+    return `放置前现场核对:${reason}（共 ${cells.length} 处）${candidateHint}；${next}原队列保留`;
+  }
+
+  /** 同区域或同材料连续放不下时暂停该施工意图，成功一次即清账。 */
+  private localBuildFailureNote(steps: readonly SkillCall[], now: number): string | null {
+    const step = this.inspectableBuild(steps);
+    if (!step) return null;
+    const bot = this.opts.getBot();
+    const pos = bot?.entity?.position;
+    if (!bot || !pos) return null;
+    this.localBuildFailures = this.localBuildFailures.filter((entry) => now - entry.at < BUILD_FAILURE_BURST_WINDOW_MS);
+    const sameMaterial = this.localBuildFailures.filter((entry) => entry.material === step.material
+      && entry.from.dimension === dimensionOf(bot));
+    const nearby = sameMaterial.filter((entry) => now - entry.at < LOCAL_BUILD_FAILURE_WINDOW_MS
+      && Math.hypot(pos.x - entry.from.x, pos.y - entry.from.y, pos.z - entry.from.z) < LOCAL_BUILD_FAILURE_DISTANCE);
+    if (sameMaterial.length >= BUILD_FAILURE_BURST_COUNT) {
+      const last = sameMaterial.at(-1)!;
+      const left = Math.ceil((BUILD_FAILURE_BURST_WINDOW_MS - (now - last.at)) / 1000);
+      return `用${zhName(step.material)}在不同位置连续放置失败 ${sameMaterial.length} 次，${left} 秒内不再受理同材料的 build；上次卡在:${last.why}。先换目标或查询保护、支撑与占位`;
+    }
+    if (nearby.length < 3) return null;
+    const last = nearby.at(-1)!;
+    const left = Math.ceil((LOCAL_BUILD_FAILURE_WINDOW_MS - (now - last.at)) / 1000);
+    return `附近用${zhName(step.material)}连续放置失败 ${nearby.length} 次，${left} 秒内不再受理这一带同材料的 build；上次卡在:${last.why}。先换行动，或走到别处找可贴附的实心方块`;
+  }
+
+  private recordLocalBuildOutcome(steps: readonly SkillCall[], landings: readonly StepLanding[]): void {
+    const bot = this.opts.getBot();
+    const pos = bot?.entity?.position;
+    if (!bot || !pos) return;
+    const now = Date.now();
+    this.localBuildFailures = this.localBuildFailures.filter((entry) => now - entry.at < BUILD_FAILURE_BURST_WINDOW_MS);
+    for (const landing of landings) {
+      const step = steps[landing.step - 1];
+      if (step?.skill !== 'build' || !('material' in step) || step.dryRun) continue;
+      if (landing.outcome === 'ok') {
+        this.localBuildFailures = this.localBuildFailures.filter((entry) => entry.material !== step.material
+          || entry.from.dimension !== dimensionOf(bot));
+      } else if (landing.outcome === 'fail') {
+        this.localBuildFailures.push({ material: step.material, at: now,
+          why: maskCoords(landing.why ?? '没说清为什么').slice(0, 180),
+          from: { x: pos.x, y: pos.y, z: pos.z, dimension: dimensionOf(bot) } });
+      }
+    }
+  }
+
+  /** 只覆盖原版锄地/种植：真实可用的土格立即放行，不因附近坏格阻断修正方案。 */
+  private localFarmFailureNote(steps: readonly SkillCall[], now: number): string | null {
+    const index = steps.findIndex((step) => step.skill === 'use' && !!step.at
+      && !!step.item && (isHoeUseItem(step.item) || !!SEED_CROP[step.item] || step.item === 'nether_wart'));
+    if (index < 0 || steps.slice(0, index).some((step) => step.skill !== 'goto')) return null;
+    const bot = this.opts.getBot();
+    const pos = bot?.entity?.position;
+    const step = steps[index];
+    if (!bot || !pos || step.skill !== 'use' || !step.at || !step.item) return null;
+    this.localFarmFailures = this.localFarmFailures.filter((entry) => now - entry.at < LOCAL_BUILD_FAILURE_WINDOW_MS);
+    const nearby = this.localFarmFailures.filter((entry) => entry.from.dimension === dimensionOf(bot)
+      && Math.hypot(pos.x - entry.from.x, pos.y - entry.from.y, pos.z - entry.from.z) < LOCAL_BUILD_FAILURE_DISTANCE);
+    if (nearby.length < 3) return null;
+    // 新目标在已加载区块里确实具备种植条件，就让执行层现场核验；不靠倒计时妨碍纠错。
+    try {
+      const requested = resolveAt(bot, step.at);
+      const cell = farmingClickCell(bot, requested, step.item) ?? requested;
+      const target = blockAtCell(bot, cell);
+      const above = blockAtCell(bot, { x: cell.x, y: cell.y + 1, z: cell.z });
+      if (target && above && AIR_NAMES.has(above.name)
+        && (isHoeUseItem(step.item) ? HOE_TILLED[target.name] !== undefined
+          : target.name === (step.item === 'nether_wart' ? 'soul_sand' : 'farmland'))) return null;
+    } catch { /* 锚点暂不可读时沿用本地冷却。 */ }
+    const last = nearby.at(-1)!;
+    const left = Math.ceil((LOCAL_BUILD_FAILURE_WINDOW_MS - (now - last.at)) / 1000);
+    return `这片区域的锄地/种植已连续失败 ${nearby.length} 次，${left} 秒内暂停相同耕种尝试；上次卡在:${last.why}。先探查已加载的土格及其上方空间，找到可用耕地或换一件事`;
+  }
+
+  private recordLocalFarmOutcome(steps: readonly SkillCall[], landings: readonly StepLanding[]): void {
+    const bot = this.opts.getBot();
+    const pos = bot?.entity?.position;
+    if (!bot || !pos) return;
+    const now = Date.now();
+    this.localFarmFailures = this.localFarmFailures.filter((entry) => now - entry.at < LOCAL_BUILD_FAILURE_WINDOW_MS);
+    for (const landing of landings) {
+      const step = steps[landing.step - 1];
+      if (step?.skill !== 'use' || !step.at || !step.item
+        || (!isHoeUseItem(step.item) && !SEED_CROP[step.item] && step.item !== 'nether_wart')) continue;
+      if (landing.outcome === 'ok') {
+        this.localFarmFailures = this.localFarmFailures.filter((entry) => entry.from.dimension !== dimensionOf(bot)
+          || Math.hypot(pos.x - entry.from.x, pos.y - entry.from.y, pos.z - entry.from.z) >= LOCAL_BUILD_FAILURE_DISTANCE);
+      } else if (landing.outcome === 'fail') {
+        this.localFarmFailures.push({ at: now, why: maskCoords(landing.why ?? '没说清为什么').slice(0, 180),
+          from: { x: pos.x, y: pos.y, z: pos.z, dimension: dimensionOf(bot) } });
+      }
+    }
+  }
+
+  private spatialFailureNote(steps: readonly SkillCall[], now: number): string | null {
+    // 入队时只检查第一段将要执行的路。前置航点或开门可能改变后段的起点与地形；
+    // 拿整单最后的目的地在这里拒绝，会让「先去门边、开门、再走」永远无法开跑。
+    const bot = this.opts.getBot();
+    const target = firstAbsoluteGoto(steps) ?? (bot ? firstRouteAfterOpenDoors(steps, bot) : null);
+    const pos = bot?.entity?.position;
+    if (!target || !bot || !pos) return null;
+    const dim = dimensionOf(bot);
+    const storageRoute = recentStorageRouteFailure(bot, target);
+    if (storageRoute) return `这处容器刚才寻路失败，短时间内不再直走相同落点；先改走其他路径或目标。上次卡在:${storageRoute}`;
+    this.spatialFailures = this.spatialFailures.filter((entry) => now - entry.at < EXACT_FAILURE_WINDOW_MS);
+    const occupied = this.spatialFailures.find((entry) => entry.dimension === dim
+      && entry.why.includes('目标那一格站不进人')
+      && entry.target.x === target.x && entry.target.y === target.y && entry.target.z === target.z);
+    if (occupied) {
+      const diag = this.opts.probeTarget?.(target);
+      const stillOccupied = !this.opts.probeTarget || diag?.kind === 'noStand';
+      const reachable = stillOccupied && this.opts.probeRoutes?.(target)
+        ?.some((probe) => probe.status === 'complete');
+      if (stillOccupied && !reachable) return `目标格 (${target.x},${target.y},${target.z}) 已确认不可站；换出发位置仍进不去。先找可站的落点或使用已验证的入口。上次卡在:${occupied.why}${this.nearbyRouteHint(bot, target)}`;
+      this.spatialFailures = this.spatialFailures.filter((entry) => entry !== occupied);
+    }
+    // A pinned body proves a failure at its departure, including a fall in the same column.
+    // A different horizontal departure needs a fresh route assessment.
+    const samePinnedDeparture = (entry: (typeof this.spatialFailures)[number]): boolean =>
+      Math.hypot(pos.x - entry.from.x, pos.z - entry.from.z) < EXACT_FAILURE_RETRY_DISTANCE;
+    const targetFailures = this.spatialFailures.filter((entry) => entry.dimension === dim
+      && /走不过去|找不到可行路线|钉在原地|没有接近目标/.test(entry.why)
+      && (!entry.why.includes('钉在原地') || samePinnedDeparture(entry))
+      && Math.hypot(target.x - entry.target.x, target.y - entry.target.y, target.z - entry.target.z) <= PROVEN_TARGET_DISTANCE);
+    const targetAttempts = targetFailures.reduce((count, entry) => count + entry.count, 0);
+    if (targetAttempts >= 3) {
+      const left = Math.ceil((EXACT_FAILURE_WINDOW_MS - (now - Math.min(...targetFailures.map((entry) => entry.at)))) / 1000);
+      return `目标格 (${target.x},${target.y},${target.z}) 已连续走不通 ${targetAttempts} 次；${left} 秒内不再接原样靠近的路线。若找到不同入口，可先走新航点再靠近；目标附近方块改变或走通目标格后也可重试。上次卡在:${targetFailures.at(-1)!.why}${this.nearbyRouteHint(bot, target)}`;
+    }
+    const pinned = this.spatialFailures.find((entry) => entry.dimension === dim
+      && entry.why.includes('钉在原地')
+      && samePinnedDeparture(entry)
+      && entry.target.x === target.x && entry.target.y === target.y && entry.target.z === target.z
+      // Falling away from the goal is movement, but it is not route progress.
+      && Math.hypot(pos.x - target.x, pos.y - target.y, pos.z - target.z)
+        >= Math.hypot(entry.from.x - target.x, entry.from.y - target.y, entry.from.z - target.z) - 1);
+    if (pinned) return `刚才走向同一目标时人被钉在原地，此后也没有接近目标；原样重走不会增加进展。先换路线、用即时传送脱困或核对现场。上次卡在:${pinned.why}`;
+    const stalled = this.spatialFailures.find((entry) => entry.count >= 2 && entry.dimension === dim
+      && Math.hypot(target.x - entry.target.x, target.y - entry.target.y, target.z - entry.target.z) <= NEARBY_GOAL_DISTANCE
+      && Math.hypot(pos.x - entry.from.x, pos.y - entry.from.y, pos.z - entry.from.z) < EXACT_FAILURE_RETRY_DISTANCE);
+    if (!stalled) return null;
+    return `这片目标区域从当前站位已经连续走不通 ${stalled.count} 次；原样靠近或换旁边几格仍会重复卡住。先离开当前站位、改走另一条路线或使用已验证的传送方式。上次卡在:${stalled.why}${this.nearbyRouteHint(bot, target)}`;
+  }
+
+  /** 只给当前可读的入口线索；避免让模型在实心目标格上不断平移坐标。 */
+  private nearbyRouteHint(bot: Bot, target: { x: number; y: number; z: number }): string {
+    const here = bot.entity?.position;
+    if (!here || typeof bot.blockAt !== 'function') return '';
+    const hints: string[] = [];
+    const known = [-1, 0, 1].map((dy) => this.opts.chests?.get(dimensionOf(bot),
+      { x: target.x, y: target.y + dy, z: target.z })).find(Boolean);
+    if (known) hints.push(`账本记有容器 (${known.x},${known.y},${known.z})；那是方块坐标，goto 应选附近可站立格，开箱用 use at`);
+    const cx = Math.floor(here.x), cy = Math.floor(here.y), cz = Math.floor(here.z);
+    const doors: Array<{ x: number; y: number; z: number; distance: number }> = [];
+    for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -1; dy <= 2; dy++) {
+      const x = cx + dx, y = cy + dy, z = cz + dz;
+      const block = bot.blockAt(new Vec3(x, y, z));
+      if (!block || (!block.name.endsWith('_door') && !block.name.endsWith('_fence_gate'))
+        || block.name.startsWith('iron_')) continue;
+      const props = block.getProperties?.() ?? {};
+      if (props.open !== false && props.open !== 'false') continue;
+      if (block.name.endsWith('_door') && props.half === 'upper') continue;
+      doors.push({ x, y, z, distance: Math.hypot(dx, dy, dz) });
+    }
+    doors.sort((a, b) => a.distance - b.distance);
+    if (doors[0]) {
+      const d = doors[0];
+      hints.push(`身边还有一扇关闭的门 (${d.x},${d.y},${d.z})；若它是入口，可先 use at 打开，再重探路线`);
+    }
+    return hints.length ? `。现场线索:${hints.join('；')}` : '';
+  }
+
+  private recordSpatialOutcome(steps: readonly SkillCall[], failed: boolean, why: string): void {
+    const target = lastAbsoluteGoto(steps);
+    const bot = this.opts.getBot();
+    const pos = bot?.entity?.position;
+    if (!target || !bot || !pos) return;
+    const now = Date.now();
+    const dim = dimensionOf(bot);
+    const occupied = why.includes('目标那一格站不进人');
+    const near = (entry: (typeof this.spatialFailures)[number]): boolean => entry.dimension === dim
+      && (occupied || entry.why.includes('目标那一格站不进人')
+        ? entry.target.x === target.x && entry.target.y === target.y && entry.target.z === target.z
+        : Math.hypot(target.x - entry.target.x, target.y - entry.target.y, target.z - entry.target.z) <= NEARBY_GOAL_DISTANCE
+          && Math.hypot(pos.x - entry.from.x, pos.y - entry.from.y, pos.z - entry.from.z) < EXACT_FAILURE_RETRY_DISTANCE);
+    this.spatialFailures = this.spatialFailures.filter((entry) => now - entry.at < EXACT_FAILURE_WINDOW_MS);
+    if (!failed) {
+      // Reaching an already-satisfied GoalNear can succeed without moving at all.
+      // Keep the short-lived request keyed by its starting cell so another
+      // identical goto from that cell is refused; real movement naturally
+      // changes the next request's key.
+      this.spatialFailures = this.spatialFailures.filter((entry) => entry.dimension !== dim
+        || Math.hypot(target.x - entry.target.x, target.y - entry.target.y, target.z - entry.target.z) > PROVEN_TARGET_DISTANCE);
+      return;
+    }
+    const prior = this.spatialFailures.find(near);
+    if (prior) {
+      prior.count++;
+      prior.at = now;
+      prior.why = maskCoords(why).slice(0, 180);
+      return;
+    }
+    this.spatialFailures.push({ count: 1, at: now, why: maskCoords(why).slice(0, 180), dimension: dim,
+      target, from: { x: pos.x, y: pos.y, z: pos.z } });
+    if (this.spatialFailures.length > 32) this.spatialFailures.shift();
+  }
+
+  private clearSpatialFailuresForChangedBlock(cell: Cell, dimension: string): void {
+    this.spatialFailures = this.spatialFailures.filter((entry) => entry.dimension !== dimension
+      || (Math.hypot(cell.x - entry.from.x, cell.y - entry.from.y, cell.z - entry.from.z) > 5
+        && Math.hypot(cell.x - entry.target.x, cell.y - entry.target.y, cell.z - entry.target.z) > PROVEN_TARGET_DISTANCE));
+    for (const [key, entry] of this.exactFailures) {
+      if (key.includes('"skill":"goto"') && entry.from?.dimension === dimension
+        && Math.hypot(cell.x - entry.from.x, cell.y - entry.from.y, cell.z - entry.from.z) <= 5) {
+        this.exactFailures.delete(key);
+      }
+    }
+    this.recentGotoRequests.clear();
+  }
+
+  private recordStalledCancel(task: RunningTask, now: number): void {
+    if (task.steps[task.stepIndex]?.skill !== 'goto' || task.goalProgressAt === undefined
+      || now - task.goalProgressAt < STALLED_CANCEL_MS || now - task.stepStartedAt < STALLED_CANCEL_MS) return;
+    const why = `叫停前 ${Math.round((now - task.goalProgressAt) / 1000)} 秒没有接近目标`;
+    this.recordSpatialOutcome([task.steps[task.stepIndex]], true, why);
+    this.opts.diag?.write({ lane: 'task', event: 'stalled-navigation-cancelled', taskId: task.id,
+      msg: why, data: { step: task.stepIndex + 1, goal: lastAbsoluteGoto([task.steps[task.stepIndex]]) }, incident: true });
+  }
+
+  private recordExactOutcome(steps: readonly SkillCall[], failed: boolean, why: string,
+    admissionRule?: string): number | undefined {
+    const openStorage = this.openStorageKey(steps);
+    if (!failed && steps.some((step) => step.skill === 'take' || step.skill === 'compact')) {
+      this.fullOpenStorageFailures.clear();
+    }
+    if (failed && openStorage && /当前窗口没有存进|那一边没空位了/.test(why)) {
+      const prior = this.fullOpenStorageFailures.get(openStorage);
+      const now = Date.now();
+      this.fullOpenStorageFailures.set(openStorage, {
+        count: prior && now - prior.at < 120_000 ? prior.count + 1 : 1,
+        at: now, why: maskCoords(why).slice(0, 160),
+      });
+    }
+    if (!retryGuardApplies(steps) && !admissionRule) return;
+    const exactKey = JSON.stringify(steps);
+    const sourceKey = openTakeRetryKey(steps);
+    const bot = this.opts.getBot();
+    const namedKey = steps.length === 1 ? namedTakeRetryKey(steps, bot) : null;
+    if (!failed) {
+      this.exactFailures.delete(exactKey);
+      if (sourceKey) this.exactFailures.delete(sourceKey);
+      if (namedKey) this.exactFailures.delete(namedKey);
+      return;
+    }
+    const key = namedKey ?? (sourceKey && /当前窗口没取到|当前没有打开可取东西的容器窗口/.test(why)
+      ? sourceKey : exactKey);
+    const now = Date.now();
+    for (const [entryKey, entry] of this.exactFailures) {
+      if (now - entry.at >= EXACT_FAILURE_WINDOW_MS) this.exactFailures.delete(entryKey);
+    }
+    const prior = this.exactFailures.get(key);
+    const inventoryStamp = steps.some((step) => step.skill === 'craft')
+      ? this.retryInventoryStamp(bot) : null;
+    const at = bot?.entity?.position;
+    const from = at && bot ? { x: at.x, y: at.y, z: at.z, dimension: dimensionOf(bot) } : null;
+    const windowTake = Boolean(namedKey) || steps.some((step) => step.skill === 'take' && step.from === 'open');
+    const samePlace = windowTake || !prior?.from || !from || (prior.from.dimension === from.dimension
+      && Math.hypot(from.x - prior.from.x, from.y - prior.from.y, from.z - prior.from.z) < EXACT_FAILURE_RETRY_DISTANCE);
+    const admissionInventoryStamp = admissionRule ? this.retryInventoryStamp(bot) : undefined;
+    const admissionTargetBlock = admissionRule ? this.admissionBlockStamp(steps) : undefined;
+    const changedAdmission = admissionRule && prior?.admissionRule
+      && (prior.admissionRule !== admissionRule || prior.admissionInventoryStamp !== admissionInventoryStamp
+        || prior.admissionTargetBlock !== admissionTargetBlock);
+    const count = prior && now - prior.at < EXACT_FAILURE_WINDOW_MS && samePlace
+      && prior.inventoryStamp === inventoryStamp && !changedAdmission ? prior.count + 1 : 1;
+    const evidence = namedKey ? this.takeEvidenceNote(steps, now) : null;
+    const takeProof = evidence?.proof;
+    this.exactFailures.set(key, { count, at: now, why: maskCoords(why).slice(0, 180), from, inventoryStamp,
+      ...(takeProof ? { takeProof } : {}),
+      ...(admissionRule ? { admissionRule, admissionInventoryStamp, admissionTargetBlock } : {}) });
+    return count;
+  }
+
+  private retryInventoryStamp(bot: Bot | null): string | null {
+    if (!bot?.inventory?.items) return null;
+    return bot.inventory.items()
+      .map((item) => `${item.type}:${item.count}`)
+      .sort().join('|');
+  }
+
+  /** Farming validity also depends on the loaded support and cover cells. */
+  private admissionBlockStamp(steps: readonly SkillCall[]): string | null {
+    const bot = this.opts.getBot();
+    if (!bot) return null;
+    const readings: string[] = [];
+    for (const step of steps) {
+      if (step.skill !== 'use' || !step.at || !step.item) continue;
+      if (!isHoeUseItem(step.item) && !SEED_CROP[step.item] && step.item !== 'nether_wart') continue;
+      const cell = this.precheckDeps(bot).resolve(step.at);
+      if (!cell) continue;
+      for (const dy of [-1, 0, 1]) {
+        const at = { ...cell, y: cell.y + dy };
+        const block = blockAtCell(bot, at);
+        readings.push(`${at.x},${at.y},${at.z}:${block ? `${block.name}:${block.stateId}` : 'unloaded'}`);
+      }
+    }
+    return readings.length ? readings.join('|') : this.observeTask(steps)?.targetBlock ?? null;
   }
 
   /**
@@ -1731,6 +3893,7 @@ export class Executor {
       },
       blockAt: (cell) => blockAtCell(bot, cell),
       lastAte: () => lastAteOf(bot),
+      chests: this.opts.chests,
     };
   }
 
@@ -1832,41 +3995,6 @@ export class Executor {
   }
 
   /**
-   * 受理刻的毒食闸。eat 点名 POISON_FOODS 里的东西:第一次只回后果、不接单;
-   * 确认窗口内原样重发即接。单槽语义与重生锚闸相同 —— 换了单就换槽。
-   */
-  private poisonGuardNote(steps: SkillCall[], now: number): string | null {
-    // 不带 at/target 的 use 拿着食物就是吃(consumeHeldFood),同一道门
-    const eats = (c: SkillCall): string | null => (
-      c.skill === 'eat' ? c.item
-        : c.skill === 'use' && c.item && !c.at && !c.target ? c.item
-          : null);
-    const hit = steps.findIndex((c) => POISON_FOODS[eats(c) ?? ''] !== undefined);
-    if (hit < 0) return null;
-    const call = { item: eats(steps[hit])! };
-    const key = `${taskSignature(steps)}@${call.item}`;
-    const prev = this.poisonConfirm;
-    if (prev && prev.key === key && now - prev.at <= POISON_CONFIRM_WINDOW_MS) {
-      this.poisonConfirm = null;
-      this.opts.diag?.write({
-        lane: 'task', event: 'poison-food-confirmed',
-        msg: `${zhName(call.item)}:同样的单再下一次,按确认放行`,
-        data: { key, steps },
-      });
-      return null;
-    }
-    this.poisonConfirm = { key, at: now };
-    this.opts.diag?.write({
-      lane: 'task', event: 'poison-food-hold',
-      msg: `${zhName(call.item)}:eat 点名毒食,先报后果等确认`,
-      data: { key, steps },
-    });
-    const where = steps.length > 1 ? `第 ${hit + 1} 步` : '这一单';
-    return `${where}要吃的是${zhName(call.item)}:${POISON_FOODS[call.item]},没吃。` +
-      '确定要吃就再下一次一模一样的单,我照吃;换个目标的话这一单作废。';
-  }
-
-  /**
    * 受理时拒绝在自身碰撞箱正上方放置重力方块的整单任务。
    * 必须先于 skillBuild 的移身操作检查，避免移身后放置绕过保护。
    */
@@ -1923,6 +4051,26 @@ export class Executor {
     return null;
   }
 
+  /** 已知目标格错误且此前没有改地形的步骤时，拒绝必败的耕种任务。 */
+  private definiteSoilPrecheckNote(steps: readonly SkillCall[]): { text: string; step: SkillCall } | null {
+    if (this.opts.precheck?.() === false) return null;
+    const bot = this.opts.getBot();
+    if (!bot) return null;
+    try {
+      const hit = precheckSteps(bot, [...steps], this.precheckDeps(bot)).find(({ index, note }) =>
+        ['use.hoeWrongBlock', 'use.hoeCovered', 'use.seedWrongBlock', 'use.soilCell'].includes(note.rule)
+        // 之前若已有挖掘、放置等动作，目标方块可能改变，仍交给执行刻判定。
+        && steps.slice(0, index).every((step) => step.skill === 'goto'
+          || (note.rule === 'use.seedWrongBlock' && step.skill === 'use' && !!step.item
+            && isHoeUseItem(step.item))));
+      if (!hit) return null;
+      return {
+        text: `第 ${hit.index + 1} 步的目标格已确认不适合耕种：${hit.note.text}。这单未入队；按现场读数修正后可立即提交，不需要等待`,
+        step: steps[hit.index],
+      };
+    } catch { return null; }
+  }
+
   /** 受理回执里的试算那一句;全通返回 null(静默) */
   private precheckNote(steps: SkillCall[]): string | null {
     if (this.opts.precheck?.() === false) return null;
@@ -1939,27 +4087,152 @@ export class Executor {
     return renderPrecheckNotes(hits);
   }
 
+  private takeDrainingContinuation(): QueuedTask | null {
+    const drain = this.checkpointDrain;
+    const continuation = drain?.continuation ?? null;
+    if (drain) drain.continuation = null;
+    return continuation && continuation.id !== this.task?.id ? continuation : null;
+  }
+
+  /** 撤销新机械原语保存的工作，不改变原有普通队列任务。 */
+  private removeCheckpointWork(): QueuedTask[] {
+    const dropped = this.queue.filter((task) => task.checkpointRequest || task.checkpointContinuation);
+    this.queue = this.queue.filter((task) => !task.checkpointRequest && !task.checkpointContinuation);
+    const continuation = this.takeDrainingContinuation();
+    if (continuation && !dropped.some((task) => task.id === continuation.id)) dropped.push(continuation);
+    return dropped;
+  }
+
+  private detachCheckpointOwner(taskId: number): void {
+    for (const queued of this.queue) {
+      if (queued.checkpointOwnerId === taskId) queued.checkpointOwnerId = undefined;
+    }
+  }
+
+  private checkpointReady(task: RunningTask, bot: Bot, stable = true, boundary = false): boolean {
+    if (this.task !== task || task.flag.aborted || this.stopped
+      || task.flag.epoch !== this.executionEpoch || this.opts.getBot() !== bot) return false;
+    if (!this.queue.some((queued) => queued.checkpointOwnerId === task.id)) return false;
+    if (this.holdReason() !== null || this.opts.busyWith?.() || task.escape.active || (this.escaping && !boundary)
+      || this.opts.bodyState?.().combatActive || this.opts.bodyState?.().environmentOwnerKind) return false;
+    const owner = goalOwnerKind(bot);
+    if (owner !== null && owner !== 'task') return false;
+    if (bot.currentWindow || bot.inventory?.selectedItem || !inventoryReadConfirmed(bot)) return false;
+    if (stable && bot.entity?.onGround !== true && !flightState(bot).flying) return false;
+    if (bot.pathfinder?.isMoving?.() || bot.pathfinder?.isMining?.() || bot.pathfinder?.isBuilding?.()) return false;
+    if (typeof bot.blockAt !== 'function' || !bot.entity?.position) return false;
+    const foot = bot.blockAt(bot.entity.position.floored());
+    const head = bot.blockAt(bot.entity.position.offset(0, 1.62, 0).floored());
+    if (!foot || !head || bodyInWater(bot) || headInWater(bot)) return false;
+    const hazard = hazardTouch(bot);
+    return !hazard.touching && !hazard.submerged && !hazard.onFire;
+  }
+
+  private async checkpointTask(
+    task: RunningTask, bot: Bot, resumeFrom: number, boundary: boolean, settle?: () => Promise<void>,
+  ): Promise<void> {
+    if (!boundary && (!checkpointReplayable(task.steps[resumeFrom])
+      || (task.steps[resumeFrom].skill === 'collect' && !task.count))) return;
+    if (this.checkpointDrain || !this.checkpointReady(task, bot, !settle, boundary)) return;
+    const drain: CheckpointDrain = { task, bot, resumeFrom, boundary, phase: 'settling', continuation: null };
+    this.checkpointDrain = drain;
+    try {
+      await settle?.();
+    } catch (err) {
+      if (err instanceof Aborted || task.flag.aborted || task.flag.epoch !== this.executionEpoch || this.stopped) {
+        throw err instanceof Aborted ? err : new Aborted(task.flag.by);
+      }
+      this.checkpointDrain = null;
+      this.opts.diag?.write({ lane: 'task', event: 'yield-deferred', taskId: task.id,
+        msg: '检查点收尾未完成，继续原任务', data: { reason: (err as Error).message } });
+      return;
+    }
+    if (task.flag.aborted || task.flag.epoch !== this.executionEpoch || this.stopped || this.opts.getBot() !== bot) {
+      throw new Aborted(task.flag.by);
+    }
+    if (!this.checkpointReady(task, bot, true, boundary)) {
+      this.checkpointDrain = null;
+      return;
+    }
+    drain.continuation = {
+      ...task,
+      resumeFrom,
+      interrupted: null,
+      progress: boundary
+        ? task.progress?.step === resumeFrom + 1 ? task.progress : undefined
+        : { step: resumeFrom + 1, count: task.count },
+      checkpointOwnerId: undefined,
+      checkpointRequest: undefined,
+      checkpointContinuation: true,
+      resumeDimension: normalizeDimension(dimensionOf(bot)),
+    };
+    drain.phase = 'yielded';
+    task.flag.aborted = true;
+    task.flag.by = '安全检查点让位';
+    this.opts.diag?.write({ lane: 'task', event: 'yield-draining', taskId: task.id,
+      msg: '已保存检查点断点，等待当前执行实例完成收尾',
+      data: { resumeFrom, boundary, count: task.count,
+        requestIds: this.queue.filter((queued) => queued.checkpointOwnerId === task.id).map((queued) => queued.id) } });
+    throw new Yielded();
+  }
+
+  /** 此回调在技能与执行器所有 finally 返回之后运行。 */
+  private completeCheckpointDrain(task: RunningTask): void {
+    const drain = this.checkpointDrain;
+    if (!drain || drain.task !== task) return;
+    this.checkpointDrain = null;
+    if (this.task === task) this.task = null;
+    const continuation = drain.continuation;
+    if (continuation && !this.stopped && task.flag.epoch === this.executionEpoch && this.opts.getBot() === drain.bot) {
+      const requested = this.queue.filter((queued) => queued.checkpointOwnerId === task.id);
+      const last = this.queue.reduce((found, queued, index) => queued.checkpointOwnerId === task.id ? index : found, -1);
+      this.queue.splice(last + 1, 0, continuation);
+      const body = this.opts.bodyState?.();
+      const goalOwner = goalOwnerKind(drain.bot);
+      if (!this.opts.busyWith?.() && this.holdReason() === null && !this.escaping && !task.escape.active
+        && !body?.combatActive && !body?.environmentOwnerKind && (goalOwner === null || goalOwner === 'task')) {
+        releaseBody(drain.bot, '检查点收尾完成', this.opts.diag);
+      }
+      this.opts.report({ kind: 'suspended', taskId: task.id,
+        text: `任务#${task.id} 已在安全检查点挂起，第 ${(continuation.resumeFrom ?? 0) + 1}/${task.steps.length} 步待续；`
+          + (requested.length > 0 ? `先执行${requested.map((queued) => `任务#${queued.id}`).join('、')}，随后以原任务 ID 续做。`
+            : '检查点请求已撤销，继续原任务。') });
+      this.opts.diag?.write({ lane: 'task', event: 'yield-suspended', taskId: task.id,
+        msg: '旧执行实例已退出，检查点断点进入队列',
+        data: { resumeFrom: continuation.resumeFrom, requestIds: requested.map((queued) => queued.id) } });
+    }
+    this.pump();
+  }
+
   /**
    * `queue:"now"` 的中断路径:掐掉手上这件(结局由受理回执点名,不另发汇报)。
    * 正在逃的任务不抢——逃岩浆的时候不插火把,急件在队头等它逃完。
    */
   private interrupt(): string | null {
+    const checkpointDropped = this.removeCheckpointWork();
+    for (const dropped of checkpointDropped) {
+      this.reportCancelled(dropped, 'queue:"now" 的新任务顶替', Executor.frozenProgress(dropped));
+    }
+    const droppedNote = checkpointDropped.length > 0
+      ? `撤掉了检查点待办 ${checkpointDropped.map((dropped) => `任务#${dropped.id}`).join('、')}` : null;
     const t = this.task;
     const frozen = this.frozen;
-    if (!t && !frozen) return null;
+    if (!t && !frozen) return droppedNote;
     if (t && this.escaping) {
-      return `手上这件正在自保(任务#${t.id}「${labelOf(t)}」),不抢它;它脱身之后立刻做这件`;
+      return `${droppedNote ? `${droppedNote};` : ''}`
+        + `手上这件正在自保(任务#${t.id}「${labelOf(t)}」),不抢它;它脱身之后立刻做这件`;
     }
-    const notes: string[] = [];
+    const notes: string[] = droppedNote ? [droppedNote] : [];
     if (t) {
       const at = this.progressOf(t);
+      this.recordStalledCancel(t, Date.now());
       this.abortTask(t, '被 queue:"now" 的新任务顶替');
       this.reportCancelled(t, 'queue:"now" 的新任务顶替', at);
       notes.push(cancelledNote(
         `任务#${t.id}「${labelOf(t)}」`,
-        t.stepIndex,
-        t.steps.length,
-        describeSkill(t.steps[Math.min(t.stepIndex, t.steps.length - 1)]),
+        t,
+        at.step,
+        'running',
       ) + `${t.count ? `(进度 ${t.count.done}/${t.count.total})` : ''}`);
     }
     if (frozen) {
@@ -1968,12 +4241,11 @@ export class Executor {
       if (!t || t.id !== frozen.id) {
         const at = Executor.frozenProgress(frozen);
         this.reportCancelled(frozen, 'queue:"now" 的新任务顶替', at);
-        const stepIndex = at ? at.step - 1 : 0;
         notes.push(cancelledNote(
           `战斗中待续的任务#${frozen.id}「${labelOf(frozen)}」`,
-          stepIndex,
-          frozen.steps.length,
-          describeSkill(frozen.steps[Math.min(stepIndex, frozen.steps.length - 1)]),
+          frozen,
+          at?.step ?? null,
+          'frozen',
         ));
       }
     }
@@ -1982,8 +4254,19 @@ export class Executor {
 
   /** 队列空着且没在做事就开下一件;身体被战斗占着时闸住(resume 时再泵) */
   private pump(): void {
-    if (this.stopped || this.task || this.holdReason() !== null) return;
+    const bot = this.opts.getBot();
+    // A disconnected native promise may never return. Its finally belongs to the old Bot,
+    // while same-Bot abort/death must still drain before sharing that body's controls.
+    if (this.checkpointDrain && this.checkpointDrain.bot !== bot) this.checkpointDrain = null;
+    if (this.stopped || this.task || this.checkpointDrain || this.holdReason() !== null) return;
     if (this.opts.busyWith?.()) return;
+    if (this.queue.some((queued) => queued.checkpointRequest || queued.checkpointContinuation)) {
+      const body = this.opts.bodyState?.();
+      const owner = goalOwnerKind(this.opts.getBot());
+      if (body?.combatActive || body?.environmentOwnerKind || this.escaping
+        || (owner !== null && owner !== 'task')
+        || [...this.runningInstances].some(([running, instance]) => instance === bot && running.flag.aborted)) return;
+    }
     const next = this.queue.shift();
     if (!next) return;
     // 反射自保时会在没有任务的情况下下寻路目标;新任务一律接管,否则一边合成
@@ -1994,7 +4277,8 @@ export class Executor {
     // 打转账只记第一次开跑:断点续做是同一单接着跑,不是又下了一单
     if (next.startedAt === undefined) this.noteStarted(taskSignature(next.steps));
     this.task = {
-      ...next, stepLog: next.stepLog ?? [], flag, escape: { active: false },
+      ...next, startObservation: next.startObservation ?? this.observeTask(next.steps) ?? undefined,
+      stepLog: next.stepLog ?? [], flag, escape: { active: false },
       startedAt: next.startedAt ?? now, stepIndex: 0, stepStartedAt: now, count: null,
     };
     this.opts.diag?.write({
@@ -2002,7 +4286,20 @@ export class Executor {
       msg: `开始任务#${next.id}「${labelOf(next)}」`,
       data: { steps: next.steps, waiting: this.queue.length },
     });
-    void this.run(this.task, flag);
+    const running = this.task;
+    if (next.checkpointContinuation) {
+      this.opts.report({ kind: 'resumed', taskId: next.id,
+        text: `任务#${next.id} 从安全检查点续做，第 ${(next.resumeFrom ?? 0) + 1}/${next.steps.length} 步。` });
+      this.opts.diag?.write({ lane: 'task', event: 'yield-resumed', taskId: next.id,
+        msg: '检查点断点以原任务 ID 续做',
+        data: { resumeFrom: next.resumeFrom, count: next.progress?.count ?? null } });
+    }
+    this.runningInstances.set(running, bot);
+    void this.run(running, flag).finally(() => {
+      this.runningInstances.delete(running);
+      this.completeCheckpointDrain(running);
+      if (!this.task && this.queue.some((queued) => queued.checkpointRequest || queued.checkpointContinuation)) this.pump();
+    });
   }
 
   /**
@@ -2014,19 +4311,28 @@ export class Executor {
     if (this.stopped || this.frozen) return;
     const t = this.task;
     if (!t) return;
+    if (this.checkpointDrain?.task === t && this.checkpointDrain.phase === 'yielded') return;
+    const boundary = this.checkpointDrain?.task === t && this.checkpointDrain.boundary
+      ? this.checkpointDrain.resumeFrom : null;
     this.abortTask(t, by);
     const idem = reRunnable(t.steps[t.stepIndex]);
     this.frozen = {
       id: t.id, steps: t.steps, enqueuedAt: t.enqueuedAt, startedAt: t.startedAt,
-      resumeFrom: idem ? t.stepIndex : t.stepIndex + 1,
-      interrupted: idem ? null : t.stepIndex,
-      progress: { step: t.stepIndex + 1, count: t.count },
+      resumeFrom: boundary ?? (idem ? t.stepIndex : t.stepIndex + 1),
+      interrupted: boundary !== null || idem ? null : t.stepIndex,
+      progress: boundary !== null ? t.progress : { step: t.stepIndex + 1, count: t.count },
       // 已经做掉的步跟着任务走:重建 ctx 会丢,重跑会报假失败
       absorbed: t.absorbed,
+      findOrigins: t.findOrigins,
       // 各步终态的账同理:挂起前跑成的那几步,断点被撤时还得说得出来
       stepLog: t.stepLog,
+      queueTailNotified: t.queueTailNotified,
       intended: t.intended,
       frozenBy: owner,
+      checkpointOwnerId: t.checkpointOwnerId,
+      checkpointRequest: t.checkpointRequest,
+      checkpointContinuation: t.checkpointContinuation,
+      resumeDimension: t.resumeDimension,
     };
     this.opts.diag?.write({
       lane: 'task', event: 'suspend', taskId: t.id,
@@ -2048,7 +4354,13 @@ export class Executor {
     this.frozen = {
       id: t.id, steps: t.steps, enqueuedAt: t.enqueuedAt, startedAt: t.startedAt,
       resumeFrom: i, interrupted: null,
-      absorbed: t.absorbed, stepLog: t.stepLog, intended: t.intended, frozenBy: 'queue',
+      queueTailNotified: t.queueTailNotified,
+      absorbed: t.absorbed, stepLog: t.stepLog, intended: t.intended,
+      findOrigins: t.findOrigins, frozenBy: 'queue',
+      checkpointOwnerId: t.checkpointOwnerId,
+      checkpointRequest: t.checkpointRequest,
+      checkpointContinuation: t.checkpointContinuation,
+      resumeDimension: t.resumeDimension,
     };
     this.abortTask(t, why);
     this.opts.diag?.write({
@@ -2072,7 +4384,11 @@ export class Executor {
       return null;
     }
     this.frozen = null;
-    if (f) this.queue.unshift(f);
+    if (f) {
+      const lastRequest = this.queue.reduce((last, queued, index) =>
+        queued.checkpointRequest && queued.checkpointOwnerId === f.id ? index : last, -1);
+      this.queue.splice(lastRequest + 1, 0, f);
+    }
     this.pump();
     if (!f) return null;
     const at = f.resumeFrom ?? 0;
@@ -2086,9 +4402,20 @@ export class Executor {
   /**
    * mc_stop：停止当前任务、撤销队列(挂起待续的也算)；全空返回 null。
    */
-  clear(): string | null {
+  clear(force = false): string | null {
     const t = this.task;
+    const now = Date.now();
+    this.earlyStops = this.earlyStops.filter((at) => now - at < 120_000);
+    const stalledGoto = t?.steps[t.stepIndex]?.skill === 'goto'
+      && t.goalProgressAt !== undefined
+      && now - t.goalProgressAt >= STALLED_CANCEL_MS
+      && now - t.stepStartedAt >= STALLED_CANCEL_MS;
+    if (t && !force && !stalledGoto && now - t.startedAt < 30_000 && this.earlyStops.length >= 1) {
+      return `这次 mc_stop 没执行：近两分钟已过早叫停 ${this.earlyStops.length} 次；任务#${t.id} 仍在做，等它跑满 30 秒或等完成/受阻回执再判断。原队列保留`;
+    }
     const dropped = this.queue.splice(0);
+    const continuation = this.takeDrainingContinuation();
+    if (continuation) dropped.unshift(continuation);
     if (this.frozen) {
       dropped.unshift(this.frozen);
       this.frozen = null;
@@ -2107,6 +4434,9 @@ export class Executor {
     }
     if (t) {
       const at = this.progressOf(t);
+      if (now - t.startedAt < 30_000) this.earlyStops.push(now);
+      this.noteRapidStop(t, now);
+      this.recordStalledCancel(t, now);
       this.abortTask(t, 'mc_stop');
       this.reportCancelled(t, 'mc_stop 叫停', at);
     }
@@ -2125,6 +4455,33 @@ export class Executor {
       dropped.length > 0 ? `撤掉了排在后面的 ${dropped.map((d) => `任务#${d.id}「${labelOf(d)}」`).join('、')}` : null,
       held !== null ? `队列冻结(${held})也解除了` : null,
     ].filter(Boolean).join(';');
+  }
+
+  /** 服务端明确拒绝当前动作时，终止这单并保留原话；后续排队任务照常排队。 */
+  blockCurrentFromServer(reason: string): boolean {
+    const task = this.task;
+    if (!task) return false;
+    const at = Date.now();
+    const step = describeSkill(task.steps[Math.min(task.stepIndex, task.steps.length - 1)]);
+    const label = labelOf(task);
+    const text = `[场上拒绝] 任务#${task.id}「${label}」第 ${task.stepIndex + 1}/${task.steps.length} 步「${step}」没做成:服务端提示 ${reason}；后续步骤未执行。`;
+    this.abortTask(task, reason);
+    this.detachCheckpointOwner(task.id);
+    this.noteBlockedReason(reason, at, { task: `任务#${task.id}「${label}」`, step });
+    this.notePriorOutcome(taskSignature(task.steps), 'blocked', reason, at);
+    const repeatFailure = this.noteRepeatOutcome(task, 'blocked', at);
+    this.recordExactOutcome(task.steps, true, reason);
+    const failedCall = task.steps[task.stepIndex];
+    if (task.steps.length > 1 && failedCall?.skill === 'take' && failedCall.at) {
+      this.recordExactOutcome([failedCall], true, reason);
+    }
+    if (task.steps[task.stepIndex]?.skill === 'goto') this.recordSpatialOutcome([task.steps[task.stepIndex]], true, reason);
+    this.opts.diag?.write({ lane: 'task', event: 'blocked', taskId: task.id, msg: text,
+      data: { reason, step }, incident: true });
+    this.opts.report({ kind: 'blocked', text, taskId: task.id, ...(repeatFailure ? { repeatFailure } : {}) });
+    this.pump();
+    if (!this.task && this.queue.length === 0) this.opts.onDrain?.();
+    return true;
   }
 
   /** 两槽合起来的一句冻结理由;都空着为 null。同时冻着就两条都说 */
@@ -2169,6 +4526,7 @@ export class Executor {
     if (!task) return token;
     const progress = this.progressOf(task);
     this.abortTask(task, reason);
+    this.detachCheckpointOwner(task.id);
     this.reportCancelled(task, reason, progress);
     return token;
   }
@@ -2256,6 +4614,8 @@ export class Executor {
     const current = this.task;
     const frozen = this.frozen;
     const queued = this.queue.splice(0);
+    const continuation = this.takeDrainingContinuation();
+    if (continuation) queued.push(continuation);
     if (current) {
       current.flag.aborted = true;
       current.flag.by = reason;
@@ -2279,7 +4639,7 @@ export class Executor {
     for (const task of queued) {
       if (reported.has(task.id)) continue;
       reported.add(task.id);
-      this.reportCancelled(task, reason, null);
+      this.reportCancelled(task, reason, Executor.frozenProgress(task));
     }
     this.opts.diag?.write({
       lane: 'task', event: 'connection-cancelled', taskId: current?.id ?? frozen?.id ?? queued[0]?.id,
@@ -2351,6 +4711,8 @@ export class Executor {
     const current = this.task;
     const frozen = this.frozen;
     const queued = this.queue.splice(0);
+    const continuation = this.takeDrainingContinuation();
+    if (continuation) queued.push(continuation);
     if (current) {
       current.flag.aborted = true;
       current.flag.by = '死亡';
@@ -2400,12 +4762,13 @@ export class Executor {
     if (this.stopped) return;
     const t = this.task;
     if (t?.escape.active) return;
+    const continuation = this.takeDrainingContinuation();
     // 抢占撤空队列时作废两种冻结令牌；旧令牌的恢复调用无效。
     const held = this.holdReason();
     this.releaseAllHolds();
     // 战斗窗口里没有"当前任务",但挂起待续的与排着的照样要撤:
     // 环境自保夺权(岩浆/溺水)之后,按原地写的计划已经不知道自己在哪了
-    if (!t && !this.frozen && this.queue.length === 0) {
+    if (!t && !this.frozen && !continuation && this.queue.length === 0) {
       if (held !== null) {
         this.opts.diag?.write({
           lane: 'task', event: 'preempted',
@@ -2423,6 +4786,7 @@ export class Executor {
       this.task = null;
     }
     const dropped = this.queue.splice(0);
+    if (continuation) dropped.unshift(continuation);
     if (this.frozen) {
       dropped.unshift(this.frozen);
       this.frozen = null;
@@ -2533,6 +4897,7 @@ export class Executor {
     t.flag.aborted = true;
     t.flag.by = by;
     this.cancelActiveAttack();
+    if (this.checkpointDrain?.task === t) this.checkpointDrain.continuation = null;
     this.task = null;
     releaseBody(this.opts.getBot(), `中止任务#${t.id}(${by})`, this.opts.diag);
   }
@@ -2541,7 +4906,8 @@ export class Executor {
   shutdown(): void {
     // 停机先同步报告现存任务的取消终态，再置 stopped；finish 据此忽略迟到回调。
     if (this.task) this.reportCancelled(this.task, 'World 停止', this.progressOf(this.task));
-    for (const d of [...(this.frozen ? [this.frozen] : []), ...this.queue]) {
+    const continuation = this.takeDrainingContinuation();
+    for (const d of [...(this.frozen ? [this.frozen] : []), ...(continuation ? [continuation] : []), ...this.queue]) {
       this.reportCancelled(d, 'World 停止', Executor.frozenProgress(d));
     }
     this.stopped = true;
@@ -2582,7 +4948,7 @@ export class Executor {
      * 再报一遍这一步的用时就是同一个数说两遍(README「一件事只说一遍」)。
      */
     const stepLabel = (i: number): string =>
-      `${task.steps.length > 1 ? `第 ${i + 1} 步 ` : ''}${JSON.stringify(task.steps[i])}`;
+      `${task.steps.length > 1 ? `第 ${i + 1} 步 ` : ''}${JSON.stringify(receiptStep(task.steps[i]))}`;
     const stepHead = (i: number, stepStart: number): string =>
       (task.steps.length > 1
         ? `${stepLabel(i)} 用时 ${fmtDur(Date.now() - stepStart)}`
@@ -2596,8 +4962,40 @@ export class Executor {
       this.finish(flag, { kind: 'blocked', text: `${span()}${label()}执行不了:当前没连上服务器。`, taskId: id });
       return;
     }
+    let windowStep = 0;
+    const windowInstances = new WeakMap<object, number>();
+    let windowSequence = 0;
+    const windowInstance = (window: NonNullable<Bot['currentWindow']> | null): number | null => {
+      if (!window) return null;
+      let instance = windowInstances.get(window);
+      if (instance === undefined) windowInstances.set(window, instance = ++windowSequence);
+      return instance;
+    };
+    const windows = new ContainerWindowOwnership(bot, {
+      valid: () => !flag.aborted && !this.stopped && flag.epoch === this.executionEpoch && this.opts.getBot() === bot,
+      scope: () => normalizeDimension(dimensionOf(bot)),
+      onEvent: ({ kind, window, source, heldWindow, candidateWindow, changedFields }) => {
+        const event = `hold-window-${kind}`;
+        this.opts.diag?.write({ lane: 'skill', event, taskId: id,
+          msg: kind === 'bound' ? '任务已认领本次打开的容器窗口'
+            : kind === 'candidate' ? '开窗步骤尚在验收，记录当前候选容器窗口'
+              : kind === 'close-deferred' ? '候选窗口未收到本次完整内容，暂不关窗，避免旧玩家槽回写背包'
+                : '容器窗口与本次开窗或已认领的窗口不一致',
+          data: { step: windowStep, source, windowId: window.id, windowInstance: windowInstance(window),
+            heldWindowId: heldWindow?.id ?? null, heldWindowInstance: windowInstance(heldWindow),
+            candidateWindowId: candidateWindow?.id ?? null, candidateWindowInstance: windowInstance(candidateWindow),
+            ...(changedFields ? { changedFields } : {}) } });
+      },
+    });
+    const closeHeldWindow = (): void => windows.close();
+    const onWindowClose = (window: NonNullable<Bot['currentWindow']> | null): void => windows.onWindowClose(window);
+    if (typeof bot.on === 'function') bot.on('windowClose', onWindowClose);
     const ctx: SkillContext = {
       aborted: () => flag.aborted || this.stopped || flag.epoch !== this.executionEpoch,
+      checkpoint: async (settle) => {
+        if (windows.heldWindow || windows.hasUnconfirmedOpening()) return;
+        await this.checkpointTask(task, bot, task.stepIndex, false, settle);
+      },
       abortedBy: () => flag.by ?? (this.stopped ? 'World 停止' : null),
       log: this.opts.log,
       fleeHealth: this.opts.fleeHealth ?? (() => 0),
@@ -2639,7 +5037,9 @@ export class Executor {
         },
       },
       showTempo: this.opts.showTempo,
+      holdWindow: (window) => windows.retain(window, 'skill'),
       spawnNote: this.opts.spawnNote,
+      serverFeedbackSince: this.opts.serverFeedbackSince,
       spawnAnchor: this.opts.spawnAnchor,
       blueprints: this.opts.blueprints,
       marks: this.opts.marks,
@@ -2657,7 +5057,7 @@ export class Executor {
       const n = e.to - e.from + 1;
       const rootWhy = e.rootOutcome === 'noop' ? '没什么可做的' : '没做成';
       return `第 ${e.from + 1}~${e.to + 1} 步 没跑(第 ${e.root} 步${rootWhy},这 ${n} 步一环扣一环都要用它的产出):`
-        + e.calls.map((c) => JSON.stringify(c)).join(';');
+        + e.calls.map((c) => JSON.stringify(receiptStep(c))).join(';');
     };
     /**
      * 无事可做的步:陈述句单独成段,不进「没做成」那一堆。
@@ -2674,7 +5074,7 @@ export class Executor {
     let bagDue = false;
     const scenes: string[] = [];
     const steps = task.steps;
-    let expectedDimension = normalizeDimension(dimensionOf(bot));
+    let expectedDimension = task.resumeDimension ?? normalizeDimension(dimensionOf(bot));
     let transitBoundary: number | null = null;
     /** 各步在验收后的结局。显式依赖要求 ok/partial；自动因果边还可凭现有入料放行。 */
     const outcomes: StepOutcome[] = [];
@@ -2688,351 +5088,555 @@ export class Executor {
       task.stepLog.push({
         step: i + 1, what: describeSkill(steps[i]), outcome, why: shortWhy(why), line,
       });
+      if (outcome === 'ok') this.noteSuccessfulIntent(steps[i], Date.now());
     };
     /**
      * 本任务有意放置的落点，跨步骤保留。
      * 回收脚手架按坐标豁免这些格子，包括后续步骤在同格重新登记的放置记录。
      */
     const intended = task.intended ??= new Set<string>();
-    for (let i = 0; i < steps.length; i++) {
-      const call = steps[i];
-      if (ctx.aborted()) return;
-      // 环境冻结在步骤边界生效：当前自救步骤可完成，后续步骤等待 resumeAfterEnvironment。
-      const heldBefore = this.holdReason();
-      if (heldBefore !== null && this.freezeBeforeStep(task, i, `环境冻结:${heldBefore}`)) return;
-      if (transitBoundary !== null) {
-        const why = `第 ${transitBoundary} 步没有完成可信的维度穿越，后续步骤不能在错误维度继续`;
-        const line = `${stepLabel(i)} 跳过(${why})`;
-        land(i, 'skip', why, line);
-        blockedSteps.push(line);
-        this.opts.diag?.write({
-          lane: 'skill', event: 'dimension-tail-blocked', taskId: id,
-          msg: `第 ${i + 1} 步「${describeSkill(call)}」跳过:${why}`,
-          data: {
-            call, transitStep: transitBoundary, expectedDimension,
-            actualDimension: normalizeDimension(dimensionOf(bot)),
-          },
-        });
-        continue;
-      }
-      const beforeDimension = normalizeDimension(dimensionOf(bot));
-      if (beforeDimension !== expectedDimension) {
-        transitBoundary = i + 1;
-        const why = `维度在没有成功 transit 的情况下从${zhDimension(expectedDimension)}变成了${zhDimension(beforeDimension)}`;
-        const line = `${stepLabel(i)} 没执行(${why}；为防止把另一维坐标当当前维度坐标，整条尾巴已停)`;
-        land(i, 'fail', why, line);
-        firstWhy ??= why;
-        blockedSteps.push(line);
-        this.opts.diag?.write({
-          lane: 'skill', event: 'dimension-unexpected', taskId: id,
-          msg: `第 ${i + 1} 步前检测到${why}`,
-          data: { call, expectedDimension, actualDimension: beforeDimension },
-        });
-        continue;
-      }
-      // 战斗挂起后的续做:被打断的非幂等步不重跑(重跑会重复扣料),按没做成算;
-      // 更早的步战前已做完,按做成计入闸门,结局回执不重述
-      if (i === task.interrupted) {
-        const line = `${stepLabel(i)} 做到一半被打断,没重做(这一步重做会重复扣料),按没做成算`;
-        land(i, 'fail', '做到一半被打断,没重做(重做会重复扣料)', line);
-        blockedSteps.push(line);
-        if (call.skill === 'transit') transitBoundary = i + 1;
-        continue;
-      }
-      if (i < (task.resumeFrom ?? 0)) {
-        // 断点之前的步:终态照账本进闸门,回执行照账本进结局回执。这一单只有 finish()
-        // 一个出口,断点之前那几步的下场没在别处报过;闸门读到「做成」会放行注定落空的
-        // 下游。账本按步序记,每一步落地恰一次,第 i 步就是 stepLog[i]。
-        const landed = task.stepLog[i];
-        outcomes.push(landed.outcome);
-        switch (landed.outcome) {
-          case 'ok': results.push(landed.line); break;
-          case 'partial': partialSteps.push(landed.line); break;
-          case 'noop': noopSteps.push(landed.line); firstWhy ??= landed.why; break;
-          case 'skip': blockedSteps.push(landed.line); break;
-          case 'fail':
-            blockedSteps.push(landed.line);
-            firstWhy ??= landed.why;
-            if (landed.why) {
-              myBlockedKeys.add(Executor.blockedKey(landed.why));
-              bagDue ||= blockedOnItems(landed.why);
-            }
-            break;
-        }
-        continue;
-      }
-      // 更早一步顺手做掉的(stow 并窗):东西已经在箱子里了。必须抢在 needs 闸与出队刻
-      // 试算之前——试算会照着「包里没有X」判死一件其实已经做成的事。回执用登记的那句,
-      // 它自带自己那一笔关窗对账,比 deriveExpect 推出来的判据更硬,不再另裁一次。
-      const absorbed = task.absorbed?.get(i);
-      if (absorbed !== undefined) {
-        const line = `${stepLabel(i)}: ${absorbed}`;
-        land(i, 'ok', null, line);
-        results.push(line);
-        this.opts.diag?.write({
-          lane: 'skill', event: 'done', taskId: id, durMs: 0,
-          msg: `${describeSkill(call)}: ${absorbed}`,
-          data: { call, result: absorbed, absorbed: true },
-        });
-        continue;
-      }
-      // 显式 needs 优先；省略时按 causalNeeds 建立产出与消费之间的依赖。
-      const causal = call.needs === undefined ? causalNeeds(steps, i, bot) : null;
-      const needs = call.needs ?? causal!.map((c) => c.step);
-      // 因果边的入料包里本来就有时不拦:闸拦的是「注定落空」,料在手上这一步就不是
-      const inBag = (items: string[]): boolean => items.every((n) =>
-        bot.inventory.items().some((it) => it.count > 0 && (matchItemName(n, it.name) || matchItemName(it.name, n))));
-      const upstreamFailed = (n: number): boolean => outcomes[n - 1] !== 'ok' && outcomes[n - 1] !== 'partial';
-      const unmet = needs.find((n) =>
-        upstreamFailed(n) && !causal?.some((c) => c.step === n && inBag(c.items)));
-      /** 上游没成但入料在包里、因而照跑的那条边 */
-      const stocked = unmet === undefined
-        ? causal?.find((c) => upstreamFailed(c.step) && inBag(c.items)) ?? null
-        : null;
-      if (unmet !== undefined) {
-        // 跳过链追到根:上游自己也是被跳过的,拖垮它的是更早那一步
-        const root = skipRoot.get(unmet) ?? unmet;
-        // 上游是「无事可做」而不是「没做成」时照实说:两者都拦下游,但说成没做成
-        // 会让她以为那一步走错了,转头去修一件根本没坏的事
-        const upstream = outcomes[root - 1] === 'noop' ? '那一步没什么可做的'
-          : outcomes[root - 1] === 'skip' ? '那一步没跑' : '那一步没做成';
-        const chained = root === unmet ? upstream : `那一步没跑(卡在第 ${root} 步)`;
-        const why = causal
-          ? `要用第 ${unmet} 步的${(causal.find((c) => c.step === unmet)?.items ?? []).map(zhName).join('、')},${chained}`
-          : `依赖的第 ${unmet} 步${outcomes[unmet - 1] === 'noop' ? '没什么可做的' : outcomes[unmet - 1] === 'skip' ? '没跑' : '没做成'}`;
-        skipRoot.set(i + 1, root);
-        land(i, 'skip', why, `${stepLabel(i)} 跳过(${why})`);
-        // 跳过的那一步压根没跑,没有"用时"可报;紧接着上一段、同一根因的并进那一段
-        const last = blockedSteps[blockedSteps.length - 1];
-        if (typeof last === 'object' && last.to === i - 1 && last.root === root) {
-          last.to = i;
-          last.whys.push(why);
-          last.calls.push(call);
-        } else {
-          blockedSteps.push({ from: i, to: i, root, rootOutcome: outcomes[root - 1], whys: [why], calls: [call] });
-        }
-        this.opts.diag?.write({
-          lane: 'skill', event: 'skip', taskId: id,
-          msg: `第 ${i + 1} 步「${describeSkill(call)}」跳过:${why}`,
-          data: { call, needs, failed: unmet, root, causal: causal?.find((c) => c.step === unmet)?.items ?? null },
-        });
-        if (call.skill === 'transit') transitBoundary = i + 1;
-        continue;
-      }
-      // 兜底说明:缺省闸门下前一步没做成、但这一步不消费它的产出(或要用的料包里本来
-      // 就有)——照跑,并说明为什么(不说这一句,她会以为闸门坏了或这一步不该跑)
-      const ranFree = stocked !== null
-        ? `(第 ${stocked.step} 步没做成;要用的${stocked.items.map(zhName).join('、')}包里本来就有,照做了)`
-        : causal !== null && i > 0 && outcomes[i - 1] !== 'ok' && outcomes[i - 1] !== 'partial'
-          ? `(第 ${i} 步没做成;这一步不用它的产出,照做了)`
-          : '';
-      // 断点续做的 collect:只挖打断前没挖到的那些;打断前就已挖够的不再进技能
-      const carried = resumedCollect(task, i);
-      if (carried && carried.remaining <= 0) {
-        const line = `${stepLabel(i)}: ${carried.note},没再挖`;
-        land(i, 'ok', null, line);
-        results.push(line);
-        this.opts.diag?.write({
-          lane: 'skill', event: 'done', taskId: id, durMs: 0,
-          msg: `${describeSkill(call)}: ${carried.note}`,
-          data: { call, resumed: { done: carried.done, total: carried.total } },
-        });
-        continue;
-      }
-      const run = carried?.call ?? call;
-      const carriedNote = carried ? `(${carried.note})` : '';
-      task.stepIndex = i;
-      task.escape.active = false; // 逃生标记只属于置位它的那一步
-      // 续做步从打断前的读数起算:第一次进度回调之前再被挂起,断点里的进度也不能是空
-      task.count = carried ? { done: carried.done, total: carried.total } : null;
-      const startedAt = Date.now();
-      task.stepStartedAt = startedAt;
-      const at = bot.entity?.position;
-      this.opts.diag?.write({
-        lane: 'skill', event: 'begin', taskId: id,
-        msg: `第 ${i + 1} 步 ${describeSkill(call)}`,
-        data: {
-          call,
-          from: at ? { x: Math.round(at.x), y: Math.round(at.y), z: Math.round(at.z) } : null,
-        },
-      });
-      let lastProgressPos = at ? { x: at.x, y: at.y, z: at.z } : null;
-      let halfSent = false;
-      const sendProgress = (half: boolean): void => {
+    try {
+      for (let i = 0; i < steps.length; i++) {
+        const call = steps[i];
         if (ctx.aborted()) return;
-        const p = bot.entity?.position ?? null;
-        const moved = p && lastProgressPos
-          ? Math.hypot(p.x - lastProgressPos.x, p.y - lastProgressPos.y, p.z - lastProgressPos.z)
-          : null;
-        if (p) lastProgressPos = { x: p.x, y: p.y, z: p.z };
-        this.opts.onProgress?.({
-          taskId: id,
-          label: labelOf(task),
-          stepIndex: i,
-          stepCount: task.steps.length,
-          step: describeSkill(call),
-          elapsedS: Math.round((Date.now() - startedAt) / 1000),
-          pos: p ? { x: Math.round(p.x), y: Math.round(p.y), z: Math.round(p.z) } : null,
-          movedBlocks: moved === null ? null : Math.round(moved * 10) / 10,
-          count: task.count,
-          half,
-          ...(ctx.sleeping ? { sleeping: true } : {}),
-        });
-      };
-      // 续做的 collect 按剩余数跑,进度读数加回打断前那一段:心跳与再次挂起看的都是整单的数
-      const offset = carried?.done ?? 0;
-      ctx.progress = (done, total) => {
-        const count = { done: done + offset, total: total + offset };
-        task.count = count;
-        if (!halfSent && count.total > 1 && count.done * 2 >= count.total && count.done < count.total) {
-          halfSent = true;
-          sendProgress(true);
+        // 环境冻结在步骤边界生效：当前自救步骤可完成，后续步骤等待 resumeAfterEnvironment。
+        const heldBefore = this.holdReason();
+        if (heldBefore !== null && this.freezeBeforeStep(task, i, `环境冻结:${heldBefore}`)) return;
+        if (transitBoundary !== null) {
+          const why = `第 ${transitBoundary} 步没有完成可信的维度穿越，后续步骤不能在错误维度继续`;
+          const line = `${stepLabel(i)} 跳过(${why})`;
+          land(i, 'skip', why, line);
+          blockedSteps.push(line);
+          this.opts.diag?.write({
+            lane: 'skill', event: 'dimension-tail-blocked', taskId: id,
+            msg: `第 ${i + 1} 步「${describeSkill(call)}」跳过:${why}`,
+            data: {
+              call, transitStep: transitBoundary, expectedDimension,
+              actualDimension: normalizeDimension(dimensionOf(bot)),
+            },
+          });
+          continue;
         }
-      };
-      const progressTimer = setInterval(() => sendProgress(false), PROGRESS_EVERY_MS);
-      progressTimer.unref?.();
-      const placedMark = placeMarksOf(bot);
-      const reserveMark = ctx.reserveHits!.length;
-      ctx.toolTrace = { last: undefined, notes: [], near: new Set() };
-      const toolAndReserve = (): string =>
-        toolTraceNote(ctx.toolTrace) + reserveNote(ctx.reserveHits!, reserveMark);
-      ctx.intended = intended;
-      const gainBase = collectGainBase(bot, call) ?? undefined;
-      // 这一步能不能顺手把后面几步也做掉(目前只有 stow 用):它自己看剩下的步
-      ctx.batch = {
-        steps, index: i,
-        absorb: (n, receipt) => { (task.absorbed ??= new Map()).set(n, receipt); },
-      };
-      /** 这一步登记的缺口(build 放不满);null = 没登记过 */
-      let gapNote: string | null = null;
-      ctx.partial = (gap) => { gapNote = gap; };
-      try {
-        const skillResult = await runSkill(bot, run, ctx);
-        if (ctx.aborted()) return;
-        const afterDimension = normalizeDimension(dimensionOf(bot));
-        if (call.skill === 'transit') {
-          expectedDimension = afterDimension;
-        } else if (afterDimension !== expectedDimension) {
+        const preceding = steps[i - 1];
+        if (consumesOpenWindow(call) && !storageWindow(bot.currentWindow)
+          && i > 0 && (outcomes[i - 1] === 'fail' || outcomes[i - 1] === 'skip')
+          && (consumesOpenWindow(preceding) || preceding.skill === 'use'
+            || (preceding.skill === 'chat' && preceding.text.startsWith('/')))) {
+          const why = `第 ${i} 步没有留下可存取的容器窗口`;
+          const line = `${stepLabel(i)} 跳过(${why})`;
+          land(i, 'skip', why, line);
+          blockedSteps.push(line);
+          continue;
+        }
+        const beforeDimension = normalizeDimension(dimensionOf(bot));
+        if (beforeDimension !== expectedDimension) {
           transitBoundary = i + 1;
-          const why = `${describeSkill(call)}执行期间未经 transit 从${zhDimension(expectedDimension)}进入了${zhDimension(afterDimension)}`;
-          const line = `${stepHead(i, startedAt)}: ${why}；本步不按完成，整条尾巴已停`;
+          const why = `维度在没有成功 transit 的情况下从${zhDimension(expectedDimension)}变成了${zhDimension(beforeDimension)}`;
+          const line = `${stepLabel(i)} 没执行(${why}；为防止把另一维坐标当当前维度坐标，整条尾巴已停)`;
           land(i, 'fail', why, line);
           firstWhy ??= why;
           blockedSteps.push(line);
           this.opts.diag?.write({
-            lane: 'skill', event: 'dimension-unexpected', taskId: id, durMs: Date.now() - startedAt,
-            msg: why,
-            data: { call, expectedDimension, actualDimension: afterDimension },
+            lane: 'skill', event: 'dimension-unexpected', taskId: id,
+            msg: `第 ${i + 1} 步前检测到${why}`,
+            data: { call, expectedDimension, actualDimension: beforeDimension },
           });
           continue;
         }
-        const result = skillResult
-          + placedNote(bot, placedMark, call.skill, intended)
-          + toolAndReserve();
-        // 期望在场时它才是裁决:技能报成也可能被期望落空推翻。她没声明就由执行器推
-        const expect = call.expect ?? deriveExpect(bot, call);
-        const verdict = expect ? evaluateExpect(bot, expect, gainBase) : null;
-        // 核验与这一步同一刻跑,句子却随终态回执一起重放:读数时刻要跟着句子走
-        const readAt = verdict ? this.clock(Date.now()) : undefined;
-        if (verdict && !verdict.met) {
-          this.opts.diag?.write({
-            lane: 'skill', event: 'blocked', taskId: id, durMs: Date.now() - startedAt,
-            msg: `${describeSkill(call)}期望落空: ${verdict.actual}`,
-            data: { call, result, expect, derived: call.expect === undefined, actual: verdict.actual, readAt },
-          });
-          const note = verdictNote(expect!, verdict, readAt);
-          const line = `${stepHead(i, startedAt)}: ${describeSkill(call)}没做成(技能报「${result}」);${note}`;
-          land(i, 'fail', note, line);
-          bagDue ||= blockedOnItems(note);
+        // 战斗挂起后的续做:被打断的非幂等步不重跑(重跑会重复扣料),按没做成算;
+        // 更早的步战前已做完,按做成计入闸门,结局回执不重述
+        if (i === task.interrupted) {
+          const line = `${stepLabel(i)} 做到一半被打断,没重做(这一步重做会重复扣料),按没做成算`;
+          land(i, 'fail', '做到一半被打断,没重做(重做会重复扣料)', line);
           blockedSteps.push(line);
           if (call.skill === 'transit') transitBoundary = i + 1;
           continue;
         }
-        this.opts.diag?.write({
-          lane: 'skill', event: 'done', taskId: id, durMs: Date.now() - startedAt,
-          msg: `${describeSkill(call)}: ${result}`,
-          data: { call, result, ...(verdict ? { expect, derived: call.expect === undefined, actual: verdict.actual } : {}) },
-        });
-        // 技能登记了缺口 = 做了一部分:回执与任务终态都要说,别混进「完成」。
-        // 例外:她**显式声明**的期望已达成时裁决权在期望(存量口径,与「技能报受阻
-        // 但期望已达成」对称)——缺口的读数仍留在句子里,只是终态不再按半成算。
-        const gap: string | null = verdict?.met && call.expect !== undefined ? null : gapNote;
-        // 达成也回显:她拿不到正向确认时,重发是唯一可用的确认手段
-        const line = `${stepHead(i, startedAt)}: ${result}${ranFree}${carriedNote}`
-          + `${verdict ? `;${verdictNote(expect!, verdict, readAt)}` : ''}`
-          + `${gap ? `;${gap}` : ''}`;
-        land(i, gap ? 'partial' : 'ok', gap, line);
-        if (gap) partialSteps.push(line);
-        else results.push(line);
-      } catch (err) {
-        const aborted = err instanceof Aborted || ctx.aborted();
-        if (aborted) {
-          // 顶替/叫停的汇报已由发起方发过;Aborted 不评估 expect
-          const by = (err instanceof Aborted ? err.by : null) ?? ctx.abortedBy?.() ?? null;
-          this.opts.diag?.write({
-            lane: 'skill', event: 'aborted', taskId: id, durMs: Date.now() - startedAt,
-            msg: `${describeSkill(call)}被打断${by ? `(${by})` : ''}`,
-            data: { call, error: (err as Error).message, by },
-          });
-          return;
+        if (i < (task.resumeFrom ?? 0)) {
+          // 断点之前的步:终态照账本进闸门,回执行照账本进结局回执。这一单只有 finish()
+          // 一个出口,断点之前那几步的下场没在别处报过;闸门读到「做成」会放行注定落空的
+          // 下游。账本按步序记,每一步落地恰一次,第 i 步就是 stepLog[i]。
+          const landed = task.stepLog[i];
+          outcomes.push(landed.outcome);
+          switch (landed.outcome) {
+            case 'ok': results.push(landed.line); break;
+            case 'partial': partialSteps.push(landed.line); break;
+            case 'noop': noopSteps.push(landed.line); firstWhy ??= landed.why; break;
+            case 'skip': blockedSteps.push(landed.line); break;
+            case 'fail':
+              blockedSteps.push(landed.line);
+              firstWhy ??= landed.why;
+              if (landed.why) {
+                myBlockedKeys.add(Executor.blockedKey(landed.why));
+                bagDue ||= blockedOnItems(landed.why);
+              }
+              break;
+          }
+          continue;
         }
-        const blocked = err instanceof SkillBlocked ? err : null;
-        if (call.skill === 'transit') transitBoundary = i + 1;
-        const reason = blocked ? blocked.message : `技能内部错误: ${zhErrorText((err as Error).message)}`;
-        // 技能报阻但期望已达成(战利品自己进了包、人已经在目的地):按达成算
-        const expect = call.expect ?? deriveExpect(bot, call);
-        const verdict = expect ? evaluateExpect(bot, expect, gainBase) : null;
-        const readAt = verdict ? this.clock(Date.now()) : undefined;
-        if (verdict?.met && (call.expect !== undefined || mayOverturnBlocked(expect!))) {
+        if (!consumesOpenWindow(call) && !windows.heldWindow && !windows.hasUnconfirmedOpening()) {
+          await this.checkpointTask(task, bot, i, true);
+        }
+        // 更早一步顺手做掉的容器步骤:须抢在 needs 闸与出队试算之前落账。
+        const absorbed = task.absorbed?.get(i);
+        if (absorbed !== undefined) {
+          const line = `${stepLabel(i)}: ${absorbed.receipt}`;
+          land(i, absorbed.ok ? 'ok' : 'fail', absorbed.ok ? null : absorbed.receipt, line);
+          if (absorbed.ok) results.push(line);
+          else {
+            blockedSteps.push(line);
+            firstWhy ??= absorbed.receipt;
+            myBlockedKeys.add(Executor.blockedKey(absorbed.receipt));
+            bagDue ||= blockedOnItems(absorbed.receipt);
+          }
           this.opts.diag?.write({
-            lane: 'skill', event: 'done', taskId: id, durMs: Date.now() - startedAt,
-            msg: `${describeSkill(call)}技能报受阻但期望已达成: ${verdict.actual}`,
-            data: { call, error: reason, expect, derived: call.expect === undefined, actual: verdict.actual },
+            lane: 'skill', event: absorbed.ok ? 'done' : 'blocked', taskId: id, durMs: 0,
+            msg: `${describeSkill(call)}: ${absorbed.receipt}`,
+            data: { call, result: absorbed.receipt, absorbed: true },
           });
-          const line = `${stepHead(i, startedAt)}: `
-            + `${describeSkill(call)}:技能报受阻(${reason});${verdictNote(expect!, verdict, readAt)}${toolAndReserve()}`;
+          continue;
+        }
+        if (call.skill === 'stow' && call.at !== undefined) {
+          try {
+            const target = resolveAt(bot, call.at);
+            const skipped = storageSkipReason(bot, target, call.item);
+            if (skipped) {
+              const why = `指定容器${skipped}，本步不再重走同一条路线`;
+              const line = `${stepLabel(i)} 跳过(${why})`;
+              land(i, 'skip', why, line);
+              blockedSteps.push(line);
+              this.opts.diag?.write({ lane: 'skill', event: 'skip', taskId: id,
+                msg: `第 ${i + 1} 步「${describeSkill(call)}」跳过:${why}`,
+                data: { call, target, reason: skipped } });
+              continue;
+            }
+          } catch { /* 坐标在技能执行时仍会校验 */ }
+        }
+        // 显式 needs 优先。默认除物品因果外，紧跟移动的定点容器/交互步骤
+        // 也依赖到场；若移动虽失败但人已在操作范围内，则仍可照做。
+        const causal = call.needs === undefined ? causalNeeds(steps, i, bot) : null;
+        const previous = i > 0 ? steps[i - 1] : null;
+        let spatialNeed: number | null = null;
+        if (call.needs === undefined && previous
+          && (previous.skill === 'goto' || previous.skill === 'server_travel')
+          && (call.skill === 'take' || call.skill === 'stow' || call.skill === 'use')
+          && call.at !== undefined) {
+          try {
+            const target = resolveAt(bot, call.at);
+            const pos = bot.entity.position;
+            const reach = call.skill === 'use' ? 5 : 32;
+            if (Math.hypot(pos.x - target.x, pos.y - target.y, pos.z - target.z) > reach) spatialNeed = i;
+          } catch { spatialNeed = i; }
+        }
+        const needs = call.needs ?? [...new Set([...causal!.map((c) => c.step), ...(spatialNeed ? [spatialNeed] : [])])];
+        // 因果边的入料包里本来就有时不拦:闸拦的是「注定落空」,料在手上这一步就不是
+        const inBag = (items: string[]): boolean => items.every((n) =>
+          playerInvIn(bot, bot.currentWindow).items().some((it) => it.count > 0
+            && (matchItemName(n, it.name) || matchItemName(it.name, n))));
+        const upstreamFailed = (n: number): boolean => outcomes[n - 1] !== 'ok' && outcomes[n - 1] !== 'partial';
+        const unmet = needs.find((n) =>
+          upstreamFailed(n) && !causal?.some((c) => c.step === n && inBag(c.items)));
+        /** 上游没成但入料在包里、因而照跑的那条边 */
+        const stocked = unmet === undefined
+          ? causal?.find((c) => upstreamFailed(c.step) && inBag(c.items)) ?? null
+          : null;
+        if (unmet !== undefined) {
+          // 跳过链追到根:上游自己也是被跳过的,拖垮它的是更早那一步
+          const root = skipRoot.get(unmet) ?? unmet;
+          // 上游是「无事可做」而不是「没做成」时照实说:两者都拦下游,但说成没做成
+          // 会让她以为那一步走错了,转头去修一件根本没坏的事
+          const upstream = outcomes[root - 1] === 'noop' ? '那一步没什么可做的'
+            : outcomes[root - 1] === 'skip' ? '那一步没跑' : '那一步没做成';
+          const chained = root === unmet ? upstream : `那一步没跑(卡在第 ${root} 步)`;
+          const why = spatialNeed === unmet
+            ? `依赖的第 ${unmet} 步没到场,当前仍够不着目标`
+            : causal
+            ? `要用第 ${unmet} 步的${(causal.find((c) => c.step === unmet)?.items ?? []).map(zhName).join('、')},${chained}`
+            : `依赖的第 ${unmet} 步${outcomes[unmet - 1] === 'noop' ? '没什么可做的' : outcomes[unmet - 1] === 'skip' ? '没跑' : '没做成'}`;
+          skipRoot.set(i + 1, root);
+          land(i, 'skip', why, `${stepLabel(i)} 跳过(${why})`);
+          // 跳过的那一步压根没跑,没有"用时"可报;紧接着上一段、同一根因的并进那一段
+          const last = blockedSteps[blockedSteps.length - 1];
+          if (typeof last === 'object' && last.to === i - 1 && last.root === root) {
+            last.to = i;
+            last.whys.push(why);
+            last.calls.push(call);
+          } else {
+            blockedSteps.push({ from: i, to: i, root, rootOutcome: outcomes[root - 1], whys: [why], calls: [call] });
+          }
+          this.opts.diag?.write({
+            lane: 'skill', event: 'skip', taskId: id,
+            msg: `第 ${i + 1} 步「${describeSkill(call)}」跳过:${why}`,
+            data: { call, needs, failed: unmet, root, causal: causal?.find((c) => c.step === unmet)?.items ?? null },
+          });
+          if (call.skill === 'transit') transitBoundary = i + 1;
+          continue;
+        }
+        if (consumesOpenWindow(call) && (windows.hasUnconfirmedOpening()
+          || windows.isCurrentUnconfirmed()
+          || (windows.heldWindow && !windows.isHeldCurrent()))) {
+          const why = '本任务使用的容器窗口已关闭或被替换，不能把后续操作改投另一窗口';
+          const line = `${stepLabel(i)} 没执行(${why})`;
+          land(i, 'fail', why, line);
+          firstWhy ??= why;
+          blockedSteps.push(line);
+          this.opts.diag?.write({ lane: 'skill', event: 'blocked', taskId: id, msg: why,
+            data: { call, reason: 'container-window-changed' } });
+          continue;
+        }
+        // 兜底说明:缺省闸门下前一步没做成、但这一步不消费它的产出(或要用的料包里本来
+        // 就有)——照跑,并说明为什么(不说这一句,她会以为闸门坏了或这一步不该跑)
+        const ranFree = stocked !== null
+          ? `(第 ${stocked.step} 步没做成;要用的${stocked.items.map(zhName).join('、')}包里本来就有,照做了)`
+          : causal !== null && i > 0 && outcomes[i - 1] !== 'ok' && outcomes[i - 1] !== 'partial'
+            ? `(第 ${i} 步没做成;这一步不用它的产出,照做了)`
+            : '';
+        // 受理后排队的旧任务也在真正执行前重读额度；只跳过当前步骤，后续独立步骤继续。
+        const repeatedSuccess = this.opts.repeatSuccessFallback
+          ? this.repeatSuccessHold([call], this.opts.repeatSuccessFallback()) : null;
+        if (repeatedSuccess) {
+          const line = `${stepLabel(i)} 没执行(${repeatedSuccess})`;
+          land(i, 'fail', repeatedSuccess, line);
+          firstWhy ??= repeatedSuccess;
+          blockedSteps.push(line);
+          this.opts.diag?.write({ lane: 'skill', event: 'blocked', taskId: id,
+            msg: `第 ${i + 1} 步「${describeSkill(call)}」暂缓:${repeatedSuccess}`,
+            data: { call, reason: 'repeat-success-fallback' } });
+          continue;
+        }
+        // 断点续做的 collect:只挖打断前没挖到的那些;打断前就已挖够的不再进技能
+        const carried = resumedCollect(task, i);
+        if (carried && carried.remaining <= 0) {
+          const line = `${stepLabel(i)}: ${carried.note},没再挖`;
           land(i, 'ok', null, line);
           results.push(line);
-        } else if (err instanceof SkillNoop) {
-          // 无事可做:条件不成立所以什么都没发生。陈述句、不进失败堆、不阻断下游。
           this.opts.diag?.write({
-            lane: 'skill', event: 'noop', taskId: id, durMs: Date.now() - startedAt,
-            msg: `${describeSkill(call)}无事可做: ${reason}`,
-            data: { call, why: reason, ...(verdict ? { actual: verdict.actual } : {}) },
+            lane: 'skill', event: 'done', taskId: id, durMs: 0,
+            msg: `${describeSkill(call)}: ${carried.note}`,
+            data: { call, resumed: { done: carried.done, total: carried.total } },
           });
-          const line = `${stepHead(i, startedAt)}: ${reason},这一步没什么可做的${toolAndReserve()}`;
-          land(i, 'noop', reason, line);
-          firstWhy ??= reason;
-          noopSteps.push(line);
-        } else {
-          this.opts.diag?.write({
-            lane: 'skill', event: 'blocked', taskId: id, durMs: Date.now() - startedAt,
-            msg: `${describeSkill(call)}受阻: ${(err as Error).message}`,
-            data: {
-              call, error: (err as Error).message, source: blockedSourceOf(err),
-              ...(verdict ? { actual: verdict.actual } : {}),
-            },
-          });
-          const line = `${stepHead(i, startedAt)}: `
-            + `${blockedText(call, reason, expect, verdict, bot.heldItem?.name ?? null, readAt)}${toolAndReserve()}${carriedNote}`;
-          land(i, 'fail', reason, line);
-          firstWhy ??= reason;
-          this.noteBlockedReason(reason, Date.now(), {
-            task: label(),
-            step: steps.length > 1 ? `第 ${i + 1} 步 ${describeSkill(call)}` : describeSkill(call),
-          });
-          // 这一单自己撞上的是哪几类:头条只在与其中一类同类时才上浮(见 blockedHeadline)
-          myBlockedKeys.add(Executor.blockedKey(reason));
-          // 判据只看受阻的**原因**:blockedText 尾巴上那句「不过包里现在有 N 个,够了」
-          // 说的是东西不缺,拿它当"卡在东西上"就反了
-          bagDue ||= blockedOnItems(reason);
-          blockedSteps.push(line);
-          if (blocked && blocked.scene.length > 0) scenes.push(...blocked.scene);
+          continue;
         }
-      } finally {
-        clearInterval(progressTimer);
-        ctx.progress = undefined;
+        const run = carried?.call ?? call;
+        const carriedNote = carried ? `(${carried.note})` : '';
+        const useCell = call.skill === 'use' && call.at ? targetCellOf(bot, call) : null;
+        const beforeUseBlock = useCell ? blockAtCell(bot, useCell) : null;
+        const useBlockBefore: UsedBlockState | null = beforeUseBlock
+          ? { name: beforeUseBlock.name, stateId: beforeUseBlock.stateId, open: blockProp(beforeUseBlock, 'open') }
+          : null;
+        task.stepIndex = i;
+        ctx.progressDetail = undefined;
+        task.escape.active = false; // 逃生标记只属于置位它的那一步
+        // 续做步从打断前的读数起算:第一次进度回调之前再被挂起,断点里的进度也不能是空
+        task.count = carried ? { done: carried.done, total: carried.total } : null;
+        const startedAt = Date.now();
+        task.stepStartedAt = startedAt;
+        if (!task.queueTailNotified && i === task.steps.length - 1
+          && this.queue.length === 0 && !this.frozen && this.holdReason() === null && !this.opts.busyWith?.()) {
+          task.queueTailNotified = true;
+          const notice: TaskQueueTail = { taskId: id, stepIndex: i, stepCount: task.steps.length };
+          task.queueTailNotice = notice;
+          try { this.opts.onQueueTail?.(notice); }
+          catch (error) { this.opts.log.warn('尾步队列观察投递失败，任务继续', { taskId: id, err: String(error) }); }
+        }
+        const at = bot.entity?.position;
+        if (call.skill === 'find' && call.direction && at) {
+          (task.findOrigins ??= new Map()).set(i, feetOf(bot));
+        }
+        const gotoTarget = call.skill === 'goto' ? lastAbsoluteGoto([call]) : null;
+        task.goalProgressAt = gotoTarget ? startedAt : undefined;
+        task.bestGoalDistance = gotoTarget && at
+          ? Math.hypot(at.x - gotoTarget.x, at.y - gotoTarget.y, at.z - gotoTarget.z) : undefined;
+        const trackGoalProgress = (): void => {
+          if (!gotoTarget || task.goalProgressAt === undefined) return;
+          const pos = bot.entity?.position;
+          if (!pos) return;
+          const distance = Math.hypot(pos.x - gotoTarget.x, pos.y - gotoTarget.y, pos.z - gotoTarget.z);
+          if (task.bestGoalDistance === undefined || distance <= task.bestGoalDistance - 1) {
+            task.bestGoalDistance = distance;
+            task.goalProgressAt = Date.now();
+          }
+        };
+        this.opts.diag?.write({
+          lane: 'skill', event: 'begin', taskId: id,
+          msg: `第 ${i + 1} 步 ${describeSkill(call)}`,
+          data: {
+            call,
+            from: at ? { x: Math.round(at.x), y: Math.round(at.y), z: Math.round(at.z) } : null,
+          },
+        });
+        let lastProgressPos = at ? { x: at.x, y: at.y, z: at.z } : null;
+        let halfSent = false;
+        const sendProgress = (half: boolean): void => {
+          if (ctx.aborted()) return;
+          const p = bot.entity?.position ?? null;
+          const moved = p && lastProgressPos
+            ? Math.hypot(p.x - lastProgressPos.x, p.y - lastProgressPos.y, p.z - lastProgressPos.z)
+            : null;
+          if (p) lastProgressPos = { x: p.x, y: p.y, z: p.z };
+          this.opts.onProgress?.({
+            taskId: id,
+            label: labelOf(task),
+            stepIndex: i,
+            stepCount: task.steps.length,
+            step: describeSkill(call),
+            elapsedS: Math.round((Date.now() - startedAt) / 1000),
+            pos: p ? { x: Math.round(p.x), y: Math.round(p.y), z: Math.round(p.z) } : null,
+            movedBlocks: moved === null ? null : Math.round(moved * 10) / 10,
+            count: task.count,
+            ...(ctx.progressDetail ? { detail: ctx.progressDetail() } : {}),
+            half,
+            ...(ctx.sleeping ? { sleeping: true } : {}),
+          });
+        };
+        // 续做的 collect 按剩余数跑,进度读数加回打断前那一段:心跳与再次挂起看的都是整单的数
+        const offset = carried?.done ?? 0;
+        ctx.progress = (done, total) => {
+          const count = { done: done + offset, total: total + offset };
+          task.count = count;
+          if (!halfSent && count.total > 1 && count.done * 2 >= count.total && count.done < count.total) {
+            halfSent = true;
+            sendProgress(true);
+          }
+        };
+        const progressTimer = setInterval(() => sendProgress(false), PROGRESS_EVERY_MS);
+        progressTimer.unref?.();
+        const goalProgressTimer = gotoTarget ? setInterval(trackGoalProgress, GOAL_PROGRESS_SAMPLE_MS) : null;
+        goalProgressTimer?.unref?.();
+        const placedMark = placeMarksOf(bot);
+        const reserveMark = ctx.reserveHits!.length;
+        ctx.toolTrace = { last: undefined, notes: [], near: new Set() };
+        const toolAndReserve = (): string =>
+          toolTraceNote(ctx.toolTrace) + reserveNote(ctx.reserveHits!, reserveMark);
+        ctx.intended = intended;
+        const gainBase = collectGainBase(bot, call) ?? undefined;
+        // 这一步能不能顺手把后面几步也做掉(目前只有 stow 用):它自己看剩下的步
+        ctx.batch = {
+          steps, index: i,
+          absorb: (n, receipt, ok = true) => { (task.absorbed ??= new Map()).set(n, { receipt, ok }); },
+        };
+        windowStep = i + 1;
+        /** 这一步登记的缺口(build 放不满);null = 没登记过 */
+        let gapNote: string | null = null;
+        ctx.partial = (gap) => { gapNote = gap; };
+        const opensForNext = (call.skill === 'use' || (call.skill === 'chat' && call.text.startsWith('/')))
+          && consumesOpenWindow(steps[i + 1]);
+        const windowBaseline = bot.currentWindow;
+        const onWindowOpen = (window: NonNullable<Bot['currentWindow']>): void => windows.onWindowOpen(window);
+        if (opensForNext) {
+          windows.beginOpening(windowBaseline);
+          bot.on('windowOpen', onWindowOpen);
+        }
+        try {
+          let skillResult = await runSkill(bot, run, ctx);
+          if (ctx.aborted()) return;
+          promoteTemporaryScaffold(bot, intended);
+          if (i === steps.length - 1 && !bot.currentWindow && !flightState(bot).flying
+            && ['goto', 'find', 'surface', 'build', 'collect', 'look', 'land'].includes(call.skill)
+            && !steps.some((step) => 'dryRun' in step && step.dryRun)) {
+            try {
+              skillResult += await reclaimPendingTemporaryScaffold(bot, ctx);
+            } catch (err) {
+              if (err instanceof Aborted || ctx.aborted()) throw err;
+              const reason = err instanceof Error ? err.message : String(err);
+              skillResult += `;临时垫脚清理未完成，原任务结果保留：${reason}`;
+              this.opts.diag?.write({ lane: 'skill', event: 'temporary-scaffold-cleanup-deferred', taskId: id,
+                msg: reason, data: { call } });
+            }
+            if (ctx.aborted()) return;
+          }
+          const next = steps[i + 1];
+          if ((call.skill === 'use' || (call.skill === 'chat' && call.text.startsWith('/')))
+            && consumesOpenWindow(next) && (!storageWindow(bot.currentWindow) || bot.currentWindow === windowBaseline)) {
+            const oldWindowOnly = bot.currentWindow !== null && bot.currentWindow === windowBaseline;
+            const why = call.skill === 'use' && call.at === undefined
+              ? `使用物品后${oldWindowOnly ? '没有打开新的容器窗口' : '没有打开容器窗口'}，下一步无法使用当前窗口`
+              : `操作后${oldWindowOnly ? '没有打开新的可存取容器窗口' : '没有打开可存取的容器窗口'}，下一步无法使用当前窗口`;
+            const line = `${stepHead(i, startedAt)}: ${skillResult};${why}`;
+            land(i, 'fail', why, line);
+            firstWhy ??= why;
+            blockedSteps.push(line);
+            this.opts.diag?.write({ lane: 'skill', event: 'blocked', taskId: id,
+              durMs: Date.now() - startedAt, msg: `${describeSkill(call)}: ${why}`,
+              data: { call, result: skillResult, reason: 'container-window-missing' } });
+            continue;
+          }
+          if (opensForNext) await windows.awaitOpeningReady(ctx);
+          const afterDimension = normalizeDimension(dimensionOf(bot));
+          if (call.skill === 'transit') {
+            expectedDimension = afterDimension;
+          } else if (afterDimension !== expectedDimension) {
+            transitBoundary = i + 1;
+            const why = `${describeSkill(call)}执行期间未经 transit 从${zhDimension(expectedDimension)}进入了${zhDimension(afterDimension)}`;
+            const line = `${stepHead(i, startedAt)}: ${why}；本步不按完成，整条尾巴已停`;
+            land(i, 'fail', why, line);
+            firstWhy ??= why;
+            blockedSteps.push(line);
+            this.opts.diag?.write({
+              lane: 'skill', event: 'dimension-unexpected', taskId: id, durMs: Date.now() - startedAt,
+              msg: why,
+              data: { call, expectedDimension, actualDimension: afterDimension },
+            });
+            continue;
+          }
+          const result = skillResult
+            + placedNote(bot, placedMark, call.skill, intended)
+            + toolAndReserve();
+          // 期望在场时它才是裁决:技能报成也可能被期望落空推翻。她没声明就由执行器推
+          const expect = call.expect ?? deriveExpect(bot, call);
+          const verdict = expect ? evaluateExpect(bot, expect, gainBase) : null;
+          // 核验与这一步同一刻跑,句子却随终态回执一起重放:读数时刻要跟着句子走
+          const readAt = verdict ? this.clock(Date.now()) : undefined;
+          if (verdict && !verdict.met) {
+            this.opts.diag?.write({
+              lane: 'skill', event: 'blocked', taskId: id, durMs: Date.now() - startedAt,
+              msg: `${describeSkill(call)}期望落空: ${verdict.actual}`,
+              data: { call, result, expect, derived: call.expect === undefined, actual: verdict.actual, readAt },
+            });
+            const note = verdictNote(expect!, verdict, readAt);
+            const line = `${stepHead(i, startedAt)}: ${describeSkill(call)}没做成(技能报「${result}」);${note}`;
+            land(i, 'fail', note, line);
+            bagDue ||= blockedOnItems(note);
+            blockedSteps.push(line);
+            if (call.skill === 'transit') transitBoundary = i + 1;
+            continue;
+          }
+          if (opensForNext) windows.commitOpening();
+          this.opts.diag?.write({
+            lane: 'skill', event: 'done', taskId: id, durMs: Date.now() - startedAt,
+            msg: `${describeSkill(call)}: ${result}`,
+            data: { call, result, ...(verdict ? { expect, derived: call.expect === undefined, actual: verdict.actual } : {}) },
+          });
+          // 技能登记了缺口 = 做了一部分:回执与任务终态都要说,别混进「完成」。
+          // 例外:她**显式声明**的期望已达成时裁决权在期望(存量口径,与「技能报受阻
+          // 但期望已达成」对称)——缺口的读数仍留在句子里,只是终态不再按半成算。
+          const gap: string | null = verdict?.met && call.expect !== undefined ? null : gapNote;
+          // 达成也回显:她拿不到正向确认时,重发是唯一可用的确认手段
+          const line = `${stepHead(i, startedAt)}: ${result}${ranFree}${carriedNote}`
+            + `${verdict ? `;${verdictNote(expect!, verdict, readAt)}` : ''}`
+            + `${gap ? `;${gap}` : ''}`;
+          land(i, gap ? 'partial' : 'ok', gap, line);
+          if (call.skill === 'tunnel' && !call.spiral && at && bot.entity?.position) {
+            const end = bot.entity.position;
+            this.noteVerticalTunnelTraversal(
+              { x: Math.floor(at.x), y: Math.floor(at.y), z: Math.floor(at.z) },
+              { x: Math.floor(end.x), y: Math.floor(end.y), z: Math.floor(end.z) },
+              afterDimension,
+            );
+          }
+          if (call.skill === 'collect') this.clearUnseenCollect(call.block, bot);
+          if (!gap && useCell && useBlockBefore) {
+            const afterBlock = blockAtCell(bot, useCell);
+            const after: UsedBlockState | null = afterBlock
+              ? { name: afterBlock.name, stateId: afterBlock.stateId, open: blockProp(afterBlock, 'open') }
+              : null;
+            if (useChangeMayClearRouteFailure(useBlockBefore, after)) {
+              this.clearSpatialFailuresForChangedBlock(useCell, dimensionOf(bot));
+            }
+          }
+          if (gap) partialSteps.push(line);
+          else results.push(line);
+        } catch (err) {
+          if (err instanceof Yielded || (this.checkpointDrain?.task === task
+            && this.checkpointDrain.phase === 'yielded' && this.checkpointDrain.continuation)) {
+            this.opts.diag?.write({ lane: 'skill', event: 'yielded', taskId: id,
+              msg: `${describeSkill(call)}保存检查点，当前执行实例正在收尾`,
+              data: { call, step: i + 1 } });
+            return;
+          }
+          const aborted = err instanceof Aborted || ctx.aborted();
+          if (aborted) {
+            // 顶替/叫停的汇报已由发起方发过;Aborted 不评估 expect
+            const by = (err instanceof Aborted ? err.by : null) ?? ctx.abortedBy?.() ?? null;
+            this.opts.diag?.write({
+              lane: 'skill', event: 'aborted', taskId: id, durMs: Date.now() - startedAt,
+              msg: `${describeSkill(call)}被打断${by ? `(${by})` : ''}`,
+              data: { call, error: (err as Error).message, by },
+            });
+            return;
+          }
+          const blocked = err instanceof SkillBlocked ? err : null;
+          if (call.skill === 'transit') transitBoundary = i + 1;
+          const reason = blocked ? blocked.message : `技能内部错误: ${zhErrorText((err as Error).message)}`;
+          // 技能报阻但期望已达成(战利品自己进了包、人已经在目的地):按达成算
+          const expect = call.expect ?? deriveExpect(bot, call);
+          const verdict = expect ? evaluateExpect(bot, expect, gainBase) : null;
+          const readAt = verdict ? this.clock(Date.now()) : undefined;
+          const operationUnconfirmed = blocked?.code === 'container-window-changed'
+            || blocked?.code === 'container-window-rollback' || blocked?.code === 'use-hand-changed'
+            || isInventoryClickError(err);
+          if (!opensForNext && !operationUnconfirmed && verdict?.met
+            && (call.expect !== undefined || mayOverturnBlocked(expect!))) {
+            this.opts.diag?.write({
+              lane: 'skill', event: 'done', taskId: id, durMs: Date.now() - startedAt,
+              msg: `${describeSkill(call)}技能报受阻但期望已达成: ${verdict.actual}`,
+              data: { call, error: reason, expect, derived: call.expect === undefined, actual: verdict.actual },
+            });
+            const line = `${stepHead(i, startedAt)}: `
+              + `${describeSkill(call)}:技能报受阻(${reason});${verdictNote(expect!, verdict, readAt)}${toolAndReserve()}`;
+            land(i, 'ok', null, line);
+            results.push(line);
+          } else if (err instanceof SkillNoop) {
+            // 无事可做:条件不成立所以什么都没发生。陈述句、不进失败堆、不阻断下游。
+            this.opts.diag?.write({
+              lane: 'skill', event: 'noop', taskId: id, durMs: Date.now() - startedAt,
+              msg: `${describeSkill(call)}无事可做: ${reason}`,
+              data: { call, why: reason, ...(verdict ? { actual: verdict.actual } : {}) },
+            });
+            const line = `${stepHead(i, startedAt)}: ${reason},这一步没什么可做的${toolAndReserve()}`;
+            land(i, 'noop', reason, line);
+            firstWhy ??= reason;
+            noopSteps.push(line);
+          } else {
+            if (call.skill === 'collect' && blocked?.code === 'target-not-visible') {
+              this.noteUnseenCollect(call.block, bot);
+            }
+            if (call.skill === 'collect' && blocked?.code === 'target-not-ready') {
+              this.noteImmatureCollect(call.block, bot);
+            }
+            this.opts.diag?.write({
+              lane: 'skill', event: 'blocked', taskId: id, durMs: Date.now() - startedAt,
+              msg: `${describeSkill(call)}受阻: ${(err as Error).message}`,
+              data: {
+                call, error: (err as Error).message, source: blockedSourceOf(err),
+                ...(verdict ? { actual: verdict.actual } : {}),
+              },
+            });
+            const line = `${stepHead(i, startedAt)}: `
+              + `${blockedText(call, reason, expect, verdict, bot.heldItem?.name ?? null, readAt)}${toolAndReserve()}${carriedNote}`;
+            land(i, 'fail', reason, line);
+            firstWhy ??= reason;
+            this.noteBlockedReason(reason, Date.now(), {
+              task: label(),
+              step: steps.length > 1 ? `第 ${i + 1} 步 ${describeSkill(call)}` : describeSkill(call),
+            });
+            // 这一单自己撞上的是哪几类:头条只在与其中一类同类时才上浮(见 blockedHeadline)
+            myBlockedKeys.add(Executor.blockedKey(reason));
+            // 判据只看受阻的**原因**:blockedText 尾巴上那句「不过包里现在有 N 个,够了」
+            // 说的是东西不缺,拿它当"卡在东西上"就反了
+            bagDue ||= blockedOnItems(reason);
+            blockedSteps.push(line);
+            if (blocked && blocked.scene.length > 0) scenes.push(...blocked.scene);
+          }
+        } finally {
+          if (opensForNext) {
+            bot.removeListener('windowOpen', onWindowOpen);
+          }
+          clearInterval(progressTimer);
+          if (goalProgressTimer) clearInterval(goalProgressTimer);
+          ctx.progress = undefined;
+          const outcome = outcomes[i];
+          if (outcome === 'fail' || outcome === 'noop' || ctx.aborted()
+            || !consumesOpenWindow(steps[i + 1])) closeHeldWindow();
+          if (opensForNext) windows.endOpening();
+        }
       }
+    } catch (err) {
+      if (err instanceof Aborted || ctx.aborted()) return;
+      throw err;
+    } finally {
+      closeHeldWindow();
+      if (typeof bot.removeListener === 'function') bot.removeListener('windowClose', onWindowClose);
     }
     // 现场事实单独成段:结论说发生了什么,现场说当时都知道什么
     const scene = scenes.length > 0 ? `\n[现场] ${scenes.join('\n[现场] ')}` : '';
@@ -3047,8 +5651,38 @@ export class Executor {
       : partialSteps.length > 0 ? 'partial'
         : results.length === 0 && noopSteps.length > 0 ? 'noop'
           : null;
-    if (kind) this.priorOutcomes.set(sig, { kind, why: firstWhy ?? '没说清为什么', at: Date.now() });
-    else this.priorOutcomes.delete(sig);
+    const finishedAt = Date.now();
+    this.notePriorOutcome(sig, kind, firstWhy ?? '没说清为什么', finishedAt);
+    const repeatFailure = this.noteRepeatOutcome(task, kind, finishedAt);
+    this.recordExactOutcome(steps, kind === 'blocked' || kind === 'noop', firstWhy ?? '没说清为什么');
+    if (steps.length > 1) {
+      for (const landing of task.stepLog) {
+        const call = steps[landing.step - 1];
+        if (call?.skill !== 'take' || !call.at) continue;
+        if (landing.outcome === 'fail') this.recordExactOutcome([call], true, landing.why ?? '没说清为什么');
+        else if (landing.outcome === 'ok' || landing.outcome === 'partial') {
+          this.recordExactOutcome([call], false, '');
+        }
+      }
+    }
+    this.recordUnmovedFindHits(task);
+    this.recordImmatureFindHits(task);
+    this.recordEmptyFindOutcomes(task);
+    this.recordDirectionalSweeps(task);
+    this.recordTunnelLiquidStop(steps, task.stepLog);
+    this.recordTunnelSupportStop(steps, task.stepLog);
+    this.recordEmptyProbeReads(steps, task.stepLog);
+    this.recordLocalBuildOutcome(steps, task.stepLog);
+    this.recordLocalFarmOutcome(steps, task.stepLog);
+    if (kind === null) this.inspections.record(steps, normalizeDimension(dimensionOf(bot)), task.stepLog, Date.now());
+    for (let i = 0; i < steps.length; i++) {
+      if (steps[i].skill !== 'goto') continue;
+      const gotoLanding = task.stepLog.find((landing) => landing.step === i + 1);
+      if (gotoLanding) {
+        this.recordSpatialOutcome([steps[i]], gotoLanding.outcome === 'fail',
+          gotoLanding.why ?? firstWhy ?? '没说清为什么');
+      }
+    }
     // 终态四分。没做成 > 做了一部分 > 完成:一单里最重的那个结局说了算。
     // 无事可做不影响终态——一单全是「附近没有掉落物」,那一单就是做完了。
     if (blockedSteps.length === 0 && partialSteps.length === 0) {
@@ -3056,6 +5690,7 @@ export class Executor {
         kind: 'done',
         text: `${span()}${label()}完成:${listOf(results)}${nothingToDo}${scene}`,
         taskId: id,
+        ...(repeatFailure ? { repeatFailure } : {}),
       });
       return;
     }
@@ -3065,6 +5700,7 @@ export class Executor {
         kind: 'partial',
         text: `${span()}${label()}做了一部分:${listOf(partialSteps)}${doneSoFar}${nothingToDo}${scene}`,
         taskId: id,
+        ...(repeatFailure ? { repeatFailure } : {}),
       });
       return;
     }
@@ -3077,7 +5713,105 @@ export class Executor {
       text: `${headline ?? ''}${span()}${label()}:${listOf(blockedSteps.map(renderBlocked))}${halfDone}${doneSoFar}${nothingToDo}${scene}`
         + `${bagDue ? bagNow(bot) : ''}`,
       taskId: id,
+      ...(repeatFailure ? { repeatFailure } : {}),
     });
+  }
+
+  private notePriorOutcome(sig: string, kind: PriorOutcome['kind'] | null, why: string, at: number): void {
+    if (kind === null) {
+      this.priorOutcomes.delete(sig);
+      return;
+    }
+    this.priorOutcomes.set(sig, { kind, why, at });
+  }
+
+  private observeTask(steps: readonly SkillCall[]): TaskObservation | null {
+    const bot = this.opts.getBot();
+    if (!bot) return null;
+    const dimension = dimensionOf(bot);
+    const orientationOnly = steps.length > 0 && steps.every((step) => step.skill === 'look');
+    // A look target is a viewing direction, not a block to modify. Keep its history
+    // separate, and in mixed batches observe the actual interaction target.
+    const observedSteps = orientationOnly ? steps : steps.filter((step) => step.skill !== 'look');
+    const target = [...observedSteps].reverse().map((step) => (step as { at?: unknown }).at).find((at): at is number[] =>
+      Array.isArray(at) && at.length === 3 && at.every((value) => typeof value === 'number' && Number.isFinite(value)));
+    const cell = target ? { x: target[0], y: target[1], z: target[2] } : null;
+    let targetBlock: string | null = null;
+    if (cell && typeof bot.blockAt === 'function') {
+      try {
+        const block = blockAtCell(bot, cell);
+        if (block) targetBlock = `${block.name}:${block.stateId}`;
+      } catch { /* An unloaded target has no comparable block reading. */ }
+    }
+    const position = bot.entity?.position;
+    const yaw = bot.entity?.yaw;
+    const pitch = bot.entity?.pitch;
+    let inventory: string | null = null;
+    try { inventory = this.retryInventoryStamp(bot); } catch { /* Observation must not hold task execution. */ }
+    return {
+      key: cell && !orientationOnly ? `target:${dimension}:${cell.x},${cell.y},${cell.z}` : `shape:${dimension}:${taskSignature(steps)}`,
+      scope: cell && !orientationOnly ? 'target' : 'shape', dimension,
+      position: position && [position.x, position.y, position.z].every(Number.isFinite)
+        ? { x: position.x, y: position.y, z: position.z } : null,
+      orientationOnly,
+      rotation: orientationOnly && Number.isFinite(yaw) && Number.isFinite(pitch) ? { yaw, pitch } : null,
+      inventory, targetBlock,
+    };
+  }
+
+  private observationChanged(before: TaskObservation | null, after: TaskObservation | null): boolean | null {
+    if (!before || !after) return null;
+    if (before.dimension !== after.dimension) return true;
+    if (before.orientationOnly && after.orientationOnly) {
+      if (!before.rotation || !after.rotation) return null;
+      const yawDelta = after.rotation.yaw - before.rotation.yaw;
+      return Math.abs(Math.atan2(Math.sin(yawDelta), Math.cos(yawDelta))) >= Math.PI / 180
+        || Math.abs(after.rotation.pitch - before.rotation.pitch) >= Math.PI / 180;
+    }
+    if (before.inventory !== null && after.inventory !== null && before.inventory !== after.inventory) return true;
+    if (before.position && after.position && Math.hypot(
+      before.position.x - after.position.x,
+      before.position.y - after.position.y,
+      before.position.z - after.position.z,
+    ) >= 0.75) return true;
+    if (before.scope === 'target' && before.targetBlock !== null && after.targetBlock !== null
+      && before.targetBlock !== after.targetBlock) return true;
+    if (before.inventory === null || after.inventory === null || !before.position || !after.position
+      || (before.scope === 'target' && (before.targetBlock === null || after.targetBlock === null))) return null;
+    return false;
+  }
+
+  private noteRepeatOutcome(task: QueuedTask, kind: PriorOutcome['kind'] | null, at: number): TaskReport['repeatFailure'] {
+    const before = task.startObservation ?? null;
+    const after = this.observeTask(task.steps);
+    const changed = this.observationChanged(before, after);
+    const key = before?.key ?? after?.key;
+    if (!key) return undefined;
+    for (const [oldKey, prior] of this.unresolvedIntents) {
+      if (at - prior.at > PRIOR_OUTCOME_WINDOW_MS) this.unresolvedIntents.delete(oldKey);
+    }
+    // 动作显示完成却未改变这些采样读数，只对同一空间目标提示复盘；
+    // 没有坐标的成功动作可能在未采样的外部状态上已经奏效。
+    if (changed === true || (kind === null && (changed !== false || before?.scope !== 'target'))) {
+      this.unresolvedIntents.delete(key);
+      return undefined;
+    }
+    const prior = this.unresolvedIntents.get(key);
+    const repeated = prior && this.observationChanged(prior.after, before) !== true;
+    const attempts = repeated ? prior.attempts + 1 : 1;
+    const landing = [...(task.stepLog ?? [])].reverse().find((step) =>
+      step.outcome === 'fail' || step.outcome === 'noop' || step.outcome === 'partial')
+      ?? task.stepLog?.at(-1);
+    const line = landing?.line ?? (kind === 'blocked' ? '任务整体受阻' : '所采样读数未变');
+    const evidence = line.length > 180 ? `${line.slice(0, 60)}…${line.slice(-119)}` : line;
+    this.unresolvedIntents.delete(key);
+    this.unresolvedIntents.set(key, { attempts, at, evidence, after });
+    if (this.unresolvedIntents.size > 128) this.unresolvedIntents.delete(this.unresolvedIntents.keys().next().value!);
+    if (!(attempts === 2 || attempts === 5 || attempts % 10 === 0)) return undefined;
+    return {
+      attempts, previousReceipt: maskCoords(repeated ? prior.evidence : '').slice(0, 180),
+      scope: before?.scope ?? after?.scope ?? 'shape', observation: changed === false ? 'unchanged' : 'unavailable',
+    };
   }
 
   /**
@@ -3113,6 +5847,7 @@ export class Executor {
   private bagLowNote(bot: Bot): string {
     // 物品栏还没到手(登录后 window_items 未到、台架的裸 bot):没有读数就不出声,
     // 更不能把"读不到"当成"空的"报成一句「只剩 36 格」
+    if (!inventoryReadConfirmed(bot)) return '';
     const items = bot.inventory?.items?.();
     if (!items) return '';
     const free = Math.max(0, PLAYER_SLOTS - items.length);
@@ -3163,6 +5898,7 @@ export class Executor {
     if (this.stopped || flag.aborted || flag.epoch !== this.executionEpoch) return;
     const t = this.task?.flag === flag ? this.task : null;
     if (t) this.task = null;
+    if (t) this.detachCheckpointOwner(t.id);
     // 「包快满了」只搭**跑完了的那一单**的车:顶替/撤单那两种终态说的是「这一单没了」,
     // 往上贴一行背包读数只会把那句话冲淡。状态机本身照常在这三种终态上推进。
     const bot = this.opts.getBot();
@@ -3173,10 +5909,14 @@ export class Executor {
     this.opts.diag?.write({
       lane: 'task', event: report.kind, taskId: report.taskId, msg: text,
     });
-    this.opts.report({ ...report, text });
+    const lastLanding = t?.stepLog.at(-1);
+    this.opts.report({ ...report, text,
+      ...(report.kind === 'done' && t && lastLanding
+        && (lastLanding.outcome === 'ok' || lastLanding.outcome === 'noop')
+        ? { lastSkill: t.steps[lastLanding.step - 1]?.skill } : {}) });
     this.pump();
     // pump 没接到新任务 = 队列空了:兜底关掉忘关的容器窗口(窗口卫生)
-    if (!this.task && this.queue.length === 0) this.opts.onDrain?.();
+    if (!this.task && !this.checkpointDrain && this.queue.length === 0) this.opts.onDrain?.();
   }
 }
 
@@ -3201,6 +5941,10 @@ interface ReflexOptions {
   fightBack: () => boolean;
   /** 反击时生命低于此值改为脱离战斗 */
   fleeHealth: () => number;
+  /** 低血脱离前可尝试不占用身体的服务端防护技能。 */
+  onLowHealth?: (bot: Bot) => void;
+  /** 持续找不到岸且水平位置未推进时，由 World 执行安全落点逃逸。 */
+  onWaterTrap?: () => void;
   /** 两次受击反应之间的最短间隔(秒) */
   reactCooldownSec: () => number;
   /** 防溺水上浮 */
@@ -3260,6 +6004,8 @@ const HOLD_WATCHDOG_MS = 60_000;
 const ESCAPE_STALL_MS = 5_000;
 /** 与 FALL_SAFE_MOVE 同口径:小于这个数的位移是站桩时的抖动,不算推进 */
 const ESCAPE_STALL_MOVE = 0.08;
+const WATER_TRAP_MS = 90_000;
+const WATER_TRAP_MOVE = 3;
 const FALL_SAFE_MOVE = 0.08;
 const FALL_UNSAFE_BLOCKS = new Set([
   'cactus', 'sweet_berry_bush', 'wither_rose', 'powder_snow',
@@ -3288,10 +6034,7 @@ export class Reflexes {
   private busyFighting = false;
   private lastHurtReactAt = 0;
   private ticks = 0;
-  private hurtHandler: ((
-    entity: { id: number },
-    source?: HurtSource,
-  ) => void) | null = null;
+  private unobserveDamage: (() => void) | null = null;
   private deathHandler: (() => void) | null = null;
   private hookedBot: Bot | null = null;
   private environmentHold: QueueHoldToken | null = null;
@@ -3346,6 +6089,7 @@ export class Reflexes {
     if (bot?.entity && this.buried !== null) bot.setControlState('jump', false);
     this.buried = null;
     this.drowning = false;
+    this.waterTrap = null;
     this.environmentHold = null;
     this.environmentHoldSince = 0;
     this.environmentForfeited = false;
@@ -3357,9 +6101,8 @@ export class Reflexes {
     if (bot) clearEscapeGoalOwner(bot);
     this.fall = null;
     this.fallBot = null;
-    if (this.hookedBot && this.hurtHandler) {
-      this.hookedBot.removeListener('entityHurt', this.hurtHandler as never);
-    }
+    this.unobserveDamage?.();
+    this.unobserveDamage = null;
     if (this.hookedBot && this.deathHandler) {
       this.hookedBot.removeListener('death', this.deathHandler as never);
     }
@@ -3615,21 +6358,15 @@ export class Reflexes {
   /** 受击反应挂在 bot 事件上;重连换 bot 后重挂 */
   private hookHurt(bot: Bot): void {
     if (this.hookedBot === bot) return;
-    if (this.hookedBot && this.hurtHandler) {
-      this.hookedBot.removeListener('entityHurt', this.hurtHandler as never);
-    }
+    this.unobserveDamage?.();
     if (this.hookedBot && this.deathHandler) {
       this.hookedBot.removeListener('death', this.deathHandler as never);
     }
     this.hookedBot = bot;
-    const handler = (
-      entity: { id: number },
-      source?: HurtSource,
-    ) => {
-      if (entity.id !== bot.entity?.id) return;
-      void this.onHurt(bot, source);
-    };
-    this.hurtHandler = handler;
+    this.unobserveDamage = observeDamage(bot, (evidence) => {
+      if (this.stopped || this.hookedBot !== bot || this.opts.getBot() !== bot) return;
+      void this.onHurt(bot, evidence);
+    });
     this.deathHandler = () => {
       this.fall = null;
       this.environmentHold = null;
@@ -3648,7 +6385,6 @@ export class Reflexes {
       this.escapeGoal = null;
       clearEscapeGoalOwner(bot);
     };
-    bot.on('entityHurt', handler as never);
     bot.on('death', this.deathHandler as never);
   }
 
@@ -3876,7 +6612,7 @@ export class Reflexes {
    * 环境伤害:岩浆、火、摔落、窒息……没有可打的对象。反射能做的是立刻重查一次
    * 挨烧(等下一个 tick 太晚)并把现场记下来。掉血这件事本身由 World 播报,不复述。
    */
-  private onEnvironmentHurt(bot: Bot, now: number): void {
+  private onEnvironmentHurt(bot: Bot, now: number, evidence: DamageEvidence): void {
     if (this.opts.antiLava()) void this.antiLava(bot);
     // hurting=true:实心方块闷头那一路(圆石/石头)只在掉血时起手,口径在这条挂钩上
     void this.antiSuffocate(bot, true);
@@ -3886,12 +6622,13 @@ export class Reflexes {
     const hazard = touch.touching ?? nearestHazard(bot, Reflexes.ON_FIRE_HAZARD_R);
     this.opts.diag?.write({
       lane: 'reflex', event: 'env-hurt',
-      msg: `在掉血但周围没有敌人(生命 ${Math.ceil(bot.health ?? 0)}/20)`
+      msg: `收到伤害,尚无可确认的攻击者(生命 ${Math.ceil(bot.health ?? 0)}/20)`
         + (hazard ? `,${zhName(hazard.name)}就在 ${hazard.distance.toFixed(1)} 格` : '')
         + (touch.onFire ? ',身上着着火' : ''),
       data: {
         health: bot.health, onFire: touch.onFire, touching: touch.touching,
-        hazard, position: bot.entity.position,
+        hazard, position: bot.entity.position, sourceType: evidence.sourceType,
+        causeId: evidence.causeId, directId: evidence.directId, origin: evidence.origin,
       },
     });
   }
@@ -4098,6 +6835,7 @@ export class Reflexes {
   private lastDrownReportAt = 0;
   private lastDrownEscapeAt = 0;
   private submergedAt = 0;
+  private waterTrap: { since: number; x: number; z: number; escalated: boolean } | null = null;
   /** 危机中头出水的起点;氧气读数不可信时靠它判「已经在换气」 */
   private surfacedAt = 0;
   private lastSubmergedDiagAt = 0;
@@ -4118,6 +6856,7 @@ export class Reflexes {
     const oxygen = Math.max(0, Math.min(20, rawOxygen ?? 20));
     // 头部出水后按落脚或换气条件清除溺水状态；环境租约由剩余危机与落脚稳定性决定。
     if (!headWet) {
+      if (hasDryFooting(bot)) this.waterTrap = null;
       if (!this.drowning) {
         this.submergedAt = 0;
         return;
@@ -4134,6 +6873,7 @@ export class Reflexes {
         this.submergedAt = 0;
         this.surfacedAt = 0;
         this.drownExcluded.clear();
+        if (dry) this.waterTrap = null;
         this.opts.diag?.write({
           lane: 'reflex', event: 'drown-clear',
           msg: dry
@@ -4218,6 +6958,8 @@ export class Reflexes {
       return;
     }
     const land = findNearbyAirColumn(bot, 12, up, excluded);
+    if (land) this.waterTrap = null;
+    else this.noteWaterTrap(bot, now);
     // 诊断区分朝岸移动与原地上浮,以检测横向位置没有进展的逃生循环。
     this.opts.diag?.write({
       lane: 'reflex', event: land ? 'drown-swim' : 'drown-noland',
@@ -4231,25 +6973,75 @@ export class Reflexes {
     }
   }
 
+  private noteWaterTrap(bot: Bot, now: number): void {
+    const p = bot.entity.position;
+    const prior = this.waterTrap;
+    if (!prior || Math.hypot(p.x - prior.x, p.z - prior.z) >= WATER_TRAP_MOVE) {
+      this.waterTrap = { since: now, x: p.x, z: p.z, escalated: false };
+      return;
+    }
+    if (prior.escalated || now - prior.since < WATER_TRAP_MS) return;
+    prior.escalated = true;
+    this.opts.diag?.write({
+      lane: 'reflex', event: 'drown-trap', incident: true,
+      msg: `持续找不到岸且水平未推进，人在 (${Math.floor(p.x)}, ${Math.floor(p.y)}, ${Math.floor(p.z)})`,
+      data: { since: prior.since, position: p },
+    });
+    this.opts.report({ kind: 'reflex', hurt: true,
+      text: '[反射] 水里持续找不到岸，水平位置也没推进，正在尝试已登记的安全落点。' });
+    this.opts.onWaterTrap?.();
+  }
+
   private async onHurt(
     bot: Bot,
-    source?: HurtSource,
+    evidence: DamageEvidence,
   ): Promise<void> {
     const now = Date.now();
-    // 1.20+ damage_event 自带实际攻击源，有就用它，最准。
-    const attacker = source && source.id !== bot.entity?.id
-      ? source
-      // animation/entity_status 产生的 entityHurt 可能不带 source。
-      // 缺少来源时，以六格内最近的非玩家敌对生物作为反击候选。
-      : nearestHostileWithin(bot, REFLEX_HURT_FALLBACK_RANGE);
-    if (!attacker) { this.onEnvironmentHurt(bot, now); return; }
-    const distance = attacker.position.distanceTo(bot.entity.position);
+    const actor = evidence.actor;
+    if (!actor) {
+      this.onEnvironmentHurt(bot, now, evidence);
+      // A known projectile without a loaded owner is still a real impact. A bounded
+      // low-health dodge uses its direction, never a nearby mob's guessed identity.
+      if ((evidence.projectile || evidence.directId !== null) && evidence.sourcePosition
+        && (bot.health ?? 20) < this.opts.fleeHealth()
+        && !this.opts.escapeActive?.() && !this.busyFighting
+        && now - this.lastHurtReactAt >= this.opts.reactCooldownSec() * 1000) {
+        const from = evidence.sourcePosition;
+        const dx = bot.entity.position.x - from.x;
+        const dz = bot.entity.position.z - from.z;
+        const length = Math.hypot(dx, dz);
+        if (length > 0.1) {
+          this.lastHurtReactAt = now;
+          this.opts.onLowHealth?.(bot);
+          this.opts.preempt('低血受到外来伤害,来源尚未确定');
+          this.setEscapeGoal(bot, 'flee', levelTravelGoal(
+            bot.entity.position.x + dx / length * 8, bot.entity.position.z + dz / length * 8));
+          this.opts.report({ kind: 'reflex', hurt: true,
+            text: '[反射] 低血受到外来伤害,尚未确认攻击者,先离开命中方向。' });
+        }
+      }
+      return;
+    }
+    const attacker = actor.entity;
+    this.opts.diag?.write({ lane: 'reflex', event: 'damage-source',
+      msg: `${evidence.origin === 'packet' ? '原始伤害包' : '实体受击事件'}的来源绑定实体 ${actor.id} (${actor.name})`,
+      data: { origin: evidence.origin, sequence: evidence.sequence, sourceType: evidence.sourceType,
+        causeId: evidence.causeId, directId: evidence.directId,
+        loaded: !!attacker?.isValid, attacker: actor.name, health: bot.health } });
     // 战斗会话在场就归它:反击、血线撤退、退出闸门都是它的(反射这套 10 秒挥两下
     // 保留为 combat.enabled 关掉时的降级行为)
-    if (this.opts.combatHurt?.(attacker.id, attacker.name ?? '')) return;
-    // 撤退阈值独立于反击开关;关闭反击只禁止攻击,不禁止逃逸。
+    if (this.opts.combatHurt?.(actor.id, actor.name)) return;
     const bleedingOut = (bot.health ?? 20) < this.opts.fleeHealth();
     if (!this.opts.fightBack() && !bleedingOut) return;
+    // Identity is not visibility or reachability: the degraded melee loop never
+    // attacks a stale entity or aims through a solid obstruction.
+    if (!attacker?.isValid || bot.entities[actor.id] !== attacker
+      || (!bleedingOut && !canSeeEntity(bot, attacker))) {
+      this.onEnvironmentHurt(bot, now, evidence);
+      return;
+    }
+    const distance = attacker.position.distanceTo(bot.entity.position);
+    // 撤退阈值独立于反击开关;关闭反击只禁止攻击,不禁止逃逸。
     if (this.opts.escapeActive?.()) return; // 已有逃逸路径时不叠加反击或直线逃逸。
     if (this.busyFighting || now - this.lastHurtReactAt < this.opts.reactCooldownSec() * 1000) return;
     this.lastHurtReactAt = now;
@@ -4262,6 +7054,7 @@ export class Reflexes {
     try {
       if ((bot.health ?? 20) < this.opts.fleeHealth()) {
         // 血少:脱离
+        this.opts.onLowHealth?.(bot);
         this.opts.preempt('血量过低,脱离战斗');
         const away = bot.entity.position.minus(attacker.position).normalize().scaled(16);
         const dest = bot.entity.position.plus(away);
@@ -4282,6 +7075,7 @@ export class Reflexes {
         try {
           while (attacker.isValid && Date.now() < deadline && !this.stopped) {
             if ((bot.health ?? 0) <= 0) break; // 人都死了,别再对着空气挥
+            if (this.opts.getBot() !== bot || !canSeeEntity(bot, attacker)) break;
             const d = attacker.position.distanceTo(bot.entity.position);
             if (d > 3.5) break; // 它跑了/被打退,不追:追击是主脑的决策,不归反射
             if (Date.now() >= strafeAt) {

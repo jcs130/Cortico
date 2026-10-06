@@ -1,5 +1,5 @@
 /**
- * 管理观察者或玩家客户端进程。Windows 通过 ownerPid 的可见窗口判断就绪，其他平台使用 stdout 标记。
+ * 管理观察者或玩家客户端进程。Windows 通过启动进程及其子进程的可见窗口判断就绪，其他平台使用 stdout 标记。
  * 进服后的附身和传送由 world.ts 编排；窗口标题按账号名设置，并在直连加载后重设一次。
  */
 import { logLines } from '../../core/ipc-logger.ts';
@@ -207,6 +207,13 @@ export class GameClient {
 
   async start(): Promise<ClientState> {
     if (this.phase === 'starting' || this.phase === 'running') return this.state();
+    // 窗口探测超时不会结束游戏进程；再次点击启动应复核原窗口，不能双开同一账号。
+    if (this.proc?.exitCode === null) {
+      const pid = this.proc.pid;
+      if (this.phase === 'error' && pid !== undefined && await this.windowSeen(pid)
+        && this.proc?.pid === pid) this.markWindowReady();
+      return this.state();
+    }
     const gameDir = this.opts.gameDir();
     const launch = this.resolveLaunch(gameDir);
     if ('error' in launch) {
@@ -289,7 +296,18 @@ export class GameClient {
     const proc = this.proc;
     this.proc = null;
     if (proc && proc.exitCode === null) {
-      try { proc.kill(); } catch { /* 已退出 */ }
+      if (process.platform === 'win32' && proc.pid !== undefined) {
+        // java 启动器可能再拉一个 java.exe，窗口在子进程。只杀启动器会留下旧客户端，
+        // 下次同账号进服便把仍在线的观察者踢掉。
+        const killer = spawn('taskkill.exe', ['/PID', String(proc.pid), '/T', '/F'], {
+          windowsHide: true, stdio: 'ignore',
+        });
+        const fallback = () => { try { proc.kill(); } catch { /* 已退出 */ } };
+        killer.once('error', fallback);
+        killer.once('exit', (code) => { if (code !== 0) fallback(); });
+      } else {
+        try { proc.kill(); } catch { /* 已退出 */ }
+      }
       await new Promise<void>((resolve) => {
         const force = setTimeout(() => {
           try { proc.kill('SIGKILL'); } catch { /* 已退出 */ }
@@ -336,21 +354,7 @@ export class GameClient {
       const seen = await this.windowSeen(pid);
       if (seen) {
         if (this.phase !== 'starting') return;
-        this.phase = 'running';
-        this.detail = null;
-        this.windowReady = true;
-        this.clearTimer();
-        this.opts.log.info(`${this.opts.label}窗口已就绪`);
-        if (process.platform !== 'win32') {
-          this.opts.log.warn(`${this.opts.label}窗口标题改不了(只有 Windows 那条路能改),`
-            + 'OBS 里要靠人自己选窗口,不能按账号名认。');
-        }
-        void this.applyWindowTitle();
-        if (this.opts.autoJoin()) {
-          const settle = this.opts.titleSettleMs ?? 8_000;
-          this.titleTimer = setTimeout(() => { void this.applyWindowTitle(); }, settle);
-        }
-        this.opts.onReady?.();
+        this.markWindowReady();
         return;
       }
       if (Date.now() > deadline) {
@@ -362,7 +366,25 @@ export class GameClient {
     }, interval);
   }
 
-  /** Windows 查询 ownerPid 对应的可见窗口；其他平台要求进程仍运行且已读到建窗标记。 */
+  private markWindowReady(): void {
+    this.phase = 'running';
+    this.detail = null;
+    this.windowReady = true;
+    this.clearTimer();
+    this.opts.log.info(`${this.opts.label}窗口已就绪`);
+    if (process.platform !== 'win32') {
+      this.opts.log.warn(`${this.opts.label}窗口标题改不了(只有 Windows 那条路能改),`
+        + 'OBS 里要靠人自己选窗口,不能按账号名认。');
+    }
+    void this.applyWindowTitle();
+    if (this.opts.autoJoin()) {
+      const settle = this.opts.titleSettleMs ?? 8_000;
+      this.titleTimer = setTimeout(() => { void this.applyWindowTitle(); }, settle);
+    }
+    this.opts.onReady?.();
+  }
+
+  /** Windows 查询托管进程及其子进程的可见窗口；其他平台要求 stdout 已读到建窗标记。 */
   private async windowSeen(pid: number): Promise<boolean> {
     if (this.opts.findWindow) return this.opts.findWindow({ ownerPid: pid });
     if (process.platform === 'win32') return findWindow({ ownerPid: pid, log: this.opts.log });

@@ -2,8 +2,9 @@
  * 观察者客户端那扇窗:有没有出来、改标题。
  *
  * 走 Windows PowerShell + user32(见 client-window.ps1),不引第三方原生依赖。
- * 认哪扇窗一律按 `ownerPid`:同一台机器上还有人自己玩的那份客户端,
- * 除了进程没有第二个凭据分得开她的窗口和别人的窗口。标题改成账号名是给 OBS 认的。
+ * 认哪扇窗按 `ownerPid` 及其子进程:Java 启动器可能把真正的游戏窗口交给子进程。
+ * 同一台机器上还有人自己玩的那份客户端,进程树是区分窗口的凭据。
+ * 标题改成账号名是给 OBS 认的。
  */
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';

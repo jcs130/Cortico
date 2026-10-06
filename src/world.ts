@@ -24,6 +24,7 @@ const ASSEMBLY_TEXT = {
     notActive: (label: string) => `${label} 未激活,没有可重启的实例`,
     restarted: (label: string) => `${label} 已重启`,
     toolClash: (other: string, names: string[]) => `工具名与 ${other} 撞名,拒绝挂载: ${names.join(', ')}`,
+    resourceClash: (other: string, resource: string) => `运行资源 ${resource} 已由 ${other} 使用,拒绝挂载`,
     toolReserved: (names: string[]) => `工具名已被 Core 或 Persona 占用,拒绝挂载: ${names.join(', ')}`,
     unbound: '装配层尚未绑定 core',
   },
@@ -38,6 +39,7 @@ const ASSEMBLY_TEXT = {
     notActive: (label: string) => `${label} is not active, so there is no instance to restart`,
     restarted: (label: string) => `${label} restarted`,
     toolClash: (other: string, names: string[]) => `Tool names clash with ${other}, refusing to mount: ${names.join(', ')}`,
+    resourceClash: (other: string, resource: string) => `Runtime resource ${resource} is already used by ${other}, refusing to mount`,
     toolReserved: (names: string[]) => `Tool names are taken by Core or the Persona, refusing to mount: ${names.join(', ')}`,
     unbound: 'The assembly layer is not bound to a core yet',
   },
@@ -80,6 +82,8 @@ export interface WorldContext<S extends WorldSection = WorldSection> {
 export interface WorldDefinition<S extends WorldSection = WorldSection> {
   id: string;
   label: string;
+  /** Worlds using the same exclusive resource cannot be mounted together. */
+  exclusiveResource?: string;
   /** World 配置默认值，每次返回新对象；enabled=false，由 bot 声明或部署配置启用。 */
   defaults(): S;
   /** 激活前置检查。抛错 = 不能激活,错误信息原样给操作者。 */
@@ -232,7 +236,10 @@ export class WorldAssembly {
         });
         continue;
       }
-      const clash = section.enabled ? this.toolClash(instance, this.mounted) : null;
+      const clash = section.enabled
+        ? this.resourceClash(def, this.slots.filter((slot) => slot.mounted))
+          ?? this.toolClash(instance, this.mounted)
+        : null;
       if (clash) {
         this.missing.push({ id: def.id, label: def.label, declared: declared.has(def.id), reason: clash });
         continue;
@@ -336,7 +343,8 @@ export class WorldAssembly {
     if (!def) throw new Error(t.prebuilt(slot.label));
     const ctx = this.context(def);
     def.preflight?.(ctx);
-    const clash = this.toolClash(slot.instance, this.mounted);
+    const clash = this.resourceClash(def, this.slots.filter((other) => other.mounted))
+      ?? this.toolClash(slot.instance, this.mounted);
     if (clash) throw new Error(clash(language));
     this.persist(id, { enabled: true });
     try {
@@ -364,7 +372,10 @@ export class WorldAssembly {
     const slot = this.slot(id, language);
     if (!slot.mounted) throw new Error(text(language).notActive(slot.label));
     await this.stopSlot(slot);
-    const clash = this.toolClash(slot.instance, this.mounted);
+    const clash = slot.definition
+      ? this.resourceClash(slot.definition, this.slots.filter((other) => other.mounted))
+        ?? this.toolClash(slot.instance, this.mounted)
+      : this.toolClash(slot.instance, this.mounted);
     if (clash) throw new Error(clash(language));
     await this.mountHost().mount(slot.instance);
     slot.mounted = true;
@@ -404,6 +415,13 @@ export class WorldAssembly {
       }
     }
     return null;
+  }
+
+  private resourceClash(def: WorldDefinition<WorldSection>, mounted: readonly WorldSlot[]):
+    ((language: Language) => string) | null {
+    if (!def.exclusiveResource) return null;
+    const other = mounted.find((slot) => slot.definition?.exclusiveResource === def.exclusiveResource);
+    return other ? (language) => text(language).resourceClash(other.label, def.exclusiveResource!) : null;
   }
 
   private mountHost(): WorldMountHost {

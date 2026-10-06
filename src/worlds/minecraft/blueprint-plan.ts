@@ -38,6 +38,8 @@ import type { Anchor } from './geometry.ts';
 
 /** palette 编码交稿的最大字符数；分批只改变传输方式，不改变这条总预算。 */
 export const BLUEPRINT_MAX_OUTPUT_CHARS = 131_072;
+/** 材料统计使用施工物品名；工具回执与设计说明共享同一份取料契约。 */
+export const BLUEPRINT_MATERIAL_NOTE = '材料表中的名称是施工所需物品，材料表不等于采集计划。木板、楼梯等先核对库存与配方，选择采原料再加工或已获许可的来源；从既有结构拆取须确认授权。';
 /** 单个底层 build 调用的体素上限；大平面会在 IR 内自动切步。 */
 const BLUEPRINT_STEP_CELL_CAP = 256;
 
@@ -488,6 +490,8 @@ export interface BlueprintDiff {
   doneSteps: number[];
   /** 还没完成的步(不只是游标之后那些) */
   remaining: BlueprintStep[];
+  /** 直接放置仍需物品的主格，按步索引列局部坐标；未知格保留，已有主块不重复计料。 */
+  placements: Readonly<Record<number, readonly PositionXYZ[]>>;
   /** 游标 = 从头连着已完成的步数 */
   cursor: number;
 }
@@ -540,6 +544,7 @@ export function diffBlueprint(
   };
 
   const done = new Set<number>();
+  const placements: Record<number, PositionXYZ[]> = {};
   for (const step of plan.steps) {
     const expectId = blockIdOf(step.state);
     // 可转换基材由执行器原地加工，不计清场冲突；豁免集包含全部等价源方块。
@@ -549,14 +554,18 @@ export function diffBlueprint(
         : [],
     );
     let stepDone = true;
+    const needed: PositionXYZ[] | null = step.method.kind === 'place' ? (placements[step.index] = []) : null;
     for (let y = step.from[1]; y <= step.to[1]; y++) {
       for (let z = step.from[2]; z <= step.to[2]; z++) {
         for (let x = step.from[0]; x <= step.to[0]; x++) {
           const local: PositionXYZ = [x, y, z];
           const pos = toWorld(anchor, local);
           const raw = read(pos[0], pos[1], pos[2]);
-          if (raw === null) { unknown++; stepDone = false; continue; }
+          if (raw === null) {
+            unknown++; stepDone = false; needed?.push(local); continue;
+          }
           const actual = normalizeBlockName(raw);
+          if (blockIdOf(actual) !== expectId) needed?.push(local);
           if (blueprintStepStateMatches(step, actual)) { matched++; continue; }
           stepDone = false;
           missing++;
@@ -619,8 +628,18 @@ export function diffBlueprint(
     conflicts,
     doneSteps,
     remaining,
+    placements,
     cursor,
   };
+}
+
+/** 施工几何保持原 IR；材料账只替换已有回读的直接放置耗材格数。 */
+export function remainingPlacementBillSteps(
+  steps: readonly BlueprintStep[],
+  placements: Readonly<Record<number, readonly PositionXYZ[]>>,
+): BlueprintStep[] {
+  return steps.map((step) => step.method.kind === 'place' && placements[step.index] !== undefined
+    ? { ...step, cells: placements[step.index].length } : step);
 }
 
 // ── 三分账单 ──────────────────────────────────────────────────────────────────

@@ -406,6 +406,8 @@ export interface WebAppToolSchemasDeps {
 export interface WebAppSessionControlDeps {
   /** 重读所有前缀源，只替换当前 session 的 system 消息。回执按 `language`。 */
   reloadPrefix(language: Language): Promise<string>;
+  /** 在安全回合边界交接上下文，保留工作区记忆与事件账本。 */
+  handoff?(): Promise<void>;
 }
 
 /** `WebAppPromptDeps.write` 在 `baseRevision` 过期时抛的错;控制台回 409 并标 conflict。 */
@@ -1927,6 +1929,22 @@ export class WebApp {
         }
       })();
     });
+
+    app.post('/api/session/handoff', (req: Request, res: Response) => {
+      void (async () => {
+        const handoff = this.deps.sessionControl?.handoff;
+        if (!handoff) { res.status(503).json({ error: 'session交接不可用' }); return; }
+        try {
+          await handoff();
+          this.deps.log.warn('当前session上下文已手动交接');
+          res.json({ ok: true });
+        } catch (err) {
+          this.deps.log.error('手动交接当前session失败', { error: String(err) });
+          if (!res.headersSent) res.status(500).json({ error: String(err) });
+        }
+      })();
+    });
+
 
     // ---- Console Page API:World 与 bot 的控制面唯一通道。----
 

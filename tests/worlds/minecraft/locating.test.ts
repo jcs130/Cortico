@@ -3,6 +3,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { V, makeExecutorOn, waitUntil } from './executor-harness.ts';
+import { skillCollect } from '../../../src/worlds/minecraft/skills-gather.ts';
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
@@ -21,13 +22,15 @@ const NON_SOLID = new Set(['air', 'water', 'lava', 'torch']);
 function worldBot(
   cells: Record<string, string>,
   at: { x: number; y: number; z: number },
-  opts: { blind?: ReadonlySet<string>; stock?: Array<{ name: string; count: number; type: number }> } = {},
+  opts: { blind?: ReadonlySet<string>; stock?: Array<{ name: string; count: number; type: number }>;
+    denied?: ReadonlySet<string> } = {},
 ) {
   const world = new Map(Object.entries(cells));
   const names = new Set(['air', 'stone', 'nether_bricks', 'spawner', 'salmon', ...world.values()]);
   const blocksByName: Record<string, { id: number; name: string }> = {};
   let nextId = 1;
   for (const n of names) blocksByName[n] = { id: nextId++, name: n };
+  const blocks = Object.fromEntries(Object.values(blocksByName).map((b) => [b.id, { name: b.name, drops: [b.id] }]));
   const blind = opts.blind ?? new Set<string>();
   const bag = opts.stock ?? [];
   const bot = {
@@ -40,7 +43,9 @@ function worldBot(
     food: 20,
     game: { minY: -64, height: 384, dimension: 'minecraft:the_nether' },
     inventory: { items: () => bag },
-    registry: { blocksByName, itemsByName: { salmon: {}, cooked_salmon: {} }, items: {}, foodsByName: { salmon: {} } },
+    registry: { blocksByName, blocks,
+      itemsByName: { salmon: {}, cooked_salmon: {}, spruce_log: {}, chest: {} },
+      items: {}, foodsByName: { salmon: {} } },
     equip: async () => {},
     lookAt: async () => {},
     blockAt: (p: V) => {
@@ -55,6 +60,8 @@ function worldBot(
       };
     },
     canSeeBlock: (b: { name: string }) => !blind.has(b.name),
+    cortiBreakVerdict: (b: { position: V }) => opts.denied?.has(`${b.position.x},${b.position.y},${b.position.z}`)
+      ? 'protected' : 'allowed',
     // 真 findBlocks 走区块索引:无视遮挡,只看距离
     findBlocks: (o: { matching: number[]; maxDistance: number; count: number }) => {
       const me = bot.entity.position;
@@ -159,6 +166,58 @@ describe('find 命中格旁边的落点', () => {
     await waitUntil(() => reports.length === 1, 15_000);
     expect(reports[0].text).toContain('blockAt=(3, 64, 0)');
     expect(reports[0].text).not.toContain('站得住的是');
+  });
+});
+
+describe('受保护资源目标', () => {
+  it('find 跳过已拒绝的原木，后续仍能找到另一棵', async () => {
+    const denied = new Set<string>();
+    const bot = worldBot({ '0,63,0': 'stone', '2,64,0': 'spruce_log', '6,64,0': 'spruce_log' },
+      { x: 0.5, y: 64, z: 0.5 }, { denied });
+    const { exec, reports } = makeExecutorOn(bot);
+    exec.submit([{ skill: 'find', target: 'spruce_log', distance: 16 }]);
+    await waitUntil(() => reports.length === 1, 15_000);
+    expect(reports[0].text).toContain('blockAt=(2, 64, 0)');
+
+    denied.add('2,64,0');
+    exec.submit([{ skill: 'find', target: 'spruce_log', distance: 16 }]);
+    await waitUntil(() => reports.length === 2, 15_000);
+    expect(reports[1].text).toContain('blockAt=(6, 64, 0)');
+    expect(reports[1].text).not.toContain('blockAt=(2, 64, 0)');
+    expect(reports[1].text).toContain('1 处同类方块已知受保护');
+
+    denied.clear();
+    const restored = makeExecutorOn(bot);
+    restored.exec.submit([{ skill: 'find', target: 'spruce_log', distance: 16 }]);
+    await waitUntil(() => restored.reports.length === 1, 15_000);
+    expect(restored.reports[0].text).toContain('blockAt=(2, 64, 0)');
+  });
+
+  it('受保护箱子仍是可观察目标，采集只给出保护拒绝', async () => {
+    const denied = new Set(['2,64,0']);
+    const bot = worldBot({ '0,63,0': 'stone', '2,64,0': 'chest' },
+      { x: 0.5, y: 64, z: 0.5 }, { denied });
+    const { exec, reports } = makeExecutorOn(bot);
+    exec.submit([{ skill: 'find', target: 'chest', distance: 16 }]);
+    await waitUntil(() => reports.length === 1, 15_000);
+    expect(reports[0].text).toContain('blockAt=(2, 64, 0)');
+    await expect(skillCollect(bot as never, 'chest', 1,
+      { aborted: () => false } as Parameters<typeof skillCollect>[3])).rejects.toThrow('已知受保护');
+  });
+
+  it('定向搜索越过首批 16 个受保护候选，命中后面的资源', async () => {
+    const cells: Record<string, string> = { '0,63,0': 'stone' };
+    const denied = new Set<string>();
+    for (let x = 1; x <= 17; x++) {
+      cells[`${x},64,0`] = 'spruce_log';
+      if (x < 17) denied.add(`${x},64,0`);
+    }
+    const bot = worldBot(cells, { x: 0.5, y: 64, z: 0.5 }, { denied });
+    const { exec, reports } = makeExecutorOn(bot);
+    exec.submit([{ skill: 'find', target: 'spruce_log', distance: 24, direction: 'east' }]);
+    await waitUntil(() => reports.length === 1, 15_000);
+    expect(reports[0].text).toContain('blockAt=(17, 64, 0)');
+    expect(reports[0].text).not.toContain('blockAt=(1, 64, 0)');
   });
 });
 
