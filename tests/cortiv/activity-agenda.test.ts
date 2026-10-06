@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ActivityAgenda, AGENDA_FILE, AGENDA_SUMMARY_MAX_CHARS, type AgendaPlan } from '../../bots/cortiv/persona/activity-agenda.ts';
+import { ActivityAgenda, AGENDA_FILE, AGENDA_MAX_ITEMS, AGENDA_SUMMARY_MAX_CHARS, type AgendaPlan } from '../../bots/cortiv/persona/activity-agenda.ts';
 import { CortiV } from '../../bots/cortiv/persona/persona.ts';
 import { FOREGROUND_CONTEXT_DEFAULTS } from '../../bots/cortiv/persona/foreground-context.ts';
 import { makeFakeHarnessApi } from '../core/helpers.ts';
@@ -104,6 +104,56 @@ describe('persistent Persona activity agenda', () => {
     expect(agenda.operate({ operation: 'adopt', id: 'river' })).toContain('上限');
     expect(agenda.state()).toEqual(before);
   });
+  it('completed stages release capacity and retain evidence across selected adoption and restart', () => {
+    const { dir, agenda } = rig();
+    adopt(agenda, { ...plan(), items: Array.from({ length: AGENDA_MAX_ITEMS }, (_, index) => ({ ...plan().items[0], id: String(index) })) });
+    for (const item of agenda.state().items) agenda.operate({ operation: 'update', id: item.id, status: 'done', note: `实际验收 ${item.id}` });
+    const evidence = agenda.state().items;
+    const captured = agenda.revision();
+    agenda.propose(JSON.stringify(plan()), captured, stamp);
+    const receipt = agenda.operate({ operation: 'adopt', id: 'river' });
+    expect(receipt).toContain('排队 1 项');
+    expect(agenda.state().items.slice(0, AGENDA_MAX_ITEMS)).toEqual(evidence);
+    const restored = new ActivityAgenda(dir, now);
+    expect(restored.state()).toEqual(agenda.state());
+    restored.operate({ operation: 'focus', id: 'river' });
+    const read = JSON.parse(restored.operate({ operation: 'read' }));
+    expect(read.items.map((item: { id: string }) => item.id)).toEqual(['river']);
+    expect(read.completedCount).toBe(AGENDA_MAX_ITEMS);
+    expect(JSON.parse(restored.operate({ operation: 'read', id: '0' })).items[0].note).toBe(evidence[0].note);
+    const history = JSON.parse(restored.operate({ operation: 'read', includeCompleted: true, limit: 2 }));
+    expect(history.items).toEqual(evidence.slice(0, 2));
+    expect(history.page.nextOffset).toBe(2);
+    const next = JSON.parse(restored.operate({ operation: 'read', includeCompleted: true, limit: 2, offset: history.page.nextOffset }));
+    expect(next.items).toEqual(evidence.slice(2, 4));
+  });
+  it('whole adoption preserves completed history and cannot reuse a completed id for another objective', () => {
+    const { dir, agenda } = rig(); adopt(agenda);
+    agenda.operate({ operation: 'update', id: 'finish-home', status: 'done', note: '实际通行通过' });
+    const completed = agenda.state().items[0];
+    adopt(agenda, { ...plan(), items: [plan().items[1]] });
+    expect(agenda.state().items[0]).toEqual(completed);
+    const changed = plan(); changed.items[0].doneWhen = '新目标尚未执行';
+    agenda.propose(JSON.stringify(changed), agenda.revision(), stamp);
+    const before = agenda.state();
+    expect(agenda.operate({ operation: 'adopt' })).toContain('不能改成新目标');
+    expect(agenda.state()).toEqual(before);
+    expect(new ActivityAgenda(dir, now).state()).toEqual(before);
+  });
+  it('planning reads open stages and recent completion evidence without expanding all history', () => {
+    const { agenda } = rig();
+    for (let index = 0; index < AGENDA_MAX_ITEMS + 2; index++) {
+      const item = { ...plan().items[0], id: `stage${index}` };
+      adopt(agenda, { ...plan(), items: [item] });
+      agenda.operate({ operation: 'update', id: item.id, status: 'done', note: `回执 ${index}` });
+    }
+    expect(agenda.summary()).toContain('当前没有未完成阶段');
+    adopt(agenda, { ...plan(), items: [plan().items[1]] });
+    const reading = JSON.parse(agenda.planningReadout());
+    expect(reading.items.map((item: { id: string }) => item.id)).toEqual(['river', ...Array.from({ length: AGENDA_MAX_ITEMS }, (_, index) => `stage${index + 2}`)]);
+    expect(reading.completedCount).toBe(AGENDA_MAX_ITEMS + 2);
+    expect(agenda.state().items).toHaveLength(AGENDA_MAX_ITEMS + 3);
+  });
   it('compact context shows actual agenda status and candidate identities while historical background is available on read', () => {
     const { agenda } = rig();
     const value = { ...plan(), summary: '之前背包已满，需要继续整理。' };
@@ -118,7 +168,10 @@ describe('persistent Persona activity agenda', () => {
     expect(summary).toContain('"river"');
     expect(summary).not.toContain(value.summary);
     expect(summary).not.toContain('生成时还未返回旧地点');
-    expect(JSON.parse(agenda.operate({ operation: 'read' })).summary).toBe(value.summary);
+    const detail = JSON.parse(agenda.operate({ operation: 'read' }));
+    expect(detail.summary).toBe(value.summary);
+    expect(detail.interpretation).toContain('不是当前现场读数');
+    expect(detail.items).toMatchObject([{ id: 'river', status: 'deferred', note: '等同伴确认时间，其余活动照常' }]);
   });
   it('fresh candidate preserves stable objective evidence; focus never reopens a completed phase', () => {
     const { agenda } = rig(); adopt(agenda);

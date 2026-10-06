@@ -52,7 +52,7 @@ import { HANDOFF_NOTE_TYPE } from '../../cormini/persona/handoffNote.ts';
 import { AUTHOR_SELF, type WorkspaceGit } from '../../cormini/persona/workspaceGit.ts';
 import { personaConsoleDecl } from './consoleSurface.ts';
 import { PeriodicPlanningReview, PLANNING, PLANNING_DEFAULTS, type PlanningConfig } from './planning-review.ts';
-import { ActivityAgenda, AGENDA_FILE } from './activity-agenda.ts';
+import { ActivityAgenda, AGENDA_FILE, AGENDA_MAX_ITEMS } from './activity-agenda.ts';
 import { CortiVSocialAttention, FAST_ATTENTION_DEFAULTS, type FastAttentionConfig } from './attention-adviser.ts';
 import { ActionFailureReflection, FAILURE_REFLECTION_ADVICE } from './failure-reflection.ts';
 import { RecentSpeech } from './recent-speech.ts';
@@ -654,6 +654,7 @@ export class CortiV extends Cormini {
     }, {
       name: 'activity_plan',
       description: 'Read a persistent flexible activity agenda; review requests asynchronous planning and returns immediately. '
+        + 'read pages open stages by default; includeCompleted:true pages history, or id reads one stage. Completed evidence does not occupy open-stage capacity. '
         + 'Read and verify a background proposal before adopt. adopt with id adds that new candidate while preserving '
         + 'existing progress; omit id to replace the agenda only when its revision is current. focus selects a current stage. update records actual progress '
         + 'or marks a stage done/deferred/queued with evidence in note. Plans do not execute World actions; '
@@ -663,7 +664,10 @@ export class CortiV extends Cormini {
         type: 'object', additionalProperties: false,
         properties: {
           operation: { type: 'string', enum: ['read', 'review', 'adopt', 'focus', 'update'] },
-          id: { type: 'string', minLength: 1, maxLength: 80, description: 'Exact item id for focus/update; adopt: one verified new candidate id, even if other stages changed.' },
+          id: { type: 'string', minLength: 1, maxLength: 80, description: 'Exact item id for focus/update; read: one stage including completed evidence; adopt: one verified new candidate id, even if other stages changed.' },
+          offset: { type: 'integer', minimum: 0, description: 'read: pagination offset, default 0.' },
+          limit: { type: 'integer', minimum: 1, maximum: AGENDA_MAX_ITEMS, description: 'read: page size, default 8.' },
+          includeCompleted: { type: 'boolean', description: 'read: include completed history, default false.' },
           status: { type: 'string', enum: ['queued', 'deferred', 'done'], description: 'update: omit to retain the current stage status.' },
           note: { type: 'string', minLength: 1, maxLength: 400, description: 'update: actual evidence, progress or reason for deferral.' },
         }, required: ['operation'],

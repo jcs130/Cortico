@@ -276,7 +276,7 @@ export class PeriodicPlanningReview {
           signal: controller.signal, tools: [],
           messages: planningMessages({ ...material,
             agenda: this.options.agenda ? this.options.agenda.summary() + '\n'
-              + JSON.stringify((({ revision, items }) => ({ revision, items }))(this.options.agenda.state())) : material.agenda,
+              + this.options.agenda.planningReadout() : material.agenda,
             activity: this.activities.map((activity) => activity.text).join('\n\n'), capturedAt,
           }, cfg.maxContextTokens, cfg.agendaEnabled && !!this.options.agenda),
         })).trim();

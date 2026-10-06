@@ -16,6 +16,11 @@ Owner: CortiV Persona (`activity-agenda.ts`, `planning-review.ts`).
 每次修改已采用日程增加 revision。候选绑定采样时 revision；生成期间发生进展后，
 旧候选不能整份覆盖新状态；核验后仍可选取一个新阶段，或重新规划。新候选的相同 id/title/doneWhen 保留已记录状态
 与证据。重启恢复账本；已完成阶段不能通过 focus/update 重新打开。
+最多保留八项未完成阶段；已完成阶段释放名额，证据留在原账本，整份采用也保留未被新候选列出的完成记录。完成 id 不能改成另一目标。
+`read` 默认分页读取未完成阶段；`includeCompleted:true` 包含历史，`id` 可读取单项证据。
+分页使用 `offset` 和 `limit`，每页最多八项，回执提供 `completedCount` 和 `page.nextOffset`。
+read 的 `interpretation` 标明规划背景与进展证据的区别；旧 summary/why/when 不能作为当前现场事实。
+后台规划读取全部未完成阶段及最近八项完成证据，较早记录保留查询入口。
 日程没有固定活动配额、自动任务重放或由随机数选择活动的逻辑。
 
 常驻摘要最多 1,200 字符，提供阶段数量、当前阶段、够用条件、受阻条件及下一步标题。
