@@ -2239,7 +2239,7 @@ describe('smelt:下料点火就走(B1 解耦)', () => {
   function slotFurnace(opts: {
     fuelName?: string; fuelCount?: number; rejectFuel?: boolean; inputLimit?: number;
     fuelLevel?: number; progress?: number; consumedFuel?: number; staleTakeFails?: boolean;
-    inputName?: string; outputName?: string; updateDelayMs?: number;
+    inputName?: string; outputName?: string; updateDelayMs?: number; fuelDelayMs?: number; fuelRollbackMs?: number;
   } = {}) {
     const fuelName = opts.fuelName ?? 'coal';
     const inputName = opts.inputName ?? 'raw_iron';
@@ -2264,7 +2264,13 @@ describe('smelt:下料点火就走(B1 解耦)', () => {
         get fuel() { return fuelLevel; }, get progress() { return progress; },
         inputItem: () => input, fuelItem: () => fuel, outputItem: () => output,
         putFuel: async (_type: number, _meta: unknown, count: number) => {
-          if (!opts.rejectFuel) fuel = move(fuelName, count);
+          if (opts.rejectFuel) return;
+          if (opts.fuelDelayMs) setTimeout(() => { fuel = move(fuelName, count); }, opts.fuelDelayMs);
+          else fuel = move(fuelName, count);
+          if (opts.fuelRollbackMs) setTimeout(() => {
+            inv.set(fuelName, (inv.get(fuelName) ?? 0) + (fuel?.count ?? 0));
+            fuel = null;
+          }, opts.fuelRollbackMs);
         },
         putInput: async (_type: number, _meta: unknown, count: number) => {
           const accepted = Math.min(count, opts.inputLimit ?? count);
@@ -2305,7 +2311,7 @@ describe('smelt:下料点火就走(B1 解耦)', () => {
     };
   }
 
-  it('燃料槽拒收火把且没有炉火:下料不算点火成功', async () => {
+  it('燃料槽未接收指定火把且没有炉火:保留本次原料并记录实际空槽', async () => {
     const { bot, inv } = slotFurnace({ fuelName: 'torch', rejectFuel: true });
     const book = new ChestBook(null);
     const diag = new MinecraftLog();
@@ -2315,14 +2321,57 @@ describe('smelt:下料点火就走(B1 解耦)', () => {
     exec.submit([{ skill: 'smelt', input: 'raw_iron', count: 8, fuel: 'torch' }]);
     await waitUntil(() => reports.length === 1, 8000);
     expect(reports[0].kind).toBe('blocked');
-    expect(inv.get('raw_iron')).toBe(0);
+    expect(inv.get('raw_iron')).toBe(8);
     expect(inv.get('torch')).toBe(30);
-    expect(reports[0].text).toContain('输入槽粗铁×8,燃料槽空,输出槽空');
-    expect(reports[0].text).toContain('燃料槽为空且炉火未起');
+    expect(reports[0].text).toContain('燃料槽未读到指定的火把');
+    expect(reports[0].text).toContain('本次未放入粗铁');
     expect(reports[0].text).not.toContain('燃料槽火把×30');
     expect(book.get('overworld', { x: 2, y: 64, z: 0 })?.furnace?.expectedDoneAt).toBeNull();
-    expect(diag.after(0).find((r) => r.event === 'smelt-loaded')?.data)
-      .toMatchObject({ input: { name: 'raw_iron', count: 8 }, fuel: null, fuelLevel: 0, expectedDoneAt: null });
+    expect(book.get('overworld', { x: 2, y: 64, z: 0 })?.furnace?.input).toBeNull();
+    expect(diag.after(0).find((r) => r.event === 'smelt-fuel-unconfirmed')?.data)
+      .toMatchObject({ requestedFuel: 'torch', input: null, fuel: null, fuelLevel: 0 });
+  });
+
+  it('燃料包稍后才更新:确认燃料入槽后继续下料并等待进度', async () => {
+    const { bot, inv } = slotFurnace({ fuelDelayMs: 150, updateDelayMs: 150 });
+    const { exec, reports } = makeExecutorOn(bot);
+    exec.submit([{ skill: 'smelt', input: 'raw_iron', count: 8, fuel: 'coal' }]);
+    await waitUntil(() => reports.length === 1, 8000);
+    expect(reports[0].kind).toBe('done');
+    expect(inv.get('raw_iron')).toBe(0);
+    expect(reports[0].text).toContain('烧炼进度读数');
+  });
+
+  it('燃料槽先预测入槽后被服务端回滚:等待回读，原料仍留背包', async () => {
+    const { bot, inv } = slotFurnace({ fuelName: 'cobblestone', fuelRollbackMs: 150, fuelLevel: 0, progress: 0 });
+    const { exec, reports } = makeExecutorOn(bot);
+    exec.submit([{ skill: 'smelt', input: 'raw_iron', count: 8, fuel: 'cobblestone' }]);
+    await waitUntil(() => reports.length === 1, 8000);
+    expect(reports[0].kind).toBe('blocked');
+    expect(reports[0].text).toContain('燃料槽未读到指定的圆石');
+    expect(inv.get('raw_iron')).toBe(8);
+    expect(inv.get('cobblestone')).toBe(30);
+  });
+
+  it('服务端接受自定义燃料圆石:使用实际燃料槽和进度，不按原版物品名拒绝', async () => {
+    const { bot } = slotFurnace({ fuelName: 'cobblestone' });
+    const { exec, reports } = makeExecutorOn(bot);
+    exec.submit([{ skill: 'smelt', input: 'raw_iron', count: 8, fuel: 'cobblestone' }]);
+    await waitUntil(() => reports.length === 1, 8000);
+    expect(reports[0].kind).toBe('done');
+    expect(reports[0].text).toContain('燃料槽圆石×30');
+    expect(reports[0].text).toContain('烧炼进度读数');
+  });
+
+  it('炉子仍在燃烧但燃料槽为空:允许本次原料继续入槽', async () => {
+    const { bot, inv } = slotFurnace({ rejectFuel: true, fuelLevel: 0.8, progress: 0.1 });
+    const { exec, reports } = makeExecutorOn(bot);
+    exec.submit([{ skill: 'smelt', input: 'raw_iron', count: 8, fuel: 'coal' }]);
+    await waitUntil(() => reports.length === 1, 8000);
+    expect(reports[0].kind).toBe('done');
+    expect(inv.get('raw_iron')).toBe(0);
+    expect(inv.get('coal')).toBe(30);
+    expect(reports[0].text).toContain('炉火读数正在燃烧');
   });
 
   it.each([0, 3])('输入槽实际只接受 %i 件:不把请求的八件写成已入槽', async (inputLimit) => {

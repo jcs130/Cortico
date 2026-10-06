@@ -1391,6 +1391,26 @@ export async function skillSmelt(
       try {
         await furnace.putFuel(fuelItem.type, fuelItem.metadata ?? null, fuelUse);
         await show.beat('click');
+        // Mineflayer may expose a predicted fuel slot before the server rolls it back.
+        const fuelSettleAt = Date.now() + WINDOW_SETTLE_MS;
+        const fuelDeadline = Date.now() + WINDOW_SETTLE_MS * 2;
+        while (Date.now() < fuelDeadline && (Date.now() < fuelSettleAt
+          || (!furnace.fuelItem() && !(furnace.fuel > 0)))) {
+          checkAbort(ctx);
+          await sleep(50);
+        }
+        if (!furnace.fuelItem() && !(furnace.fuel > 0)) {
+          ctx.diag?.write({
+            lane: 'craft', event: 'smelt-fuel-unconfirmed', taskId: ctx.taskId,
+            msg: `${where}:未确认燃料${zhName(fuelItem.name)}入槽，本次原料未投入`,
+            data: { at: atLog, requestedFuel: fuelItem.name, fuelUse,
+              input: furnace.inputItem() ?? null, fuel: furnace.fuelItem() ?? null, fuelLevel: furnace.fuel },
+          });
+          throw new SkillBlocked(`${station}${where}燃料槽未读到指定的${zhName(fuelItem.name)}，炉火未起。`
+            + `本次未放入${zhName(input.name)}，原有炉内物品保留。`
+            + '先核对该物品能否作为这座炉子的燃料及窗口回执，再选择下一步；没有证据表明只是燃料数量不够',
+          [], 'server', 'target-not-ready');
+        }
         await furnace.putInput(input.type, input.metadata ?? null, want);
         // 炉火点起来在画面上亮一拍再关窗
         await show.beat('result');
@@ -1404,7 +1424,7 @@ export async function skillSmelt(
           await sleep(50);
         }
       } catch (err) {
-        if (err instanceof Aborted) throw err;
+        if (err instanceof Aborted || err instanceof SkillBlocked) throw err;
         throw new SkillBlocked(`往${where}里放东西失败: ${zhErrorText((err as Error).message)}`);
       }
     } finally {
@@ -1434,7 +1454,9 @@ export async function skillSmelt(
     throw new SkillBlocked(`${station}往${where}下料后读到:${slots}。输入槽未确认接收${zhName(input.name)},也没有新产物;未完成下料`);
   }
   if (!loaded.fuel && !(loaded.fuelLevel > 0) && !outputAdvanced) {
-    throw new SkillBlocked(`${station}往${where}下料后读到:${slots}。燃料槽为空且炉火未起,没有新产物;未点火。原料仍在炉里,可点名 take 的 item+count 收回`);
+    throw new SkillBlocked(`${station}往${where}下料后读到:${slots}。燃料槽为空且炉火未起,没有新产物;未点火。`
+      + `指定燃料${zhName(fuelItem.name)}未确认生效，先核对燃料用法和窗口回执。原料仍在炉里,可点名 take 的 item+count 收回`,
+    [], 'server', 'target-not-ready');
   }
   if (!(loaded.progress > 0) && !outputAdvanced) {
     throw new SkillBlocked(`${station}在${where}下料后读到:${staleNote}${slots}。${burning},${progress}。`
