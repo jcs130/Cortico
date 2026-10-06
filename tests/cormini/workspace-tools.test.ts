@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Cormini } from '../../bots/cormini/persona/persona.ts';
 import { globToRegExp } from '../../bots/cormini/persona/memory.ts';
-import { READ_FILE_DEFAULT_LINES, workspaceTools } from '../../bots/cormini/persona/workspaceTools.ts';
+import { READ_FILE_DEFAULT_CHARS, READ_FILE_DEFAULT_LINES, workspaceTools } from '../../bots/cormini/persona/workspaceTools.ts';
 import { nullLogger } from '../../src/core/util.ts';
 
 
@@ -66,6 +66,48 @@ describe('read_file:短文件与长文件分页', () => {
     expect(whole.split('\n')[0]).not.toContain('offset=');
     const tail = await run('read_file', { path: 'long.md', offset: -2 });
     expect(tail.split('\n').slice(1)).toEqual(lines.slice(-2));
+  });
+
+  it('长行与多行按字符分页,接续偏移完整恢复 Unicode 正文', async () => {
+    const lines = ['开头', '🌸汉字'.repeat(READ_FILE_DEFAULT_CHARS), '', '结尾'];
+    put('wide.md', lines.join('\n'));
+    let offset = 1;
+    let column = 1;
+    const recovered = new Map<number, string>();
+    let pages = 0;
+    while (true) {
+      const page = await run('read_file', { path: 'wide.md', offset, column });
+      const [header, ...body] = page.split('\n');
+      expect(Array.from(body.join('\n')).length).toBeLessThanOrEqual(READ_FILE_DEFAULT_CHARS);
+      body.forEach((text, index) => recovered.set(offset + index, (recovered.get(offset + index) ?? '') + text));
+      const next = header.match(/后续从 offset=(\d+)(?:, column=(\d+))?/);
+      pages++;
+      if (!next) break;
+      offset = Number(next[1]);
+      column = Number(next[2] ?? 1);
+    }
+    expect([...recovered.values()]).toEqual(lines);
+    expect(pages).toBeGreaterThan(2);
+    expect(disk('wide.md')).toBe(lines.join('\n'));
+  });
+
+  it('不足默认行数的密集正文也分页,显式字符预算可读取整段', async () => {
+    const content = Array.from({ length: 80 }, (_, index) => `${index}: ${'资料'.repeat(80)}`).join('\n');
+    put('dense.md', content);
+    const page = await run('read_file', { path: 'dense.md' });
+    const [header, ...body] = page.split('\n');
+    expect(Array.from(body.join('\n')).length).toBeLessThanOrEqual(READ_FILE_DEFAULT_CHARS);
+    expect(header).toContain('后续从 offset=');
+    expect(await run('read_file', { path: 'dense.md', max_chars: Array.from(content).length })).toBe(content);
+  });
+
+  it('行尾恰好用完预算时接续下一行,负 offset 与列偏移仍可定位', async () => {
+    put('edge.md', '🌸🌸\n\n尾巴');
+    expect(await run('read_file', { path: 'edge.md', max_chars: 2 }))
+      .toBe('[edge.md 第 1-1 行,共 3 行;后续从 offset=2 继续读取]\n🌸🌸');
+    expect(await run('read_file', { path: 'edge.md', offset: -1, column: 2 }))
+      .toBe('[edge.md 第 3-3 行,共 3 行;首行从 column=2 开始]\n巴');
+    expect(await run('read_file', { path: 'edge.md', offset: 3, column: 8 })).toContain('没有 column=8');
   });
 
   it('虚拟文件也能分页读取', async () => {

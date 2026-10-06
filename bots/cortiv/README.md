@@ -50,7 +50,7 @@ Memory 使用工作区文件，由 [Persona](persona/persona.ts) 管理。
 | 功能 | 行为 |
 |---|---|
 | 观众档案 | `viewers/<来源>/<数字ID>.md`，首行为摘要。同一 `senderKey` 在当前上下文窗口首次出现时，档案首行与外部事件同批注入。交接清除已唤起记录，热重启保留；没有稳定身份键的事件不触发档案召回。后台整理追加档案时同时更新首行摘要。 |
-| 工作区工具 | 基类提供 `read_file`（支持行区间）、`write_file`、`edit_file`、`delete_file`、`list_files`、`glob_files`、`grep_files`；另外提供 `append_file`、`git_log`、`git_show`、`recall_viewer`。文件修改成功后尝试提交工作区 Git，使用 Persona 署名；提交失败保留已写文件并报告错误。 |
+| 工作区工具 | 基类提供 `read_file`（默认每页最多 200 行、6000 字符，`offset` 和 `column` 接续正文，`limit` 与 `max_chars` 可显式扩大范围）、`write_file`、`edit_file`、`delete_file`、`list_files`、`glob_files`、`grep_files`；另外提供 `append_file`、`git_log`、`git_show`、`recall_viewer`。文件修改成功后尝试提交工作区 Git，使用 Persona 署名；提交失败保留已写文件并报告错误。 |
 | 主动召回 | `recall_viewer` 按来源/id 或名字查询档案；带 `query` 时返回档案首行和最多三条带时间、事件编号的旧观众原文。自动召回提供首行及有界旧发言节选；事件正文不附加身份 id。 |
 | 目录列表 | 前缀将 `viewers/` 与 `handoffs/` 显示为文件计数。`list_files` 指定目录时列出全部条目；默认列表的各子目录最多展示十项并统计其余条目。前缀提示使用 `recall_viewer` 读取档案。 |
 | 上下文阈值 | 批末估算 token 超过 `context.maxTokens * context.softRatio` 时，首次注入记录提醒；提醒后再次在批末超过阈值才请求交接。交接后复位提醒状态。Core 另按模型 token 上限执行强制交接。 |

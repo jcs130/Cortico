@@ -13,6 +13,8 @@ import { BLOBS_DIR, LIST_DIR_CAP, globToRegExp, memHandle, type GitWorkspaceMemo
 const GLOB_LIMIT = 100;
 /** `read_file` 缺省交回的行数；回执给出后续区间的起点。 */
 export const READ_FILE_DEFAULT_LINES = 200;
+/** `read_file` 缺省正文字符预算；字符按 Unicode 码点计数。 */
+export const READ_FILE_DEFAULT_CHARS = 6000;
 /** `grep_files` 缺省最多交回的命中行(或文件)数。 */
 const GREP_DEFAULT_LIMIT = 50;
 /** `grep_files` 每行交回的最大字符数,更长的截断。 */
@@ -44,8 +46,8 @@ export interface WorkspaceHost {
 function readTool(host: WorkspaceHost): ToolDef {
   return {
     name: 'read_file',
-    description: `Read a file from your workspace, up to ${READ_FILE_DEFAULT_LINES} lines by default. `
-      + 'Long files include the next offset; use grep_files to locate relevant passages, then offset and limit to read them. '
+    description: `Read a file from your workspace, up to ${READ_FILE_DEFAULT_LINES} lines and ${READ_FILE_DEFAULT_CHARS} text characters by default. `
+      + 'Partial reads include the next offset and, within a line, column. Use grep_files to locate relevant passages, then read that range. '
       + 'A negative offset counts from the end, so offset -20 reads the last 20 lines.',
     tags: ['read'],
     parameters: {
@@ -54,6 +56,8 @@ function readTool(host: WorkspaceHost): ToolDef {
         path: { type: 'string', description: 'Path relative to your workspace.' },
         offset: { type: 'integer', description: 'First line to read, 1-indexed. Negative counts from the end (-1 is the last line). Omit to start at the top.' },
         limit: { type: 'integer', description: `How many lines to read. Defaults to ${READ_FILE_DEFAULT_LINES}; give a larger value when needed.` },
+        column: { type: 'integer', description: 'First character in the starting line, 1-indexed Unicode characters. Use the continuation column for a partially read line; defaults to 1.' },
+        max_chars: { type: 'integer', description: `Maximum text characters in this read, excluding the header. Defaults to ${READ_FILE_DEFAULT_CHARS}; increase explicitly when a larger passage is needed.` },
       },
       required: ['path'],
     },
@@ -75,16 +79,42 @@ function readTool(host: WorkspaceHost): ToolDef {
       }
       const offset = intArg(args.offset);
       const limit = intArg(args.limit);
+      const column = Math.max(1, intArg(args.column) ?? 1);
+      const maxChars = Math.max(1, intArg(args.max_chars) ?? READ_FILE_DEFAULT_CHARS);
       const lines = text.split('\n');
       const total = text === '' ? 0 : text.endsWith('\n') ? lines.length - 1 : lines.length;
-      if (offset === undefined && limit === undefined && total <= READ_FILE_DEFAULT_LINES) return text;
+      if (offset === undefined && limit === undefined && args.column === undefined
+        && total <= READ_FILE_DEFAULT_LINES && Array.from(text).length <= maxChars) return text;
       if (total === 0) return `[${path} 是空文件]`;
       let start = offset === undefined || offset === 0 ? 1 : offset > 0 ? offset : total + offset + 1;
       if (start < 1) start = 1;
       if (start > total) return `[${path} 共 ${total} 行,没有第 ${start} 行]`;
-      const end = Math.min(total, start + Math.max(limit ?? READ_FILE_DEFAULT_LINES, 1) - 1);
-      const continuation = end < total ? `;后续从 offset=${end + 1} 继续读取` : '';
-      return `[${path} 第 ${start}-${end} 行,共 ${total} 行${continuation}]\n${lines.slice(start - 1, end).join('\n')}`;
+      const wantedEnd = Math.min(total, start + Math.max(limit ?? READ_FILE_DEFAULT_LINES, 1) - 1);
+      const chunks: string[] = [];
+      let remaining = maxChars;
+      let end = start;
+      let partialColumn: number | null = null;
+      for (let line = start; line <= wantedEnd; line++) {
+        const points = Array.from(lines[line - 1]);
+        const from = line === start ? column - 1 : 0;
+        if (from > points.length) return `[${path} 第 ${line} 行共 ${points.length} 字符,没有 column=${column}]`;
+        const separator = chunks.length ? 1 : 0;
+        const available = remaining - separator;
+        if (available < 0 || (available === 0 && from < points.length)) break;
+        const count = Math.min(points.length - from, available);
+        chunks.push(points.slice(from, from + count).join(''));
+        remaining -= separator + count;
+        end = line;
+        if (from + count < points.length) {
+          partialColumn = from + count + 1;
+          break;
+        }
+      }
+      const continuation = partialColumn !== null
+        ? `;末行未读完,后续从 offset=${end}, column=${partialColumn} 继续读取`
+        : end < total ? `;后续从 offset=${end + 1} 继续读取` : '';
+      const firstColumn = column > 1 ? `;首行从 column=${column} 开始` : '';
+      return `[${path} 第 ${start}-${end} 行,共 ${total} 行${firstColumn}${continuation}]\n${chunks.join('\n')}`;
     },
   };
 }
