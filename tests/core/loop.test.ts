@@ -2640,7 +2640,7 @@ describe('MainLoop 工具调用流水', () => {
     expect(contexts).toEqual([{ role: 'main', tool: 'act', args: { at: [1, 2, 3] }, outcome: original }]);
     const receipt = rig.session.records.find(record => record.item.type === 'function_call_output'
       && record.item.call_id === 'explained')!;
-    expect(receipt.item).toMatchObject({ output: expect.stringMatching(/^实际失败，进展以现场为准\n\[反思\] 核对失败前提\n\[blob log:[^\]]+ image\/png\] 现场图片$/) });
+    expect(receipt.item).toMatchObject({ output: expect.stringMatching(/^\[tool failed\] 实际失败，进展以现场为准\n\[反思\] 核对失败前提\n\[blob log:[^\]]+ image\/png\] 现场图片$/) });
     expect(receipt.context?.blobs).toHaveLength(1);
     expect(s.rows()[0]).toMatchObject({ receipt: original.text, failed: true, blobs: 1 });
     expect(original.text).toBe('实际失败，进展以现场为准');
@@ -2661,7 +2661,7 @@ describe('MainLoop 工具调用流水', () => {
     await until(() => rig.session.messages.some(m => m.tool_call_id === 'untouched'));
     await sleep(30);
     expect(rig.llm.calls).toHaveLength(before + 1);
-    expect(rig.session.messages.find(m => m.tool_call_id === 'untouched')?.content).toBe('Original.\n');
+    expect(rig.session.messages.find(m => m.tool_call_id === 'untouched')?.content).toBe('[tool failed] Original.\n');
     expect(s.rows()[0]).toMatchObject({ receipt: 'Original.\n', failed: true });
     assertPairing(rig.session.messages);
     s.tmp.cleanup();

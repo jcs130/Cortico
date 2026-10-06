@@ -1,7 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { explainToolOutcome } from '../../src/core/tool-outcome.ts';
+import { explainToolOutcome, toolOutcomeText } from '../../src/core/tool-outcome.ts';
 import type { ToolOutcome } from '../../src/core/types.ts';
 import { nullLogger } from '../../src/core/util.ts';
+import { toolFailed } from '../../src/core/markers.ts';
+
+describe('model-visible tool outcome', () => {
+  it('retains structured failure in text without changing the original outcome', () => {
+    const outcome = { text: 'Not accepted; existing work continues.', failed: true as const, endsTurn: true as const };
+    const original = structuredClone(outcome);
+    expect(toolOutcomeText(outcome)).toBe(toolFailed(outcome.text));
+    expect(outcome).toEqual(original);
+    expect(toolOutcomeText({ text: toolFailed('handler error'), failed: true })).toBe(toolFailed('handler error'));
+    expect(toolOutcomeText({ text: 'Accepted; execution is pending.' })).toBe('Accepted; execution is pending.');
+  });
+});
 
 describe('Persona synchronous tool explanations', () => {
   const outcome: ToolOutcome = { text: 'Actual result.', failed: true, endsTurn: true,

@@ -1,5 +1,5 @@
 import type { ForkOptions, Logger, ModelSpec, Persona, ToolCallContext, ToolDef } from './types.ts';
-import { explainToolOutcome } from './tool-outcome.ts';
+import { explainToolOutcome, toolOutcomeText } from './tool-outcome.ts';
 import type { SessionHandle } from './sessions.ts';
 import { message, functionResult, responseRecords, type ContextRecord } from '../protocol/open-responses/context.ts';
 import { responseRequest, textOf } from '../protocol/open-responses/context-helpers.ts';
@@ -139,7 +139,7 @@ export async function runForkLoop(opts: ForkLoopOptions): Promise<string> {
           const result = await def.handler(args, { ...ctx, callId: call.call_id });
           const outcome = typeof result === 'string' ? { text: result } : result;
           ended = def.endsTurn === true || outcome.endsTurn === true;
-          out = explainToolOutcome(opts.onToolOutcome, { role: id, tool: call.name, args, outcome }, log).text;
+          out = toolOutcomeText(explainToolOutcome(opts.onToolOutcome, { role: id, tool: call.name, args, outcome }, log));
         } catch (error) { out = toolFailed(error instanceof Error ? error.message : String(error)); }
         if (def.barrierAfter) barrier = true;
       }

@@ -117,7 +117,7 @@ describe('Core.spawnFork provider and cancellation', () => {
     const summary = core.sessions.list().find(session => session.role === 'analysis')!;
     const items = core.sessions.messages(summary.id)!.map(record => record.item);
     expect(items).toContainEqual(expect.objectContaining({ type: 'function_call_output',
-      call_id: 'first', output: 'Unchanged target.' }));
+      call_id: 'first', output: '[tool failed] Unchanged target.' }));
     expect(items).toContainEqual(expect.objectContaining({ type: 'function_call_output',
       call_id: 'second', output: NOT_EXECUTED_THREAD_ENDED }));
     expect(api.sessionInfo('analysis').running).toBe(0);
@@ -144,7 +144,7 @@ describe('Core.spawnFork provider and cancellation', () => {
     const session = core.sessions.list().find(entry => entry.role === 'analysis')!;
     const items = core.sessions.messages(session.id)!.map(record => record.item);
     expect(items).toContainEqual(expect.objectContaining({ type: 'function_call_output', call_id: 'first',
-      output: 'Actual failure.\nPersona explanation.' }));
+      output: '[tool failed] Actual failure.\nPersona explanation.' }));
     expect(items).toContainEqual(expect.objectContaining({ type: 'function_call_output', call_id: 'second', output: NOT_EXECUTED_THREAD_ENDED }));
   });
 

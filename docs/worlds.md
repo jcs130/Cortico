@@ -52,6 +52,7 @@ World 应通过事件报告服务器起停、存档切换、连接变化等状�
 外部消息使用 `origin: 'external'`。
 
 工具回执 `ToolOutcome { text, blobs?, failed?, endsTurn? }`;handler 抛错由 Core 转成失败回执。
+`failed:true` 的模型回执带 `[tool failed]` 协议标记，主循环与后台调用相同；原工具日志保留 handler 正文。
 工具声明或执行回执的 `endsTurn` 结束当前唤醒，保留后续事件和 World 中已受理的任务；
 `barrierAfter` 让流式提前派发在它之后停下。跨进程 World 须在回执中保留这些控制字段。
 工具名在一个 bot 内全局唯一:模型按名字调用,Core 按名字归属与隐藏。用自家短名做前缀

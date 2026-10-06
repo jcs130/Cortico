@@ -228,7 +228,7 @@ export interface ToolCallContext {
 export interface ToolOutcome {
   text: string;
   blobs?: BlobInput[];
-  /** 执行失败；工具调用记录据此标记 failed。 */
+  /** 执行失败；原工具日志标记 failed，模型回执附加 [tool failed] 协议标记。 */
   failed?: true;
   /** 本次工具结果足以结束当前唤醒；下一批事件可重新唤醒。 */
   endsTurn?: true;

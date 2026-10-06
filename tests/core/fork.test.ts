@@ -49,6 +49,16 @@ function toolTexts(seen: ChatMessage[][]): string[] {
 }
 
 describe('runForkLoop 回合契约', () => {
+  it('passes a returned failure to the next model request with its protocol marker', async () => {
+    const llm = new ScriptedLLM(1);
+    const outcome = { text: 'Target unavailable; nothing changed.', failed: true as const };
+    await runForkLoop({ id: 'review', llm, spec: SPEC,
+      messages: [{ role: 'user', content: 'Check the target.' }],
+      tools: [{ ...touch, handler: async () => outcome }], maxRounds: 4, log: nullLogger() });
+    expect(toolTexts(llm.seen)).toEqual(['[tool failed] Target unavailable; nothing changed.']);
+    expect(outcome.text).toBe('Target unavailable; nothing changed.');
+  });
+
   it('输出上限截在推理阶段时继续下一轮，直到拿到完成响应', async () => {
     const requests: string[] = [];
     const llm: ResponseClient = {

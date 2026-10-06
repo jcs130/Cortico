@@ -44,7 +44,7 @@ import type { CoreState } from './state.ts';
 import type { SessionHandle, SessionTracker } from './sessions.ts';
 import { assembleSystem, type EnvPromptDirs } from './prefix.ts';
 import { recordToolCall, type ToolCallLog } from './tool-log.ts';
-import { explainToolOutcome } from './tool-outcome.ts';
+import { explainToolOutcome, toolOutcomeText } from './tool-outcome.ts';
 import type { Transcript } from './transcript.ts';
 import { setAnchors, withAnchors } from './log-context.ts';
 import { withBlobLines } from './blobs.ts';
@@ -476,7 +476,7 @@ export class MainLoop {
   /** 工具回执落库:附件内部化,每份的文本形态接在正文后。 */
   private toolResult(callId: string, out: ToolOutcome): ContextRecord {
     const blobs = this.d.blobs.intern(out.blobs);
-    let text = withBlobLines(out.text, blobs);
+    let text = withBlobLines(toolOutcomeText(out), blobs);
     if (text.length > RECEIPT_HARD_CAP_CHARS) {
       text = text.slice(0, RECEIPT_HARD_CAP_CHARS)
         + `\n…[回执 ${text.length} 字符,截断至 ${RECEIPT_HARD_CAP_CHARS};完整内容请重调工具或查 World 账本]`;
