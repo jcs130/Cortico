@@ -150,7 +150,8 @@ export class ActivityAgenda {
   summary(): string {
     const active = this.ledger.items.find(item => item.status === 'active');
     const next = this.ledger.items.filter(item => item.status === 'queued');
-    const deferred = this.ledger.items.filter(item => item.status === 'deferred');
+    const deferred = this.ledger.items.filter(item => item.status === 'deferred')
+      .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
     const done = this.ledger.items.filter(item => item.status === 'done').length;
     const draft = this.ledger.proposal;
     const lines = ['[活动日程；意图与执行结果分别记录]',
@@ -160,6 +161,7 @@ export class ActivityAgenda {
           : '当前没有未完成阶段；完成记录是历史。结合长期目标和现场选择新阶段，可 review 异步请求候选，期间独立行动可以继续。',
       ...next.map(item => `候选 id=${JSON.stringify(item.id)} ${clip(item.title, 80)}`),
       ...(deferred.length ? ['挂起阶段仅在新条件出现后复核，read 可查恢复条件；其他可行活动可以继续。'] : []),
+      ...deferred.map(item => `挂起 id=${JSON.stringify(item.id)} ${clip(item.title, 50)}；${item.updatedAt} 记录的依据：${clip(item.note, 100)}；新观察是否改变条件须核验。`),
       ...(draft ? [`后台候选采样于 ${draft.capturedAt}，${draft.baseRevision === this.ledger.revision ? '待核验采用' : '整份已落后于当前进展'}：${draft.items.map(item => `${JSON.stringify(item.id)} ${clip(item.title, 60)}`).join('；')}。read 核验后可 adopt 指定一项，不改现有进展；整份过期则 review。`] : []),
       '阶段变化用 activity_plan update 留证据；详情和资料按需 read；日程不阻止交流、应急和新的选择。'];
     const result = lines.join('\n');

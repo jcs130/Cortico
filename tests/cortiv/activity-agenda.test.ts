@@ -173,6 +173,43 @@ describe('persistent Persona activity agenda', () => {
     expect(detail.interpretation).toContain('不是当前现场读数');
     expect(detail.items).toMatchObject([{ id: 'river', status: 'deferred', note: '等同伴确认时间，其余活动照常' }]);
   });
+  it('restored deferred intentions expose their dated blocker without a background proposal or automatic resumption', () => {
+    const { dir, agenda } = rig(); adopt(agenda);
+    agenda.operate({ operation: 'update', id: 'river', status: 'deferred', note: '食物不足，获得返程补给后复核' });
+    const restored = new ActivityAgenda(dir, now);
+    const before = restored.state();
+    const summary = restored.summary();
+    expect(summary).toContain('挂起 id="river" 沿河探索');
+    expect(summary).toContain(`${stamp} 记录的依据：食物不足，获得返程补给后复核`);
+    expect(summary).toContain('新观察是否改变条件须核验');
+    expect(restored.state()).toEqual(before);
+    expect(before.proposal).toBeNull();
+    expect(before.items.find(item => item.id === 'river')?.status).toBe('deferred');
+  });
+  it('a bounded context places the newest deferred evidence before oversized background candidates', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cortiv-agenda-')); dirs.push(dir);
+    let clock = now();
+    const agenda = new ActivityAgenda(dir, () => clock);
+    adopt(agenda, { ...plan(), items: Array.from({ length: AGENDA_MAX_ITEMS }, (_, index) => ({
+      ...plan().items[1], id: `stage-${index}`, title: `探索阶段${index}`,
+    })) });
+    for (let index = 0; index < AGENDA_MAX_ITEMS; index++) {
+      clock += 1000;
+      agenda.operate({ operation: 'update', id: `stage-${index}`, status: 'deferred',
+        note: index === AGENDA_MAX_ITEMS - 1 ? '桥未连接，接通后可以复核' : '此前观察的障碍'.repeat(20) });
+    }
+    agenda.propose(JSON.stringify({ ...plan(), items: Array.from({ length: AGENDA_MAX_ITEMS }, (_, index) => ({
+      ...plan().items[1], id: `candidate-${index}`, title: '后台候选活动标题'.repeat(12),
+    })) }), 0, stamp);
+    const summary = agenda.summary();
+    expect(summary.length).toBeLessThanOrEqual(AGENDA_SUMMARY_MAX_CHARS);
+    expect(summary).toContain(`挂起 id="stage-${AGENDA_MAX_ITEMS - 1}"`);
+    expect(summary).toContain('桥未连接，接通后可以复核');
+    expect(summary).toContain(new Date(clock).toISOString());
+    expect(summary.indexOf(`"stage-${AGENDA_MAX_ITEMS - 1}"`)).toBeLessThan(summary.indexOf('"stage-0"') < 0
+      ? summary.length : summary.indexOf('"stage-0"'));
+    expect(JSON.parse(agenda.operate({ operation: 'read' })).items).toHaveLength(AGENDA_MAX_ITEMS);
+  });
   it('fresh candidate preserves stable objective evidence; focus never reopens a completed phase', () => {
     const { agenda } = rig(); adopt(agenda);
     agenda.operate({ operation: 'update', id: 'finish-home', status: 'done', note: '通行验收通过' });
@@ -233,5 +270,20 @@ describe('persistent Persona activity agenda', () => {
     expect(view!.map(record => itemText(record.item)).join('\n')).toContain('沿河探索');
     expect((persona as unknown as { writeGuard: (operation: 'write', path: string, role: string) => string | null })
       .writeGuard('write', AGENDA_FILE, 'main')).toContain('activity_plan');
+  });
+  it('short foreground requests retain a deferred goal and its resumption evidence after Persona restoration', () => {
+    const { dir, agenda } = rig(); adopt(agenda);
+    agenda.operate({ operation: 'focus', id: 'finish-home' });
+    agenda.operate({ operation: 'update', id: 'river', status: 'deferred', note: '缺少返程口粮，补足后复核' });
+    const persona = new CortiV({ memoryDir: dir, tickDelayMs: () => null,
+      foreground: () => ({ ...FOREGROUND_CONTEXT_DEFAULTS, enabled: true }) });
+    persona.attach(makeFakeHarnessApi());
+    const view = persona.prepareRequest({ sessionId: 'main', round: 1, messages: [message('user', '补给已经到手')] });
+    const context = view!.map(record => itemText(record.item)).join('\n');
+    expect(context).toContain('挂起 id="river" 沿河探索');
+    expect(context).toContain('缺少返程口粮，补足后复核');
+    expect(context).toContain(stamp);
+    expect(context).toContain('改善入口');
+    expect(new ActivityAgenda(dir, now).state().items.find(item => item.id === 'river')?.status).toBe('deferred');
   });
 });
