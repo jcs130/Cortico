@@ -423,15 +423,8 @@ export class Bridge {
     bot.on('death', () => { if (this._bot === bot && this.generation === gen) this.agentMana = null; });
     const protectionBackoff = new NearbyProtectionBackoff();
     let releaseProtectionWalk: (() => void) | null = null;
-    let releaseDistantWalk: (() => void) | null = null;
     type HeldPathAction = { action: ProtectAction; cell: ProtectCell; dimension: string; key: string; querying: boolean };
     let heldPathAction: HeldPathAction | null = null;
-    const endDistantWalk = (): void => {
-      if (!releaseDistantWalk) return;
-      releaseDistantWalk();
-      releaseDistantWalk = null;
-      scheduleProtectionReplan();
-    };
     const scheduleProtectionReplan = (): void => {
       if (this.aclReplanTimer) return;
       this.aclReplanTimer = setTimeout(() => {
@@ -446,12 +439,8 @@ export class Bridge {
       const pos = bot.entity?.position;
       const distance = pos ? Math.hypot(pos.x - gate.cell.x, pos.y - gate.cell.y, pos.z - gate.cell.z) : Infinity;
       // 服务端只接受 16 格内的查询；远处节点绝不能试探性地得到 unknown 后触发重算。
-      // 先沿现有通路靠近，进入可查询范围再开放挖/放和逐格预检。
+      // 路径已截到改块动作之前；沿这个前缀靠近，不改变整条路线的移动规则。
       if (distance > 15) return;
-      if (releaseDistantWalk) {
-        endDistantWalk();
-        return;
-      }
       gate.querying = true;
       void protect.check(gate.action, gate.dimension, gate.cell).then(() => {
         if (heldPathAction === gate) {
@@ -525,7 +514,6 @@ export class Bridge {
       const protect = this.agentFriendProtection;
       const clearHeldRoute = (): void => {
         heldPathAction = null;
-        endDistantWalk();
       };
       bot.on('goal_updated', clearHeldRoute);
       bot.on('goal_reached', clearHeldRoute);
@@ -556,13 +544,11 @@ export class Bridge {
         }
         const distance = bot.entity.position.distanceTo(new Vec3(gate.cell.x, gate.cell.y, gate.cell.z));
         if (distance > 15) {
-          if (!releaseDistantWalk) {
-            releaseDistantWalk = walkOnlyPath(bot);
+          if (selected === candidate) {
             this.opts.diag?.write({ lane: 'path', event: 'protection-distant-walk',
               msg: `前方 ${Math.round(distance)} 格才需改方块；先走现有通路，接近后再预检`,
               data: { action: gate.action, cell: gate.cell, safePrefix: gate.safePrefix },
             });
-            scheduleProtectionReplan();
           }
         } else {
           queryHeldAction();
@@ -619,8 +605,6 @@ export class Bridge {
       this.digFails.clear();
       this.agentFriendProtection = null;
       heldPathAction = null;
-      releaseDistantWalk?.();
-      releaseDistantWalk = null;
       releaseProtectionWalk?.();
       releaseProtectionWalk = null;
       const willReconnect = !this.stopped;
