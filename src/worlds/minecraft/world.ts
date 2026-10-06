@@ -7947,6 +7947,11 @@ export class MinecraftWorld implements World {
     const marks = mapSnapshotLine(this.markTable().list);
     const foodReserve = renderFoodReserveReadout(snap.inventory,
       this.bridge?.bot?.registry?.foodsByName ?? {}, snap.invSynced === true, zhName);
+    const spawn = this.personalSpawn;
+    const respawn = spawn
+      ? `个人重生点：[${zhDimension(spawn.dimension)}] (${Math.round(spawn.x)}, ${Math.round(spawn.y)}, ${Math.round(spawn.z)})，来源 ${spawn.source}。`
+      : spawn === null ? '个人重生点已确认失效，重生落点由服务端决定。'
+        : '个人重生点尚未核实；未核实不表示没有重生点。';
     const anchorDue = this.snapshotBaseline === null
       || this.snapshotAnchorPending
       || now - this.lastSnapshotFullAt >= this.cfg.world.snapshotAnchorSec * 1000;
@@ -7955,6 +7960,7 @@ export class MinecraftWorld implements World {
       // 位置相对路标的描述参与 place 段比对。背包相对上一份已发快照只报变化，
       // 全量锚则报告完整背包。
       ...narrateWorldSegments(snap, near, anchorDue ? null : this.snapshotBagBase),
+      { key: 'respawn' as const, text: respawn, cmp: respawn },
       { key: 'queue' as const, text: queue, cmp: queue },
       { key: 'goals' as const, text: goals, cmp: goals },
       { key: 'marks' as const, text: marks, cmp: marks },
@@ -7965,7 +7971,8 @@ export class MinecraftWorld implements World {
     const fullSegments = anchorDue ? segs : [
       ...narrateWorldSegments(snap, near, null),
       ...segs.filter((segment) => segment.key === 'queue'
-        || segment.key === 'goals' || segment.key === 'marks' || segment.key === 'foodReserve'),
+        || segment.key === 'goals' || segment.key === 'marks' || segment.key === 'foodReserve'
+        || segment.key === 'respawn'),
     ];
     const parts = [{ key: 'sample', text: `[Minecraft 当前读数；采样 ${snap.realTime}]` },
       ...fullSegments.map(({ key, text }) => ({ key, text })),

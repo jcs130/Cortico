@@ -4695,6 +4695,27 @@ describe('地点相对化(回执侧、事实措辞)', () => {
     expect(render()).toContain('包里有：橡木原木×3、面包×2。');
   });
 
+  it('重生点三种状态进入当前事实，变化时更新快照且不丢失未核实状态', () => {
+    const m = new MinecraftWorld({ cfg: cfg({ port: 1 }) });
+    const bot = idleBot();
+    stub(m, { host: new FakeHost(), bridge: { connected: true, bot, invSynced: true } });
+    const render = () => { (m as any).lastSnapshotRenderAt = 0; return (m as any).renderSnapshotEvent(); };
+    expect(render()).toContain('个人重生点尚未核实');
+    const unknown = m.requestFacts()!;
+    expect(unknown.parts?.find(part => part.key === 'respawn')?.text).toContain('未核实不表示没有重生点');
+    expect(render()).toBeNull();
+    (m as any).setPersonalSpawn({ x: 12, y: 64, z: -3, dimension: 'minecraft:overworld', source: 'bed' }, 'set_spawn');
+    expect(render()).toContain('个人重生点：[主世界] (12, 64, -3)');
+    expect(m.requestFacts()?.text).not.toContain('个人重生点尚未核实');
+    (m as any).setPersonalSpawn(null, 'spawnReset');
+    expect(render()).toContain('个人重生点已确认失效');
+    expect(m.requestFacts()?.text).not.toContain('个人重生点：[主世界]');
+    (m as any).setPersonalSpawn(undefined, 'spawn', { announce: false });
+    expect(render()).toContain('个人重生点尚未核实');
+    expect(m.requestFacts()?.text).not.toContain('个人重生点已确认失效');
+    expect(unknown.parts?.find(part => part.key === 'respawn')?.text).toContain('个人重生点尚未核实');
+  });
+
   it('请求事实立即保留真实执行终态，不等待下次快照或依赖被裁剪的任务事件', () => {
     const m = new MinecraftWorld({ cfg: cfg({ port: 1 }) });
     const bot = idleBot();
