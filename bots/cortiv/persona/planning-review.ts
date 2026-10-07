@@ -299,7 +299,7 @@ export class PeriodicPlanningReview {
         this.activities.splice(i, 1);
       }
     }
-    if (!this.activities.length) return { accepted: false, reason: '近期没有可供复盘的活动记录' };
+    if (!question && !this.activities.length) return { accepted: false, reason: '近期没有可供复盘的活动记录' };
     const core = this.options.core;
     const generation = this.generation;
     const version = this.version;
@@ -341,7 +341,7 @@ export class PeriodicPlanningReview {
           messages: planningMessages({ ...material,
             agenda: this.options.agenda ? this.options.agenda.summary() + '\n'
               + this.options.agenda.planningReadout() : material.agenda,
-            activity: this.activities.map((activity) => activity.text).join('\n\n'), capturedAt,
+            activity: this.activities.map((activity) => activity.text).join('\n\n') || '(没有近期活动记录)', capturedAt,
           }, question ? Math.min(cfg.maxContextTokens, FOCUSED_CONTEXT_MAX_TOKENS) : cfg.maxContextTokens,
           agendaReview, question),
         })).trim();

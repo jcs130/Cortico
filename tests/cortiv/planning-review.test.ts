@@ -9,9 +9,9 @@ import definition, { CORTIV_PLANNING_CONFIG_GROUP, CORTIV_FAST_ATTENTION_CONFIG_
 import { coerceGroupValues, readGroupValues } from '../../src/core/config-schema.ts';
 import { TimerStore } from '../../src/core/timers.ts';
 import { nullLogger, estimateMessagesTokens } from '../../src/core/util.ts';
-import type { CoreApi, ForkOptions } from '../../src/core/types.ts';
+import type { CoreApi, EventEnvelope, ForkOptions } from '../../src/core/types.ts';
 import { message, functionCall, functionResult, itemText, type ContextRecord } from '../../src/protocol/open-responses/context.ts';
-import { makeFakeHarnessApi } from '../core/helpers.ts';
+import { makeFakeHarnessApi, makeFakeIO } from '../core/helpers.ts';
 import { ActivityAgenda } from '../../bots/cortiv/persona/activity-agenda.ts';
 
 const cleanup: Array<() => void> = [];
@@ -96,6 +96,16 @@ describe('Persona长期复盘', () => {
     r.reply(async () => candidate);
     expect(r.review.review().accepted).toBe(true);
     await vi.advanceTimersByTimeAsync(0);
+  });
+  it('定向复核可使用本批尚未进入会话的回执，缺少历史时明确记录缺口', async () => {
+    const r = rig(); r.snapshot([]);
+    expect(r.review.review().accepted).toBe(false);
+    expect(r.review.review('任务#3执行受阻：门已打开，目标平台仍未到达。').accepted).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    const input = r.forks[0].messages.map(record => itemText(record.item)).join('\n');
+    expect(input).toContain('目标平台仍未到达');
+    expect(input).toContain('没有近期活动记录');
+    expect(r.review.state().lastOutcome).toBe('completed');
   });
   it('新规划读取当前阶段证据，旧背景说明仍在账本中但不作为当前事实重复投递', async () => {
     const r = rig({ agendaEnabled: true });
@@ -435,6 +445,57 @@ describe('Persona长期复盘', () => {
     expect(await console.invoke!('planning', 'review', [{ question: '原假设是否符合回执？' }])).toMatchObject({ accepted: true });
     expect(forks).toHaveLength(2);
     finish('(nothing)'); await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it('受理后的重复执行受阻直接进入后台复核，包含本批终态与当前目标且不等待生成', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cortiv-task-review-'));
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+    const world = makeFakeIO('mymc');
+    world.requestFacts = () => ({ text: '当前位置y=68；目标是探索天然山峰，尚未登顶。', snapshotTypes: [] });
+    const forks: ForkOptions[] = [];
+    const injected: Array<{ text: string; kind?: string }> = [];
+    let finish!: (text: string) => void;
+    const gate = vi.fn();
+    const persona = new CortiV({ memoryDir: dir, worlds: [world], tickDelayMs: () => null,
+      planning: () => ({ ...PLANNING_DEFAULTS, enabled: true, provider: 'configured-planner' }) });
+    persona.attach({ ...makeFakeHarnessApi({
+      toolsTagged: tag => tag === 'act' ? new Set(['mymc_do']) : new Set(),
+      injectInternal: (text, kind) => { injected.push({ text, kind }); },
+    }),
+      deliveryGate: { set: gate, clear: gate, isBlocked: () => false },
+      sessionInfo: () => ({ id: 'main', running: 0, snapshot: [], estTokens: null, hardTokens: null }),
+      spawnFork: async options => { forks.push(options); return new Promise(resolve => { finish = resolve; }); } });
+    persona.startRhythm(); cleanup.push(() => persona.stopRhythm());
+    expect(persona.onToolOutcome({ role: 'main', tool: 'mymc_do', args: { steps: [] },
+      outcome: { text: '已受理任务#16，稍后报告执行终态。' } })).toBeNull();
+    const task: EventEnvelope = {
+      cursor: 13, ts: stamp(), source: 'mymc', type: 'mymc.task', origin: 'external',
+      text: '任务#16受阻：打开了门，但仍没到目标平台；现场y=68。',
+      meta: { repeatFailure: { taskId: 16, attempts: 2, scope: 'target', observation: 'changed' } },
+    };
+    await persona.onDelivery({ events: [task] });
+    expect(forks).toHaveLength(1);
+    const input = forks[0].messages.map(record => itemText(record.item)).join('\n');
+    expect(input).toContain(task.text);
+    expect(input).toContain(task.ts);
+    expect(input).toContain('游标13');
+    expect(input).toContain('探索天然山峰');
+    expect(input).toContain('现场采样有变化，整单仍未完成');
+    expect(forks[0].tools).toEqual([]);
+    expect(gate).not.toHaveBeenCalled();
+    expect(await persona.console().invoke!('planning', 'state', [])).toMatchObject({ running: true });
+    expect(injected.find(row => row.kind === 'reflection')?.text).toContain('已异步请求后台因果复核');
+    expect(injected.at(-1)?.text).toContain('外界事件原文');
+    await persona.onDelivery({ events: [task] });
+    expect(injected.filter(row => row.kind === 'reflection')).toHaveLength(1);
+    await persona.onDelivery({ events: [{ ...task, cursor: 14,
+      meta: { repeatFailure: { taskId: 17, attempts: 5, scope: 'target', observation: 'changed' } } }] });
+    expect(forks).toHaveLength(1);
+    expect(injected.filter(row => row.kind === 'reflection')).toHaveLength(2);
+    finish('门打开只证明入口变化；目标平台仍未到达。先核对平台和通路，再选一步验证。');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(injected.find(row => row.kind === 'causal_review')?.text).toContain('目标平台仍未到达');
+    expect(await persona.console().invoke!('planning', 'state', [])).toMatchObject({ running: false, lastOutcome: 'completed' });
   });
 
   it('owner配置默认关闭，provider引用和文件指针可热更，模型强度保留provider配置', () => {

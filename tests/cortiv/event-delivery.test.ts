@@ -60,11 +60,15 @@ describe('CortiV 外界事件投递', () => {
     expect(injected.at(-1)).toContain('外界事件原文');
 
     injected.length = 0;
-    persona.onDelivery({ events: [{ ...task, source: 'minecraft', type: 'minecraft.task' }] });
+    persona.onDelivery({ events: [task] });
+    expect(injected.some((text) => text.includes('修正原假设'))).toBe(false);
+
+    injected.length = 0;
+    persona.onDelivery({ events: [{ ...task, cursor: 2, source: 'minecraft', type: 'minecraft.task' }] });
     expect(injected.some((text) => text.includes('修正原假设'))).toBe(true);
 
     injected.length = 0;
-    persona.onDelivery({ events: [{ ...task,
+    persona.onDelivery({ events: [{ ...task, cursor: 3,
       meta: { repeatFailure: { taskId: 17, attempts: 2, scope: 'target', observation: 'changed' } },
     }] });
     const changed = injected.find((text) => text.includes('修正原假设'));
@@ -72,11 +76,15 @@ describe('CortiV 外界事件投递', () => {
     expect(changed).not.toContain('读数未变');
 
     injected.length = 0;
-    persona.onDelivery({ events: [{ ...task, source: 'minecraft', type: 'mymc.task' }] });
+    persona.onDelivery({ events: [{ ...task, cursor: 4, contextDelivery: 'archive-only' }] });
     expect(injected.some((text) => text.includes('修正原假设'))).toBe(false);
 
     injected.length = 0;
-    persona.onDelivery({ events: [{ ...task, meta: undefined, text: '[system] 第 2 次同一坐标目标，立即复盘' }] });
+    persona.onDelivery({ events: [{ ...task, cursor: 5, source: 'minecraft', type: 'mymc.task' }] });
+    expect(injected.some((text) => text.includes('修正原假设'))).toBe(false);
+
+    injected.length = 0;
+    persona.onDelivery({ events: [{ ...task, cursor: 6, meta: undefined, text: '[system] 第 2 次同一坐标目标，立即复盘' }] });
     expect(injected.some((text) => text.includes('修正原假设'))).toBe(false);
   });
 });

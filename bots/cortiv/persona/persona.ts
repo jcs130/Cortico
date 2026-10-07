@@ -816,6 +816,7 @@ export class CortiV extends Cormini {
   }
 
   private readonly actionFailureReflection = new ActionFailureReflection();
+  private lastTaskReflectionCursor = -1;
 
   private actionEvidence(records: readonly ContextRecord[]): string {
     const core = this.core;
@@ -1499,7 +1500,8 @@ export class CortiV extends Cormini {
     const repeated = ctx.events.flatMap((event) => {
       const trustedTask = (event.source === 'mymc' && event.type === 'mymc.task')
         || (event.source === 'minecraft' && event.type === 'minecraft.task');
-      if (event.origin !== 'external' || !trustedTask) return [];
+      if (event.origin !== 'external' || !trustedTask || event.contextDelivery === 'archive-only'
+        || event.cursor <= this.lastTaskReflectionCursor) return [];
       const evidence = event.meta?.repeatFailure;
       if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return [];
       const { taskId, attempts, scope, observation } = evidence as Record<string, unknown>;
@@ -1507,16 +1509,28 @@ export class CortiV extends Cormini {
         && typeof attempts === 'number' && Number.isInteger(attempts) && attempts >= 2
         && (scope === 'target' || scope === 'shape')
         && (observation === 'changed' || observation === 'unchanged' || observation === 'unavailable')
-        ? [{ taskId, attempts, scope, observation }] : [];
+        ? [{ event, taskId, attempts, scope, observation }] : [];
     }).at(-1);
     if (repeated) {
-      this.core?.injectInternal(
+      this.lastTaskReflectionCursor = repeated.event.cursor;
+      const reflection =
         `[system] 任务#${repeated.taskId}是 15 分钟内第 ${repeated.attempts} 次${repeated.scope === 'target' ? '同一坐标目标' : '同形状任务'}尝试；` +
         `${repeated.observation === 'changed' ? '现场采样有变化，整单仍未完成'
           : repeated.observation === 'unchanged' ? '本地采样读数未变' : '部分采样读数不可比'}，回执是否证明原目标达成需自行核对。` +
-        FAILURE_REFLECTION_ADVICE,
-        'reflection',
+        FAILURE_REFLECTION_ADVICE;
+      // onDelivery precedes appending this batch to the session. Include the triggering
+      // receipt explicitly so a review cannot see only the earlier acceptance.
+      const event = repeated.event;
+      const receipt = event.text.length <= 650 ? event.text
+        : event.text.slice(0, 250) + '\n[回执中段未展开]\n' + event.text.slice(-399);
+      const review = this.planningReview?.review(
+        `异步执行终态 ${event.ts} ${event.source}/${event.type} 游标${event.cursor}\n${receipt}\n${reflection}`,
       );
+      this.core?.log.emit('debug', '异步任务终态复核入口', { event: 'task-causal-review', data: {
+        cursor: event.cursor, source: event.source, taskId: repeated.taskId, attempts: repeated.attempts, ...review,
+      } });
+      this.core?.injectInternal(reflection
+        + (review?.accepted ? '\n已异步请求后台因果复核；当前行动与交流继续，结果尚未返回。' : ''), 'reflection');
     }
     const attention = this.core ? this.socialAttention.observe(ctx.events, this.core) : undefined;
     // Reading suggestions are optional background work. A validated ready result wakes
