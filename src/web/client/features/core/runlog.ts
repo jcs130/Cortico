@@ -2,10 +2,12 @@
  * 运行日志不进入 agent 上下文。/api/log?run&level&area&grep&round&limit 按条件从
  * log.jsonl 尾部查满 limit 条；run 默认当前运行，清单取自 /api/runs。
  * 文本输入去抖 300 ms，Enter 立即查询。
+ * 实时日志帧只在查看当前 run 时触发重查；重查在途时到达的帧合并成结束后的一次。
  */
 
 import type { ConsoleUi } from '../../../shared/client-panel.ts';
 import { get } from '../../core/api.ts';
+import { shouldStick } from '../../ui/index.ts';
 import { S } from './strings.ts';
 
 export interface RunlogEntry {
@@ -17,7 +19,7 @@ export interface RunlogEntry {
   /** 折叠汇总行代表的重复条数 */
   repeat?: number;
   data?: unknown;
-  err?: { name: string; message: string };
+  err?: { name: string; message: string; stack?: string };
 }
 
 interface RunRow {
@@ -34,6 +36,8 @@ const TAIL = 200;
 /** `data` 摘要最多印多少字。 */
 const DATA_MAX = 300;
 const DEBOUNCE_MS = 300;
+/** 距底多少像素之内仍算贴着底。 */
+const STICK_PX = 60;
 
 function truncate(s: string, n: number): string {
   return s && s.length > n ? `${s.slice(0, n)}…` : s;
@@ -49,12 +53,19 @@ export interface RunlogViewDeps {
 export interface RunlogView {
   el: HTMLElement;
   refresh(): Promise<void>;
+  /** 当前 run 写了新日志。 */
+  noteLive(): void;
 }
 
 export function createRunlogView(deps: RunlogViewDeps): RunlogView {
   const { ui } = deps;
   const q = { run: '', level: 'debug', area: '', grep: '', round: '' };
   let runsLoaded = false;
+  let currentRun = '';
+  /** 查询代号:只有最新一次查询的结果写表。 */
+  let generation = 0;
+  let busy = false;
+  let liveAgain = false;
   let debounce: ReturnType<typeof setTimeout> | null = null;
 
   const cancel = (): void => {
@@ -171,28 +182,49 @@ export function createRunlogView(deps: RunlogViewDeps): RunlogView {
     const keep = runs.some((r) => r.run === q.run) ? q.run : (d?.current ?? '');
     q.run = runs.some((r) => r.run === keep) ? keep : '';
     runSel.value = q.run;
+    currentRun = d?.current ?? '';
     runsLoaded = true;
   };
 
-  /** 正文格:msg,折叠计数,`data` 摘要,err.message 走警示色。 */
+  /** 展开着的行。重查后按这把键重新展开,跟随新日志时不被收起。 */
+  const openRows = new Set<string>();
+  const rowKey = (en: RunlogEntry): string => `${en.ts}|${en.area}|${en.event ?? ''}|${en.msg}`;
+
+  /** 正文格:msg,折叠计数,`data` 摘要,err.message 走警示色;带 data 或 err 的行可展开看全文与堆栈。 */
   const bodyCell = (en: RunlogEntry): HTMLElement => {
-    const box = ui.h('span');
-    box.appendChild(ui.h('span', null, en.msg));
-    if (en.repeat) box.appendChild(ui.h('span', 'data-extra', ` ×${en.repeat + 1}`));
+    const line = ui.h('span');
+    line.appendChild(ui.h('span', null, en.msg));
+    if (en.repeat) line.appendChild(ui.h('span', 'data-extra', ` ×${en.repeat + 1}`));
     if (en.data !== undefined) {
-      box.appendChild(ui.h('span', 'data-extra', ` ${truncate(JSON.stringify(en.data), DATA_MAX)}`));
+      line.appendChild(ui.h('span', 'data-extra', ` ${truncate(JSON.stringify(en.data), DATA_MAX)}`));
     }
-    if (en.err) box.appendChild(ui.h('span', 'lv-error', ` ${en.err.message}`));
+    if (en.err) line.appendChild(ui.h('span', 'lv-error', ` ${en.err.message}`));
+    if (en.data === undefined && !en.err) return line;
+    const box = ui.h('details', 'logdetail');
+    const key = rowKey(en);
+    box.open = openRows.has(key);
+    box.addEventListener('toggle', () => {
+      if (box.open) openRows.add(key);
+      else openRows.delete(key);
+    }, { signal: deps.signal });
+    const summary = ui.h('summary');
+    summary.appendChild(line);
+    const full = ui.h('pre', 'mono', JSON.stringify({ msg: en.msg, data: en.data, err: en.err }, null, 2));
+    box.append(summary, full, ui.copyButton(() => JSON.stringify(en, null, 2), { label: S.copyEntry }));
     return box;
   };
 
   const view: RunlogView = {
     el,
     async refresh() {
+      const mine = ++generation;
+      busy = true;
       try {
         if (!runsLoaded) await loadRuns();
         const entries = await get<RunlogEntry[]>(query(), { signal: deps.signal });
+        if (mine !== generation) return;
         const rows = Array.isArray(entries) ? entries : [];
+        const wasStuck = shouldStick(table.el.scrollTop, table.el.scrollHeight, table.el.clientHeight, STICK_PX);
         table.clear(rows.length ? undefined : S.noLog);
         for (const en of rows) {
           table.addRow([
@@ -202,12 +234,29 @@ export function createRunlogView(deps: RunlogViewDeps): RunlogView {
             { el: bodyCell(en), cls: 'txt' },
           ]);
         }
+        if (wasStuck) table.el.scrollTop = table.el.scrollHeight;
         deps.onNet(true);
       } catch (err) {
         if ((err as { name?: string } | null)?.name === 'AbortError') return;
         deps.onNet(false);
         deps.onError(err);
+      } finally {
+        if (mine === generation) {
+          busy = false;
+          if (liveAgain) {
+            liveAgain = false;
+            void view.refresh();
+          }
+        }
       }
+    },
+    noteLive() {
+      if (!runsLoaded || (q.run !== '' && q.run !== currentRun)) return;
+      if (busy) {
+        liveAgain = true;
+        return;
+      }
+      void view.refresh();
     },
   };
   return view;

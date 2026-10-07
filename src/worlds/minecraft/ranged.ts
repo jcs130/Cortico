@@ -6,7 +6,7 @@ import { readDurability, type ItemLike } from './item-facts.ts';
 export const RANGED_ENTER_RANGE = 32;
 /** 已进入远程交战后允许继续追踪的最大距离，避免目标在边界来回抖动。 */
 export const RANGED_EXIT_RANGE = 40;
-const HYBRID_RANGED_AT = 8;
+export const HYBRID_RANGED_AT = 8;
 export const HYBRID_MELEE_AT = 5.5;
 export const KITE_MIN_RANGE = 8;
 export const KITE_MAX_RANGE = 14;
@@ -16,6 +16,13 @@ export const BOW_HIT_WINDOW_MS = 1_500;
 const AIM_STEP_MS = 50;
 const ARROW_SPEED_PER_TICK = 3;
 const ARROW_GRAVITY_PER_TICK = 0.05;
+/** 原版箭每刻先位移,再把速度乘这个系数,再减重力 */
+const ARROW_DRAG_PER_TICK = 0.99;
+/** 箭在射手眼高下方这么多格生成 */
+const ARROW_SPAWN_BELOW_EYE = 0.1;
+/** 仰角从朝下往朝上逐度扫,第一个够得着目标高度的角就是低弧那一侧,再在前一度之间二分 */
+const PITCH_SCAN_STEP = Math.PI / 180;
+const PITCH_BISECT_ROUNDS = 20;
 const MOTION_STALE_MS = 250;
 const MOTION_DECAY_MS = 250;
 const MOTION_MAX_BLOCKS_PER_TICK = 1.5;
@@ -34,6 +41,19 @@ export interface RangedTarget {
   position: Point3;
   height?: number;
   width?: number;
+  /** 瞄的是这一格方块而不是实体:射线碰到这一格本身不算遮挡,不跟踪移动,没有近身下限 */
+  cell?: Point3;
+}
+
+/** 以一格方块的中心为靶;id 为 -1,不会与任何实体的受击事件对上 */
+export function cellTarget(cell: Point3): RangedTarget {
+  return {
+    id: -1,
+    position: { x: cell.x + 0.5, y: cell.y + 0.5, z: cell.z + 0.5 },
+    height: 0,
+    width: 0,
+    cell: { x: cell.x, y: cell.y, z: cell.z },
+  };
 }
 
 interface PositionVelocityEstimate {
@@ -164,7 +184,7 @@ function targetCenter(target: RangedTarget): Point3 {
   };
 }
 
-/** 满弓箭的低弧瞄点；速度由位置采样得到，单位为格/tick。 */
+/** 满弓箭的低弧瞄点,按原版箭的逐刻重力与阻力算;速度由位置采样得到,单位为格/tick。 */
 export function lowArcAimPoint(
   eye: Point3,
   target: RangedTarget,
@@ -183,7 +203,6 @@ export function lowArcAimPoint(
       z: center.z + velocity.z * flightTicks,
     };
     const horizontal = Math.hypot(predicted.x - eye.x, predicted.z - eye.z);
-    const speed2 = ARROW_SPEED_PER_TICK ** 2;
     const dy = predicted.y - eye.y;
     if (horizontal < 1e-6) {
       const vertical = verticalFlight(dy);
@@ -192,30 +211,76 @@ export function lowArcAimPoint(
       aim = new Vec3(predicted.x, eye.y + vertical.direction, predicted.z);
       continue;
     }
-    const disc = speed2 ** 2 - ARROW_GRAVITY_PER_TICK * (
-      ARROW_GRAVITY_PER_TICK * horizontal ** 2 + 2 * dy * speed2
-    );
-    if (disc < 0) return null;
-    const tan = (speed2 - Math.sqrt(disc)) / (ARROW_GRAVITY_PER_TICK * horizontal);
-    const cos = 1 / Math.sqrt(1 + tan ** 2);
-    flightTicks = horizontal / (ARROW_SPEED_PER_TICK * cos);
-    aim = new Vec3(predicted.x, eye.y + horizontal * tan, predicted.z);
+    const arc = lowArcPitch(horizontal, dy);
+    if (arc === null) return null;
+    flightTicks = arc.ticks;
+    aim = new Vec3(predicted.x, eye.y + horizontal * Math.tan(arc.pitch), predicted.z);
   }
   return new Vec3(aim.x, aim.y, aim.z);
 }
 
-function verticalFlight(dy: number): { ticks: number; direction: 1 | -1 } | null {
-  if (Math.abs(dy) < 1e-6) return { ticks: 0, direction: 1 };
-  const direction = dy > 0 ? 1 : -1;
-  const discriminant = ARROW_SPEED_PER_TICK ** 2 - 2 * ARROW_GRAVITY_PER_TICK * dy;
-  if (discriminant < 0) return null;
-  const ticks = direction > 0
-    ? (ARROW_SPEED_PER_TICK - Math.sqrt(discriminant)) / ARROW_GRAVITY_PER_TICK
-    : (-ARROW_SPEED_PER_TICK + Math.sqrt(discriminant)) / ARROW_GRAVITY_PER_TICK;
-  return ticks >= 0 ? { ticks, direction } : null;
+/**
+ * 仰角 pitch 射出的箭飞到水平距离 horizontal 时相对眼睛的高度与所用刻数。
+ * 下落中已经低于 floor 还没飞到时返回 null:之后只会更低。
+ */
+function arrowHeightAt(
+  pitch: number,
+  horizontal: number,
+  floor: number,
+): { y: number; ticks: number } | null {
+  let vx = ARROW_SPEED_PER_TICK * Math.cos(pitch);
+  let vy = ARROW_SPEED_PER_TICK * Math.sin(pitch);
+  let x = 0;
+  let y = -ARROW_SPAWN_BELOW_EYE;
+  let ticks = 0;
+  for (;;) {
+    if (x + vx >= horizontal) {
+      const part = (horizontal - x) / vx;
+      return { y: y + vy * part, ticks: ticks + part };
+    }
+    x += vx;
+    y += vy;
+    ticks += 1;
+    vx *= ARROW_DRAG_PER_TICK;
+    vy = vy * ARROW_DRAG_PER_TICK - ARROW_GRAVITY_PER_TICK;
+    if (vy < 0 && y < floor) return null;
+  }
 }
 
-/** 眼睛到目标半身高的方块射线；读不到世界射线时保守地视为遮挡。 */
+function lowArcPitch(horizontal: number, dy: number): { pitch: number; ticks: number } | null {
+  const reaches = (pitch: number): boolean => (arrowHeightAt(pitch, horizontal, dy)?.y ?? -Infinity) >= dy;
+  let below: number | null = null;
+  for (let pitch = -Math.PI / 2 + PITCH_SCAN_STEP; pitch < Math.PI / 2; pitch += PITCH_SCAN_STEP) {
+    if (!reaches(pitch)) {
+      below = pitch;
+      continue;
+    }
+    let above = pitch;
+    for (let round = 0; below !== null && round < PITCH_BISECT_ROUNDS; round += 1) {
+      const mid = (below + above) / 2;
+      if (reaches(mid)) above = mid;
+      else below = mid;
+    }
+    return { pitch: above, ticks: arrowHeightAt(above, horizontal, dy)!.ticks };
+  }
+  return null;
+}
+
+function verticalFlight(dy: number): { ticks: number; direction: 1 | -1 } | null {
+  const direction = dy >= -ARROW_SPAWN_BELOW_EYE ? 1 : -1;
+  let vy = ARROW_SPEED_PER_TICK * direction;
+  let y = -ARROW_SPAWN_BELOW_EYE;
+  let ticks = 0;
+  while (direction > 0 ? y < dy : y > dy) {
+    if (direction > 0 && vy <= 0) return null;
+    y += vy;
+    ticks += 1;
+    vy = vy * ARROW_DRAG_PER_TICK - ARROW_GRAVITY_PER_TICK;
+  }
+  return { ticks, direction };
+}
+
+/** 眼睛到目标半身高(方块靶为格心)的方块射线；读不到世界射线时保守地视为遮挡。 */
 export function hasRangedLos(bot: Bot, target: RangedTarget): boolean {
   try {
     const entity = bot.entity as Bot['entity'] & { eyeHeight?: number };
@@ -239,7 +304,12 @@ export function hasRangedLos(bot: Bot, target: RangedTarget): boolean {
       eye,
       delta.scaled(1 / distance),
       distance,
-      (block) => (block as { boundingBox?: string } | null)?.boundingBox === 'block',
+      (block) => {
+        const b = block as { boundingBox?: string; position?: Point3 } | null;
+        if (b?.boundingBox !== 'block') return false;
+        const cell = target.cell;
+        return !(cell && b.position && b.position.x === cell.x && b.position.y === cell.y && b.position.z === cell.z);
+      },
     );
     return hit == null;
   } catch {
@@ -348,7 +418,7 @@ export class BowController {
     const bow = bestRangedWeapon(bot);
     if (!bow) return this.blocked('aborted', 'bow_lost');
     if (!hasUsableArrows(bot)) return this.blocked('no_arrow');
-    if (rangedTargetDistance(bot, target) <= HYBRID_MELEE_AT) return this.blocked('too_close');
+    if (!target.cell && rangedTargetDistance(bot, target) <= HYBRID_MELEE_AT) return this.blocked('too_close');
     if (!this.hasLos(bot, target)) return this.blocked('no_los');
     if (!this.validLease(leaseToken)) return this.blocked('aborted', 'lease');
 
@@ -473,7 +543,7 @@ export class BowController {
       return { kind: 'blocked', reason: 'aborted', cause: 'bow_lost' };
     }
     if (!hasUsableArrows(drawing.bot)) return { kind: 'blocked', reason: 'no_arrow' };
-    if (rangedTargetDistance(drawing.bot, target) <= HYBRID_MELEE_AT) {
+    if (!target.cell && rangedTargetDistance(drawing.bot, target) <= HYBRID_MELEE_AT) {
       return { kind: 'blocked', reason: 'too_close' };
     }
     if (!this.hasLos(drawing.bot, target)) return { kind: 'blocked', reason: 'no_los' };
@@ -488,6 +558,7 @@ export class BowController {
   }
 
   private trackTarget(drawing: Drawing, fallback: RangedTarget): TrackedTarget | null {
+    if (fallback.cell) return { target: fallback, velocityPerTick: zeroPoint() };
     const resolved = this.opts.resolveTarget
       ? this.opts.resolveTarget(drawing.targetId)
       : fallback;

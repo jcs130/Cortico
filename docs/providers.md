@@ -46,6 +46,9 @@ provider 模块不预设任何模型名;端点
 记住,所有端点共用。`connectionBlocks` 里计价与协议默认收起。
 面板的 `setConfig` 同样只进暂存;运行时启停、安装与拉取模型要求端点已保存。「测试连接」与
 「获取模型列表」按编辑页当前内容(含刚输入的 API Key)发请求,不写盘,不参与可用性判断。
+取到的模型(`ProviderInstance.listModels()` 的返回项)进入模型选单,标签取 `displayName`,缺省用 id;
+选一项等同手填它的 id:该项的 `contextWindow` 填进上下文上限,`inputImages` 设定图像开关,
+`maxOutputTokens` 只显示,不改最大输出。列表外的 id 照样可以手填。
 
 控制台保存的 `secret` 遵循环境变量名格式 `[A-Za-z_][A-Za-z0-9_]*`。
 只填密钥值未填变量名时,默认名按端点名派生:`CORTICO_KEY_<端点名>`,`-` 折成 `_`。
@@ -79,7 +82,9 @@ provider 模块不预设任何模型名;端点
 原记录、附件句柄和 Memory 保留；需要再次查看时可重新提交图像。文字历史继续原样回放。
 该选项适用于不复用多模态缓存的端点；前缀是否实际命中由上游决定。
 
-`POST <baseUrl>/responses`,每次请求重放完整上下文。历史推理按 `options.reasoningReplay` 回传:
+`POST <baseUrl>/responses`,每次请求重放完整上下文。整条响应为 `completed` 时,没带 `status` 的
+`function_call` 项补成 `completed`;响应未完成时原样交给 Core,Core 不执行这些调用。历史推理按
+`options.reasoningReplay` 回传:
 `encrypted`(默认)只回 `encrypted_content`,且只回来源实例、模块、兼容域与模型均匹配的项,受
 `keepPastThinking` 控制;`plaintext` 把推理文字以 `reasoning_text` 回传,最后一条 user 消息之后的
 那一轮不受 `keepPastThinking` 约束,没有记录来源的工具调用前补一项合成推理。签名块要靠
@@ -88,7 +93,9 @@ provider 模块不预设任何模型名;端点
 探测发两条诊断请求(合成调用不带 / 带明文推理),按上游接受哪种写回 `reasoningReplay`。
 `options.endpointPath`、
 `options.extraHeaders`、`options.extraBody` 分别改路径、加头、并进请求体(`extraBody` 最后
-合并,能覆盖 `service_tier` 之类)。模型列表走 `GET <baseUrl>/models`。
+合并,能覆盖 `service_tier` 之类)。模型列表走 `GET <baseUrl>/models`;行里有 `name`、`context_length`、
+`top_provider.max_completion_tokens`、`architecture.input_modalities` 时,分别成为列表项的
+`displayName`、`contextWindow`、`maxOutputTokens` 与 `inputImages`(模态含 `image`)。
 
 模型上下文上限取服务探测值与配置的 `contextWindow` 中的较小者；Core 根据该上限限制请求
 容量，阶段预算由 Persona 决定（见 [sessions.md](sessions.md)）。
@@ -115,7 +122,7 @@ Persona 的后台规划与总结可选择独立端点，主 session 继续使用
 决定:
 
 - **外部**:连接独立运行的 llama-server。通过 `/health` 检查状态、`/props?model=`
-  读上下文窗口、`/models` 列模型(带加载状态与输入模态)。
+  读上下文窗口、`/models` 列模型(带加载状态与输入模态,输入模态给出列表项的 `inputImages`)。
 - **托管**:端点页的运行时段落点「开启托管」后,`options.runtime` 记版本 tag 与后端,`options.launch`
   记 `-c` / `-ngl` / `--parallel` 与附加参数,`options.autoStart` 决定 bot 启动时是否一并起。
   运行时和启动配置由模块的 `ConfigGroup` 声明,端点面板复用控制台 schema 渲染器,

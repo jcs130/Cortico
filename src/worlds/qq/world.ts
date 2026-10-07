@@ -29,8 +29,14 @@ import {
   sameConversation,
   type Conv,
 } from './conversation.ts';
-import { OneBotDriver, type OneBotEvent } from './driver.ts';
-import { createHistoryTools } from './history-tools.ts';
+import {
+  DEFAULT_API_TIMEOUT_MS,
+  OneBotDriver,
+  RETCODE_UNSUPPORTED_ACTION,
+  type ExtensionResult,
+  type OneBotEvent,
+} from './driver.ts';
+import { createHistoryTools, readLatest } from './history-tools.ts';
 import {
   buildOutgoing,
   makeImagePolicy,
@@ -51,6 +57,20 @@ const ENV_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url
 
 /** QQ在查不到账号资料时返回的昵称占位,等于「没有名字」。 */
 const PLACEHOLDER_NICKNAME = 'QQ用户';
+
+/**
+ * 语音转文字的扩展动作,按尝试顺序。SnowLuma、NapCat 提供前者,LLOneBot 提供后者;
+ * 两者参数都是 `{ message_id }`,返回 `{ text }`。
+ */
+const PTT_TEXT_ACTIONS = ['fetch_ptt_text', 'voice_msg_to_text'] as const;
+type PttTextAction = (typeof PTT_TEXT_ACTIONS)[number];
+
+/**
+ * 协议端等 QQ 推回转写结果的最长时间:LLOneBot 等 30s;NapCat 取消息、转写、再取消息
+ * 三段各等 baseTimeout(缺省 10s);SnowLuma 等 20s。调用时限在此之上再加一次普通调用
+ * 的时限,协议端自己的超时失败先于本端超时送达。
+ */
+const PTT_TEXT_PROTOCOL_WAIT_MS = 30_000;
 
 
 
@@ -152,15 +172,25 @@ export class QQWorld implements World {
   private watchedPrivates: Set<number>;
 
   /**
-   * 已记录的 QQ 消息:平台 message_id → 所在会话与时间(内存索引,启动时从store重建)。
+   * 已记录的 QQ 消息:平台 message_id → 所在会话与首条带这个号的事件的 ts(内存索引,启动时从store重建)。
    * QQ 消息身份即平台自身的 message_id,不使用 core 事件游标。
    */
   private knownMessages = new Map<string, { conv: Conv; ts: string }>();
+  /**
+   * 事件面板的会话汇总与总条数,覆盖事件库里游标不超过 summarizedCursor 的本 World 事件。
+   * 启动时重建,之后只累加新事件;清空当前 run 的事件不会扣减,下次启动才回到事件库的实际条数。
+   */
+  private convSummary = new Map<string, { kind: Conv['kind']; id: number; count: number; lastTs: string }>();
+  private summarizedTotal = 0;
+  private summarizedCursor = 0;
   /** QQ号 → 最近见到的显示名(撤回/入退群/私聊寻址渲染用;同样从store重建) */
   private nameByUserId = new Map<string, string>();
 
   /** 单槽草稿(起草-确认门) */
   private pendingDraft: PendingDraft | null = null;
+
+  /** 当前连接上可用的转写动作:undefined=未探明,null=都不存在。每次(重)连后重新探明。 */
+  private pttTextAction: PttTextAction | null | undefined;
 
 
   /** 最近一次成功组装的动态账号/会话事实(断线期间沿用；不缓存可编辑固定文本) */
@@ -516,33 +546,14 @@ export class QQWorld implements World {
     const store = this.host?.store;
     if (!store) throw new Error('QQ World 未启动,事件历史不可用');
     const opts = (args[0] ?? {}) as { conv?: unknown; limit?: unknown };
-    const all = store.range({ source: this.id });
-    const convMap = new Map<string, { kind: string; id: number; count: number; lastTs: string }>();
-    for (const e of all) {
-      const c = e.meta?.conv as { kind?: string; id?: number } | undefined;
-      if (!c || (c.kind !== 'group' && c.kind !== 'private') || c.id === undefined) continue;
-      const key = `${c.kind}:${Number(c.id)}`;
-      const cur = convMap.get(key);
-      if (cur) { cur.count++; cur.lastTs = e.ts; }
-      else convMap.set(key, { kind: c.kind, id: Number(c.id), count: 1, lastTs: e.ts });
-    }
-    const conversations = [...convMap.values()].sort((a, b) => (a.lastTs < b.lastTs ? 1 : -1));
+    for (const e of store.range({ source: this.id, fromCursor: this.summarizedCursor + 1 })) this.summarize(e);
+    this.summarizedCursor = store.latestCursor();
+    const conversations = [...this.convSummary.values()].sort((a, b) => (a.lastTs < b.lastTs ? 1 : -1));
 
     const convRaw = typeof opts.conv === 'string' ? opts.conv.trim() : '';
-    let events = all;
-    const m = convRaw ? /^(group|private):(\d+)$/i.exec(convRaw) : null;
-    if (convRaw && !m) {
-      events = [];
-    } else if (m) {
-      const kind = m[1].toLowerCase();
-      const id = Number(m[2]);
-      events = all.filter((e) => {
-        const c = e.meta?.conv as { kind?: string; id?: number } | undefined;
-        return !!c && c.kind === kind && Number(c.id) === id;
-      });
-    }
+    const conv = convRaw ? parseConversationAddress(convRaw) : null;
     const limit = Math.max(1, Math.min(2000, Number(opts.limit) || 300));
-    if (events.length > limit) events = events.slice(events.length - limit);
+    const events = convRaw && !conv ? [] : readLatest(store, { source: this.id }, conv, limit);
     const lean = events.map((e) => ({
       cursor: e.cursor,
       type: e.type,
@@ -552,7 +563,7 @@ export class QQWorld implements World {
       senderName: (e.meta?.sender_name as string | undefined) ?? '',
       conv: e.meta?.conv ?? null,
     }));
-    return { conversations, events: lean, total: all.length };
+    return { conversations, events: lean, total: this.summarizedTotal };
   }
 
 
@@ -577,6 +588,7 @@ export class QQWorld implements World {
     this.driver = driver;
     driver.onEvent((ev) => this.handleEvent(ev));
     driver.onReady(() => {
+      this.pttTextAction = undefined;
       this.envPromptVars(); // 为副作用调用:趁 identity 在,把群名快照存进缓存
       this.log.info('身份就绪', { context: this.cachedDynamicContext });
     });
@@ -773,6 +785,9 @@ export class QQWorld implements World {
         ? idn?.groups.get(conv.id)?.card || idn?.nickname || '你'
         : idn?.nickname || '你';
 
+    const transcribe =
+      (msg.message ?? []).some((seg) => seg.type === 'record') && this.pttTextAction !== null;
+
     const { text, mentionedSelf } = renderIncoming(msg, {
       selfId,
       selfName,
@@ -782,6 +797,7 @@ export class QQWorld implements World {
       nameOf: (qq) => this.nameByUserId.get(qq),
       renderImage,
       renderJsonCard,
+      recordText: transcribe ? '[语音,正在转写中...]' : '[语音,协议端不提供转写]',
     });
 
     const when =
@@ -814,8 +830,10 @@ export class QQWorld implements World {
         }
       }
     }
-    // 私聊照常合批;群里被@立即投递
-    const trigger = conv.kind === 'group' && mentionedSelf ? 'flush' as const : 'debounce' as const;
+    // 私聊照常合批;群里被@立即投递;等转写的语音不单独唤醒,随下一次唤醒投递
+    const trigger = transcribe
+      ? 'piggyback' as const
+      : conv.kind === 'group' && mentionedSelf ? 'flush' as const : 'debounce' as const;
     const env = await host.pushEvent(
       {
         type: 'qq.message',
@@ -834,6 +852,8 @@ export class QQWorld implements World {
       { trigger },
     );
     this.knownMessages.set(String(msg.message_id), { conv, ts: env.ts });
+
+    if (transcribe) this.transcribeVoice(msg, conv, displayName, when);
 
     for (const img of lateImages) {
       void img.promise.then(({ image }) => {
@@ -890,6 +910,59 @@ export class QQWorld implements World {
       const resId = String(forwardSeg.data?.id ?? '');
       if (resId) this.lookupForward(resId, conv, msg.message_id);
     }
+  }
+
+  /**
+   * 向协议端请求 QQ 自带的语音转文字,结果另发一条 qq.transcript,不阻塞当前投递。
+   * 转写结果照常合批唤醒;没转写成也发一条说明并唤醒,因为占位已写了「正在转写中」。
+   * 只有动作不存在(1404)才换下一个动作名,超时、撤回、识别失败都按这条没转写成处理。
+   */
+  private transcribeVoice(msg: OneBotGroupMessage, conv: Conv, displayName: string, when: Date): void {
+    const host = this.host!;
+    const driver = this.driver!;
+    const mid = msg.message_id;
+    const timeoutMs = PTT_TEXT_PROTOCOL_WAIT_MS + (this.cfg.apiTimeoutMs ?? DEFAULT_API_TIMEOUT_MS);
+    void (async () => {
+      let rep!: ExtensionResult;
+      for (const action of this.pttTextAction ? [this.pttTextAction] : PTT_TEXT_ACTIONS) {
+        rep = await driver.callExtension(action, { message_id: mid }, timeoutMs);
+        if (!rep.ok && rep.retcode === RETCODE_UNSUPPORTED_ACTION) continue;
+        if (rep.ok || rep.retcode !== undefined) this.pttTextAction = action;
+        break;
+      }
+      const raw = rep.ok ? (rep.data as { text?: unknown } | null)?.text : undefined;
+      const text = typeof raw === 'string' ? raw.trim() : '';
+      if (text) {
+        await host.pushEvent(
+          {
+            type: 'qq.transcript',
+            ts: nowIso(this.timezone),
+            source: this.id,
+            text: `#${mid} [${this.convLabel(conv)} ${shortTime(this.timezone, when)}] ${displayName}(${msg.user_id}): [QQ语音转写] ${text}`,
+            senderKey: String(msg.user_id),
+            meta: { message_id: mid, user_id: msg.user_id, sender_name: displayName, conv },
+          },
+          { trigger: 'debounce' },
+        );
+        return;
+      }
+      let reason: string;
+      if (rep.ok) {
+        reason = '转写结果为空';
+      } else if (rep.retcode === RETCODE_UNSUPPORTED_ACTION) {
+        this.pttTextAction = null;
+        reason = `协议端不提供转写动作(${PTT_TEXT_ACTIONS.join('、')} 都不存在)`;
+      } else {
+        reason = rep.error;
+      }
+      await host.pushEvent({
+        type: 'qq.transcript',
+        ts: nowIso(this.timezone),
+        source: this.id,
+        text: `[系统] #${mid} 的语音没能转写:${reason}`,
+        meta: { conv, message_id: mid },
+      });
+    })().catch((e) => host.log.warn('事件投递失败', { err: String(e) }));
   }
 
   /**
@@ -1024,10 +1097,15 @@ export class QQWorld implements World {
     const recoveryWindowSeconds = 120;
     const from = Math.min(...timed.map((n) => n.time));
     const to = Math.max(...timed.map((n) => n.time)) + recoveryWindowSeconds;
+    // 事件库按字符串比较 ts。UTC 偏移在 -12:00 到 +14:00 之间,同一时刻在不同偏移下的
+    // 时间串最多差 26 小时;两端各放宽 26 小时只用来圈定要读的事件,时间判断由下面的 Date.parse 做。
+    const offsetSpanMs = 26 * 3600_000;
     return host.store
       .range({
         source: this.id,
         senderKey: String(selfId),
+        fromTs: nowIso(this.timezone, new Date(from * 1000 - offsetSpanMs)),
+        toTs: nowIso(this.timezone, new Date(to * 1000 + offsetSpanMs)),
       })
       .filter(
         (event) =>
@@ -1195,14 +1273,17 @@ export class QQWorld implements World {
     }).catch((e) => host.log.warn('事件投递失败', { err: String(e) }));
   }
 
-  /** 启动时从事件库meta重建 已记录消息索引 与 QQ号→称呼 映射 */
+  /** 启动时从事件库meta重建 已记录消息索引、QQ号→称呼 映射 与 事件面板的会话汇总 */
   private rebuildMaps(): void {
     const host = this.host!;
     const events = host.store.range({ source: this.id });
+    this.convSummary.clear();
+    this.summarizedTotal = 0;
     for (const e of events) {
+      this.summarize(e);
       const mid = e.meta?.message_id;
       const conv = e.meta?.conv as Conv | undefined;
-      if (mid !== undefined && conv && (conv.kind === 'group' || conv.kind === 'private')) {
+      if (mid !== undefined && conv && (conv.kind === 'group' || conv.kind === 'private') && !this.knownMessages.has(String(mid))) {
         this.knownMessages.set(String(mid), {
           conv: { kind: conv.kind, id: Number(conv.id) },
           ts: e.ts,
@@ -1214,10 +1295,21 @@ export class QQWorld implements World {
         this.nameByUserId.set(String(uid), name);
       }
     }
+    this.summarizedCursor = host.store.latestCursor();
     this.log.debug('映射重建完成', {
       messages: this.knownMessages.size,
       names: this.nameByUserId.size,
     });
+  }
+
+  private summarize(e: EventEnvelope): void {
+    this.summarizedTotal++;
+    const c = e.meta?.conv as { kind?: string; id?: number } | undefined;
+    if (!c || (c.kind !== 'group' && c.kind !== 'private') || c.id === undefined) return;
+    const key = `${c.kind}:${Number(c.id)}`;
+    const cur = this.convSummary.get(key);
+    if (cur) { cur.count++; cur.lastTs = e.ts; }
+    else this.convSummary.set(key, { kind: c.kind, id: Number(c.id), count: 1, lastTs: e.ts });
   }
 
 
@@ -1364,7 +1456,11 @@ export class QQWorld implements World {
     const list = [
       this.draftTool(),
       this.confirmTool(),
-      ...createHistoryTools({ source: this.id, host: () => this.host }),
+      ...createHistoryTools({
+        source: this.id,
+        host: () => this.host,
+        messageTs: (mid) => this.knownMessages.get(mid)?.ts,
+      }),
     ];
     // 看图追问依赖 IMG-N(外挂视觉),随视觉出现/消失
     if (this.vision) list.push(this.viewImageTool());

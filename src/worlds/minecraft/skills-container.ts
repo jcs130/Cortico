@@ -14,7 +14,7 @@ import {
 import { isSpawnAnchorBlock } from './policy.ts';
 import { roman, zhDimension, zhEnchant, zhName } from './names.ts';
 import { Aborted, SkillBlocked, SkillNoop, checkAbort, sleep, type SkillContext } from './skill-context.ts';
-import { AIR_NAMES, LIQUIDS, blockAtCell, cellText, dimensionOf, feetOf, resolveAt } from './cell-facts.ts';
+import { AIR_NAMES, LIQUIDS, blockAtCell, cellKeyOf, cellText, dimensionOf, feetOf, resolveAt } from './cell-facts.ts';
 import { droppedStackOf, type ItemStack } from './terrain.ts';
 import { CONTAINER_FIND, FURNACE_KINDS, matchItemName, matchMaterialName } from './chests.ts';
 import { dropGoal, gotoGoal } from './travel.ts';
@@ -25,14 +25,15 @@ import {
   findContainers, furnaceDoneAt, noContainerNearby, openNearbyContainer,
   openWindowGuarded, orderForStow, orderForTake, rememberChest, rememberNonStorageMenu,
   rememberStorageAccessFailure, rememberStorageWriteFailure, storageSkipReason, slotStack, smeltPerItemMs,
-  WINDOW_SETTLE_MS,
+  BREW_BOTTLE_SLOTS, BREW_FUEL_SLOT, BREW_INPUT_SLOT, BREW_PROP_FUEL, BREW_PROP_TIME,
+  brewStandText, potionText, windowProp, WINDOW_SETTLE_MS,
   type GenericWindow,
 } from './containers.ts';
 import { contentsText, zhErrorText } from './receipt.ts';
 import { ShowPacer } from './show.ts';
 import { type Anchor, type Cell } from './geometry.ts';
 import { FURNACE_STATION, ensureStation, type Station, type StationAt } from './placement.ts';
-import { readEnchants, readPotionId, type ItemEnchant } from './item-facts.ts';
+import { readEnchants, type ItemEnchant } from './item-facts.ts';
 import { normalizeDimension } from './escape.ts';
 import { consumesOpenWindow, selectionMenuTitle } from './window-semantics.ts';
 import { itemCustomName, itemProfileSkinHash } from './item-display.ts';
@@ -110,7 +111,12 @@ export async function skillPickup(bot: Bot, ctx: SkillContext, item?: string): P
   throw new SkillNoop(item ? `附近没有${zhName(item)}掉落物,包里也没多出什么` : '附近没有掉落物,包里也没多出什么');
 }
 
-/** 搜索投掷方向时检查的开阔范围(格),不是物品实际落点或安全拾取距离 */
+/**
+ * 抛远的落点找多远(格)。原版丢出的物品初速 0.3 格/刻沿视线、另加 0.1 向上,空中每刻
+ * 重力 0.04、阻力 0.98,落地摩擦 0.6:平扔停在约 3.3 格外,抬头 40° 约 3.7 格外,所以
+ * 一路要空出 4 格。拾取判定是玩家碰撞箱水平外扩 1 格,离身体中心约 1.4 格,停在 4 格外
+ * 站着不动捡不回来。远端只用来在几个方向里挑更开阔的那个。
+ */
 export const TOSS_RANGE = { min: 4, max: 8 } as const;
 /** 抛远的仰角(弧度)。mineflayer 的 pitch 是**负值朝上**,抬头 30–45° 取中间偏上的 40° */
 export const TOSS_PITCH = -(40 * Math.PI) / 180;
@@ -127,33 +133,41 @@ const recentTosses = new WeakMap<Bot, Map<string, { at: number; after: number; x
 
 /**
  * toss 按当前 yaw/pitch 给物品初速度，须预先转向。
- * 纯读已加载格，在 min..max 范围检查头部空间是否开阔；选最长畅通方向，同距取首。
- * 无合格方向返回 null，调用方就地丢弃；不寻路或修改方块。
+ * 纯读已加载格。先找抬头抛的方向:齐眼与头上一层从 1 格起连续为空;抬头抛的物品
+ * 升到脚下约 2.4 格高,两格高的通道顶会挡住。没有就找平扔的方向:脚下与齐眼两层为空,
+ * 平扔最高到脚下约 1.8 格,两格高的通道够用。连续畅通满 min 格才算合格,选最长的,
+ * 同距取首。都没有返回 null,调用方就地丢弃;不寻路或修改方块。
  */
-export function planTossThrow(bot: Bot): { yaw: number; distance: number } | null {
+export function planTossThrow(bot: Bot): { yaw: number; pitch: number; distance: number } | null {
   // 读不了方块、或转不了头(台架的裸 bot)= 没有合格方向可挑,退回就地扔
   if (typeof bot.blockAt !== 'function' || typeof bot.look !== 'function') return null;
   const me = bot.entity.position;
-  const eyeY = Math.floor(me.y + 1);
-  let best: { yaw: number; distance: number } | null = null;
-  for (let deg = 0; deg < 360; deg += TOSS_YAW_STEP) {
-    const rad = (deg * Math.PI) / 180;
-    // mineflayer 的 yaw:0 = -Z(北),向 -X 增大。这两行与 skillFish 的算法同一套
-    const dx = -Math.sin(rad);
-    const dz = -Math.cos(rad);
-    let reach = 0;
-    for (let d = TOSS_RANGE.min; d <= TOSS_RANGE.max; d++) {
-      const cell = { x: Math.floor(me.x + dx * d), y: eyeY, z: Math.floor(me.z + dz * d) };
-      const at = blockAtCell(bot, cell);
-      const above = blockAtCell(bot, { ...cell, y: cell.y + 1 });
-      const clear = (b: ReturnType<Bot['blockAt']>): boolean =>
-        b !== null && b.boundingBox === 'empty' && !LIQUIDS.has(b.name);
-      if (!clear(at) || !clear(above)) break;
-      reach = d;
+  const feetY = Math.floor(me.y);
+  const clear = (b: ReturnType<Bot['blockAt']>): boolean =>
+    b !== null && b.boundingBox === 'empty' && !LIQUIDS.has(b.name);
+  const throws: Array<{ pitch: number; layers: readonly number[] }> = [
+    { pitch: TOSS_PITCH, layers: [1, 2] },
+    { pitch: 0, layers: [0, 1] },
+  ];
+  for (const { pitch, layers } of throws) {
+    let best: { yaw: number; pitch: number; distance: number } | null = null;
+    for (let deg = 0; deg < 360; deg += TOSS_YAW_STEP) {
+      const rad = (deg * Math.PI) / 180;
+      // mineflayer 的 yaw:0 = -Z(北),向 -X 增大。这两行与 skillFish 的算法同一套
+      const dx = -Math.sin(rad);
+      const dz = -Math.cos(rad);
+      let reach = 0;
+      for (let d = 1; d <= TOSS_RANGE.max; d++) {
+        const x = Math.floor(me.x + dx * d);
+        const z = Math.floor(me.z + dz * d);
+        if (!layers.every((dy) => clear(blockAtCell(bot, { x, y: feetY + dy, z })))) break;
+        reach = d;
+      }
+      if (reach >= TOSS_RANGE.min && (!best || reach > best.distance)) best = { yaw: rad, pitch, distance: reach };
     }
-    if (reach > 0 && (!best || reach > best.distance)) best = { yaw: rad, distance: reach };
+    if (best) return best;
   }
-  return best;
+  return null;
 }
 
 /** yaw 弧度 → 八向汉字。只用来在回执里说清「往哪边扔的」 */
@@ -207,12 +221,16 @@ export async function skillToss(
     const throwTo = planTossThrow(bot);
     if (throwTo) {
       checkAbort(ctx);
-      await bot.look(throwTo.yaw, TOSS_PITCH, true);
+      await bot.look(throwTo.yaw, throwTo.pitch, true);
     }
+    const stand = cellText(feetOf(bot));
     where = throwTo
-      ? `,朝${yawCompass(throwTo.yaw)}抬头抛出去,前方 ${throwTo.distance} 格有开阔空间(实际落点未核验)`
-      : ',周围 4–8 格没找到又空又开阔的方向,就在脚边扔的';
+      ? `,站在 ${stand} 朝${yawCompass(throwTo.yaw)}${throwTo.pitch < 0 ? '抬头抛出去' : '平着扔出去'},`
+        + `那个方向 ${throwTo.distance} 格内是空的,预计落在约 3–4 格外(实际落点未核验)`
+      : `,周围没有连续 ${TOSS_RANGE.min} 格空着的方向,就在脚边扔的(站在 ${stand});`
+        + '扔出的东西 2 秒后就能被捡,人还站在这儿会马上收回包里';
   }
+  where += '。扔在地上的东西留 5 分钟(所在区块加载着才计时),这期间走到离它约 1 格内,服务端会自动收回包里';
   const picked: PickTarget[] = [];
   for (const it of bot.inventory.items().filter((i) => pred(i.name, i))) {
     if (left <= 0) break;
@@ -380,71 +398,32 @@ export function stowReceipt(
   return { ok: true, text: `${head}${tail}` };
 }
 
-export async function skillStow(
-  bot: Bot, call: Extract<SkillCall, { skill: 'stow' }>, ctx: SkillContext,
-): Promise<string> {
-  const { item, count, pick } = call;
-  if (call.at !== undefined && call.into === 'open') {
-    throw new SkillBlocked('stow 的 at 与 into:open 只能选一个');
-  }
-  if (invCount(bot, itemPredOf(bot, item, pick)) === 0) throw noSuchItem(bot, item, pick);
-  if (call.into === 'open') return stowIntoOpenWindow(bot, call, ctx);
-  const found = call.at === undefined ? findContainers(bot, 32) : (() => {
-    const cell = resolveAt(bot, call.at!);
-    const block = bot.blockAt(new Vec3(cell.x, cell.y, cell.z));
-    if (!block) throw new SkillBlocked(`指定的 (${cell.x}, ${cell.y}, ${cell.z}) 方块数据尚未加载;先走近或用 find chest 找已可见的箱子`);
-    if (!CONTAINER_FIND.includes(block.name)) {
-      const stale = ctx.chests?.forget(dimensionOf(bot), cell) ?? false;
-      throw new SkillBlocked(`指定的 (${cell.x}, ${cell.y}, ${cell.z}) 实际是${zhName(block.name)},不是储物箱;用 find chest 找已可见的箱子`
-        + (stale ? ';已从仓储账移除这个过期坐标' : ''));
-    }
-    const d = bot.entity.position.distanceTo(new Vec3(cell.x, cell.y, cell.z));
-    if (d > 32) throw new SkillBlocked(`指定储物箱距离 ${Math.round(d)} 格;先走到 32 格内再存`);
-    return [{ x: cell.x, y: cell.y, z: cell.z, name: block.name, d }];
-  })();
-  if (found.length === 0) throw noContainerNearby(bot, ctx);
-  const show = new ShowPacer(ctx.showTempo?.() ?? null);
-  let target: (typeof found)[number] | undefined;
-  let chest: Awaited<ReturnType<Bot['openContainer']>> | undefined;
-  const failures: string[] = [];
-  const ordered = call.at === undefined ? orderForStow(found, ctx, bot, item) : found;
-  for (const candidate of ordered.slice(0, AUTO_CONTAINER_OPEN_LIMIT)) {
-    checkAbort(ctx);
-    const candidateWhere = `(${candidate.x}, ${candidate.y}, ${candidate.z}) 的${zhName(candidate.name)}`;
-    let opened: Awaited<ReturnType<Bot['openContainer']>>;
-    try {
-      await show.openGap();
-      opened = await openNearbyContainer(bot, candidate, ctx);
-    } catch (err) {
-      if (err instanceof Aborted) throw err;
-      const why = zhErrorText((err as Error).message);
-      rememberStorageAccessFailure(bot, candidate, why);
-      failures.push(`${candidateWhere}打不开:${why}`);
-      continue;
-    }
-    const menu = selectionMenuTitle(opened.title);
-    if (menu) {
-      opened.close();
-      rememberNonStorageMenu(bot, candidate);
-      failures.push(`${candidateWhere}打开的是${menu}选择菜单`);
-      ctx.diag?.write({ lane: 'skill', event: 'stow-menu-skip', taskId: ctx.taskId,
-        msg: `${candidateWhere}打开的是${menu}，跳过并寻找普通箱子`, data: { at: candidate, menu } });
-      continue;
-    }
-    clearStorageMenu(bot, candidate);
-    target = candidate;
-    chest = opened;
-    break;
-  }
-  if (!target || !chest) {
-    const prior = found.map((spot) => storageSkipReason(bot, spot, item)).filter((why): why is string => why !== null);
-    throw new SkillBlocked(`附近没有当前可存物的容器:${[...failures, ...prior].slice(0, 4).join('；') || '未找到可用目标'}。换站位或容器后可再试`);
-  }
+type StowPlanStep = { stepIndex: number | null; item: string; count: number; pick?: string };
+
+async function stowIntoOne(
+  bot: Bot, ctx: SkillContext, target: ReturnType<typeof findContainers>[number], plan: StowPlanStep[], show: ShowPacer,
+): Promise<{ done: Array<{ e: StowEntry; text: string; ok: boolean }>; aborted: Aborted | null }> {
   const where = `(${target.x}, ${target.y}, ${target.z}) 的${zhName(target.name)}`;
-  const plan: Array<{ stepIndex: number | null; item: string; count: number; pick?: string }> = [
-    { stepIndex: null, item, count, ...(pick ? { pick } : {}) },
-    ...collectStowBatch(bot, ctx, found, target, call.at),
-  ];
+  let chest: Awaited<ReturnType<Bot['openContainer']>>;
+  try {
+    checkAbort(ctx);
+    await show.openGap();
+    chest = await openNearbyContainer(bot, target, ctx);
+  } catch (err) {
+    if (err instanceof Aborted) throw err;
+    const why = zhErrorText((err as Error).message);
+    rememberStorageAccessFailure(bot, target, why);
+    throw new SkillBlocked(`${where}打不开:${why}`);
+  }
+  const menu = selectionMenuTitle(chest.title);
+  if (menu) {
+    chest.close();
+    rememberNonStorageMenu(bot, target);
+    ctx.diag?.write({ lane: 'skill', event: 'stow-menu-skip', taskId: ctx.taskId,
+      msg: `${where}打开的是${menu}，跳过并寻找普通箱子`, data: { at: target, menu } });
+    throw new SkillBlocked(`${where}打开的是${menu}选择菜单`);
+  }
+  clearStorageMenu(bot, target);
   const entries: StowEntry[] = [];
   /** 抢占落在半路:已经点进去的那几样照样要关窗对账、照样要落回执,不能当没发生过 */
   let aborted: Aborted | null = null;
@@ -541,17 +520,94 @@ export async function skillStow(
     done.push({ e, ...r });
   }
 
-  // 同窗后续步骤复用这次窗口的实际下场。拒绝后立刻重开会撞上服务端库存回灌竞态。
-  const first = done[0];
-  for (const d of done.slice(1)) {
-    if (d.e.stepIndex === null) continue;
-    ctx.batch?.absorb(d.e.stepIndex, `(跟第 ${(ctx.batch.index ?? 0) + 1} 步同一次开窗)${d.text}`, d.ok);
+  return { done, aborted };
+}
+
+const CLOCKWISE: Record<string, Cell> = {
+  north: { x: 1, y: 0, z: 0 }, east: { x: 0, y: 0, z: 1 }, south: { x: -1, y: 0, z: 0 }, west: { x: 0, y: 0, z: -1 },
+};
+const COUNTER_CLOCKWISE: Record<string, Cell> = {
+  north: { x: -1, y: 0, z: 0 }, east: { x: 0, y: 0, z: -1 }, south: { x: 1, y: 0, z: 0 }, west: { x: 0, y: 0, z: 1 },
+};
+
+/**
+ * 大箱子另一半所在的格;单箱和非箱子为 null。原版判据:type=left 的另一半在朝向的
+ * 顺时针一侧,type=right 在逆时针一侧。两半开出来是同一扇窗。
+ */
+export function chestPartnerCell(bot: Bot, cell: Cell): Cell | null {
+  const props = blockAtCell(bot, cell)?.getProperties() as { facing?: string; type?: string } | undefined;
+  const side = props?.type === 'left' ? CLOCKWISE : props?.type === 'right' ? COUNTER_CLOCKWISE : null;
+  const d = side && props?.facing ? side[props.facing] : undefined;
+  return d ? { x: cell.x + d.x, y: cell.y, z: cell.z + d.z } : null;
+}
+
+export async function skillStow(
+  bot: Bot, call: Extract<SkillCall, { skill: 'stow' }>, ctx: SkillContext,
+): Promise<string> {
+  const { item, count, pick } = call;
+  if (call.at !== undefined && call.into === 'open') {
+    throw new SkillBlocked('stow 的 at 与 into:open 只能选一个');
   }
-  if (aborted) throw aborted;
-  if (!first.ok) throw new SkillBlocked(first.text);
-  // 存进箱子的床同样离开了地面:重生点跟着作废,这一句不能省
+  if (invCount(bot, itemPredOf(bot, item, pick)) === 0) throw noSuchItem(bot, item, pick);
+  if (call.into === 'open') return stowIntoOpenWindow(bot, call, ctx);
+  const found = call.at === undefined ? findContainers(bot, 32) : (() => {
+    const cell = resolveAt(bot, call.at!);
+    const block = bot.blockAt(new Vec3(cell.x, cell.y, cell.z));
+    if (!block) throw new SkillBlocked(`指定的 (${cell.x}, ${cell.y}, ${cell.z}) 方块数据尚未加载;先走近或用 find chest 找已可见的箱子`);
+    if (!CONTAINER_FIND.includes(block.name)) {
+      const stale = ctx.chests?.forget(dimensionOf(bot), cell) ?? false;
+      throw new SkillBlocked(`指定的 (${cell.x}, ${cell.y}, ${cell.z}) 实际是${zhName(block.name)},不是储物箱;用 find chest 找已可见的箱子`
+        + (stale ? ';已从仓储账移除这个过期坐标' : ''));
+    }
+    const d = bot.entity.position.distanceTo(new Vec3(cell.x, cell.y, cell.z));
+    if (d > 32) throw new SkillBlocked(`指定储物箱距离 ${Math.round(d)} 格;先走到 32 格内再存`);
+    return [{ x: cell.x, y: cell.y, z: cell.z, name: block.name, d }];
+  })();
+  if (found.length === 0) throw noContainerNearby(bot, ctx);
+  const pred = itemPredOf(bot, item, pick);
+  const want = Math.min(count, invCount(bot, pred));
+  const show = new ShowPacer(ctx.showTempo?.() ?? null);
+  const ordered = call.at === undefined ? orderForStow(found, ctx, bot, item) : found;
+  const lines: Array<{ ok: boolean; text: string }> = [];
+  const opened: Cell[] = [];
+  let stored = 0;
+  for (const target of ordered.slice(0, AUTO_CONTAINER_OPEN_LIMIT)) {
+    if (stored >= want || invCount(bot, pred) === 0) break;
+    if (opened.some((c) => {
+      const p = chestPartnerCell(bot, c);
+      return p !== null && p.x === target.x && p.y === target.y && p.z === target.z;
+    })) continue;
+    const here: StowPlanStep = { stepIndex: null, item, count: want - stored, ...(pick ? { pick } : {}) };
+    const plan = opened.length === 0 ? [here, ...collectStowBatch(bot, ctx, found, target, call.at)] : [here];
+    let result: Awaited<ReturnType<typeof stowIntoOne>>;
+    try {
+      result = await stowIntoOne(bot, ctx, target, plan, show);
+    } catch (err) {
+      if (!(err instanceof SkillBlocked)) throw err;
+      lines.push({ ok: false, text: err.message });
+      continue;
+    }
+    opened.push(target);
+    const [mine, ...batched] = result.done;
+    // 同窗失败也登记，下一步不立即重开同一扇服务端窗口。
+    for (const d of batched) {
+      if (d.e.stepIndex === null) continue;
+      ctx.batch?.absorb(d.e.stepIndex, `(跟第 ${(ctx.batch.index ?? 0) + 1} 步同一次开窗)${d.text}`, d.ok);
+    }
+    lines.push({ ok: mine.ok, text: mine.text });
+    if (mine.ok) stored += mine.e.deposited;
+    if (result.aborted) throw result.aborted;
+  }
+  const anyOk = lines.some((l) => l.ok);
+  let text = lines.map((l) => l.text).join(';');
+  if (lines.length > 1) {
+    const left = Math.min(want - stored, invCount(bot, pred));
+    const tail = left > 0 ? `;还有${zhName(item)}×${left}没放下,本次候选箱子已试完` : '';
+    text = `分 ${lines.length} 口箱子存,共存进${zhName(item)}×${stored}${tail}。${text}`;
+  }
+  if (!anyOk) throw new SkillBlocked(text || '附近没有当前可存物的容器');
   const anchor = isSpawnAnchorBlock(item) ? anchorInHandNote(bot, ctx, [zhName(item)], '存走') : '';
-  return `${first.text}${anchor}`;
+  return `${text}${anchor}`;
 }
 
 /** 存进已经打开的服务端容器窗口；物品名和位置都从窗口读，不猜玩家头或槽位。 */
@@ -1121,6 +1177,37 @@ export async function takeFromOpenWindow(
   }
 }
 
+type BotEntity = NonNullable<Bot['entities'][string]>;
+
+/**
+ * 附近的运输矿车(带箱子的矿车实体),由近到远。它是实体,findContainers 按方块找不到;
+ * 右键开出来的是一扇 27 格的箱子窗口。只在客户端收到过的实体里找。
+ */
+export function findChestMinecarts(
+  bot: Bot, range: number,
+): Array<{ x: number; y: number; z: number; name: string; d: number; entity: BotEntity }> {
+  const me = bot.entity.position;
+  const out: Array<{ x: number; y: number; z: number; name: string; d: number; entity: BotEntity }> = [];
+  for (const e of Object.values(bot.entities)) {
+    if (e?.name !== 'chest_minecart' || !e.position) continue;
+    const d = e.position.distanceTo(me);
+    if (d > range) continue;
+    const p = e.position.floored();
+    out.push({ x: p.x, y: p.y, z: p.z, name: e.name, d, entity: e });
+  }
+  return out.sort((a, b) => a.d - b.d);
+}
+
+/** 走到运输矿车跟前开它的箱子窗口 */
+async function openChestMinecart(
+  bot: Bot, cart: BotEntity, ctx: SkillContext,
+): Promise<Awaited<ReturnType<Bot['openContainer']>>> {
+  await gotoGoal(bot, new goals.GoalNear(cart.position.x, cart.position.y, cart.position.z, 2), ctx);
+  checkAbort(ctx);
+  if (!cart.isValid) throw new SkillBlocked('运输矿车不见了(被打碎或移出了视野)');
+  return openWindowGuarded(bot, ctx, () => bot.openContainer(cart as never));
+}
+
 export async function skillTake(bot: Bot, call: Extract<SkillCall, { skill: 'take' }>, ctx: SkillContext): Promise<string> {
   if (call.from === 'open') return takeFromOpenWindow(bot, call, ctx);
   if (call.at) return skillTakeAt(bot, call, ctx);
@@ -1128,8 +1215,12 @@ export async function skillTake(bot: Bot, call: Extract<SkillCall, { skill: 'tak
   const count = call.count ?? 1;
   const pred = itemPredOf(bot, item, call.pick);
   const found = findContainers(bot, 32);
-  if (found.length === 0) throw noContainerNearby(bot, ctx);
-  const ordered = orderForTake(found, ctx, bot, item);
+  const carts = findChestMinecarts(bot, 32);
+  if (found.length === 0 && carts.length === 0) throw noContainerNearby(bot, ctx);
+  // 运输矿车会动,不进容器账本,排在箱子后面
+  const ordered: Array<(typeof found)[number] & { entity?: BotEntity }> = [
+    ...orderForTake(found, ctx, bot, item), ...carts,
+  ];
   const notes: string[] = [];
   let got = 0;
   let unconfirmed = 0;
@@ -1140,11 +1231,13 @@ export async function skillTake(bot: Bot, call: Extract<SkillCall, { skill: 'tak
   for (const target of ordered.slice(0, AUTO_CONTAINER_OPEN_LIMIT)) {
     if (got >= count) break;
     checkAbort(ctx);
-    const at = `(${target.x}, ${target.y}, ${target.z})`;
+    const at = `(${target.x}, ${target.y}, ${target.z})${target.entity ? ' 的运输矿车' : ''}`;
     let chest;
     try {
       await show.openGap();
-      chest = await openNearbyContainer(bot, target, ctx);
+      chest = target.entity
+        ? await openChestMinecart(bot, target.entity, ctx)
+        : await openNearbyContainer(bot, target, ctx);
     } catch (err) {
       if (err instanceof Aborted) throw err;
       const why = zhErrorText((err as Error).message);
@@ -1205,7 +1298,7 @@ export async function skillTake(bot: Bot, call: Extract<SkillCall, { skill: 'tak
           await show.beat('click');
         }
       }
-      snap = rememberChest(ctx, bot, target, chest);
+      snap = target.entity ? containerStacks(chest, bot.registry as never) : rememberChest(ctx, bot, target, chest);
       await show.beat('close');
     } finally {
       chest.close();
@@ -1227,7 +1320,7 @@ export async function skillTake(bot: Bot, call: Extract<SkillCall, { skill: 'tak
       lane: 'skill', event: took === 0 ? 'take-none' : 'take-done', taskId: ctx.taskId,
       msg: `${at}:窗口里点出${zhName(item)} ${took} 个,关窗后包里多了 ${conf?.moved ?? 0} 个`,
       data: {
-        at: target, item, took, confirmed: conf?.moved ?? 0,
+        at: { x: target.x, y: target.y, z: target.z }, item, took, confirmed: conf?.moved ?? 0,
         status: conf?.status ?? 'none', failure,
       },
     });
@@ -1266,11 +1359,14 @@ export async function skillTake(bot: Bot, call: Extract<SkillCall, { skill: 'tak
   return `${head}。${notes.join('；')}`;
 }
 
-/** 输入槽只有一格:同一次只烧一种,包里符合的挑最多的那一摞 */
+/**
+ * 输入槽只有一格:同一次只烧一种。注册表里的真实 id 只认它自己(cod 不认 cooked_cod),
+ * 类别名才按后缀挑;同名的那一摞排最前,其余挑最多的那一摞。
+ */
 export function pickSmeltInput(bot: Bot, item: string) {
   return bot.inventory.items()
     .filter((i) => matchMaterialName(bot.registry, item, i.name))
-    .sort((a, b) => b.count - a.count)[0];
+    .sort((a, b) => Number(b.name === item) - Number(a.name === item) || b.count - a.count)[0];
 }
 
 /**
@@ -1467,7 +1563,9 @@ export async function skillSmelt(
   const etaClock = loaded.doneAt !== null && ctx.clock ? `${ctx.clock(loaded.doneAt)} 左右,` : '';
   const estimate = loaded.doneAt === null ? '当前不估完成时间。'
     : `若燃料持续足够,预计 ${etaClock}${Math.max(0, Math.round((loaded.doneAt - Date.now()) / 1000))} 秒后出完,到时提醒查看。`;
-  return `${station}在${where}下料后读到:${staleNote}${slots}。${burning},${progress}。` +
+  const byCategory = input.name === item ? '' : `(按类别名「${item}」挑中的)`;
+  const putIn = `往输入槽投了包里的${zhName(input.name)}×${want}${byCategory},燃料${zhName(fuelItem.name)}×${fuelUse};`;
+  return `${station}${putIn}在${where}下料后读到:${staleNote}${slots}。${burning},${progress}。` +
     `${zhName(at.name)}烧一件约 ${perS} 秒。${estimate}` +
     `输出槽有成品时取货:{"skill":"take","at":[${at.x},${at.y},${at.z}],"all":true}`;
 }
@@ -1645,11 +1743,6 @@ export async function skillEnchant(
 
 // ── 酿造台 ────────────────────────────────────────────────────────────────────
 
-/** 酿造台的窗口槽位(原版固定):0-2 三个瓶位,3 材料位,4 燃料位 */
-export const BREW_BOTTLE_SLOTS = [0, 1, 2] as const;
-export const BREW_INPUT_SLOT = 3;
-export const BREW_FUEL_SLOT = 4;
-
 /** 原版一轮酿造 400 刻 = 20 秒,与瓶数无关 */
 export const BREW_ROUND_MS = 20_000;
 
@@ -1657,21 +1750,19 @@ export const BREW_STATION: Station = {
   kinds: ['brewing_stand'], label: '酿造台', hint: '先 craft 一个酿造台(1 根烈焰棒 + 3 块圆石)',
 };
 
-/** 一件药水念成「药水(内容 #N)」;`#N` 是原版药水注册表序号,不是药水都不带这个尾巴 */
-export function potionText(stack: { name: string; count: number } | null): string {
-  if (!stack) return '空';
-  const id = readPotionId(stack as never);
-  return `${zhName(stack.name)}${id === null ? '' : `(内容 #${id})`}×${stack.count}`;
-}
-
-/** 三个瓶位现在各是什么;同内容的合并计数 */
-export function bottleText(win: GenericWindow, loaded: number): string {
-  if (loaded === 0) return '空';
-  const bits = BREW_BOTTLE_SLOTS
-    .map((s) => win.slots[s] ?? null)
-    .filter((s): s is { name: string; count: number; slot: number } => s !== null)
-    .map((s) => potionText(s));
-  return bits.length > 0 ? bits.join('、') : `${loaded} 瓶`;
+/** 酿造台开窗:mineflayer 的 openContainer 只认箱子族,酿造台走 openBlock */
+async function openBrewingStand(
+  bot: Bot, ctx: SkillContext, block: NonNullable<ReturnType<Bot['blockAt']>>,
+): Promise<GenericWindow> {
+  const win = await openWindowGuarded(
+    bot, ctx,
+    () => (bot as unknown as { openBlock(b: unknown): Promise<GenericWindow> }).openBlock(block),
+  );
+  if (win.type !== undefined && !win.type.startsWith('minecraft:brewing_stand')) {
+    win.close();
+    throw new SkillBlocked(`开出来的窗口是 ${win.type},不是酿造台`);
+  }
+  return win;
 }
 
 /**
@@ -1712,25 +1803,33 @@ export async function skillBrew(
   await show.openGap();
   let win: GenericWindow;
   try {
-    win = await openWindowGuarded(bot, ctx, () => bot.openContainer(at.block) as unknown as Promise<GenericWindow>);
+    win = await openBrewingStand(bot, ctx, at.block);
   } catch (err) {
     if (err instanceof Aborted || err instanceof SkillBlocked) throw err;
     throw new SkillBlocked(`${at.note};打不开${where}: ${zhErrorText((err as Error).message)}`);
   }
   const want = Math.min(call.count, bottleHave);
   let loaded = 0;
-  let fuelPut = 0;
+  let fuelPut = false;
+  let brewing = false;
+  let stand = '';
   try {
     await show.beat('open');
+    await sleep(WINDOW_SETTLE_MS);
     const grab = (name: string) => win.items().find((i) => i.name === name);
     const inSlot = (slot: number) => win.slots[slot] ?? null;
-    // 烧着才酿:燃料槽空了就补一份,已经有燃料就不再塞
-    if (!inSlot(BREW_FUEL_SLOT)) {
+    // 烧着才酿:台里没剩燃料轮数、燃料位也空,才补一份;原版放进去的那份会立刻烧成 20 轮
+    const fuelLeft = windowProp(bot, win, BREW_PROP_FUEL);
+    if (!inSlot(BREW_FUEL_SLOT) && !(fuelLeft !== null && fuelLeft > 0)) {
       const fuel = grab(call.fuel);
-      if (fuel) {
-        await bot.moveSlotItem(fuel.slot, BREW_FUEL_SLOT).catch(() => undefined);
-        fuelPut = inSlot(BREW_FUEL_SLOT)?.count ?? 0;
+      if (!fuel) {
+        throw new SkillBlocked(
+          `${at.note};${where}燃料 ${fuelLeft ?? '读数没收到'}/20 轮、燃料位空,包里也没有${zhName(call.fuel)}`,
+        );
       }
+      await bot.moveSlotItem(fuel.slot, BREW_FUEL_SLOT).catch(() => undefined);
+      await sleep(WINDOW_SETTLE_MS);
+      fuelPut = true;
     }
     for (const slot of BREW_BOTTLE_SLOTS.slice(0, want)) {
       if (inSlot(slot)) { loaded++; continue; }
@@ -1749,6 +1848,9 @@ export async function skillBrew(
       throw new SkillBlocked(`${at.note};${where}的材料位没放进${zhName(call.input)},台子不收它`);
     }
     if (loaded === 0) throw new SkillBlocked(`${at.note};${where}的三个瓶位一个都没放进${zhName(call.bottle)}`);
+    // 下完料等服务端下一刻开酿;酿造刻 > 0 才算点着了
+    await sleep(WINDOW_SETTLE_MS);
+    brewing = (windowProp(bot, win, BREW_PROP_TIME) ?? 0) > 0;
   } finally {
     const state = {
       input: slotStack(win, BREW_INPUT_SLOT),
@@ -1758,21 +1860,25 @@ export async function skillBrew(
     const now = Date.now();
     ctx.chests?.rememberFurnace(
       dimensionOf(bot), cell, 'brewing_stand', state, now,
-      state.input && loaded > 0 ? now + BREW_ROUND_MS : null,
+      brewing ? now + BREW_ROUND_MS : null,
     );
+    stand = brewStandText(bot, win);
     win.close();
   }
-  const fuelNote = fuelPut > 0
-    ? `燃料槽放了${zhName(call.fuel)}×${fuelPut}(一份烧 20 轮)`
-    : `燃料槽本来就有${zhName(win.slots[BREW_FUEL_SLOT]?.name ?? call.fuel)}`;
-  const etaClock = ctx.clock ? `${ctx.clock(Date.now() + BREW_ROUND_MS)} 左右` : '20 秒后';
   ctx.diag?.write({
-    lane: 'craft', event: 'brew-start', taskId: ctx.taskId,
-    msg: `${where}:${loaded} 瓶${call.bottle} + ${call.input}`,
-    data: { at: cell, bottles: loaded, input: call.input, fuel: call.fuel, fuelPut },
+    lane: 'craft', event: brewing ? 'brew-start' : 'brew-idle', taskId: ctx.taskId,
+    msg: `${where}:${loaded} 瓶${call.bottle} + ${call.input}${brewing ? '' : ',没开酿'}`,
+    data: {
+      at: cell, bottles: loaded, input: call.input, fuel: call.fuel, fuelPut,
+      fuelLeft: windowProp(bot, win, BREW_PROP_FUEL), brewTicks: windowProp(bot, win, BREW_PROP_TIME),
+    },
   });
-  return `${at.note};在${where}下了料:瓶位${bottleText(win, loaded)},材料位${zhName(call.input)},${fuelNote}。`
-    + `一轮约 20 秒(${etaClock}好,有事件提醒);这段时间不用守着。`
+  const put = `${at.note};在${where}下了料${fuelPut ? `,燃料位补了${zhName(call.fuel)}` : ''}。台里现在:${stand}。`;
+  if (!brewing) {
+    throw new SkillBlocked(`${put}台子没开酿:这一对瓶和材料按原版酿不出东西,或者燃料没点着`, [], 'server');
+  }
+  const etaClock = ctx.clock ? `${ctx.clock(Date.now() + BREW_ROUND_MS)} 左右` : '20 秒后';
+  return `${put}一轮约 20 秒(${etaClock}好,有事件提醒);这段时间不用守着。`
     + `取货:{"skill":"take","at":[${cell.x},${cell.y},${cell.z}],"all":true}`;
 }
 
@@ -1789,7 +1895,7 @@ export async function takeFromBrewingStand(
   await show.openGap();
   let win: GenericWindow;
   try {
-    win = await openWindowGuarded(bot, ctx, () => bot.openContainer(block) as unknown as Promise<GenericWindow>);
+    win = await openBrewingStand(bot, ctx, block);
   } catch (err) {
     if (err instanceof Aborted || err instanceof SkillBlocked) throw err;
     throw new SkillBlocked(`打不开 ${where}: ${zhErrorText((err as Error).message)}`);
@@ -1835,6 +1941,32 @@ export async function takeFromBrewingStand(
  * 显式穿门只认当前维度里实际读到的下界传送门方块。寻路负责到门边，最后踏进
  * 门里的动作由这一步自己完成；维度未改变前绝不把“到了门口”当成完成。
  */
+/** transit 认的三种门方块 */
+export const PORTAL_BLOCKS = new Set(['nether_portal', 'end_portal', 'end_gateway']);
+/**
+ * 折跃门:人离门方块超过这么远就算已经被传走。两端相距约千格(外岛那头生成在离主岛门约 1024 格处);
+ * 穿门前人先走到门边(GoalNear 半径 2),再一路朝门方块走,离它不会比走到门边那一刻更远。
+ * 按离门方块算:从远处走过来时,出发点离门本来就可能超过这个数。
+ */
+const GATEWAY_JUMP_BLOCKS = 64;
+
+/** 和 start 六邻接连成一片的同种门方块(含 start);一片的大小由原版门框决定 */
+function portalCells(bot: Bot, start: Cell, kind: string): Cell[] {
+  const out: Cell[] = [start];
+  const seen = new Set([cellKeyOf(start)]);
+  for (let i = 0; i < out.length; i++) {
+    const c = out[i];
+    for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+      const n = { x: c.x + dx, y: c.y + dy, z: c.z + dz };
+      const key = cellKeyOf(n);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (blockAtCell(bot, n)?.name === kind) out.push(n);
+    }
+  }
+  return out;
+}
+
 export async function skillTransit(
   bot: Bot,
   call: Extract<SkillCall, { skill: 'transit' }>,
@@ -1843,36 +1975,78 @@ export async function skillTransit(
   const portal = resolveAt(bot, call.at);
   const block = blockAtCell(bot, portal);
   if (!block) throw new SkillBlocked(`${cellText(portal)} 所在区块没加载`);
-  if (block.name !== 'nether_portal') {
-    throw new SkillBlocked(`${cellText(portal)} 是${zhName(block.name)},不是下界传送门方块`);
+  const kind = block.name;
+  if (!PORTAL_BLOCKS.has(kind)) {
+    throw new SkillBlocked(`${cellText(portal)} 是${zhName(kind)},不是传送门方块(下界传送门、末地传送门、末地折跃门)`);
   }
 
   const fromDimension = normalizeDimension(dimensionOf(bot));
-  await gotoGoal(bot, new goals.GoalNear(portal.x, portal.y, portal.z, 1), ctx);
+  const portalCenter = new Vec3(portal.x + 0.5, portal.y + 0.5, portal.z + 0.5);
+  // 折跃门在末地内部传送,维度不变,只看人离门方块多远
+  const crossed = (): boolean => (kind === 'end_gateway'
+    ? bot.entity.position.distanceTo(portalCenter) > GATEWAY_JUMP_BLOCKS
+    : normalizeDimension(dimensionOf(bot)) !== fromDimension);
+  // 走到这片门里任意一格门方块的边上。只围着给定那一格算半径时,3×3 末地传送门的中心格
+  // 从门框上够不着,寻路器只能在门方块头顶垫块站上去,把门盖住
+  const cells = portalCells(bot, portal, kind);
+  const radius = kind === 'nether_portal' ? 1 : 2;
+  await gotoGoal(bot, new goals.GoalCompositeAny(cells.map((c) => new goals.GoalNear(c.x, c.y, c.z, radius))), ctx);
   checkAbort(ctx);
   const reread = blockAtCell(bot, portal);
-  if (reread?.name !== 'nether_portal') {
-    throw new SkillBlocked(`走到门边时 ${cellText(portal)} 已经不是下界传送门了`);
+  if (reread?.name !== kind) {
+    throw new SkillBlocked(`走到门边时 ${cellText(portal)} 已经不是${zhName(kind)}了`);
   }
 
   dropGoal(bot, 'task', '到门边了,自己走进去', ctx.diag);
-  await bot.lookAt(new Vec3(portal.x + 0.5, portal.y + 0.8, portal.z + 0.5), true);
+  // 末地传送门是地面上一层,朝门方块低头走进去就掉进去;另两种是竖着的,平视
+  const aimDy = kind === 'end_portal' ? 0.2 : 0.8;
+  const nearestCell = (): Cell => {
+    const p = bot.entity.position;
+    let best = cells[0];
+    let bestD = Infinity;
+    for (const c of cells) {
+      const d = Math.hypot(c.x + 0.5 - p.x, c.y + aimDy - p.y, c.z + 0.5 - p.z);
+      if (d < bestD) { best = c; bestD = d; }
+    }
+    return best;
+  };
   const deadline = Date.now() + 20_000;
+  let touched = false;
   try {
-    while (normalizeDimension(dimensionOf(bot)) === fromDimension) {
+    while (!crossed()) {
       checkAbort(ctx);
-      if (Date.now() >= deadline) {
-        throw new SkillBlocked(`已经走进 ${cellText(portal)} 的门里等了 20 秒,维度仍是${zhDimension(fromDimension)}`);
-      }
       const feet = feetOf(bot);
-      const bodyInPortal = blockAtCell(bot, feet)?.name === 'nether_portal'
-        || blockAtCell(bot, { x: feet.x, y: feet.y + 1, z: feet.z })?.name === 'nether_portal';
+      const bodyInPortal = blockAtCell(bot, feet)?.name === kind
+        || blockAtCell(bot, { x: feet.x, y: feet.y + 1, z: feet.z })?.name === kind;
+      touched ||= bodyInPortal;
+      if (Date.now() >= deadline) {
+        const lids = kind === 'end_portal'
+          ? cells.map((c) => blockAtCell(bot, { x: c.x, y: c.y + 1, z: c.z }))
+            .filter((b): b is NonNullable<typeof b> => b?.boundingBox === 'block')
+          : [];
+        const covered = lids.length > 0
+          ? `;这片门 ${cells.length} 格里有 ${lids.length} 格头顶压着方块(`
+            + `${lids.map((b) => `${cellText(b.position)} ${zhName(b.name)}`).join('、')}),盖住的门格掉不进去`
+          : '';
+        const stuck = `维度仍是${zhDimension(fromDimension)}${covered}`;
+        throw new SkillBlocked(touched
+          ? `人进了 ${cellText(portal)} 的${zhName(kind)},等了 20 秒${kind === 'end_gateway' ? '人还在原地附近' : stuck}`
+          : `朝 ${cellText(portal)} 的${zhName(kind)}走了 20 秒,身子一直没碰到门方块,停在 ${cellText(feet)};${stuck}`);
+      }
+      // 每一拍重新对准最近的门方块:跳着走会被框架和台阶带偏,只在出发时瞄一次会越走越远
+      if (!bodyInPortal) {
+        const c = nearestCell();
+        await bot.lookAt(new Vec3(c.x + 0.5, c.y + aimDy, c.z + 0.5), true);
+      }
       bot.setControlState('forward', !bodyInPortal);
+      // 末地传送门四周的框架高 13/16 格、折跃门悬在基岩中间,平地都走不进去;没进门就一路跳
+      bot.setControlState('jump', kind !== 'nether_portal' && !bodyInPortal);
       await sleep(100);
     }
   } finally {
     bot.setControlState('forward', false);
     bot.setControlState('sprint', false);
+    bot.setControlState('jump', false);
   }
 
   const changedAt = Date.now();

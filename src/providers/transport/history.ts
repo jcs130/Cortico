@@ -73,7 +73,7 @@ export function mapTools(tools?: ToolSchema[]): Array<Record<string, unknown>> |
 
 /**
  * 渲染 Chat 请求消息，移除内部 blobs 字段。仅在 keepReasoning 时保留非空 reasoning_content。
- * 启用媒体时将可读取附件转换为 data URL 内容块；无法读取的附件跳过，原文本引用仍保留。
+ * 启用媒体时将可读取的图片附件转换为 data URL 内容块；其余附件跳过，原文本引用仍保留。
  */
 export function renderMessagesWithMedia(
   messages: NativeChatMessage[],
@@ -87,7 +87,7 @@ export function renderMessagesWithMedia(
     const { reasoning_content: _r, parts: _parts, ...rest } = dropHeadMark(m);
     const base = { ...rest, content: m.parts ?? m.content } as Record<string, unknown>;
     if (opts?.keepReasoning && m.reasoning_content) base.reasoning_content = m.reasoning_content;
-    if (!renderMedia || !refs?.length) return base;
+    if (!renderMedia || !refs.length) return base;
     const parts: Array<Record<string, unknown>> = m.parts ? [...m.parts] : [{ type: 'text', text: m.content }];
     let attached = false;
     for (const r of refs) {

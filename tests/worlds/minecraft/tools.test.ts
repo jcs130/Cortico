@@ -60,7 +60,7 @@ describe('economy mining tools with 1.20.6 block and item data', () => {
     expect(choose(target).pick).toBe(axe);
     await equipToolFor(bot as unknown as Bot, target, ctx, miningToolPlan(undefined));
     expect(bot.heldItem).toBe(axe);
-    expect(ctx.toolTrace?.notes).toContain('节约模式选:钻石斧');
+    expect(ctx.toolTrace?.notes).toContain('节约模式选:Carved axe 耐久1520/1561');
   });
 
   it('uses the material class for non-log blocks too', () => {

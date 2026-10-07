@@ -9,3 +9,4 @@ overrides:
 
 patchedDependencies:
   mineflayer-pathfinder@2.4.5: patches/mineflayer-pathfinder@2.4.5.patch
+  prismarine-windows@2.10.0: patches/prismarine-windows@2.10.0.patch

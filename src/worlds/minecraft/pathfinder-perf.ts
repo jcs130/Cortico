@@ -232,7 +232,7 @@ export function setSiteZones(
 }
 
 /**
- * 注册按成果坐标禁止头顶垫脚的判据，null 撤销。
+ * 注册禁垫格判据(成果登记格、传送门方块),落点本身或落点下面那格命中都不生成放置；null 撤销。
  * 此稀疏点集与 setSiteZones 的工地体积约束独立。
  */
 export function setNoPlaceCells(
@@ -244,7 +244,7 @@ export function setNoPlaceCells(
 
 /**
  * 给一份 movements 装上「这一格此刻挖不动」的取数口;`null` 撤销。判据由调用方给
- * (bridge 的挖掘失败退避),这里只负责让 `safeToBreak` 认它 —— 挖不动的格子不再
+ * (bridge 的挖掘失败退避与成果登记格),这里只负责让 `safeToBreak` 认它 —— 挖不动的格子不再
  * 进 `toBreak`,A* 自然绕开,而不是每个物理刻把同一条路重算一遍。
  */
 export function setDigBackoff(

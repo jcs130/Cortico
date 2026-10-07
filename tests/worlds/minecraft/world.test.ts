@@ -1,10 +1,11 @@
 import { EventEmitter } from 'node:events';
+import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { renderWorldEnvPrompt } from '../../../src/core/prefix.ts';
-import { MinecraftWorld, MINECRAFT_TOOL_DECLS, PwsrTables, GOAL_TABLE_DECL, goalAge, applyGoal, goalSnapshotLine, staleGoalNotice, GOAL_NOTICE_HOURLY_CAP, GOAL_STALE_COOLDOWN_MS, GOAL_STALE_MS, GOAL_STALE_TASKS, MAP_KINDS, MAP_SLOTS, MAP_SLOTS_TIGHT, MAP_TABLE_DECL, MARK_NEAR_MAX, mapSnapshotLine, checkMark, dangerZonesAt, markBearing, nearMarkText, nearestMark, parseMap, renderDifficultyFact, type MinecraftGoal, type MinecraftMark } from '../../../src/worlds/minecraft/world.ts';
+import { ACTION_BAR_SHOW_MS, MinecraftWorld, MINECRAFT_TOOL_DECLS, PwsrTables, GOAL_TABLE_DECL, goalAge, applyGoal, goalSnapshotLine, staleGoalNotice, GOAL_NOTICE_HOURLY_CAP, GOAL_STALE_COOLDOWN_MS, GOAL_STALE_MS, GOAL_STALE_TASKS, MAP_KINDS, MAP_SLOTS, MAP_SLOTS_TIGHT, MAP_TABLE_DECL, MARK_NEAR_MAX, mapSnapshotLine, checkMark, dangerZonesAt, markBearing, nearMarkText, nearestMark, parseMap, renderDifficultyFact, type MinecraftGoal, type MinecraftMark } from '../../../src/worlds/minecraft/world.ts';
 import { MINECRAFT_DEFAULTS, type MinecraftConfigSection } from '../../../src/worlds/minecraft/config.ts';
 import { acceptBlueprint } from '../../../src/worlds/minecraft/blueprint-plan.ts';
 import { parseGoalPlan, recordGoalJudgment } from '../../../src/worlds/minecraft/goal-plan.ts';
@@ -441,7 +442,7 @@ describe('MinecraftWorld World 面(未连接状态)', () => {
     expect(Object.keys(byName).sort())
       .toEqual([
         'mc_bag', 'mc_blocked', 'mc_blueprint', 'mc_check', 'mc_do', 'mc_escape',
-        'mc_goal', 'mc_help', 'mc_map', 'mc_policy', 'mc_queue', 'mc_scout', 'mc_stop', 'mc_visual',
+        'mc_goal', 'mc_help', 'mc_map', 'mc_policy', 'mc_queue', 'mc_scout', 'mc_stop', 'mc_view_map', 'mc_visual',
       ]);
     // 三个只读原语与 mc_check 同一档:纯读、不进队列、不该进只读 fork 的禁区;
     // 回执是此刻读数,另打 snapshot(交接笔记同名只留最后一次)
@@ -451,6 +452,7 @@ describe('MinecraftWorld World 面(未连接状态)', () => {
     }
     // 对账只读世界:不进队列也不该进只读 fork 的禁区
     expect(byName.mc_check.tags).toEqual(['read']);
+    expect(byName.mc_view_map.tags).toEqual(['read']);
     expect(byName.mc_check.barrierAfter).toBeUndefined();
     expect(byName.mc_scout.tags).toContain('read');
     expect(byName.mc_scout.barrierAfter).toBeUndefined();
@@ -961,14 +963,13 @@ describe('MinecraftWorld World 面(未连接状态)', () => {
 
   it('默认 enabled=false:World 不自报被需要;观察者客户端也默认不开', () => {
     expect(MINECRAFT_DEFAULTS.enabled).toBe(false);
-    expect(MINECRAFT_DEFAULTS.local.serverEnabled).toBe(false);
+    expect(MINECRAFT_DEFAULTS.local.startWithWorld).toBe(false);
     expect(MINECRAFT_DEFAULTS.client.enabled).toBe(false);
   });
 });
 
-describe('MinecraftWorld 受管服务器开关', () => {
-  const serverState = (enabled: boolean, phase: MinecraftServerState['phase'] = 'stopped'): MinecraftServerState => ({
-    enabled,
+describe('MinecraftWorld 受管服务器启停', () => {
+  const serverState = (phase: MinecraftServerState['phase'] = 'stopped'): MinecraftServerState => ({
     phase,
     address: '127.0.0.1:1',
     detail: null,
@@ -978,25 +979,25 @@ describe('MinecraftWorld 受管服务器开关', () => {
     configured: true,
   });
 
-  it('关态长期不连接；开后启动并连接，再关会断线并保存式停服', async () => {
+  it('startWithWorld 关时 World 启动不连接；面板启动才起服并连接，面板停止断线并存档停服', async () => {
     vi.useFakeTimers();
     const runtimeCfg = cfg({
       port: 1,
       local: {
         ...MINECRAFT_DEFAULTS.local,
         serverDir: 'C:\\managed',
-        serverEnabled: false,
+        startWithWorld: false,
         cheats: false,
       },
     });
     const bridgeStart = vi.spyOn(Bridge.prototype, 'start').mockImplementation(() => undefined);
     const bridgeStop = vi.spyOn(Bridge.prototype, 'stop').mockResolvedValue(undefined);
     const serverStart = vi.spyOn(MinecraftServerManager.prototype, 'start')
-      .mockImplementation(async () => serverState(runtimeCfg.local.serverEnabled, 'starting'));
+      .mockImplementation(async () => serverState('starting'));
     const serverStop = vi.spyOn(MinecraftServerManager.prototype, 'stop')
-      .mockImplementation(async () => serverState(runtimeCfg.local.serverEnabled));
+      .mockImplementation(async () => serverState());
     vi.spyOn(MinecraftServerManager.prototype, 'state')
-      .mockImplementation(async () => serverState(runtimeCfg.local.serverEnabled));
+      .mockImplementation(async () => serverState());
     const m = new MinecraftWorld({ cfg: runtimeCfg });
     try {
       await m.start(new FakeHost() as never);
@@ -1009,15 +1010,14 @@ describe('MinecraftWorld 受管服务器开关', () => {
       await vi.advanceTimersByTimeAsync(600_000);
       expect(bridgeStart).not.toHaveBeenCalled();
       expect(serverStart).not.toHaveBeenCalled();
-      expect((await m.serverConsole().start()).detail).toContain('开关已关闭');
+      expect((await m.serverConsole().state()).wanted).toBe(false);
 
-      runtimeCfg.local.serverEnabled = true;
-      await vi.advanceTimersByTimeAsync(1_000);
+      expect((await m.serverConsole().start()).wanted).toBe(true);
       expect(serverStart).toHaveBeenCalledTimes(1);
       expect(bridgeStart).toHaveBeenCalledTimes(1);
-      const stopsBeforeRejectedConsoleStop = serverStop.mock.calls.length;
-      expect((await m.serverConsole().stop()).detail).toContain('开关仍开启');
-      expect(serverStop).toHaveBeenCalledTimes(stopsBeforeRejectedConsoleStop);
+      // 心跳只在目标变化时动手,不会再起一次
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(serverStart).toHaveBeenCalledTimes(1);
 
       // 运行期间把配置路径清空也不得孤儿化已受管的进程。
       const executor = (m as unknown as { executor: { onConnectionLost(reason?: string): void } }).executor;
@@ -1026,13 +1026,12 @@ describe('MinecraftWorld 受管服务器开关', () => {
       const combatLost = vi.spyOn(combat, 'onConnectionLost');
       (m as unknown as { mcServer: { activeServerDir: string | null } }).mcServer.activeServerDir = 'C:\\managed';
       runtimeCfg.local.serverDir = '';
-      runtimeCfg.local.serverEnabled = false;
-      await vi.advanceTimersByTimeAsync(1_000);
+      expect((await m.serverConsole().stop()).wanted).toBe(false);
       expect(bridgeStop).toHaveBeenCalledTimes(2);
-      expect(serverStop).toHaveBeenCalledTimes(stopsBeforeRejectedConsoleStop + 1);
-      expect(executorLost).toHaveBeenCalledWith('受管服务器开关关闭');
+      expect(serverStop).toHaveBeenCalledTimes(2);
+      expect(executorLost).toHaveBeenCalledWith('受管服务器已停止');
       expect(combatLost).toHaveBeenCalledOnce();
-      expect(m.console().badges?.[0]).toMatchObject({ value: '受管服务已关闭', tone: 'off' });
+      expect(m.console().badges?.[0]).toMatchObject({ value: '未启动', tone: 'off' });
     } finally {
       await m.stop();
       vi.restoreAllMocks();
@@ -1047,7 +1046,7 @@ describe('MinecraftWorld 受管服务器开关', () => {
       local: {
         ...MINECRAFT_DEFAULTS.local,
         serverDir: 'C:\\managed',
-        serverEnabled: false,
+        startWithWorld: false,
         cheats: false,
       },
     });
@@ -1055,9 +1054,9 @@ describe('MinecraftWorld 受管服务器开关', () => {
     const bridgeStop = vi.spyOn(Bridge.prototype, 'stop')
       .mockRejectedValueOnce(new Error('quit failed'))
       .mockResolvedValue(undefined);
-    vi.spyOn(MinecraftServerManager.prototype, 'start').mockResolvedValue(serverState(false));
-    const serverStop = vi.spyOn(MinecraftServerManager.prototype, 'stop').mockResolvedValue(serverState(false));
-    vi.spyOn(MinecraftServerManager.prototype, 'state').mockResolvedValue(serverState(false));
+    vi.spyOn(MinecraftServerManager.prototype, 'start').mockResolvedValue(serverState());
+    const serverStop = vi.spyOn(MinecraftServerManager.prototype, 'stop').mockResolvedValue(serverState());
+    vi.spyOn(MinecraftServerManager.prototype, 'state').mockResolvedValue(serverState());
     const m = new MinecraftWorld({ cfg: runtimeCfg });
     try {
       await m.start(new FakeHost() as never);
@@ -1075,23 +1074,23 @@ describe('MinecraftWorld 受管服务器开关', () => {
     }
   });
 
-  it('模块重启按持久化的开启值恢复受管服务器与连接', async () => {
+  it('startWithWorld 开时 World 启动即起服并连接', async () => {
     vi.useFakeTimers();
     const runtimeCfg = cfg({
       port: 1,
       local: {
         ...MINECRAFT_DEFAULTS.local,
         serverDir: 'C:\\managed',
-        serverEnabled: true,
+        startWithWorld: true,
         cheats: false,
       },
     });
     const bridgeStart = vi.spyOn(Bridge.prototype, 'start').mockImplementation(() => undefined);
     vi.spyOn(Bridge.prototype, 'stop').mockResolvedValue(undefined);
     const serverStart = vi.spyOn(MinecraftServerManager.prototype, 'start')
-      .mockResolvedValue(serverState(true, 'starting'));
-    vi.spyOn(MinecraftServerManager.prototype, 'stop').mockResolvedValue(serverState(true));
-    vi.spyOn(MinecraftServerManager.prototype, 'state').mockResolvedValue(serverState(true));
+      .mockResolvedValue(serverState('starting'));
+    vi.spyOn(MinecraftServerManager.prototype, 'stop').mockResolvedValue(serverState());
+    vi.spyOn(MinecraftServerManager.prototype, 'state').mockResolvedValue(serverState());
     const m = new MinecraftWorld({ cfg: runtimeCfg });
     try {
       await m.start(new FakeHost() as never);
@@ -1112,7 +1111,7 @@ describe('MinecraftWorld 受管服务器开关', () => {
       local: {
         ...MINECRAFT_DEFAULTS.local,
         serverDir: 'C:\\managed',
-        serverEnabled: true,
+        startWithWorld: true,
         cheats: false,
       },
     });
@@ -1123,8 +1122,8 @@ describe('MinecraftWorld 受管服务器开关', () => {
       new Promise<MinecraftServerState>((resolve) => { pending.resolve = resolve; })
     ));
     const serverStop = vi.spyOn(MinecraftServerManager.prototype, 'stop')
-      .mockResolvedValue(serverState(true));
-    vi.spyOn(MinecraftServerManager.prototype, 'state').mockResolvedValue(serverState(true));
+      .mockResolvedValue(serverState());
+    vi.spyOn(MinecraftServerManager.prototype, 'state').mockResolvedValue(serverState());
     const m = new MinecraftWorld({ cfg: runtimeCfg });
     try {
       await m.start(new FakeHost() as never);
@@ -1137,32 +1136,33 @@ describe('MinecraftWorld 受管服务器开关', () => {
       expect(bridgeStop).toHaveBeenCalledOnce();
       expect(bridgeStart).not.toHaveBeenCalled();
 
-      pending.resolve?.(serverState(true, 'starting'));
+      pending.resolve?.(serverState('starting'));
       await stopping;
       // 在途启动探针没把收摊挡住:服务器照样停下了,而且 bridge 没被重新拉起来
       expect(serverStop).toHaveBeenCalledOnce();
       expect(bridgeStart).not.toHaveBeenCalled();
     } finally {
-      pending.resolve?.(serverState(true));
+      pending.resolve?.(serverState());
       vi.restoreAllMocks();
       vi.useRealTimers();
     }
   });
 
-  it('未配置本地服务时不受本地开关约束，仍按远程连接启动', async () => {
+  it('未配置本地服务器时按远程连接启动', async () => {
     vi.useFakeTimers();
     const bridgeStart = vi.spyOn(Bridge.prototype, 'start').mockImplementation(() => undefined);
     vi.spyOn(Bridge.prototype, 'stop').mockResolvedValue(undefined);
-    const serverStart = vi.spyOn(MinecraftServerManager.prototype, 'start').mockResolvedValue(serverState(true));
-    const serverStop = vi.spyOn(MinecraftServerManager.prototype, 'stop').mockResolvedValue(serverState(true));
-    vi.spyOn(MinecraftServerManager.prototype, 'state').mockResolvedValue(serverState(true));
+    const serverStart = vi.spyOn(MinecraftServerManager.prototype, 'start').mockResolvedValue(serverState());
+    const serverStop = vi.spyOn(MinecraftServerManager.prototype, 'stop').mockResolvedValue(serverState());
+    vi.spyOn(MinecraftServerManager.prototype, 'state').mockResolvedValue(serverState());
     const m = new MinecraftWorld({ cfg: cfg({
-      local: { ...MINECRAFT_DEFAULTS.local, serverDir: '', serverEnabled: false },
+      local: { ...MINECRAFT_DEFAULTS.local, serverDir: '', startWithWorld: false },
     }) });
     try {
       await m.start(new FakeHost() as never);
       await vi.advanceTimersByTimeAsync(0);
       expect(bridgeStart).toHaveBeenCalledTimes(1);
+      expect((await m.serverConsole().state()).wanted).toBe(true);
       expect(serverStart).not.toHaveBeenCalled();
       expect(serverStop).not.toHaveBeenCalled();
     } finally {
@@ -1330,6 +1330,69 @@ async function started(over: Partial<MinecraftConfigSection> = {}) {
     queueText: () => renderQueue((m as any).executor.status()),
   };
 }
+
+describe('服务器系统消息与动作栏', () => {
+  const mfReq = createRequire(createRequire(import.meta.url).resolve('mineflayer'));
+  const registry = mfReq('prismarine-registry')('1.20.6') as { supportFeature(f: string): boolean };
+  const injectChat = mfReq('mineflayer/lib/plugins/chat.js') as (bot: unknown, opts: object) => void;
+
+  /** 真 mineflayer 聊天插件:systemChat 包 → message/messagestr → 聊天模式派发 chat/whisper */
+  function chatRig() {
+    const m = new MinecraftWorld({ cfg: cfg() });
+    const host = new FakeHost();
+    stub(m, { host });
+    const bot = Object.assign(new EventEmitter(), idleBot() as Record<string, unknown>, {
+      registry,
+      supportFeature: (f: string) => registry.supportFeature(f),
+    }) as unknown as EventEmitter & { _client: EventEmitter };
+    injectChat(bot, {});
+    (m as unknown as { hookBotEvents(bot: unknown): void }).hookBotEvents(bot);
+    const send = async (component: object, positionId: 1 | 2): Promise<void> => {
+      bot._client.emit('systemChat', { formattedMessage: JSON.stringify(component), positionId });
+      await Promise.resolve();
+    };
+    const sent = () => host.events.map((e, i) => ({ text: e.text, trigger: (host.pushOpts[i] as { trigger?: string } | undefined)?.trigger }));
+    return { send, sent };
+  }
+
+  it('插件回执与命令反馈 piggyback 进 minecraft.chat;进出服广播与已成聊天的消息不重复转发', async () => {
+    const { send, sent } = chatRig();
+    await send({ text: '技能列表:火球术(10 魔力)' }, 1);
+    await send({ translate: 'commands.time.set', with: ['1000'] }, 1);
+    await send({ translate: 'multiplayer.player.joined', with: ['Alex'] }, 1);
+    await send({ text: '[Server] hello' }, 1);
+    expect(sent()).toEqual([
+      { text: '[MC 系统] 技能列表:火球术(10 魔力)', trigger: 'piggyback' },
+      { text: '[MC 系统] Set the time to 1000', trigger: 'piggyback' },
+      { text: '[MC] Server: hello', trigger: 'debounce' },
+    ]);
+  });
+
+  it('动作栏同一文字在显示期内重发只算续显;显示期过了或换了文字才再入流', async () => {
+    const { send, sent } = chatRig();
+    let now = 1_000_000;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      await send({ text: '魔力 50/100' }, 2);
+      now += ACTION_BAR_SHOW_MS - 1;
+      await send({ text: '魔力 50/100' }, 2);
+      now += ACTION_BAR_SHOW_MS - 1;
+      await send({ text: '魔力 50/100' }, 2);
+      now += ACTION_BAR_SHOW_MS;
+      await send({ text: '魔力 50/100' }, 2);
+      await send({ text: '魔力 40/100' }, 2);
+      await send({ text: '魔力 50/100' }, 2);
+    } finally {
+      clock.mockRestore();
+    }
+    expect(sent()).toEqual([
+      { text: '[MC 动作栏] 魔力 50/100', trigger: 'piggyback' },
+      { text: '[MC 动作栏] 魔力 50/100', trigger: 'piggyback' },
+      { text: '[MC 动作栏] 魔力 40/100', trigger: 'piggyback' },
+      { text: '[MC 动作栏] 魔力 50/100', trigger: 'piggyback' },
+    ]);
+  });
+});
 
 describe('MinecraftWorld 物品损坏事件', () => {
   interface BreakItem {
@@ -2200,7 +2263,7 @@ describe('Minecraft 聊天框消息', () => {
     expect(host.pushOpts[2]?.deliver).toBe(false);
   });
 
-  it('方块保护与命令回执作为系统聊天投递，动作栏和进服广播不重复', async () => {
+  it('方块保护回执及时投递，系统提示和动作栏随下一批投递，进服广播不重复', async () => {
     const { bot, host } = hooked();
     bot.emit('message', { toString: () => '你不能破坏这里的方块' }, 'system');
     bot.emit('message', { translate: 'commands.generic.permission', toString: () => '你没有权限' }, 'system');
@@ -2211,8 +2274,9 @@ describe('Minecraft 聊天框消息', () => {
     expect(host.events.map((e) => e.text)).toEqual([
       '[MC 系统] 你不能破坏这里的方块',
       '[MC 系统] 你没有权限',
+      '[MC 动作栏] 魔力 90/100',
     ]);
-    expect(host.pushOpts.map((o) => o?.trigger)).toEqual(['flush', 'debounce']);
+    expect(host.pushOpts.map((o) => o?.trigger)).toEqual(['flush', 'piggyback', 'piggyback']);
   });
 
   it('床的动作栏拒绝理由供当前操作读取，普通 HUD 不进入回执或事件流', () => {
@@ -2279,7 +2343,7 @@ describe('Minecraft 聊天框消息', () => {
       '[MC 插件] 可用咏唱：治愈术',
       '[MC 系统] 领地保护已开启',
     ]);
-    expect(host.pushOpts.map((o) => o?.trigger)).toEqual(['flush', 'debounce']);
+    expect(host.pushOpts.map((o) => o?.trigger)).toEqual(['flush', 'piggyback']);
   });
 });
 
@@ -2929,7 +2993,7 @@ describe('权限与作弊面板(服务器停着)', () => {
     cfg: cfg({
       port: 1,
       username: 'CortiV',
-      local: { ...MINECRAFT_DEFAULTS.local, serverDir: dir, serverEnabled: true },
+      local: { ...MINECRAFT_DEFAULTS.local, serverDir: dir },
       client: { ...MINECRAFT_DEFAULTS.client, username: 'CortiCam' },
       player: { ...MINECRAFT_DEFAULTS.player, username: 'Phant' },
     }),
@@ -3001,7 +3065,6 @@ describe('权限与作弊面板(服务器停着)', () => {
         local: {
           ...MINECRAFT_DEFAULTS.local,
           serverDir: off,
-          serverEnabled: true,
           cheats: false,
         },
       }),

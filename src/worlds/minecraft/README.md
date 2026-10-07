@@ -57,6 +57,7 @@ cell-facts.ts    格的读法:锚点落到哪一格、脚下与参照面、区�
 geometry.ts      形状与锚点的纯几何:解析、栅格化
 item-facts.ts / entity-facts.ts / animal-state.ts / item-pick.ts / item-break.ts / piglin.ts
                  物品与实体的事实读法
+damage-source.ts 自己挨打的来由:damage_event 的伤害类型、起因实体与直接实体
 names.ts         方块/实体/生物群系/附魔/效果的中文名表
 
 技能
@@ -97,6 +98,7 @@ goal-plan.ts     PWSR 目标计划的协调与判定
 check.ts         mc_check 的断言器:受理 → 对世界求值 → 只报差异的回执(纯函数)
 chests.ts / works.ts / explored.ts / deaths.ts  容器、成果、探索覆盖、死亡的持久账
 placed-ledger.ts 挂在 bot 实例上的小账:这一场放过、锄过、没放上的那些格
+map-view.ts      地图像素包按编号缓存,渲成 PNG(mc_view_map)
 search-observation.ts / round.ts / show.ts / readouts.ts / log.ts
                  find 的短期观察、同轮重复查询、容器演出节拍、三份读数、日志转发
 
@@ -262,7 +264,7 @@ export 的 `panels` 键就是服务端 `console().panels[].id`)：`mount` 挂载
 挂载接口分别管理服务器、观察者和玩家客户端，方法名使用对应前缀，例如
 `server.state`、`client.start` 与 `player.teleport`。
 
-- **游戏服务器**：`worlds.minecraft.local.serverDir` 指定含 `server.jar` 的目录，`local.javaPath` 指定 Java。停止时通过 stdin 发送 `stop` 保存存档，15 秒后仍未退出则强制终止。
+- **游戏服务器**：`worlds.minecraft.local.serverDir` 指定含 `server.jar` 的目录，`local.javaPath` 指定 Java。启动与停止同时决定 bot 是否连接这台服务器：启动后起服并连接，停止后断开 bot、取消重连并关服。`local.startWithWorld=true` 时 World 启动即起服；默认关。`serverDir` 为空时按远程服务器处理，World 启动即连接。停止时通过 stdin 发送 `stop` 保存存档，15 秒后仍未退出则强制终止。
 - **观察者客户端**：窗口出现表示客户端进程已就绪，进服和附身另按玩家列表确认。`client.enabled=false` 时仍可手动启停；World 启动及一键挂载不自动启动它。
 - **玩家客户端**：与观察者使用独立进程和账号，共用 `GameClient` 实现；附身与传送由 World 编排。默认继承观察者的游戏目录和版本，`worlds.minecraft.player.*` 可覆盖。仅在共用游戏目录时，将 `chatVisibility` 设为 FULL，以允许打开聊天框和命令行；不应用观察者的其他启动设置。
 - 服务器健康探测独立于托管进程，已运行的外部服务器显示为外部实例。World 停止时终止其托管进程。
@@ -301,6 +303,7 @@ World 将所选文件保存在部署的 `data/minecraft-skin-{bot,player}.png`�
 | `mc_do(steps, queue?)` | 提交任务。立即返回带时刻与任务号（#N）的受理回执；后台依次执行，结果以同一任务号的 `minecraft.task` 事件返回。`queue` 模式见「队列」 |
 | `mc_scout(steps, queue?)` | `tags:['read']`。与 `mc_do` 共用队列和回执，执行 probe，以及按 dryRun 入队的 goto / build / excavate / tunnel。后续操作仍可入队 |
 | `mc_check(checks)` | `tags:['read']`。提交至多 16 条断言（单格 `at/is`、区域 `count/all/air/sealed`、背包 `inv`、蓝图 `blueprint`、路标 `mark`），对照世界后只报差异。同步返回、不进队列、不移动，只读已加载区块；未加载单独报告。`sealed` 按流入通路判断，水和岩浆算通路 |
+| `mc_view_map(id?)` | `tags:['read']`。看身上一张已开图的地图：回执带 512×512 的 PNG 画面（上北右东）与文字读数：编号、比例、已探索比例、图标位置。本机服务端能读到存档 `data/map_<id>.dat` 时再给中心坐标和图标的世界坐标。画面来自服务端推给包里地图的像素包 |
 | `mc_policy(六格，全可选)` | `tags:['write']`。设置垫脚/照明名单、照明场合、赶路取向、保留工具、主动交战条件。不进队列、不占任务号，同步回执；空调用只回读。见「策略面」 |
 | `mc_stop()` | 停止当前任务并清空待办队列。单步受阻不自动清队 |
 | `mc_escape()` | 仅用于移动或任务无法推进时的作弊脱困，不能用于旅行或濒死自救；使用前须先对外说明。立即清队并用 `/tp` 前往选定安全锚，物品保留。候选为床/重生锚、世界出生点及 `mc_map` 的「家」「床」路标；同维度无候选时回退为个人重生点优先。同维度候选优先，明确不可站立的落点降级后按水平距离选点，回执列出候选、距离、所选落点及是否位于标记的危险区 |
@@ -449,7 +452,9 @@ agent 可以在同一轮发出多次调用以提交已确定的后续任务。
 
 `use.times` 对每种右键操作生效，最多 16 次。回执报告已完成的右键次数与请求次数；物品用完或单次操作失败时停止，并注明中止位置。已完成至少一次时保留部分结果；次数本身不证明未核验的效果已发生。
 
-`equip` 省略 `item` 或写 `air` 表示清空主手；`use` 省略 `item` 则沿用当前手持物。解析归一化进入受理回执。背包已满时，Mineflayer 的 `equipEmpty` 可能通过 `tossStack` 将主手物品扔到地上，回执需报告实际掉落。
+`equip` 省略 `item` 或写 `air` 表示清空主手；`use` 省略 `item` 则沿用当前手持物。解析归一化进入受理回执。背包已满时，Mineflayer 的 `equipEmpty` 可能通过 `tossStack` 将主手物品扔到地上，回执需报告实际掉落。`hand:"off"` 腾副手时，包里既没空格也没有能并入的同种未满一摞就不腾，受阻说明物品还挂在副手。
+
+`equip` 点名的物品也在副手里找（同一档名字下包里优先）；从副手换到主手时，回执写出快捷栏那格原来的东西是否换进了副手。挖掘选工具同样认副手：`tool` 指定工具名时主手那把优先，其次包里，副手最后；按类别选时，副手那件只在包里没有能挖出掉落的同类工具时动用。工具回执按附魔全标签念出实际用的那一把。
 
 `find` 是**找东西这件事唯一的动词**，一个 `distance` 旋钮，执行器按有没有给
 `direction` 分诊：不给 = 站着扫一圈（最远 `FIND_STATIC_MAX` = 48 格，不挪地方）；
@@ -669,6 +674,7 @@ attack 先验证目标名（实体英文 id 或在线玩家名），不认识与
 近战按武器攻速满冷却再挥，落地跳、下落出手（crit），8 格内用方向键贴身侧移，
 苦力怕贴脸就后撤。战斗中生命跌破脱战血线（与反射同源的 `reflex.fleeHealth`）
 自动收手，**走完撤离路线**（寻路 24 格）再汇报撤到了哪。
+auto 在 8 格内弓射不出时改近战；8 格外射不出（被挡、太近、没弹道等）则受阻，回执写明原因、相距格数和已放箭数。
 
 `surface` 在水中尝试换气并寻找 32 格内的登岸点；身体离水且稳定站在干燥落脚格才完成。
 只有换气、没有岸或无法登岸都报告受阻。天空未知不影响已核验的登岸结果。
@@ -698,7 +704,8 @@ attack 先验证目标名（实体英文 id 或在线玩家名），不认识与
 2. **合成前清空合成格。** 光标物品无法放回时返回错误；徒手 2×2 合成使用不会关闭的窗口 0，失败后由补丁取回格内材料。
 3. **放置后回读目标格。** 每次等待 400ms，最多尝试三次；最终错误保留 Mineflayer 的文本契约，供寻路器处理。
 4. **`windowId=-2/254` 按玩家库存索引更新。** 热栏、主栏、盔甲和副手映射到窗口 0；开窗时同步对应的主栏与热栏玩家槽，关闭窗口不会回写旧数量。这类包不改变当前容器的 `stateId`。其他窗口的 `set_slot` 和 `window_items` 继续传递；已收到当前窗口的 `stateId` 时，用该值替换其他窗口包中的 `stateId`。
-5. **水平碰撞停在离方块面 `WALL_GAP` 处。** 服务端拒绝包围盒恰好贴着方块侧面的位置(静默传送回上一个好位置,不打 `moved wrongly`),prismarine-physics 原本停在贴面处;竖直方向贴面服务端照收,不改。改的是 `prismarine-physics` 的 AABB 原型,bot 物理与寻路器模拟同时生效。
+5. **丢弃已关窗口的 `window_items`。** windowId 既不是 0 也不是当前窗口的 `window_items` 不交给 Mineflayer:它会把这类包缓存下来,当成之后同号窗口(服务端窗口号在 1–100 循环)的初始内容,关窗时再经 `copyInventory` 写进 `bot.inventory`。每次丢弃记 World 日志 `skill` 类别 `closed-window-items-drop`。
+6. **水平碰撞停在离方块面 `WALL_GAP` 处。** 服务端拒绝包围盒恰好贴着方块侧面的位置(静默传送回上一个好位置,不打 `moved wrongly`),prismarine-physics 原本停在贴面处;竖直方向贴面服务端照收,不改。改的是 `prismarine-physics` 的 AABB 原型,bot 物理与寻路器模拟同时生效。
 
 合成与放置期间的包流记为 World 日志 `craft` 类别（`click-out`、`slot-in`、
 `items-in`、`stateid-guard`、`result-slot`、`grid-clear`);窗口外的高频 `set_slot`
@@ -757,7 +764,16 @@ ID，表示中文词表未覆盖。覆盖率可用 `scratch/` 下的探针脚本
 | `minecraft.task` | 反射急报 true | 队列里一件事的完成/受阻/被抢占（后面跟一行当下的队列）；反射的事后汇报 |
 | `minecraft.world` | false | 节流后的位移、群系、天气、背包、饥饿和新出现敌对种类的变化摘要；仅含背包增减时使用 `piggyback` |
 | `minecraft.world.snapshot` | 投递成文 | 世界状态与队列，投递时读取；按 `snapshotSec` 限制频率，与上一份相同则不生成事件，详见「世界快照事件」 |
-| `minecraft.chat` | 点名、私聊及部分插件回执为 true | 游戏聊天框的普通聊天、私聊和系统提示；自己说话回录不投递，动作栏不进入聊天事件 |
+| `minecraft.chat` | 点名、私聊及部分插件回执为 true | 游戏聊天框的普通聊天、私聊和系统提示；自己说话回录不投递，动作栏不进入聊天事件 || `minecraft.chat` | `piggyback` | `[MC 系统]` 服务器系统消息原文：命令反馈、插件回执、公告；`[MC 动作栏]` 动作栏原文 |
+
+系统消息里已有专报的不经 `[MC 系统]` 再转一遍：死亡广播与成就（键名
+`death.*`、`chat.type.advancement`）、`block.minecraft.set_spawn`、进出服广播
+（`multiplayer.player.joined` / `left`，由玩家列表事件成文）、被 mineflayer 聊天模式认成
+`chat` / `whisper` 的那几条（如 `[Server] hi`，照旧按 `[MC]` 聊天投递）。1.20.5 起成就键名
+是 `chat.type.advancement.{task,goal,challenge}`，这些按普通系统消息进 `[MC 系统]`。
+动作栏是一格会被覆盖的显示位，原版客户端每条显示 60 tick，期间收到同一文字只重置计时；
+因此同一文字距上一次收到不足 3 秒不再入流，过了显示期或换了文字才成新事件。
+
 
 睡眠事件的 `meta` 包含 `sleeping`、既有存档或服务器身份 `world`、维度 `dimension`、
 日内刻 `timeOfDay`、游戏日序号 `gameDay` 和累计世界刻 `worldAge`。时间直接读取
@@ -1044,6 +1060,8 @@ interest/danger 图，硬约束通过 masking 执行。
 死亡、断线、停止与连接代次切换先使旧租约失效；观测结果不拦截现有动作。
 
 交战期间继续投递事件：接敌、击杀和撤退使用 urgent，战况每 6 秒随其他事件投递。事件正文采用第一人称可观察事实，遵守闭包原则。战斗会话已报告的击杀不再由 World 重复播报。
+
+接敌时近战武器不在主手就换上，播报只说正在换和原来手里是什么；换手被拒、或做完后主手读数不是它，另发一条 urgent 写明原因与主手实际是什么。战况每条都带主手读数。
 
 战斗暂停当前任务并保存断点，战后继续。当前步骤经 `checkAbort` 中止，任务与 `stepIndex` 保留。已结束步骤的终态保留在 `stepLog`，用于后续依赖判断和最终回执；正在执行的 collect 保留计数进度，只继续剩余数量。开工时间、主动丢弃物的位置及附带完成的操作也保留。craft、smelt、toss、stow、take、多次 use 和交易等可能重复消耗物品的步骤不重跑，按未完成处理，后续步骤按依赖条件判断。
 

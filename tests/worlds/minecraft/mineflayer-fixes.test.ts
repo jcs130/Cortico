@@ -2,9 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 import {
-  DIG_UNCONFIRMED_EVENT, WALL_GAP, installMineflayerFixes, installPathfinderToolSelection, installWallGap,
+  DIG_UNCONFIRMED_EVENT, WALL_GAP, installMineflayerFixes, installOffsetShapes, installPathfinderToolSelection, installWallGap,
 } from '../../../src/worlds/minecraft/mineflayer-fixes.ts';
 import { MinecraftLog } from '../../../src/worlds/minecraft/log.ts';
+import { PLACE_REACH } from '../../../src/worlds/minecraft/cell-facts.ts';
 import type { Logger } from '../../../src/core/types.ts';
 
 const log = { child() { return this; }, info() {}, warn() {}, error() {}, debug() {}, trace() {}, emit() {} } as unknown as Logger;
@@ -517,6 +518,35 @@ describe('放方块:短超时 + 就地重发', () => {
     });
   });
 
+  /**
+   * 脚下支撑第一次没放上、人就掉下去了:再发两遍服务端只会拒,还白白多等两轮确认才撤路,
+   * 人落地后沿旧路继续走。重试前人已出手长就当场判失败并撤路,这一格也不进拒放黑名单。
+   */
+  it('寻路垫脚第一次没放上、人已掉出手长:不再重发,当场撤路并报离开了几格', async () => {
+    const bot = placeBot(99, true);
+    const feet = { x: 1.5, y: 3, z: 3.5 };
+    Object.assign(bot, { entity: { position: feet } });
+    const place = bot._genericPlace as () => Promise<void>;
+    bot._genericPlace = async (): Promise<void> => {
+      await place();
+      feet.y = -9; // 落到 12 格下
+    };
+    installMineflayerFixes(bot as never, log);
+
+    await Promise.all([
+      expect(
+        (bot as unknown as { placeBlock(a: unknown, b: unknown): Promise<void> }).placeBlock(ref, {}),
+      ).rejects.toThrow('No block has been placed'),
+      vi.runAllTimersAsync(),
+    ]);
+
+    expect((bot as unknown as { attempts: number }).attempts).toBe(1);
+    expect((bot as unknown as { pathGoals: unknown[] }).pathGoals).toEqual([null]);
+    const failure = (bot as unknown as { pathSupportFailure: { leftReach?: number } }).pathSupportFailure;
+    expect(failure.leftReach).toBeGreaterThan(PLACE_REACH);
+    expect((bot as unknown as { placeMisses?: unknown[] }).placeMisses ?? []).toEqual([]);
+  });
+
   it('同代同格的七个重叠垫脚请求共享一次三遍确认', async () => {
     const bot = placeBot(99, true);
     installMineflayerFixes(bot as never, log);
@@ -961,6 +991,74 @@ describe('stateId:无效的玩家库存直接更新包忽略', () => {
     client.emit('set_slot', { windowId: 0, stateId: 900, slot: 45 });
 
     expect(seen).toEqual([900]);
+  });
+});
+
+/**
+ * 走真的 mineflayer 物品栏插件:关掉的箱子窗口迟到的 window_items 不能成为
+ * 窗口号循环回来之后那扇铁砧窗口的内容,也不能经关窗回灌进 bot.inventory。
+ */
+describe('关掉的窗口迟到的 window_items', () => {
+  const VERSION = '1.20.6';
+  const mfReq = createRequire(createRequire(import.meta.url).resolve('mineflayer'));
+  const registry = mfReq('minecraft-data')(VERSION) as {
+    itemsByName: Record<string, { id: number }>;
+    supportFeature(f: string): boolean;
+  };
+  const Item = mfReq('prismarine-item')(VERSION) as {
+    new (type: number, count: number): unknown;
+    toNotch(item: unknown): unknown;
+  };
+  const injectInventory = mfReq('mineflayer/lib/plugins/inventory.js') as (bot: unknown, opts: object) => void;
+
+  const stack = (name: string, count: number): unknown => Item.toNotch(new Item(registry.itemsByName[name].id, count));
+  const empty = (): unknown => Item.toNotch(null);
+
+  function inventoryBot() {
+    const bot = new EventEmitter() as unknown as EventEmitter & Record<string, unknown>;
+    const client = new EventEmitter() as unknown as EventEmitter & Record<string, unknown>;
+    client.write = (): void => {};
+    bot._client = client;
+    bot.version = VERSION;
+    bot.registry = registry;
+    bot.supportFeature = (f: string): boolean => registry.supportFeature(f);
+    bot.blockAt = (): null => null;
+    bot._genericPlace = async (): Promise<void> => {};
+    injectInventory(bot, {});
+    installMineflayerFixes(bot as never, log);
+    return {
+      bot: bot as unknown as EventEmitter & {
+        currentWindow: unknown;
+        inventory: { items(): Array<{ name: string }> };
+        closeWindow(win: unknown): void;
+      },
+      client,
+    };
+  }
+
+  it('同号铁砧窗口开出来时玩家那半是自己的,关窗后背包还是真实的账', () => {
+    const { bot, client } = inventoryBot();
+    const player = Array.from({ length: 36 }, (_, i) => (i === 0 ? stack('diamond_boots', 1) : empty()));
+    client.emit('window_items', { windowId: 0, stateId: 1, items: [...Array.from({ length: 9 }, empty), ...player, empty()] });
+
+    const chest = Array.from({ length: 27 }, () => stack('wheat_seeds', 64));
+    client.emit('open_window', { windowId: 5, inventoryType: 'minecraft:generic_9x3', windowTitle: '"chest"' });
+    client.emit('window_items', { windowId: 5, stateId: 2, items: [...chest, ...player] });
+    bot.closeWindow(bot.currentWindow);
+    // 服务端在收到关窗之前发出的整窗回灌,到达时客户端已经关了窗
+    client.emit('window_items', { windowId: 5, stateId: 3, items: [...chest, ...player] });
+
+    let seenAtOpen: string[] | null = null;
+    bot.once('windowOpen', (win: { items(): Array<{ name: string }> }) => {
+      seenAtOpen = win.items().map((i) => i.name);
+      bot.closeWindow(win);
+    });
+    client.emit('open_window', { windowId: 5, inventoryType: 'minecraft:anvil', windowTitle: '"anvil"' });
+    expect(seenAtOpen).toBeNull(); // 自己的 window_items 没到之前不发 windowOpen
+    client.emit('window_items', { windowId: 5, stateId: 4, items: [empty(), empty(), empty(), ...player] });
+
+    expect(seenAtOpen).toEqual(['diamond_boots']);
+    expect(bot.inventory.items().map((i) => i.name)).toEqual(['diamond_boots']);
   });
 });
 
@@ -1752,5 +1850,45 @@ describe('installWallGap:水平碰撞停在离方块面 WALL_GAP 处', () => {
     installWallGap();
     const s = walk(makeWorld(false), stateAt(0.5, 64, 3.5, 0, { forward: true }), 60);
     expect(s.pos.z - HALF - 1).toBeCloseTo(WALL_GAP, 9);
+  });
+});
+
+describe('滴水石锥与竹子按格偏移碰撞箱', () => {
+  const req = createRequire(createRequire(import.meta.url).resolve('mineflayer/package.json'));
+  const registry = req('prismarine-registry')('1.20.6');
+  const World = req('prismarine-world')(registry);
+  const Chunk = req('prismarine-chunk')(registry);
+  const { Vec3 } = req('vec3');
+  /** 石笋尖:朝上、上面是空气 */
+  const Block = req('prismarine-block')(registry);
+  const TIP = Block.fromProperties('pointed_dripstone', {
+    thickness: 'tip', vertical_direction: 'up', waterlogged: false,
+  }, 0).stateId as number;
+
+  function botAt(cells: Array<[number, number, number]>) {
+    const world = new World(null).sync;
+    for (const [x, , z] of cells) world.setColumn(x >> 4, z >> 4, new Chunk({ minY: -64, worldHeight: 384 }));
+    for (const [x, y, z] of cells) world.setBlockStateId(new Vec3(x, y, z), TIP);
+    const bot = { registry, blockAt: (p: unknown) => world.getBlock(p) };
+    installOffsetShapes(bot as never);
+    return bot as unknown as { blockAt(p: unknown): { shapes: number[][] } };
+  }
+
+  it('(-150,-11,63) 那根石笋尖按服务端偏移摆:北沿在 z=63.8125,不是注册表里的 63.5625', () => {
+    const bot = botAt([[-150, -11, 63]]);
+    const [[x0, , z0, x1, , z1]] = bot.blockAt(new Vec3(-150, -11, 63)).shapes;
+    // 原版石笋尖是 5..11 像素见方,这一格偏移 (+0.1167, +0.125)
+    expect(-150 + x0).toBeCloseTo(-150 + 0.3125 + 7 / 60, 4);
+    expect(-150 + x1).toBeCloseTo(-150 + 0.6875 + 7 / 60, 4);
+    expect(63 + z0).toBeCloseTo(63.4375, 6);
+    expect(63 + z1).toBeCloseTo(63.8125, 6);
+  });
+
+  it('(0,0) 那一格就是注册表取形状的那一格,不挪;注册表里共用的数组不被改', () => {
+    const bot = botAt([[0, -11, 0], [-150, -11, 63]]);
+    const shared = JSON.stringify(registry.blockCollisionShapes.shapes[
+      registry.blockCollisionShapes.blocks.pointed_dripstone[TIP - registry.blocksByName.pointed_dripstone.minStateId]]);
+    bot.blockAt(new Vec3(-150, -11, 63));
+    expect(JSON.stringify(bot.blockAt(new Vec3(0, -11, 0)).shapes)).toBe(shared);
   });
 });

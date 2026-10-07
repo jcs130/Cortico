@@ -12,7 +12,7 @@ import type { Logger } from '../../core/types.ts';
 import type { RouteProbe, TargetDiag } from './executor.ts';
 import type { MinecraftLog } from './log.ts';
 import { DEFAULT_BLUEPRINT_MC_VERSION, setBlueprintMcVersion } from './blueprint-registry.ts';
-import { DIG_UNCONFIRMED_EVENT, installMineflayerFixes, installPathfinderToolSelection } from './mineflayer-fixes.ts';
+import { DIG_UNCONFIRMED_EVENT, installMineflayerFixes, installOffsetShapes, installPathfinderToolSelection } from './mineflayer-fixes.ts';
 import { inventoryReadConfirmed } from './inventory-window-sync.ts';
 import { installNavigationBareHand } from './hand-interaction.ts';
 import { installDoorWaypointRepair } from './path-waypoints.ts';
@@ -33,6 +33,10 @@ import { walkOnlyPath } from './travel.ts';
 import { installPartialBlockStartRepair } from './pathfinder-start.ts';
 import { parseSkillsPayload, VIEWER_STATE_CHANNEL } from './viewer-state.ts';
 import { watchFlightAbilities } from './flight.ts';
+import { trackWindowProps } from './containers.ts';
+import { installTreadWater } from './travel.ts';
+import { trackMaps } from './map-view.ts';
+import { trackDamageSources } from './damage-source.ts';
 
 interface BridgeOptions {
   host: string;
@@ -60,7 +64,7 @@ interface BridgeOptions {
   blueprintZones?: () => readonly SiteZone[];
   /**
    * 成果登记里的一格(维度已由调用方合上)。寻路器不往登记格自己、也不往它头顶
-   * 垫脚搭路;走与挖不受限。每次候选移动生成时现问。
+   * 垫脚搭路,也不把它排进挖掘计划;走不受限。每次候选移动生成时现问。
    */
   workCell?: (x: number, y: number, z: number) => boolean;
   /** 容器 GUI 演出节拍;摄像机没开/演出关着时回 null(craft 用,每次 bot.craft 现取) */
@@ -507,8 +511,12 @@ export class Bridge {
         ? 'protected'
         : this.protection.verdict(String(bot.game.dimension), block.position.x, block.position.y, block.position.z, block.type);
     this._invSynced = false;
+    // 包里地图的整张画面服务端只在登录后第一刻推一次,早于 spawn;挂在 spawn 上就只剩增量
+    trackMaps(bot);
+    trackDamageSources(bot);
     /** 修补须通过插件注入，等待 Mineflayer 的 inject_allowed。 */
     bot.loadPlugin((b) => installMineflayerFixes(b, log, this.opts.diag, this.opts.showTempo));
+    bot.loadPlugin(installOffsetShapes);
     bot.loadPlugin(pathfinder);
     if (this.agentFriendProtection) {
       const protect = this.agentFriendProtection;
@@ -653,6 +661,8 @@ export class Bridge {
     bot.pathfinder.setMovements(movements);
     bot.pathfinder.tickTimeout = 60;
     suppressSprintNearWater(bot, movements);
+    installTreadWater(bot);
+    trackWindowProps(bot);
     this.installDigBackoff(bot);
     installDoorWaypointRepair(bot);
     this.installPathDiag(bot);
@@ -663,11 +673,20 @@ export class Bridge {
   private applyTuning(bot: mineflayer.Bot, movements: Movements): void {
     const log = this.opts.log;
 
-    /** 寻路单次落差限制为一格。 */
+    /** 寻路单次落差上限 2 格(原版 3 格内摔落不掉血)。 */
     movements.maxDropDown = 2;
     // 上游 parkour 会把屋门边的两格高墙当成捷径，插入 y+1 的跳跃首步；
     // 实际碰撞过不去，反复 reset stuck。普通走路/开门/搭桥仍由 Movements 规划。
     movements.allowParkour = false;
+
+    /**
+     * 水路代价:游一步记 1 + 3,往水里跳也受 maxDropDown 约束(上游默认不限高)。
+     * 在存档 33 西海台周边取直播里真实下过的 107 对起终点只算不走:成功路线上泡水的路点
+     * 139 → 99,没有新增算不出的路,多垫 44 块方块;液体代价取 5 与 3 的结果逐条相同。
+     */
+    // 上游类型声明漏了 liquidCost,运行时字段在 Movements 上
+    (movements as unknown as { liquidCost: number }).liquidCost = 3;
+    movements.infiniteLiquidDropdownDistance = false;
 
     /** 上游 lava 的 diggable=true；额外加入 blocksCantBreak 禁止寻路挖掘。 */
     const lava = (bot.registry.blocksByName as Record<string, { id: number } | undefined>).lava;
@@ -675,6 +694,8 @@ export class Bridge {
 
     // 维度切换只由 transit 发起；普通寻路把传送面与门框当作空间边界。
     const portalBlocks = bot.registry.blocksByName as Record<string, { id: number } | undefined>;
+    /** 传送门方块的 id;寻路器不在这些格子里、也不在它们头顶垫脚(末地传送门头顶垫一块就把门盖住) */
+    const portalIds = new Set<number>();
     for (const name of [
       'nether_portal', 'end_portal', 'end_gateway',
       'obsidian', 'crying_obsidian', 'end_portal_frame',
@@ -683,6 +704,7 @@ export class Bridge {
       if (!portal) continue;
       if (name === 'nether_portal' || name === 'end_portal' || name === 'end_gateway') {
         movements.blocksToAvoid.add(portal.id);
+        portalIds.add(portal.id);
       }
       movements.blocksCantBreak.add(portal.id);
     }
@@ -748,8 +770,12 @@ export class Bridge {
       }
     }
     setSiteZones(movements, this.opts.blueprintZones ?? null);
-    setNoPlaceCells(movements, this.opts.workCell ?? null);
-    setDigBackoff(movements, (x, y, z) => this.digBackedOff(x, y, z));
+    // 判据对落点和落点下面那一格各问一次(见 setNoPlaceCells)
+    const workCell = this.opts.workCell;
+    setNoPlaceCells(movements, (x, y, z) => portalIds.has(bot.blockAt(new Vec3(x, y, z), false)?.type ?? -1)
+      || (workCell?.(x, y, z) ?? false));
+    // 成果登记格同挖不动的格一样排出寻路的挖掘计划;显式挖掘不经这里
+    setDigBackoff(movements, (x, y, z) => this.digBackedOff(x, y, z) || (workCell?.(x, y, z) ?? false));
     setProtectedCells(movements, (x, y, z, type) =>
       this.protection.denied(String(bot.game.dimension), x, y, z, type)
       || (this.agentFriendProtection?.verdict('break', String(bot.game.dimension), { x, y, z }) === 'deny')

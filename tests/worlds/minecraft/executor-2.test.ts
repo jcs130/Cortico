@@ -2080,13 +2080,14 @@ describe('Reflexes 窒息', () => {
     bot.hurt();
     await waitUntil(() => bot.dug.length === 2, 3000);
     expect(bot.dug).toEqual(['gravel', 'gravel']);
-    // 头顶通了:松开跳键,不再报第二条
+    // 头顶通了:松开跳键,只补一条挖出来了
     bot.hurt();
     await waitUntil(() => bot.controls.some(([k, v]) => k === 'jump' && !v), 3000);
     expect(reflexes.envActive).toBe(false);
     reflexes.stop();
     expect(bot.dug).toHaveLength(2);
-    expect(reports).toHaveLength(1);
+    expect(reports).toHaveLength(2);
+    expect(reports[1].text).toContain('挖出来了');
   });
 
   it('沙砾挖开后不再掉血:下一拍主动清掉被埋状态并松开跳键', async () => {
@@ -2893,34 +2894,76 @@ describe('use:(item × 目标方块) 效果表', () => {
    * 报飞向哪边、飞多远、落地没落地;一个「往那边走」都不说。
    */
   it('末影之眼:报飞向、飞了多远、最后看见它在哪、落没落地', async () => {
-    const bag: Bag = [{ name: 'eye_of_ender', count: 2 }];
+    const bag: Bag = [{ name: 'ender_eye', count: 2 }];
     const entities: Record<string, unknown> = {};
     const bot = effectBot({
       cells: FLOOR,
       bag,
       onUse: () => {
-        entities.eye = { name: 'eye_of_ender', position: new V(0.5, 70, -24.5) };
+        // 物品叫 ender_eye,飞的实体叫 eye_of_ender;先在身边生成,再飞远
+        const eye = { id: 9, name: 'eye_of_ender', position: new V(0.5, 65.5, 0.5) };
+        entities[9] = eye;
+        setTimeout(() => { eye.position = new V(0.5, 70, -24.5); }, 150);
         // 飞完落地留下一个掉落物
         setTimeout(() => {
-          delete entities.eye;
-          entities.drop = { name: 'item', position: new V(0.5, 69, -24.5) };
+          delete entities[9];
+          entities[10] = { id: 10, name: 'item', position: new V(0.5, 69, -24.5) };
         }, 400);
       },
       entities,
     });
-    const r = await runUse(bot, { skill: 'use', item: 'eye_of_ender' });
+    const r = await runUse(bot, { skill: 'use', item: 'ender_eye' });
     expect(r.kind).toBe('done');
-    expect(r.text).toContain('末影之眼朝北飞了 25 格');
+    expect(r.text).toContain('末影之眼朝北飞了 25 格,方位角 0°');
     expect(r.text).toContain('升了 6 格');
     expect(r.text).toContain('落地了,地上有掉落物');
     for (const word of ['往那边走', '建议', '要塞在']) expect(r.text).not.toContain(word);
   });
 
+  it('末影之眼点框架是放进去,不是扔:回执报这一圈几个框放了眼', async () => {
+    const bag: Bag = [{ name: 'ender_eye', count: 1 }];
+    const frame = { name: 'end_portal_frame', props: { eye: 'false', facing: 'north' } };
+    const bot = effectBot({
+      cells: {
+        ...FLOOR,
+        '1,64,0': frame,
+        '2,64,0': { name: 'end_portal_frame', props: { eye: 'true', facing: 'north' } },
+      },
+      bag,
+      onUse: (b) => { frame.props.eye = 'true'; b.bag[0].count = 0; },
+    });
+    const r = await runUse(bot, { skill: 'use', item: 'ender_eye', at: [1, 64, 0] });
+    expect(bot.itemActivated).toBe(0);
+    expect(bot.activated).toEqual(['1,64,0']);
+    expect(r.kind).toBe('done');
+    expect(r.text).toContain('eye false → true');
+    expect(r.text).toContain('框架 2 个,放了眼的 2 个');
+  });
+
+  it('走过去再右键:路上主手被换成垫脚块,到了先把点名的东西拿回手上', async () => {
+    const bag: Bag = [{ name: 'ender_eye', count: 1 }];
+    const frame = { name: 'end_portal_frame', props: { eye: 'false', facing: 'north' } };
+    let heldAtUse: string | null = null;
+    const bot = effectBot({
+      cells: { ...FLOOR, '8,63,0': 'stone', '8,64,0': frame },
+      bag,
+      onUse: (b) => { heldAtUse = b.heldItem?.name ?? null; frame.props.eye = 'true'; b.bag[0].count = 0; },
+    });
+    // 寻路器路上搭桥会把主手换成垫脚块;走到框架旁边
+    bot.pathfinder.goto = async () => {
+      await bot.equip({ name: 'cobblestone', count: 1 });
+      bot.entity.position = new V(6.5, 64, 0.5);
+    };
+    const r = await runUse(bot, { skill: 'use', item: 'ender_eye', at: [8, 64, 0] });
+    expect(heldAtUse).toBe('ender_eye');
+    expect(r.text).toContain('eye false → true');
+  });
+
   it('末影之眼一路没看见:如实说没看见,不编方向', async () => {
-    const bag: Bag = [{ name: 'eye_of_ender', count: 1 }];
+    const bag: Bag = [{ name: 'ender_eye', count: 1 }];
     const bot = effectBot({ cells: FLOOR, bag, onUse: (b) => { b.bag[0].count = 0; } });
     const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'use', item: 'eye_of_ender' }]);
+    exec.submit([{ skill: 'use', item: 'ender_eye' }]);
     await waitUntil(() => reports.length === 1, 15000);
     expect(reports[0].text).toContain('一路没看见那颗末影之眼');
     expect(reports[0].text).not.toContain('朝');

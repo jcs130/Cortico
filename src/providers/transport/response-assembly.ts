@@ -12,6 +12,24 @@ export interface ResponseAssembly {
 }
 
 /**
+ * In a completed response, function calls without a status become `completed`; items that carry a
+ * status and responses that are not completed pass through unchanged. Some Responses-compatible
+ * endpoints omit the item status, and Core executes only calls whose status is `completed`.
+ */
+export function normalizeCompletedFunctionCalls(response: Response): Response {
+  if (response.status !== 'completed') return response;
+  let changed = false;
+  const output = response.output.map((item) => {
+    if (item.type !== 'function_call') return item;
+    const status = (item as unknown as { status?: string | null }).status;
+    if (status !== undefined && status !== null) return item;
+    changed = true;
+    return { ...item, status: 'completed' as const };
+  });
+  return changed ? { ...response, output } : response;
+}
+
+/**
  * Validate native Responses Items before notifying observers.
  * Normalize reasoning aliases by the announced Item shape. Summary-only reasoning streams may
  * omit part events; their observed text supplies the missing summary part lifecycle.
@@ -70,7 +88,7 @@ export class NativeResponseAssembly implements ResponseAssembly {
     this.send(event, emit);
     if (event.type === 'error') throw new ResponseProtocolError(`Native response error: ${JSON.stringify(event)}`);
   }
-  finish(): Response { return this.accumulator.finish(); }
+  finish(): Response { return normalizeCompletedFunctionCalls(this.accumulator.finish()); }
   snapshot(): Response | null { return this.accumulator.snapshot(); }
   serviceTier(): string | null { return this.tier; }
   meters(): TokenMeters { return structuredClone(this.usage); }

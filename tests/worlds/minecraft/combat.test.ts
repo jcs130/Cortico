@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import type { Bot } from 'mineflayer';
 import { Vec3 } from 'vec3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CombatSession, type CombatTuning } from '../../../src/worlds/minecraft/combat.ts';
+import { CombatSession, footingAhead, type CombatTuning } from '../../../src/worlds/minecraft/combat.ts';
 import type { CombatRangedActions } from '../../../src/worlds/minecraft/combat.ts';
 import type { RangedTarget } from '../../../src/worlds/minecraft/ranged.ts';
 import { MinecraftLog } from '../../../src/worlds/minecraft/log.ts';
@@ -261,6 +261,20 @@ describe('standable 认岩浆', () => {
 });
 
 describe('战斗会话:进入(夺手不夺嘴)', () => {
+  it('换武器没成:接敌播报不说手里是它,换手结果出来后照实补一条', async () => {
+    const { bot } = combatRigBot([foe(7, 'zombie', 2.5)]);
+    const b = bot as unknown as Record<string, unknown>;
+    b.heldItem = null;
+    b.inventory = { items: () => [{ name: 'diamond_sword', type: 1, count: 1 }], slots: [] };
+    b.equip = async () => { throw new Error('Server rejected transaction for clicking on slot 36'); };
+    const { session, events } = rig(bot);
+    expect(session.onHurtBy(7, 'zombie')).toBe(true);
+    expect(events[0].text).not.toContain('手里是钻石剑');
+    await new Promise((r) => setImmediate(r));
+    expect(events.some((e) => e.text.includes('钻石剑没换到手上') && e.text.includes('手里是空手'))).toBe(true);
+    session.stop();
+  });
+
   it('被打就接手:挂起任务、发第一人称接敌事件,文本不出现「战斗模式/脚本/接管」', () => {
     const { bot } = combatRigBot([foe(7, 'zombie', 2.5)]);
     const { session, events, calls } = rig(bot);
@@ -1594,4 +1608,49 @@ describe('血量播报向上取整', () => {
     expect(refused?.data).toMatchObject({ health: 0.086 });
     session.stop();
   });
+});
+
+describe('末地:龙只报不撤,撤退不朝悬崖跑', () => {
+  it('末影龙打中:只播报(不急报),不挂起任务、不撤退', () => {
+    const { bot } = combatRigBot([foe(9, 'ender_dragon', 2.5)]);
+    const { session, events, calls } = rig(bot);
+    expect(session.onHurtBy(9, 'ender_dragon')).toBe(false);
+    expect(calls.suspended).toBe(0);
+    expect(events).toHaveLength(1);
+    expect(events[0].text).toContain('不在自动撤退之列');
+    expect(events[0].urgent).toBe(false);
+    session.stop();
+  });
+
+  /** x < 0 整柱是空的(岛边往下是虚空),其余 y < 64 是石头 */
+  function cliffBlockAt(p: { x: number; y: number }) {
+    if (p.x < 0 || p.y >= 64) return { name: 'air', boundingBox: 'empty' };
+    return { name: 'stone', boundingBox: 'block' };
+  }
+
+  it('footingAhead:前方整柱空是悬崖,3 格内有实心算踩得住,落脚面是岩浆不算', () => {
+    const { bot } = combatRigBot();
+    const b = bot as unknown as { blockAt: unknown };
+    b.blockAt = cliffBlockAt;
+    expect(footingAhead(bot, -1, 0)).toBe(false);
+    expect(footingAhead(bot, 1, 0)).toBe(true);
+    b.blockAt = (p: { y: number }) => (p.y === 62
+      ? { name: 'lava', boundingBox: 'empty' }
+      : p.y < 62 ? { name: 'stone', boundingBox: 'block' } : { name: 'air', boundingBox: 'empty' });
+    expect(footingAhead(bot, 1, 0)).toBe(false);
+  });
+
+  it('背对怪群那边是悬崖:撤退改走侧面,记一条 retreat-edge', async () => {
+    const diag = new MinecraftLog();
+    const { bot } = combatRigBot([foe(7, 'zombie', 2.5)]);
+    (bot as unknown as { health: number }).health = 5;
+    (bot as unknown as { blockAt: unknown }).blockAt = cliffBlockAt;
+    const { session } = rig(bot, {}, diag);
+    session.onHurtBy(7, 'zombie');
+    expect(session.active).toBe(true);
+    await drive(bot as unknown as EventEmitter, 300);
+    const edge = diag.after(0).find((e) => e.event === 'retreat-edge');
+    expect(edge?.msg).toContain('改走侧面');
+    session.stop();
+  }, 15_000);
 });

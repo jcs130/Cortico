@@ -59,11 +59,16 @@ export interface UsageAggregate {
   bucket?: UsageBucketUnit;
   from?: string | null;
   to?: string | null;
+  /** from/to 与桶键所在的部署时区。 */
+  timezone?: string | null;
+  /** 首末桶之间连续,没有调用的桶也在。 */
   series?: UsagePoint[];
   /** `usage` 未挂载时为 null。 */
   totals?: UsageGroupStat | null;
   byRole?: UsageGroupStat[];
   byModel?: UsageGroupStat[];
+  /** 按发起调用的模型连接(Provider 实例)分组;同一模型走不同连接时分开。 */
+  byInstance?: UsageGroupStat[];
   /** 失败、丢弃和中断均计入 totals；此字段用于核对失败消耗。 */
   failed?: UsageAccum;
 }

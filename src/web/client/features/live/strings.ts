@@ -7,13 +7,16 @@ const zh = {
   noProvider: '未选择模型供应商',
   ctxOpenAria: '查看 token 分类',
   ctxPanelAria: 'Token 分类',
-  netConnecting: '连接中…',
-  netOnline: '已连接',
-  netOffline: '接口不可达',
+  netConnecting: '控制台连接中…',
+  netOnline: '控制台已连接',
+  netOffline: '控制台已断开',
   composerLabel: '终端消息输入',
   composerPlaceholder: "输入消息…",
   exportDiagnostics: '导出诊断',
   exportFailed: '诊断包取不回来',
+  exportConfirmTitle: '导出诊断包',
+  exportConfirmBody: '诊断包包含对话、提示词、事件、工具调用、用量和运行日志。配置里的密钥已脱敏，其余内容原样写出。分享前请检查其中的私人信息。',
+  composerFork: '正在查看后台会话；这里发出的消息仍送到主会话',
   composerNoProvider: '当前模型供应商不可用，请前往「模型供应商」页设置',
   composerQueued: '终端通道正在重连，消息已排队',
   emptyConnecting: '连接调试通道中…',
@@ -32,15 +35,24 @@ const zh = {
   chipBatchesPre: '累计 ',
   chipBatchesPost: ' 批',
   chipPaused: '⏸ 已暂停',
+  chipBehind: (n: number) => `待投递 ${n}`,
   chipScheduleBlocked: '◷ 闹钟阻断',
   chipTruncating: '截断中',
   chipOnline: '在线 ',
+  phaseDelivering: '正在把事件写入上下文',
+  phaseModel: '等待模型输出',
+  phaseTools: '执行工具',
+  phaseBackoff: (clock: string) => `模型调用失败，${clock} 重试`,
+  phaseHandoff: '上下文交接中',
+  phaseRound: (n: number) => `第 ${n} 轮`,
+  phaseRunning: (names: string) => `运行中：${names}`,
 
   // fork.ts
   mainLabel: "主 session",
-  forkViewing: '◉ 正在查看 ',
+  forkViewing: '◉ 正在查看后台会话 ',
   forkInfo: (count: number, tok: string, ended: boolean, sec: number) =>
-    ` · ${count} 条 · ~${tok} tok · ` + (ended ? '已结束（定格）' : `进行中（${sec} 秒刷新）`),
+    ` · ${count} 条 · ~${tok} tok · ` + (ended ? '已结束（定格）' : `未结束（每 ${sec} 秒刷新）`),
+  forkReadOnly: '此视图只读，输入框发出的消息仍送到主会话。',
   forkBack: '⏎ 返回主 session',
   forkEmpty: '（这个 session 还没有消息）',
   forkFetchFailed: (msg: string) => `(拉取失败: ${msg})`,
@@ -58,11 +70,10 @@ const zh = {
     hit: number,
   ) =>
     `${label} (${id})\n` +
-    `${running ? '进行中' : `已结束 ${endedAt}`}\n` +
+    `${running ? '未结束' : `已结束 ${endedAt}`}\n` +
     `输入 ${prompt} / 输出 ${completion} / 命中 ${hit}`,
 
   // timeline.ts
-  thinking: '思考中…',
   jumpBottom: '↓ 回到底部',
   foldHead: (open: boolean, n: number) => `${open ? '▾' : '▸'} ${n} 字`,
   ordinalTitle: (index: number) => `session 第 ${index} 条 Item`,
@@ -96,7 +107,7 @@ const zh = {
   catDialogue: '对话往来 · 事件',
   catToolIO: '工具调用与结果',
   ctxNone: "暂无上下文数据。",
-  ctxUsage: '上下文占用',
+  ctxUsage: '上下文估计构成',
   ctxSub: (budgetPct: string | null, keepOn: boolean) =>
     `${budgetPct === null ? '预算未知' : `占预算 ${budgetPct}`}　·　保留历史思维链：${keepOn ? '开' : '关'}`,
   toolCount: (n: number) => `　${n} 个`,
@@ -108,7 +119,7 @@ const zh = {
   footStrippedPre: '历史思维链已丢弃约 ',
   footStrippedPost: " tok，不发送。",
   footHardPre: '越过 ',
-  footHardPost: '（模型物理上限）由 core 强制交接。',
+  footHardPost: '（模型输入上限：上下文窗口减去输出预留）由 core 强制交接。',
   footSoftPre: 'Persona 软阈值：',
   footSoftPost: (max: string) => `；阶段预算 ${max}。`,
 
@@ -134,13 +145,16 @@ const en: typeof zh = {
   noProvider: 'No provider selected',
   ctxOpenAria: 'View token breakdown',
   ctxPanelAria: 'Token breakdown',
-  netConnecting: 'Connecting…',
-  netOnline: 'Connected',
-  netOffline: 'API unreachable',
+  netConnecting: 'Console connecting…',
+  netOnline: 'Console connected',
+  netOffline: 'Console disconnected',
   composerLabel: 'Terminal message input',
   composerPlaceholder: "Enter a message…",
   exportDiagnostics: 'Export diagnostics',
   exportFailed: 'The diagnostics bundle could not be fetched',
+  exportConfirmTitle: 'Export diagnostics',
+  exportConfirmBody: 'The bundle contains conversations, prompts, events, tool calls, usage and run logs. Secrets in the config are redacted; everything else is written as is. Check it for private information before sharing.',
+  composerFork: 'Viewing a background session; messages sent here still go to the main session',
   composerNoProvider: 'No usable provider. Set one up on the LLM Provider page.',
   composerQueued: 'Terminal channel is reconnecting; message queued',
   emptyConnecting: 'Connecting to the debug channel…',
@@ -159,15 +173,24 @@ const en: typeof zh = {
   chipBatchesPre: 'total ',
   chipBatchesPost: ' batches',
   chipPaused: '⏸ Paused',
+  chipBehind: (n: number) => `${n} pending delivery`,
   chipScheduleBlocked: '◷ Schedule blocked',
   chipTruncating: 'Truncating',
   chipOnline: 'online ',
+  phaseDelivering: 'Writing events into context',
+  phaseModel: 'Waiting for model output',
+  phaseTools: 'Running tools',
+  phaseBackoff: (clock: string) => `Model call failed; retrying at ${clock}`,
+  phaseHandoff: 'Context handoff in progress',
+  phaseRound: (n: number) => `round ${n}`,
+  phaseRunning: (names: string) => `running: ${names}`,
 
   // fork.ts
   mainLabel: "Main session",
-  forkViewing: '◉ Viewing ',
+  forkViewing: '◉ Viewing background session ',
   forkInfo: (count: number, tok: string, ended: boolean, sec: number) =>
-    ` · ${count} msgs · ~${tok} tok · ` + (ended ? 'ended (frozen)' : `running (refreshes every ${sec} s)`),
+    ` · ${count} msgs · ~${tok} tok · ` + (ended ? 'ended (frozen)' : `not ended (refreshes every ${sec} s)`),
+  forkReadOnly: 'This view is read-only; the input box still sends to the main session.',
   forkBack: '⏎ Back to main session',
   forkEmpty: '(This session has no messages yet)',
   forkFetchFailed: (msg: string) => `(fetch failed: ${msg})`,
@@ -185,11 +208,10 @@ const en: typeof zh = {
     hit: number,
   ) =>
     `${label} (${id})\n` +
-    `${running ? 'running' : `ended ${endedAt}`}\n` +
+    `${running ? 'not ended' : `ended ${endedAt}`}\n` +
     `input ${prompt} / output ${completion} / cache hits ${hit}`,
 
   // timeline.ts
-  thinking: 'Thinking…',
   jumpBottom: '↓ Back to bottom',
   foldHead: (open: boolean, n: number) => `${open ? '▾' : '▸'} ${n} chars`,
   ordinalTitle: (index: number) => `Item #${index} in session`,
@@ -223,7 +245,7 @@ const en: typeof zh = {
   catDialogue: 'Dialogue · events',
   catToolIO: 'Tool calls and results',
   ctxNone: "No context data yet.",
-  ctxUsage: 'Context usage',
+  ctxUsage: 'Estimated context breakdown',
   ctxSub: (budgetPct: string | null, keepOn: boolean) =>
     `${budgetPct === null ? 'Budget unknown' : `${budgetPct} of budget`} · Keep past reasoning: ${keepOn ? 'on' : 'off'}`,
   toolCount: (n: number) => ` (${n})`,
@@ -235,7 +257,7 @@ const en: typeof zh = {
   footStrippedPre: 'About ',
   footStrippedPost: " tok of past reasoning is excluded from requests.",
   footHardPre: 'Beyond ',
-  footHardPost: ' (the model\'s hard limit) the core forces a handoff.',
+  footHardPost: ' (the model input limit: context window minus reserved output) the core forces a handoff.',
   footSoftPre: 'Persona soft threshold: ',
   footSoftPost: (max: string) => `; stage budget ${max}.`,
 

@@ -35,7 +35,7 @@ import { ProviderHub } from './providers/console/hub.ts';
 import { ProviderSettings } from './providers/console/settings.ts';
 import { providerModules } from './providers/registry.ts';
 import { repoRoot } from './paths.ts';
-import { readGroupValues, setByPath as setConfigPath } from './core/config-schema.ts';
+import { isConfigGroup, readGroupValues, setByPath as setConfigPath } from './core/config-schema.ts';
 import type { ConfigValues } from './core/config-schema.ts';
 import {
   PromptRevisionConflict,
@@ -1067,17 +1067,27 @@ export function createBot<C extends CoreConfig>(
   });
 
   // 未激活实例也提供配置；组 id、owner 和配置键不随语言变化。
+  // bot 包、World、provider 交来的形状不完整的组跳过,并记在交来方的日志名下;其余组照常列出和保存。
+  const wellFormedGroups = (source: string, groups: readonly ConfigGroup[]): ConfigGroup[] => {
+    const malformed = groups.filter((g) => !isConfigGroup(g));
+    if (malformed.length) {
+      core.runlog.logger(source).error('配置组缺 id、owner 或 schema.properties,已跳过', {
+        fields: malformed.map((g) => (g && typeof g === 'object' ? Object.keys(g) : typeof g)),
+      });
+    }
+    return groups.filter(isConfigGroup);
+  };
 
   const configGroups = (language: Language): ConfigGroup[] => [
     coreConfigGroup(language),
-    ...(contribution.configGroups ?? []),
-    ...assembly.instances().flatMap((m) => m.console?.(language)?.config ?? []),
+    ...wellFormedGroups('persona', contribution.configGroups ?? []),
+    ...assembly.instances().flatMap((m) => wellFormedGroups(`worlds.${m.id}`, m.console?.(language)?.config ?? [])),
   ];
 
   // 共享端点配置位于部署根的 providers/；activeProvider 属于当前部署。
   const providerSettings = new ProviderSettings(cfg,core.providers,join(loaded.rootDir,'config.json'),loaded.providersDir ?? join(loaded.rootDir,'providers'));
   const providerHub = new ProviderHub(cfg, core.providers, providerSettings, join(loaded.rootDir, 'config.json'), loaded.providersDir ?? join(loaded.rootDir, 'providers'));
-  const allConfigGroups = (language: Language) => [...configGroups(language),...providerSettings.groups(language)];
+  const allConfigGroups = (language: Language) => [...configGroups(language),...wellFormedGroups('provider', providerSettings.groups(language))];
   const llmManagers = new Map<string,{stop():Promise<unknown>}>([['providers',{stop:()=>core.providers.stopAll()}]]);
 
   let webApp: WebApp | null = null;
@@ -1151,7 +1161,7 @@ export function createBot<C extends CoreConfig>(
       defaultScheme: cfg.web.theme,
       sessions: core.sessions,
       storage: consoleStorage,
-      usage: { aggregate: (opts) => aggregateUsage(core.usageLog.readAll(), opts), status: () => core.usageLog.status() },
+      usage: { aggregate: (opts) => aggregateUsage(core.usageLog.readAll(), { ...opts, timezone: core.config.timezone }), status: () => core.usageLog.status() },
       config: {
         groups: (language) => allConfigGroups(language).map((group) => ({ group, values: group.owner.startsWith('provider:') ? providerSettings.values(group.id, language) : readGroupValues(cfg, group) })),
         set: (groupId: string, values: ConfigValues, language) => {
@@ -1234,7 +1244,7 @@ export function createBot<C extends CoreConfig>(
         onSessionReset: (cb) => core.session.onReset(cb),
         onEvent: (cb) => core.store.onAppend(cb),
         onRunlog: (cb) => core.runlog.onWrite(cb),
-        recentLog: (limit) => core.runlog.recent(limit),
+        onRunPhase: (cb) => core.loop.onRunPhase(cb),
         runId: () => core.run.id,
         toolSchemas: () => core.loop.getToolSchemas(),
       },
@@ -1264,7 +1274,7 @@ export function createBot<C extends CoreConfig>(
         modelConnection: providerHub.current(language),
         startedAt,
         loop: core.loop.getStatus(),
-        eventCount: core.store.latestCursor(),
+        latestEventCursor: core.store.latestCursor(),
         onboardingPending: existsSync(join(loaded.rootDir, ONBOARDING_FLAG_FILE)),
         ...(contribution.status?.() ?? {}),
       }),

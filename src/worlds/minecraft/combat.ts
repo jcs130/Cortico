@@ -35,6 +35,7 @@ import { HOSTILE, bestWeapon, dropOwnedGoal, meleeCooldownMs, releaseBody, setOw
 import { walkOnlyPath } from './travel.ts';
 import type { FightMode } from './policy.ts';
 import { zhEntity, zhName } from './names.ts';
+import { zhErrorText } from './receipt.ts';
 import { BURNING_BLOCKS, SCORCHING_FLOOR, bodyInWater, canSeeEntity, findBankCell, headInWater } from './terrain.ts';
 import { piglinIsHostile } from './piglin.ts';
 import { consumeHeldFood } from './skills-craft.ts';
@@ -123,11 +124,47 @@ const RANGED = new Set(['skeleton', 'stray', 'bogged', 'pillager', 'witch', 'bla
 const FOOD_RETRY_MS = 5_000;
 const OFFHAND_RETRY_MS = 5_000;
 
-/** E7:不交战,只跑 */
+/** E7:反射不主动交战;挨打时除 REPORT_ONLY 外一律撤 */
 const NO_FIGHT = new Set(['warden', 'wither', 'ender_dragon']);
+/**
+ * 挨打只报不撤的 NO_FIGHT。末影龙只在末地出现,去末地就是去打它;自动撤退在
+ * 主岛上等于朝虚空跑。打不打、怎么打由任务决定(attack 步里挨打本来就由任务吸收)。
+ */
+const REPORT_ONLY = new Set(['ender_dragon']);
+
+/**
+ * 撤退每一拍踩出去之前看前方那一格往下多深有落脚。超过这个深度按悬崖处理:
+ * 原版摔落伤害 = 落差 - 3,3 格以内不掉血;末地岛边往下是虚空,整柱都空。
+ */
+const RETREAT_MAX_DROP = 3;
 
 /** 主动进场高于脱战血线的余量，单位为生命点；普通受击入场不加此余量。 */
 const ENGAGE_MARGIN = 3;
+
+/** 主手此刻的读数,空着念「空手」 */
+function heldText(bot: Bot): string {
+  return bot.heldItem ? zhName(bot.heldItem.name) : '空手';
+}
+
+/**
+ * 朝 (dx,dz) 迈一步踩得住吗:前方 1.2 格那一柱,从脚那层往下 RETREAT_MAX_DROP 格内有实心(或脚那层
+ * 本身是台阶/墙,由 autoJump 跳),且落脚面不是岩浆。区块没加载不拦,那是读不到,不是悬崖。
+ */
+export function footingAhead(bot: Bot, dx: number, dz: number): boolean {
+  const len = Math.hypot(dx, dz);
+  if (len < 1e-6) return true;
+  const p = bot.entity.position;
+  const x = Math.floor(p.x + (dx / len) * 1.2);
+  const z = Math.floor(p.z + (dz / len) * 1.2);
+  const y = Math.floor(p.y);
+  for (let d = 0; d <= RETREAT_MAX_DROP + 1; d++) {
+    const b = bot.blockAt(new Vec3(x, y - d, z));
+    if (!b) return true;
+    if (b.name === 'lava') return false;
+    if (b.boundingBox === 'block') return true;
+  }
+  return false;
+}
 
 export interface CombatTuning {
   enabled: boolean;
@@ -282,6 +319,8 @@ export class CombatSession {
   private retreatEscalated = false;
   /** 空手低血挡下的那次转身还手,一场撤退只记一次(判据每 250ms 都会再成立一遍) */
   private retreatBarehandNoted = false;
+  /** 这一场撤退有没有记过「前面没落脚」;一场只记一次 */
+  private retreatEdgeNoted = false;
   /** 撤退失败转身还手中:E2 血线对本场静默(血线的前提是"跑得掉",这里已经证伪) */
   private desperate = false;
 
@@ -438,6 +477,11 @@ export class CombatSession {
     // 头在水里不接手:水下近战是另一回事,交回 surface/防溺水那条线
     const bot = this.opts.getBot();
     if (bot && headInWater(bot)) return false;
+    if (REPORT_ONLY.has(name)) {
+      // 不急报:一次俯冲连着打几下,由投递批次合并
+      this.opts.emit(`${zhEntity(name)}打中了我(生命 ${this.hp()}/20);它不在自动撤退之列,手上的任务照常`, false, true);
+      return false;
+    }
     // E7:打不过的,不进场,直接跑
     if (NO_FIGHT.has(name)) {
       this.bot = this.opts.getBot();
@@ -583,9 +627,7 @@ export class CombatSession {
     this.opts.suspendTasks(`战斗:${trialClear ? '试炼清怪' : hurt ? '被' : ''}${zhEntity(firstName)}${hurt ? '打了' : trialClear ? '' : '贴到跟前'}`);
     this.releaseWalkOnly ??= walkOnlyPath(bot);
     this.hook(bot);
-    const weapon = bestWeapon(bot);
-    if (weapon) void bot.equip(weapon, 'hand').catch(() => undefined);
-    const held = weapon ? `,手里是${zhName(weapon.name)}` : ',手边没趁手的家伙';
+    const held = this.armMelee(bot);
     this.opts.emit(
       hurt
         ? `有只${zhEntity(firstName)}打过来了,我抄家伙还手!(生命 ${this.hp()}/20${held})`
@@ -967,7 +1009,7 @@ export class CombatSession {
     this.opts.emit(
       `还在打:${foes.length} 只在附近(最近的是${zhEntity(nearest.name)}),` +
         `刀 ${this.swings} 次命中 ${this.meleeLanded()} 次,箭 ${this.arrows} 支命中 ${this.rangedLanded} 次,` +
-        `生命 ${this.hp()}/20。`,
+        `手里是${heldText(bot)},生命 ${this.hp()}/20。`,
       false, false,
     );
   }
@@ -990,8 +1032,32 @@ export class CombatSession {
     }
     this.opts.ranged?.abort();
     this.rangedPendingOwner = null;
+    this.armMelee(bot);
+  }
+
+  /**
+   * 把近战最好的那件拿到主手,返回接敌播报里那半句。已经在手上就不动;
+   * 要换时播报只说正在换,换手的结果出来后没拿到手就另发一条,写明原因和手里实际是什么。
+   */
+  private armMelee(bot: Bot): string {
     const weapon = bestWeapon(bot);
-    if (weapon) void bot.equip(weapon, 'hand').catch(() => undefined);
+    if (!weapon) return ',手边没趁手的家伙';
+    if (bot.heldItem?.name === weapon.name) return `,手里是${zhName(weapon.name)}`;
+    const was = heldText(bot);
+    const miss = (why: string): void => {
+      const now = heldText(bot);
+      this.opts.emit(`${zhName(weapon.name)}没换到手上(${why}),手里是${now}。`, true, false);
+      this.opts.diag?.write({
+        lane: 'combat', event: 'arm-miss',
+        msg: `近战换${weapon.name}没成:${why},主手是${now}`,
+        data: { weapon: weapon.name, held: bot.heldItem?.name ?? null, why },
+      });
+    };
+    void bot.equip(weapon, 'hand').then(
+      () => { if (bot.heldItem?.name !== weapon.name) miss('换手做完了,主手读数却不是它'); },
+      (err: Error) => miss(zhErrorText(err.message)),
+    );
+    return `,正把${zhName(weapon.name)}换到手上(原来手里是${was})`;
   }
 
   private driveRanged(bot: Bot, target: Foe, foes: Foe[], now: number): void {
@@ -1565,6 +1631,7 @@ export class CombatSession {
     };
     this.retreatEscalated = false;
     this.retreatBarehandNoted = false;
+    this.retreatEdgeNoted = false;
     // 在水里"拉开 N 格"是永远追不上的目标(溺尸游得比人快),赢法只有出水:目标改成最近的岸
     this.retreatBank = bodyInWater(bot) ? findBankCell(bot, this.retreatFrom, 16) : null;
     if (this.retreatBank) {
@@ -1599,6 +1666,14 @@ export class CombatSession {
     const wantedX = bank ? bank.x + 0.5 - p.x : p.x - from.x;
     const wantedZ = bank ? bank.z + 0.5 - p.z : p.z - from.z;
     const heading = this.retreatHeading(bot, foes, wantedX, wantedZ);
+    if (!bank && !footingAhead(bot, wantedX, wantedZ) && !this.retreatEdgeNoted) {
+      this.retreatEdgeNoted = true;
+      this.opts.diag?.write({
+        lane: 'combat', event: 'retreat-edge',
+        msg: `撤退方向前面没有 ${RETREAT_MAX_DROP} 格内的落脚:${heading ? '改走侧面' : '两侧也没有,原地不动'}`,
+        data: { at: { x: p.x, y: p.y, z: p.z }, dx: wantedX, dz: wantedZ },
+      });
+    }
     const trapped = stalled && heading === null;
 
     // 跑不掉时近战按贴身判据还手；远程目标须持续命中且撤退无进展。
@@ -1739,10 +1814,9 @@ export class CombatSession {
     this.rangedOwner = {};
     this.rangedPendingOwner = null;
     this.nextRangedAt = now;
-    const weapon = bestWeapon(bot);
-    if (weapon) void bot.equip(weapon, 'hand').catch(() => undefined);
+    const held = this.armMelee(bot);
     const pressure = glued.reach <= 3.2 ? '还咬着我' : '还在远处压着我';
-    this.opts.emit(`跑不掉,${zhEntity(glued.name)}${pressure}——回头打!(生命 ${this.hp()}/20)`, true, true);
+    this.opts.emit(`跑不掉,${zhEntity(glued.name)}${pressure}——回头打!(生命 ${this.hp()}/20${held})`, true, true);
     this.opts.diag?.write({
       lane: 'combat', event: 'cornered',
       msg: `撤退失败(${cause}):挨了 ${this.retreatHits} 下,${glued.name}在 ${Math.round(glued.flat * 10) / 10} 格:转身还手,生命 ${this.hp()}/20`,

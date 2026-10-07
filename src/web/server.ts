@@ -21,7 +21,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import type {
   EventEnvelope, EventRangeQuery, EventStoreReader, Logger,
   ConfigGroup, ConfigValues, WorldConsoleDecl,
-  LogRecord, OwnedStoragePart, StoragePart, ToolSchema,
+  LogRecord, OwnedStoragePart, StoragePart, ToolSchema, RunPhase,
 } from '../core/types.ts';
 import type { SessionStats } from '../core/sessions.ts';
 import type { UsageAggregate, UsageBucketOption } from '../core/cost.ts';
@@ -101,8 +101,8 @@ export interface WebAppDebugDeps {
   onSessionReset(cb: (messages: ContextRecord[]) => void): void;
   onEvent(cb: (e: EventEnvelope) => void): void;
   onRunlog(cb: (entry: LogRecord) => void): void;
-  /** 当前 run 最近落盘的运行日志(hello 快照用) */
-  recentLog?(limit: number): LogRecord[];
+  /** 主循环的 RunPhase 变化;缺席时状态帧里的 loop.phase 只随其他帧更新。 */
+  onRunPhase?(cb: (phase: RunPhase) => void): void;
   /** 当前 run id;/api/log 缺省读它的 log.jsonl */
   runId?(): string;
   /** 主循环当前工具表schema(run()前为空数组) */
@@ -459,7 +459,8 @@ export interface WebAppCheckpointDeps {
 /** 分时段/范围的用量聚合(用量·成本页数据源) */
 export interface WebAppUsageDeps {
   status?(): { pending: number; error: string | null };
-  aggregate(opts: { from?: string; to?: string; bucket: UsageBucketOption; currency?: string; basis?: 'marginal' | 'equivalent' }): UsageAggregate;
+  /** `days` 与补空桶的截止时刻按部署时区解释,由实现方给定时区。 */
+  aggregate(opts: { from?: string; to?: string; days?: number; bucket: UsageBucketOption; currency?: string; basis?: 'marginal' | 'equivalent' }): UsageAggregate;
 }
 
 
@@ -875,14 +876,17 @@ export class WebApp {
         // status顺带推一份(不定时轮询,append即代表状态变化)
         this.debugBroadcast({ t: 'status', status: this.safeStatus() });
       });
-      // reset 顺带带上合成开头现值:前缀重载/交接都走 reset,标注块跟着刷新
+      // reset 顺带带上合成开头与工具表现值:前缀重载/交接都走 reset,两者与新前缀同一代
       dbg.onSessionReset((messages) => this.debugBroadcast({
         t: 'session.reset',
         messages,
         head: dbg.sessionHead?.() ?? [],
+        toolSchemas: dbg.toolSchemas(),
       }));
       dbg.onEvent((envelope) => this.debugBroadcast({ t: 'event', envelope }));
       dbg.onRunlog((entry) => this.debugBroadcast({ t: 'runlog', entry }));
+      // 工具每次开始与结束都会变,单独成帧:status 帧要估算 token、扫描投递积压,不随它重算。
+      dbg.onRunPhase?.((phase) => this.debugBroadcast({ t: 'phase', phase }));
     }
     // session统计变化→全量列表推送(列表小,每次LLM调用一帧,频率低)。
     // 同帧也走debug通道(chat调试台已连/ws/debug,免开第二条连接)。
@@ -1209,8 +1213,6 @@ export class WebApp {
         session: dbg.sessionMessages(),
         head: dbg.sessionHead?.() ?? [],
         toolSchemas: dbg.toolSchemas(),
-        events: dropArchiveOnly(this.deps.store.range({ limit: 400 })).slice(-200),
-        runlog: dbg.recentLog?.(200) ?? [],
         status: this.safeStatus(),
         sessions: this.safeSessionList(),
       }));
@@ -1518,6 +1520,14 @@ export class WebApp {
       const source = strParam(req.query.source);
       if (source) q.source = source;
       const withArchive = strParam(req.query.archive) === '1';
+      // 只给 from 是追新:从区间头部取最早的 limit 条,hasMore 表示后面还有没返回的记录。
+      if (from !== undefined && to === undefined) {
+        const latest = this.deps.store.latestCursor();
+        const all = this.deps.store.range({ ...q, toCursor: latest });
+        const visible = withArchive ? all : dropArchiveOnly(all);
+        res.json({ latest, events: visible.slice(0, limit), hasMore: visible.length > limit });
+        return;
+      }
       if (withArchive) {
         q.limit = limit;
         res.json({ latest: this.deps.store.latestCursor(), events: this.deps.store.range(q) });
@@ -1642,6 +1652,7 @@ export class WebApp {
       if (!run) { res.status(503).json({ error: '运行控制不可用' }); return; }
       run.pause();
       this.deps.log.warn('运行已暂停(人工操作)');
+      this.debugBroadcast({ t: 'status', status: this.safeStatus() });
       res.json({ ok: true, paused: true, result: pick(this.languageOf(req), SERVER_TEXT).paused });
     }));
 
@@ -1650,6 +1661,7 @@ export class WebApp {
       if (!run) { res.status(503).json({ error: '运行控制不可用' }); return; }
       run.resume();
       this.deps.log.warn('运行已继续(人工操作)');
+      this.debugBroadcast({ t: 'status', status: this.safeStatus() });
       res.json({ ok: true, paused: false, result: pick(this.languageOf(req), SERVER_TEXT).resumed });
     }));
 
@@ -2056,6 +2068,8 @@ export class WebApp {
       if (from) opts.from = from;
       const to = strParam(req.query.to);
       if (to) opts.to = to;
+      const days = intParam(req.query.days);
+      if (days !== undefined && days >= 1) opts.days = days;
       res.json({ ...src.aggregate(opts), ledger: src.status?.() });
     }));
 
@@ -2099,7 +2113,7 @@ export class WebApp {
         });
     });
 
-    app.post('/api/config', express.json(), (req: Request, res: Response) => {
+    app.post('/api/config', express.json(), wrap((req, res) => {
       const src = this.deps.config;
       if (!src) { res.status(503).json({ error: '配置项声明不可用' }); return; }
       const body = (req.body ?? {}) as Record<string, unknown>;
@@ -2111,14 +2125,10 @@ export class WebApp {
       // 校验完全按声明走:schema 里没声明的键一律忽略,控制台不能靠猜往配置里塞东西
       const parsed = coerceGroupValues(entry.group, values, language);
       if ('error' in parsed) { res.status(400).json({ error: parsed.error }); return; }
-      try {
-        const result = src.set(groupId, parsed.values, language);
-        this.deps.log.warn('配置项已修改', { group: groupId });
-        res.json({ ok: true, result, groups: src.groups(language) });
-      } catch (err) {
-        res.status(500).json({ error: String(err) });
-      }
-    });
+      const result = src.set(groupId, parsed.values, language);
+      this.deps.log.warn('配置项已修改', { group: groupId });
+      res.json({ ok: true, result, groups: src.groups(language) });
+    }));
 
     /**
      * 扩展的浏览器端产物。**逐个文件发,不挂目录**:URL 里的三段只用来在产物表里

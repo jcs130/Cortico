@@ -18,7 +18,9 @@ import { exportDiagnostics } from './diagnostics.ts';
 import { createForkView, MAIN_ID, MAIN_LABEL } from './fork.ts';
 import {
   arr,
+  loopOf,
   str,
+  type RunPhase,
   type SessionStat,
   type StatusSnapshot,
   type ToolSchemaDoc,
@@ -26,7 +28,7 @@ import {
 import { icon } from '../../ui/icons.ts';
 import { createOnboarding, type OnboardingView } from './onboarding.ts';
 import { createSessionBand } from './sessions.ts';
-import { applyDisplayName, createStatusBand } from './status.ts';
+import { applyDisplayName, createStatusBand, phaseLabel } from './status.ts';
 import { S } from './strings.ts';
 import { createTimeline } from './timeline.ts';
 
@@ -82,6 +84,8 @@ function mountLive(ctx: FeatureContext, env: SocketEnv): Disposable | void {
     status: null as StatusSnapshot | null,
     sessions: [] as SessionStat[],
     displayName: '',
+    /** 主循环运行阶段,只取自调试通道的帧;断线时清空。 */
+    phase: null as RunPhase | null,
   };
 
   const view = ui.h('div', 'liveview');
@@ -143,8 +147,17 @@ function mountLive(ctx: FeatureContext, env: SocketEnv): Disposable | void {
     if (event.key === 'Escape') closeCtx();
   }, { signal: ctx.signal });
 
+  /** 运行阶段说的是主 session,查看后台会话时不显示。 */
+  const syncActivity = (): void => {
+    timeline.setActivity(fork.isMain() ? phaseLabel(ui, state.phase) : null);
+  };
+
   let netEl: HTMLElement = ui.pill(S.netConnecting, 'plain');
   const setNet = (online: boolean): void => {
+    if (!online) {
+      state.phase = null;
+      syncActivity();
+    }
     const next = ui.pill(online ? S.netOnline : S.netOffline, online ? 'on' : 'off');
     netEl.replaceWith(next);
     netEl = next;
@@ -161,7 +174,7 @@ function mountLive(ctx: FeatureContext, env: SocketEnv): Disposable | void {
   const exportButton = ui.button('', {
     size: 'sm',
     onClick: () => {
-      void exportDiagnostics({ doc, signal: ctx.signal }).catch((err: unknown) => {
+      void exportDiagnostics({ ui, doc, signal: ctx.signal }).catch((err: unknown) => {
         ui.toast(S.exportFailed, 'bad');
         ctx.onError(err);
       });
@@ -192,6 +205,9 @@ function mountLive(ctx: FeatureContext, env: SocketEnv): Disposable | void {
   timeline.rebuild([], { empty: S.emptyConnecting });
 
   let providerReady = false;
+  const syncPlaceholder = (): void => {
+    composer.setPlaceholder(!fork.isMain() ? S.composerFork : providerReady ? null : S.composerNoProvider);
+  };
 
   const resumeRun = (): Promise<unknown> => post('/api/run/resume', {}, { signal: ctx.signal });
 
@@ -253,7 +269,11 @@ function mountLive(ctx: FeatureContext, env: SocketEnv): Disposable | void {
     mainMessages: () => state.messages,
     mainHead: () => state.head,
     sessions: () => state.sessions,
-    onChange: () => sessionBand.render(state.sessions, fork.id),
+    onChange: () => {
+      sessionBand.render(state.sessions, fork.id);
+      syncPlaceholder();
+      syncActivity();
+    },
     onError: (err) => ctx.onError(err),
   });
 
@@ -269,7 +289,7 @@ function mountLive(ctx: FeatureContext, env: SocketEnv): Disposable | void {
     const ratio = known ? d.total / d.maxTokens! : 0;
     // 分母未知(Persona没报预算、Provider 也没报窗口)时圈里只写计数,不编百分比
     ctxPct.textContent = d ? (known ? ui.fmt.percent(ratio) : ui.fmt.count(d.total)) : '—';
-    ctxOpen.className = `ctxdonut${ratio >= 1 ? ' danger' : d && d.softRatio !== null && ratio >= d.softRatio ? ' warn' : ''}`;
+    ctxOpen.className = `ctxdonut${ratio >= 1 ? ' danger' : d && d.softTokens !== null && d.total >= d.softTokens ? ' warn' : ''}`;
     ctxOpen.title = d
       ? S.ctxTitle(ui.fmt.count(d.total), known ? ui.fmt.count(d.maxTokens!) : null)
       : S.ctxWaiting;
@@ -282,7 +302,7 @@ function mountLive(ctx: FeatureContext, env: SocketEnv): Disposable | void {
     connectionValue.textContent = current ? `${current.name} · ${current.model ?? '—'}` : S.noProvider;
     connection.title = current ? `${current.moduleTitle} (${current.module})\n${current.baseUrl}` : S.noProvider;
     providerReady = current?.ready === true;
-    composer.setPlaceholder(providerReady ? null : S.composerNoProvider);
+    syncPlaceholder();
     onboarding?.setProvider(providerReady);
     if (st && applyDisplayName(doc, st.displayName, state.displayName)) {
       state.displayName = str(st.displayName);
@@ -310,6 +330,8 @@ function mountLive(ctx: FeatureContext, env: SocketEnv): Disposable | void {
         setStatus((f.status as StatusSnapshot | null) ?? null);
         timeline.rebuild(state.messages, { head: state.head });
         setSessions(arr<SessionStat>(f.sessions));
+        state.phase = loopOf(state.status).phase ?? null;
+        syncActivity();
         break;
       }
       case 'session.append': {
@@ -331,12 +353,19 @@ function mountLive(ctx: FeatureContext, env: SocketEnv): Disposable | void {
       case 'session.reset':
         state.messages = arr<ContextRecord>(f.messages);
         if (f.head !== undefined) state.head = arr<ContextRecord>(f.head);
+        if (f.toolSchemas !== undefined) state.toolSchemas = arr<ToolSchemaDoc>(f.toolSchemas);
         if (fork.isMain()) {
           timeline.rebuild(state.messages, { note: S.sessionResetNote, head: state.head });
         }
         break;
       case 'status':
         setStatus((f.status as StatusSnapshot | null) ?? null);
+        state.phase = loopOf(state.status).phase ?? null;
+        syncActivity();
+        break;
+      case 'phase':
+        state.phase = (f.phase as RunPhase | null) ?? null;
+        syncActivity();
         break;
       case 'sessions':
         setSessions(arr<SessionStat>(f.sessions));
@@ -405,7 +434,19 @@ function mountLive(ctx: FeatureContext, env: SocketEnv): Disposable | void {
     clearTimer: env.clearTimer,
     onError: (err) => ctx.onError(err),
     handlers: {
-      message: () => {},
+      // 时间线由调试通道画;这条流上只读终端 World 对本连接所发帧的拒收与附带说明。
+      message: (raw) => {
+        let frame: unknown;
+        try {
+          frame = JSON.parse(raw);
+        } catch {
+          return;
+        }
+        const { type, kind, text } = (frame ?? {}) as { type?: unknown; kind?: unknown; text?: unknown };
+        if (type !== 'sys' || typeof text !== 'string') return;
+        if (kind === 'rejected') ui.toast(text, 'bad');
+        else if (kind === 'warning') ui.toast(text);
+      },
       close: (willRetry) => {
         if (willRetry) chatStream?.send(hello);
       },

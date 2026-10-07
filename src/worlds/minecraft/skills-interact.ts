@@ -14,7 +14,7 @@ import {
   AIR_NAMES, FACE_ZH, LIQUIDS, blockAtCell, blockProp, cellText, dimensionOf, feetOf, resolveAt,
 } from './cell-facts.ts';
 import { zhDimension, zhEntity, zhName } from './names.ts';
-import { SIGN_RE, signLinesText, zhThing } from './receipt.ts';
+import { SIGN_RE, contentsText, signLinesText, zhThing } from './receipt.ts';
 import { Aborted, SkillBlocked, SkillNoop, checkAbort, sleep, type SkillContext } from './skill-context.ts';
 import {
   FEED_ITEMS, TAME_ITEMS, TRUST_ITEMS, animalStateNote, dyeColorOf, isKnownTarget, readHorseTamed, readSaddled, readSheepColor,
@@ -34,7 +34,7 @@ import { consumeHeldFood, equipNamed } from './skills-craft.ts';
 import { matchItemName } from './chests.ts';
 import {
   ANVIL_BLOCKS, STATION_FIND_R, WINDOW_SETTLE_MS, findStationCell, openStationWindow,
-  putIntoStation, rememberWindow, stationItemFacts,
+  containerStacks, putIntoStation, rememberWindow, stationItemFacts, type StationWindow,
 } from './containers.ts';
 import { isSpawnAnchorBlock } from './policy.ts';
 import { DRINKABLES, maxDurabilityOf } from './item-facts.ts';
@@ -45,6 +45,8 @@ import { windowSnapshot } from './viewer-state.ts';
 import { consumesOpenWindow, selectionMenuTitle, storageWindow } from './window-semantics.ts';
 import { clearHandForBlockInteraction, withPreparedInteractionHand } from './hand-interaction.ts';
 import { farmingClickCell, floodedCropSpace } from './farming-target.ts';
+import { cellTarget, type BowShotResult } from './ranged.ts';
+import { rangedBlockedText } from './melee.ts';
 
 const { goals } = pathfinderPkg;
 
@@ -120,11 +122,18 @@ async function dispatchUse<T>(bot: Bot, hand: UseHand, ctx: SkillContext, packet
   return useDispatch.run({ bot, hand, ctx, packet }, action);
 }
 
-/** 投掷类:朝 at 看一眼然后甩出去,不是往那一格放东西 */
+/**
+ * 投掷类:朝 at 看一眼然后甩出去,不是往那一格放东西。
+ * 末影之眼不在这里:它右键框架是放进去,右键别处才是扔,见 useOnce 的 ENDER_EYE 分支。
+ */
 export const THROWN = new Set([
   'splash_potion', 'lingering_potion', 'ender_pearl', 'snowball', 'egg',
-  'experience_bottle', 'eye_of_ender', 'trident',
+  'experience_bottle', 'trident',
 ]);
+
+/** 末影之眼:物品 id 是 ender_eye,扔出去飞的那个实体叫 eye_of_ender,两边名字不同 */
+export const ENDER_EYE_ITEM = 'ender_eye';
+export const ENDER_EYE_ENTITY = 'eye_of_ender';
 
 export function isThrown(name: string): boolean {
   return THROWN.has(name) || name.startsWith('splash_') || name.startsWith('lingering_');
@@ -454,6 +463,9 @@ export function useProbeAt(
     if (target === 'tnt') return probeCell(bot, cell, (n) => AIR_NAMES.has(n), 'TNT 点着飞出去,那一格空出来');
     if (LIT_BY_FIRE.test(target)) return probeProp(bot, cell, 'lit', (_was, now) => now === 'true', 'lit 变 true');
     return probeCell(bot, out, (n) => FIRE_BLOCKS.has(n), `${cellText(out)} 烧起来`, `${cellText(out)} `);
+  }
+  if (item === 'ender_eye' && target === 'end_portal_frame') {
+    return probeProp(bot, cell, 'eye', (_was, now) => now === 'true', 'eye 变 true(眼放进框里)');
   }
   if (item === 'bone_meal') {
     // 满龄的作物再撒骨粉原版什么都不发生、骨粉也不消耗,所以 age 没往上走就是没催动
@@ -840,8 +852,15 @@ export async function useOnce(bot: Bot, call: Extract<SkillCall, { skill: 'use' 
     await sleep(USE_SETTLE_MS);
     checkAbort(ctx);
     const head = `${label}右键了${zhEntity(call.target)}`;
+    // 运输矿车、漏斗矿车右键开出的是箱子类窗口:读一遍内容再关,东西要用 take 取
+    const win = bot.currentWindow;
+    const boxNote = win && /^minecraft:(generic_9x\d|hopper)$/.test(String(win.type))
+      ? `。开出了它的箱子窗口,里面:${contentsText(containerStacks(win as never, bot.registry as never).items)};`
+        + '窗口已关,要取东西用 take'
+      : '';
+    if (boxNote) bot.closeWindow(win!);
     const note = useInvNote(beforeInv, bot);
-    const facts = useNoteOn(bot, held, call.target, entity) + leaveVehicle(bot, call.target);
+    const facts = useNoteOn(bot, held, call.target, entity) + leaveVehicle(bot, call.target) + boxNote;
     if (!probe) {
       noteOffTable(ctx, held, call.target);
       return `${head}。${note || '包里一样没动'}${facts}`;
@@ -868,10 +887,19 @@ export async function useOnce(bot: Bot, call: Extract<SkillCall, { skill: 'use' 
     const cell = alignedCell ?? requestedCell;
     const alignmentNote = alignedCell
       ? `（请求的 ${cellText(requestedCell)} 是空气，实际对准下方 ${cellText(cell)}）` : '';
+    // 末影之眼只有点末地传送门框架是放进去;at 指别的格照样扔,它自己朝要塞飞,不往 at 去
+    if (held === ENDER_EYE_ITEM && blockAtCell(bot, cell)?.name !== 'end_portal_frame') {
+      return throwEnderEye(bot, ctx, activateItem);
+    }
+    if (held === 'bow') return shootBowAt(bot, cell, ctx);
     // 投掷物的 at 是落点方向,不是要改的那一格
     if (held && isThrown(held)) {
       const before = invCount(bot, (n) => n === held);
       await aimThenUse(bot, new Vec3(cell.x + 0.5, cell.y + 0.5, cell.z + 0.5), activateItem);
+      if (held === 'trident') {
+        await bot.waitForTicks(TRIDENT_CHARGE_TICKS);
+        bot.deactivateItem();
+      }
       await sleep(300);
       return `朝 ${cellText(cell)} 扔了${label};包里还有 ${invCount(bot, (n) => n === held)} 个(扔前 ${before})`;
     }
@@ -887,6 +915,8 @@ export async function useOnce(bot: Bot, call: Extract<SkillCall, { skill: 'use' 
     }
     await reachCell(bot, cell, ctx);
     checkAbort(ctx);
+    // 路上寻路器垫方块会把主手换成垫脚块;点名的东西不在手上就再拿一次,不然右键的是圆石
+    if (call.item && held && bot.heldItem?.name !== held) held = await equipNamed(bot, call.item);
     const target = blockAtCell(bot, cell);
     if (!target) throw new SkillBlocked(`${cellText(cell)} 所在区块没加载`);
     const desiredProbe = call.open !== undefined ? desiredOpenProbe(bot, cell, target.name, call.open) : null;
@@ -1006,6 +1036,7 @@ export async function useOnce(bot: Bot, call: Extract<SkillCall, { skill: 'use' 
       ctx.holdWindow?.(bot.currentWindow!);
     }
     await sleep(USE_SETTLE_MS);
+    const frameNote = target.name === 'end_portal_frame' ? endFrameNote(bot, cell) : '';
     checkAbort(ctx);
     // 先记下真实窗口。下一步要使用当前窗口时，把同一扇窗口交给它；
     // 否则这一步只负责查看，仍在回执前关窗。
@@ -1036,14 +1067,14 @@ export async function useOnce(bot: Bot, call: Extract<SkillCall, { skill: 'use' 
             + `要踏入并等待维度切换，用 {"skill":"transit","at":[${cell.x},${cell.y},${cell.z}]}`
           : `；实测维度从${zhDimension(beforeDimension)}变为${zhDimension(dimensionOf(bot))}，后续坐标须按当前维度核对`
         : '';
-      return `${head}${changed}。${note || '包里一样没动'}${placementReadback?.() ?? ''}${seen}${portalNote}`;
+      return `${head}${changed}。${note || '包里一样没动'}${placementReadback?.() ?? ''}${seen}${portalNote}${frameNote}`;
     }
     const v = await settleProbe(probe);
     // 失败路径与成功路径报同一份背包增减:存量事实往往就是病因所在
     if (!v.met) {
       const serverFeedback = ctx.serverFeedbackSince?.(interactionStartedAt);
       throw new SkillBlocked(
-        `${head},${v.actual}${serverFeedback ? `;服务端提示:${serverFeedback}` : ''}${note ? `。${note}` : ''}`,
+        `${head},${v.actual}${serverFeedback ? `;服务端提示:${serverFeedback}` : ''}${note ? `。${note}` : ''}${frameNote}`,
         [`要看到的是:${probe.want}`],
         'server',
       );
@@ -1055,11 +1086,11 @@ export async function useOnce(bot: Bot, call: Extract<SkillCall, { skill: 'use' 
       ? noteTilled(bot, cell)
       : '';
     noteWork(bot, ctx, held, cell, target.name);
-    return `${head},${v.actual}${slept}${note ? `。${note}` : ''}${seen}${retilled}`;
+    return `${head},${v.actual}${slept}${note ? `。${note}` : ''}${seen}${retilled}${frameNote}`;
   }
 
   if (!held) throw new SkillBlocked('空手又没给 at/target');
-  if (held === 'eye_of_ender') return throwEnderEye(bot, ctx, activateItem);
+  if (held === ENDER_EYE_ITEM) return throwEnderEye(bot, ctx, activateItem);
   // 手上是吃的/喝的就走真进食通道:通用兜底按一下 1.2 秒就松手,喝完一桶奶要 1.61 秒,
   // 从那条路走的奶永远喝不下去(只会回一句「这样东西没有登记的使用效果」)
   if ((bot.registry?.foodsByName as Record<string, unknown> | undefined)?.[held] || DRINKABLES[held]) {
@@ -1119,32 +1150,129 @@ export async function aimThenUse(bot: Bot, point: Vec3, activate?: () => Promise
   else await bot.activateItem();
 }
 
-/** 原版末影之眼飞 40–80 刻(2–4 秒)就消失,盯 6 秒足够,盯不到就说盯不到 */
+/**
+ * 原版三叉戟松手时蓄力满 10 刻才掷出。服务端按自己收到按下与松开两个包之间的刻数算,
+ * 与客户端刻差一两刻,按住 12 刻再松。
+ */
+const TRIDENT_CHARGE_TICKS = 12;
+
+/** 原版箭的位置每 20 刻同步一次;超过一次同步间隔再加 10 刻网络抖动没动过,就是插住了 */
+const ARROW_SETTLED_MS = 1_500;
+/** 满弓竖直上射落回出手高度要 104 刻(5.2 秒),再加一次 20 刻的位置同步 */
+const ARROW_WATCH_MS = 6_200;
+/** 刚放出的箭在身边这么近的水平距离内生成;更远的是别处早先射的 */
+const ARROW_SPAWN_RADIUS = 3;
+
+/**
+ * 满弓朝那一格的格心射一支普通箭,盯到箭插住、不见或超时。
+ * 回执报落点、那一格射前射后的方块,以及包里普通箭的增减(带无限附魔时不减)。
+ */
+async function shootBowAt(bot: Bot, cell: Cell, ctx: SkillContext): Promise<string> {
+  const ranged = ctx.attack.ranged;
+  if (!ranged) throw new SkillBlocked('远程控制器现在不可用');
+  const before = blockAtCell(bot, cell);
+  const arrowsBefore = invCount(bot, (n) => n === 'arrow');
+  const known = new Set(Object.values(bot.entities).filter((e) => e?.name === 'arrow').map((e) => e.id));
+  const lease = ctx.attack.acquire(-1);
+  let shot: BowShotResult;
+  try {
+    shot = await ranged.shoot(cellTarget(cell), lease.token);
+  } finally {
+    ctx.attack.release(lease);
+  }
+  checkAbort(ctx);
+  if (shot.kind !== 'released') throw new SkillBlocked(`朝 ${cellText(cell)} 没射出去:${rangedBlockedText(shot)}`);
+
+  const from = bot.entity.position.clone();
+  const deadline = Date.now() + ARROW_WATCH_MS;
+  let arrowId: number | null = null;
+  let last: Vec3 | null = null;
+  let movedAt = Date.now();
+  let settled = false;
+  while (Date.now() < deadline) {
+    checkAbort(ctx);
+    const arrow: (typeof bot.entities)[number] | undefined = arrowId !== null
+      ? bot.entities[arrowId]
+      : Object.values(bot.entities).find((e) => e?.name === 'arrow' && e.position && !known.has(e.id)
+        && Math.hypot(e.position.x - from.x, e.position.z - from.z) <= ARROW_SPAWN_RADIUS);
+    if (arrow?.position) {
+      arrowId = arrow.id;
+      if (!last || !arrow.position.equals(last)) {
+        last = arrow.position.clone();
+        movedAt = Date.now();
+      } else if (Date.now() - movedAt >= ARROW_SETTLED_MS) {
+        settled = true;
+        break;
+      }
+    } else if (arrowId !== null) break;
+    await sleep(100);
+  }
+
+  const at = (p: Vec3): string => `(${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)})`;
+  const center = new Vec3(cell.x + 0.5, cell.y + 0.5, cell.z + 0.5);
+  const flight = !last
+    ? '一路没看见这支箭'
+    : settled
+      ? `箭插在 ${at(last)},离那一格中心 ${last.distanceTo(center).toFixed(1)} 格`
+      : arrowId !== null && !bot.entities[arrowId]
+        ? `箭在 ${at(last)} 之后不见了`
+        : `盯了 ${ARROW_WATCH_MS / 1000} 秒箭还在动,最后看见在 ${at(last)}`;
+  const after = blockAtCell(bot, cell);
+  const cellNote = !before || !after || after.stateId === before.stateId
+    ? ''
+    : after.name === before.name
+      ? `;那一格的${zhName(after.name)}状态变了`
+      : `;那一格从${zhName(before.name)}变成了${zhName(after.name)}`;
+  return `朝 ${cellText(cell)} 满弓放了一箭,${flight}${cellNote}。`
+    + `包里普通箭 ${arrowsBefore} → ${invCount(bot, (n) => n === 'arrow')} 支`;
+}
+
+/** 原版末影之眼飞 80 刻(4 秒)后落下或碎掉,盯 6 秒足够,盯不到就说盯不到 */
 export const ENDER_EYE_WATCH_MS = 6_000;
+/** 刚扔出的眼在身边这么近的距离内生成;更远的是别处早先扔的,不认 */
+const ENDER_EYE_SPAWN_RADIUS = 3;
+
+/**
+ * 罗盘方位角:正北(-z)0°、正东(+x)90°,顺时针。三角定位要的是这个角,八方位差 22.5° 太粗。
+ */
+export function compassDegrees(dx: number, dz: number): number {
+  const deg = Math.atan2(dx, -dz) * (180 / Math.PI);
+  return Math.round(((deg % 360) + 360) % 360);
+}
 
 export async function throwEnderEye(bot: Bot, ctx: SkillContext, activate?: () => Promise<void>): Promise<string> {
   const from = { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z };
-  const before = invCount(bot, (n) => n === 'eye_of_ender');
+  const before = invCount(bot, (n) => n === ENDER_EYE_ITEM);
+  const known = new Set(Object.values(bot.entities).filter((e) => e?.name === ENDER_EYE_ENTITY).map((e) => e.id));
   if (activate) await activate();
   else await bot.activateItem();
   const deadline = Date.now() + ENDER_EYE_WATCH_MS;
+  let eyeId: number | null = null;
+  let first: { x: number; y: number; z: number } | null = null;
   let last: { x: number; y: number; z: number } | null = null;
-  let seen = false;
   while (Date.now() < deadline) {
     checkAbort(ctx);
-    const eye = Object.values(bot.entities)
-      .find((e) => e?.name === 'eye_of_ender' && e.position);
+    const eye: (typeof bot.entities)[number] | undefined = eyeId !== null
+      ? bot.entities[eyeId]
+      : Object.values(bot.entities).find((e) => e?.name === ENDER_EYE_ENTITY && e.position && !known.has(e.id)
+        && Math.hypot(e.position.x - from.x, e.position.z - from.z) <= ENDER_EYE_SPAWN_RADIUS);
     if (eye?.position) {
-      seen = true;
+      eyeId = eye.id;
       last = { x: eye.position.x, y: eye.position.y, z: eye.position.z };
-    } else if (seen) break;
-    await sleep(150);
+      first ??= last;
+    } else if (eyeId !== null) break;
+    await sleep(100);
   }
-  const after = invCount(bot, (n) => n === 'eye_of_ender');
-  if (!last) return `扔出去了,但一路没看见那颗末影之眼(包里 ${before} → ${after} 个)`;
+  const after = invCount(bot, (n) => n === ENDER_EYE_ITEM);
+  const origin = `从 (${Math.round(from.x)}, ${Math.round(from.y)}, ${Math.round(from.z)}) 扔出`;
+  if (!last || !first) return `${origin},但一路没看见那颗末影之眼(包里 ${before} → ${after} 个)`;
   const dist = Math.round(Math.hypot(last.x - from.x, last.z - from.z));
   const dir = bearing(last.x - from.x, last.z - from.z);
   const dy = Math.round(last.y - from.y);
+  // 原版:离要塞 12 格以内时眼直接飞到要塞正上方悬停,水平位移就会很短
+  const heading = dist >= 1
+    ? `,方位角 ${compassDegrees(last.x - from.x, last.z - from.z)}°(正北 0°、正东 90°,顺时针)`
+    : '';
   const drop = Object.values(bot.entities).some(
     (e) => e?.name === 'item' && e.position
       && Math.hypot(e.position.x - last!.x, e.position.y - last!.y, e.position.z - last!.z) <= 4,
@@ -1152,10 +1280,37 @@ export async function throwEnderEye(bot: Bot, ctx: SkillContext, activate?: () =
   const fell = drop
     ? '落地了,地上有掉落物'
     : '没看见它落地(20% 概率会碎,也可能落在视野外)';
-  return `末影之眼朝${dir ? DIRECTION_ZH[dir] : '正上下'}飞了 ${dist} 格`
+  return `${origin},末影之眼朝${dir ? DIRECTION_ZH[dir] : '正上下'}飞了 ${dist} 格${heading}`
     + `${dy === 0 ? '' : `,${dy > 0 ? '升' : '降'}了 ${Math.abs(dy)} 格`}`
-    + `,最后看见它在 (${Math.round(last.x)}, ${Math.round(last.y)}, ${Math.round(last.z)});${fell}。`
+    + `,最后看见它在 (${last.x.toFixed(1)}, ${last.y.toFixed(1)}, ${last.z.toFixed(1)});${fell}。`
     + `包里 ${before} → ${after} 个`;
+}
+
+/** 框架那一圈在被点的框架周围多大范围里找:原版 12 个框围成 5×5 去掉四角的一圈,中间 3×3 是门;对边的框离被点的那一格 4 格 */
+const END_FRAME_SCAN = 4;
+
+/**
+ * 右键末地传送门框架之后,把这一圈的现状念出来:几个框、几个放了眼、门开没开。
+ * 原版框架的 eye 属性就是「放了眼没有」,门方块和框在同一层。
+ */
+export function endFrameNote(bot: Bot, cell: Cell, name = 'end_portal_frame'): string {
+  if (name !== 'end_portal_frame') return '';
+  let frames = 0;
+  let eyes = 0;
+  let portal = 0;
+  for (let dx = -END_FRAME_SCAN; dx <= END_FRAME_SCAN; dx++) {
+    for (let dz = -END_FRAME_SCAN; dz <= END_FRAME_SCAN; dz++) {
+      const b = blockAtCell(bot, { x: cell.x + dx, y: cell.y, z: cell.z + dz });
+      if (b?.name === 'end_portal_frame') {
+        frames++;
+        if (blockProp(b, 'eye') === 'true') eyes++;
+      } else if (b?.name === 'end_portal') {
+        portal++;
+      }
+    }
+  }
+  return `。周围 ${END_FRAME_SCAN * 2 + 1}×${END_FRAME_SCAN * 2 + 1} 内框架 ${frames} 个,放了眼的 ${eyes} 个`
+    + (portal > 0 ? `;框中间已经有末地传送门方块 ${portal} 格,门开了` : ';还没有传送门方块');
 }
 
 /**
@@ -1210,12 +1365,16 @@ export const RIDE_STEP: Readonly<Record<string, number>> = {
   pig: 0.12, strider: 0.12, boat: 0.3, chest_boat: 0.3,
 };
 export const RIDE_STEP_DEFAULT = 0.12;
+/** 贴墙滑时某一轴剩下的分量短于这个就不算一种走法(只为跳过零长度那一轴) */
+export const RIDE_MIN_SLIDE = 0.001;
+/** 坐骑实体没带宽高读数时的包围盒边长(猪的宽高) */
+export const RIDE_HULL_DEFAULT = 0.9;
 /** 驾驭这一种要手持的道具(服务端认「受控」的前提;拿掉它坐骑就不听使唤) */
 export const RIDE_CONTROL_ITEM: Readonly<Record<string, string>> = {
   pig: 'carrot_on_a_stick', strider: 'warped_fungus_on_a_stick',
 };
 
-export interface VehicleEntity { name?: string; position: Vec3; height?: number }
+export interface VehicleEntity { name?: string; position: Vec3; height?: number; width?: number }
 export interface RideClient {
   write(name: string, data: Record<string, unknown>): void;
   on(name: string, fn: (p: { x: number; y: number; z: number }) => void): void;
@@ -1603,9 +1762,80 @@ export function rideGroundY(bot: Bot, x: number, yNow: number, z: number): numbe
   return null;
 }
 
+/** 骑手脚底比坐骑 y 高出的量;骑手位置跟着坐骑写,埋头判定读的也是这个位置 */
+export const RIDER_OVER_VEHICLE = 0.6;
+/** 玩家眼高;原版窒息按眼睛那一点所在的方块判 */
+export const PLAYER_EYE = 1.62;
+/**
+ * 坐骑包围盒各面收进的量,只为让恰好贴着方块面的位置不算重叠。
+ * 原版源码验碰撞前收进 1/16,但台架上的 Paper 1.20.6 对整盒重叠 0.06 格的落点照样拽回,
+ * 所以按整盒算。
+ */
+export const VEHICLE_HULL_EPS = 1e-6;
+
+export interface RideObstacle {
+  cell: Cell;
+  name: string;
+  /** hull=坐骑身子撞上;head=坐骑过得去、骑手的头会在这一格里 */
+  kind: 'hull' | 'head';
+}
+
+function shapeBoxes(b: NonNullable<ReturnType<Bot['blockAt']>>): number[][] {
+  const shapes = (b as unknown as { shapes?: number[][] }).shapes;
+  if (Array.isArray(shapes)) return shapes;
+  return b.boundingBox === 'block' ? [[0, 0, 0, 1, 1, 1]] : [];
+}
+
+/**
+ * 坐骑落到 (x,y,z) 这一步挡不挡:身子按实体宽高的整盒碰方块碰撞箱,
+ * 骑手眼睛所在那一格是整格实心就算头挡——原版船钻得进一格高的缝,人在里面窒息掉血。
+ * 区块没加载的格按挡住报,不当空气。
+ */
+export function rideObstacle(
+  bot: Bot, x: number, y: number, z: number, hull: { width: number; height: number },
+): RideObstacle | null {
+  const hw = hull.width / 2 - VEHICLE_HULL_EPS;
+  const x0 = x - hw; const x1 = x + hw;
+  const z0 = z - hw; const z1 = z + hw;
+  const y0 = y + VEHICLE_HULL_EPS; const y1 = y + hull.height - VEHICLE_HULL_EPS;
+  for (let cy = Math.floor(y0); cy <= Math.floor(y1); cy += 1) {
+    for (let cx = Math.floor(x0); cx <= Math.floor(x1); cx += 1) {
+      for (let cz = Math.floor(z0); cz <= Math.floor(z1); cz += 1) {
+        const cell = { x: cx, y: cy, z: cz };
+        const b = blockAtCell(bot, cell);
+        if (!b) return { cell, name: '(区块没加载)', kind: 'hull' };
+        const hit = shapeBoxes(b).some(([sx0, sy0, sz0, sx1, sy1, sz1]) => cx + sx0 < x1 && cx + sx1 > x0
+          && cy + sy0 < y1 && cy + sy1 > y0 && cz + sz0 < z1 && cz + sz1 > z0);
+        if (hit) return { cell, name: b.name, kind: 'hull' };
+      }
+    }
+  }
+  const eye = { x: Math.floor(x), y: Math.floor(y + RIDER_OVER_VEHICLE + PLAYER_EYE), z: Math.floor(z) };
+  const head = blockAtCell(bot, eye);
+  if (head && head.boundingBox === 'block') return { cell: eye, name: head.name, kind: 'head' };
+  return null;
+}
+
+/** 直走、贴墙滑几种走法各自撞上的那一格,同一格只说一次 */
+export function rideObstacleText(hits: readonly RideObstacle[], zhV: string): string {
+  const seen = new Set<string>();
+  const parts: string[] = [];
+  for (const o of hits) {
+    const key = `${o.cell.x},${o.cell.y},${o.cell.z}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    parts.push(o.kind === 'head'
+      ? `${cellText(o.cell)} 是${zhName(o.name)},在人头的高度(${zhV}钻得过去,人头会闷在里面掉血)`
+      : `${cellText(o.cell)} 是${zhName(o.name)},挡着${zhV}的身子`);
+  }
+  return `直走和贴墙滑都过不去:${parts.join(';')}`;
+}
+
 /**
  * 玩家控制的载具由骑手客户端发送 vehicle_move 绝对坐标，服务端做碰撞和纠偏。
  * Mineflayer 无载具物理，此处每 tick 小步移动并转向；仅转头不能驱动载具。
+ *
+ * 服务端对「落点和方块重叠」的包不记日志,只回一个 vehicle_move 把坐骑拽回原处。
  */
 export async function rideDrive(bot: Bot, ctx: SkillContext, to: Cell): Promise<string> {
   const vehicle = vehicleOf(bot);
@@ -1630,6 +1860,7 @@ export async function rideDrive(bot: Bot, ctx: SkillContext, to: Cell): Promise<
     }
   }
   const step = RIDE_STEP[vname] ?? RIDE_STEP_DEFAULT;
+  const hull = { width: vehicle.width ?? RIDE_HULL_DEFAULT, height: vehicle.height ?? RIDE_HULL_DEFAULT };
   const client = (bot as unknown as { _client: RideClient })._client;
   const pos = vehicle.position.clone();
   const start = { x: pos.x, z: pos.z };
@@ -1665,15 +1896,35 @@ export async function rideDrive(bot: Bot, ctx: SkillContext, to: Cell): Promise<
         }
         mark = { x: pos.x, z: pos.z, at: Date.now() };
       }
-      const ux = dx / dist;
-      const uz = dz / dist;
-      const nx = pos.x + ux * Math.min(step, dist);
-      const nz = pos.z + uz * Math.min(step, dist);
-      const ny = rideGroundY(bot, nx, pos.y, nz);
-      if (ny === null) {
-        stalledWhy = '前面那一格落不了脚(悬崖/墙/区块没加载)';
+      const along = Math.min(step, dist);
+      const tries = [
+        { mx: (dx / dist) * along, mz: (dz / dist) * along },
+        { mx: Math.sign(dx) * Math.min(step, Math.abs(dx)), mz: 0 },
+        { mx: 0, mz: Math.sign(dz) * Math.min(step, Math.abs(dz)) },
+      ];
+      let move: { nx: number; ny: number; nz: number; ux: number; uz: number } | null = null;
+      const blocked: RideObstacle[] = [];
+      for (const t of tries) {
+        const len = Math.hypot(t.mx, t.mz);
+        if (len < RIDE_MIN_SLIDE) continue;
+        const nx = pos.x + t.mx;
+        const nz = pos.z + t.mz;
+        const ny = rideGroundY(bot, nx, pos.y, nz);
+        if (ny === null) continue;
+        const hit = rideObstacle(bot, nx, ny, nz, hull);
+        // 原版只在「原处不重叠」时才拒重叠的落点;已经嵌着的身子往哪挪服务端都收
+        const wedged = hit?.kind === 'hull' && rideObstacle(bot, pos.x, pos.y, pos.z, hull)?.kind === 'hull';
+        if (hit && !wedged) { blocked.push(hit); continue; }
+        move = { nx, ny, nz, ux: t.mx / len, uz: t.mz / len };
         break;
       }
+      if (!move) {
+        stalledWhy = blocked.length > 0
+          ? rideObstacleText(blocked, zhV)
+          : '前面那一格落不了脚(悬崖/墙/区块没加载)';
+        break;
+      }
+      const { nx, ny, nz, ux, uz } = move;
       // notchian yaw:0=+Z,-90=+X
       const yaw = -Math.atan2(ux, uz) * (180 / Math.PI);
       client.write('look', { yaw, pitch: 0, onGround: false });
@@ -1681,7 +1932,7 @@ export async function rideDrive(bot: Bot, ctx: SkillContext, to: Cell): Promise<
       pos.set(nx, ny, nz);
       vehicle.position.set(nx, ny, nz);
       // 骑手位置跟着坐骑走:别的读数(距离、快照)不该停在上马那一格
-      bot.entity.position.set(nx, ny + 0.6, nz);
+      bot.entity.position.set(nx, ny + RIDER_OVER_VEHICLE, nz);
       await sleep(RIDE_TICK_MS);
     }
   } finally {
@@ -1704,6 +1955,20 @@ export async function rideDrive(bot: Bot, ctx: SkillContext, to: Cell): Promise<
 }
 
 // ======================== anvil / grindstone:通用窗口协议 ========================
+
+/**
+ * shift 点产出槽(2 号格)把产物取进包,返回它落进的那一格;窗口背包段里没有哪格
+ * 多出这样东西时返回 null。包里可能还有别的同名件,产物只认这一格。
+ */
+async function shiftTakeOutput(bot: Bot, win: StationWindow, outName: string): Promise<{ name: string } | null> {
+  const bagBefore = win.slots.slice(win.inventoryStart, win.inventoryEnd);
+  await (bot as unknown as { clickWindow(s: number, b: number, m: number): Promise<void> }).clickWindow(2, 0, 1);
+  await sleep(WINDOW_SETTLE_MS);
+  return win.slots.slice(win.inventoryStart, win.inventoryEnd).find((s, i) => {
+    const prev = bagBefore[i];
+    return s !== null && s.name === outName && (prev === null || prev.name !== s.name || s.count > prev.count);
+  }) ?? null;
+}
 
 export async function skillAnvil(bot: Bot, call: Extract<SkillCall, { skill: 'anvil' }>, ctx: SkillContext): Promise<string> {
   const cell = call.at ? resolveAt(bot, call.at) : findStationCell(bot, ANVIL_BLOCKS);
@@ -1739,6 +2004,8 @@ export async function skillAnvil(bot: Bot, call: Extract<SkillCall, { skill: 'an
   (client as unknown as { on(n: string, f: unknown): void }).on('craft_progress_bar', onProp);
   const { win, blockName } = await openStationWindow(bot, ctx, cell, ANVIL_BLOCKS, '铁砧');
   let out: { name: string } | null = null;
+  /** shift 取出后产物落进的那一格(窗口里玩家背包段);没看到落格时为 null */
+  let landed: { name: string } | null = null;
   try {
     await putIntoStation(bot, win, mainPred, 0, itemAsked(call.item, call.pick));
     await sleep(300);
@@ -1759,11 +2026,7 @@ export async function skillAnvil(bot: Bot, call: Extract<SkillCall, { skill: 'an
         [], 'server',
       );
     }
-    const outFacts = stationItemFacts(bot, out);
-    await (bot as unknown as { clickWindow(s: number, b: number, m: number): Promise<void> }).clickWindow(2, 0, 1);
-    await sleep(WINDOW_SETTLE_MS);
-    // 产出留在读数里,取没取到由下面的等级/库存判
-    void outFacts;
+    landed = await shiftTakeOutput(bot, win, out.name);
   } finally {
     (client as unknown as { removeListener(n: string, f: unknown): void }).removeListener('craft_progress_bar', onProp);
     try { bot.closeWindow(win as never); } catch { /* 已关 */ }
@@ -1778,7 +2041,9 @@ export async function skillAnvil(bot: Bot, call: Extract<SkillCall, { skill: 'an
       throw new SkillBlocked(`铁砧的产出没拿到手:经验一级没扣、包里一样没动(${gate};等级不够时原版不给取)`, [], 'server');
     }
   }
-  const result = bot.inventory.items().find((i) => i.name === (out?.name ?? call.item));
+  const product = landed
+    ? `${zhName(landed.name)}(${stationItemFacts(bot, landed)})`
+    : `${zhName(out.name)}(${stationItemFacts(bot, out)};这是取出前产出槽的读数,没看到它落进包里哪一格)`;
   const anvilNow = blockAtCell(bot, cell)?.name ?? null;
   const wear = anvilNow === blockName
     ? ''
@@ -1789,7 +2054,7 @@ export async function skillAnvil(bot: Bot, call: Extract<SkillCall, { skill: 'an
     ? `在 ${cellText(cell)} 的${zhName(blockName)}上把${askedLabel(bot, call.item, call.pick, main)}改名成「${call.name}」`
     : `在 ${cellText(cell)} 的${zhName(blockName)}上把${askedLabel(bot, call.item, call.pick, main)}`
       + `和${askedLabel(bot, call.with!, call.withPick, withOne)}合了`;
-  return `${head}:产物${result ? `${zhName(result.name)}(${stationItemFacts(bot, result)})` : '已入包'};`
+  return `${head}:产物${product};`
     + `花了 ${Math.max(spent, 0)} 级经验(${lvl0} → ${lvl1})${wear}`;
 }
 
@@ -1807,6 +2072,7 @@ export async function skillGrindstone(bot: Bot, call: Extract<SkillCall, { skill
   const pts0 = bot.experience.points;
   const { win } = await openStationWindow(bot, ctx, cell, ['grindstone'], '砂轮');
   let out: { name: string } | null = null;
+  let landed: { name: string } | null = null;
   try {
     await putIntoStation(bot, win, mainPred, 0, itemAsked(call.item, call.pick));
     if (call.with) {
@@ -1824,16 +2090,15 @@ export async function skillGrindstone(bot: Bot, call: Extract<SkillCall, { skill
         [], 'server',
       );
     }
-    await (bot as unknown as { clickWindow(s: number, b: number, m: number): Promise<void> }).clickWindow(2, 0, 1);
-    await sleep(WINDOW_SETTLE_MS);
+    landed = await shiftTakeOutput(bot, win, out.name);
   } finally {
     try { bot.closeWindow(win as never); } catch { /* 已关 */ }
   }
   await sleep(400); // 经验球飞过来要一拍
-  const result = bot.inventory.items().find((i) => i.name === (out?.name ?? call.item));
+  const result = landed ? stationItemFacts(bot, landed) : `${stationItemFacts(bot, out)};这是取出前产出槽的读数,没看到它落进包里哪一格`;
   const gained = bot.experience.points - pts0;
   const xpNote = gained > 0 ? `;返还了 ${gained} 点经验(附魔按原版比例折算)` : ';没有经验返还';
   return `在 ${cellText(cell)} 的砂轮上磨了${askedLabel(bot, call.item, call.pick, main)}`
     + `${call.with ? `+${itemAsked(call.with, call.withPick)}` : ''}:`
-    + `磨之前(${beforeFacts}),磨完(${result ? stationItemFacts(bot, result) : '产物读不到'})${xpNote}`;
+    + `磨之前(${beforeFacts}),磨完(${result})${xpNote}`;
 }

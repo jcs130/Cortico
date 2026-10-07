@@ -3,7 +3,7 @@
  */
 
 import type { ConsoleUi } from '../../../shared/client-panel.ts';
-import { chipsOf, loopOf, type StatusSnapshot } from './protocol.ts';
+import { chipsOf, loopOf, type RunPhase, type StatusSnapshot } from './protocol.ts';
 import { S } from './strings.ts';
 
 /** 一枚 chip:纯文本片段与要加粗的读数交替。 */
@@ -28,6 +28,24 @@ export function applyDisplayName(doc: Document, name: string | undefined, curren
   return true;
 }
 
+/** 主循环运行阶段的一行说明;idle 或没有阶段时为 null。 */
+export function phaseLabel(ui: ConsoleUi, phase: RunPhase | null): string | null {
+  if (!phase) return null;
+  let head: string;
+  switch (phase.state) {
+    case 'delivering': head = S.phaseDelivering; break;
+    case 'model': head = S.phaseModel; break;
+    case 'tools': head = S.phaseTools; break;
+    case 'backoff': head = S.phaseBackoff(ui.fmt.clock(phase.retryAt)); break;
+    case 'handoff': head = S.phaseHandoff; break;
+    default: return null;
+  }
+  const parts = [head];
+  if (phase.round !== undefined) parts.push(S.phaseRound(phase.round));
+  if (phase.running.length > 0) parts.push(S.phaseRunning(phase.running.join(', ')));
+  return parts.join(' · ');
+}
+
 export interface StatusBand {
   el: HTMLElement;
   render(st: StatusSnapshot | null): void;
@@ -43,25 +61,27 @@ export function createStatusBand(ui: ConsoleUi): StatusBand {
         el.appendChild(ui.chip(S.chipDisconnected));
         return;
       }
+      // 先列影响 bot 能否响应的状态,累计统计排在后面。
       const loop = loopOf(st);
+      if (loop.paused) el.appendChild(ui.chip(S.chipPaused, 'warn'));
+      else if (loop.scheduleBlocked) el.appendChild(ui.chip(S.chipScheduleBlocked, 'warn'));
+      if (loop.truncating) el.appendChild(ui.chip(S.chipTruncating, 'accent'));
+      if (loop.behind) el.appendChild(ui.chip(S.chipBehind(loop.behind), 'warn'));
+      // 人格概念(「梦中」这类)由Persona自报文本,框架照画不解释。
+      for (const chip of chipsOf(st)) el.appendChild(ui.chip(chip.label, chip.tone));
       if (loop.estTokens != null) {
         el.appendChild(chipOf(ui, [{ b: ui.fmt.count(loop.estTokens) }, ' tok']));
       }
-      if (loop.messageCount != null) el.appendChild(chipOf(ui, [{ b: loop.messageCount }, S.chipMsgs]));
       const u = loop.lastUsage;
       if (u && u.promptTokens) {
         el.appendChild(
           chipOf(ui, [S.chipCache, { b: ui.fmt.percent((u.cacheHitTokens || 0) / u.promptTokens) }]),
         );
       }
+      if (loop.messageCount != null) el.appendChild(chipOf(ui, [{ b: loop.messageCount }, S.chipMsgs]));
       if (loop.batchesHandled != null) {
         el.appendChild(chipOf(ui, [S.chipBatchesPre, { b: loop.batchesHandled }, S.chipBatchesPost]));
       }
-      if (loop.paused) el.appendChild(ui.chip(S.chipPaused, 'warn'));
-      else if (loop.scheduleBlocked) el.appendChild(ui.chip(S.chipScheduleBlocked, 'warn'));
-      if (loop.truncating) el.appendChild(ui.chip(S.chipTruncating, 'accent'));
-      // 人格概念(「梦中」这类)由Persona自报文本,框架照画不解释。
-      for (const chip of chipsOf(st)) el.appendChild(ui.chip(chip.label, chip.tone));
       if (st.terminalOnline != null) el.appendChild(chipOf(ui, [S.chipOnline, { b: st.terminalOnline }]));
     },
   };

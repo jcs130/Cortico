@@ -121,7 +121,7 @@ export type SkillCall = StepBounds & (
   | { skill: 'enchant'; at: Anchor; item: string; index?: number }
   | { skill: 'eat'; item: string }
   | { skill: 'attack'; target: string; mode?: AttackMode }
-  | { skill: 'equip'; item?: string; pick?: string }
+  | { skill: 'equip'; item?: string; pick?: string; hand?: 'main' | 'off' }
   | { skill: 'pickup'; item?: string }
   | { skill: 'toss'; item: string; count: number; at?: Anchor; pick?: string }
   | { skill: 'stow'; item: string; count: number; pick?: string; at?: Anchor; into?: 'open' }
@@ -750,17 +750,21 @@ const EMPTY_HAND_NAMES = ['air', 'minecraft:air'];
 function parseEquip(c: Record<string, unknown>, at: string): ParseResult {
   const item = str(c.item);
   const pick = str(c.pick);
+  if (c.hand !== undefined && c.hand !== 'main' && c.hand !== 'off') {
+    return { error: `${at} equip 的 hand 只认 main/off` };
+  }
+  const hand: { hand?: 'main' | 'off' } = c.hand === 'main' || c.hand === 'off' ? { hand: c.hand } : {};
   if (!item) {
     if (pick) return { error: `${at} equip 的 pick 是从同 id 的几件里挑一件,要和 item 一起给` };
-    return { step: { skill: 'equip' } };
+    return { step: { skill: 'equip', ...hand } };
   }
   if (EMPTY_HAND_NAMES.includes(item)) {
     return {
-      step: { skill: 'equip' },
+      step: { skill: 'equip', ...hand },
       notes: [{ field: 'item', given: c.item, kind: 'rewritten', as: '空手' }],
     };
   }
-  return { step: { skill: 'equip', item, ...(pick ? { pick } : {}) } };
+  return { step: { skill: 'equip', item, ...(pick ? { pick } : {}), ...hand } };
 }
 
 /** 原版铁砧改名框的字符上限(ServerboundRenameItem 超长直接丢) */
@@ -1035,14 +1039,14 @@ const SKILLS: readonly SkillSpec[] = [
   },
   {
     name: 'transit',
-    doc: `{"skill":"transit","at":[-228,73,58]}          穿过这一格的下界传送门。只认当前维度里已加载的 nether_portal;
-                                                 会先走到门边,再明确踏进门里,等维度和落点都切换后才算完成。
-                                                 goto 只到门边，use 只右键；这两种动作不确认穿门。穿门后重新核对当前维度和落点`,
+    doc: `{"skill":"transit","at":[-228,73,58]}          穿过这一格的传送门:nether_portal、end_portal(框中间地面那层)、
+                                                 end_gateway(末地外岛的折跃门)。会先走到门边,再明确踏进门里,
+                                                 等维度(折跃门是落点)切换后才算完成。普通寻路永远绕开这三种门。goto 只到门边，use 只右键；穿门后重新核对当前维度和落点`,
     fields: [
       {
         key: 'at', kind: 'anchor', required: true,
-        error: `transit 要 at:[x,y,z](下界传送门方块;${RELATIVE_HINT}),或一个当前维度的 mc_map 路标名`,
-        doc: '当前维度里的一格 nether_portal;给字符串 = 当前维度的 mc_map 路标名',
+        error: `transit 要 at:[x,y,z](传送门方块;${RELATIVE_HINT}),或一个当前维度的 mc_map 路标名`,
+        doc: '当前维度里的一格传送门方块;给字符串 = 当前维度的 mc_map 路标名',
       },
     ],
   },
@@ -1276,7 +1280,7 @@ const SKILLS: readonly SkillSpec[] = [
       },
       { key: 'fill', kind: 'enum', values: ['solid', 'outline', 'edges'], error: 'fill 只认 solid/outline/edges', doc: '只对 box 有意义' },
       {
-        key: 'where', kind: 'names', hint: `方块英文 id 或类别 ${UNTIL_CATEGORY_DOC}`,
+        key: 'where', kind: 'names', hint: `方块英文 id 或类别 ${UNTIL_CATEGORY_DOC};实体 id 按收到的实体表报`,
         doc: '只报这几样在这片里的坐标(不看视线)',
       },
     ],
@@ -1308,8 +1312,12 @@ const SKILLS: readonly SkillSpec[] = [
                                                  再带 "index":1,"times":2 = 按菜单 1 号成交 2 次
                                                  喂鸡用 wheat_seeds，驯狼用 bone、喂狼用肉，驯猫/喂猫用 cod 或 salmon。
                                                  多只同类可带现场读到的 entityId 精确点一只；ID 只在当前连接有效，失效后重新观察，不会改点别只。
-{"skill":"use","item":"potion"}                  只给 item:对自己/面前用,喝药水、拉弓蓄力。
-                                                 投掷类(喷溅药水、末影珍珠、雪球、鸡蛋)再给 at = 朝那一格扔
+{"skill":"use","item":"potion"}                  只给 item:对自己/面前用,喝药水。
+                                                 投掷类(喷溅药水、末影珍珠、雪球、鸡蛋、三叉戟)再给 at = 朝那一格扔
+{"skill":"use","item":"bow","at":[12,70,-5]}     满弓朝那一格的中心射一支普通箭,不用走过去。回执报箭插在哪、
+                                                 那一格变没变;路上有别的方块挡着就受阻
+{"skill":"use","item":"ender_eye"}               扔末影之眼:回执报扔出点、飞了多远、方位角(正北 0°、正东 90°)、落没落地。
+                                                 at 指末地传送门框架 = 把眼放进框,回执报这一圈几个框放了眼、门开没开
 {"skill":"use","at":[-147,72,101],"text":"欢迎来我家\\n可缇"}
                                                  **往告示牌上写字**:先 build 把牌子放上,再用这条写。
                                                  \\n 分行,最多 4 行、每行 45 字符;写完读回牌子上的字进回执。
@@ -1379,7 +1387,8 @@ const SKILLS: readonly SkillSpec[] = [
                                                  材料不足时先按回执补材料,不要靠猜 grid 消耗库存。
 {"skill":"craft","grid":[["charcoal"],["stick"]],"count":4}
                                                  grid 用于自定配方或游戏配方表没有的目标:按行写名字二维数组,空位写 null;产出槽出什么算什么。
-                                                 2 行 2 列以内徒手就能做,更大要工作台。够得着的工作台直接用;够不着就放一个自己带的,包里没有才走去现成的`,
+                                                 2 行 2 列以内徒手就能做,更大要工作台。够得着的工作台直接用;够不着就放一个自己带的,包里没有才走去现成的。
+                                                 下界合金装备走锻造台:每件要下界合金升级模板、同种钻石件、下界合金锭各 1 个，钻石件附魔与耐久保留`,
     parse: parseCraft,
     fields: [
       { key: 'item', kind: 'string', doc: '已知目标物品优先使用;按游戏配方表摆;与 grid 二选一' },
@@ -1413,8 +1422,8 @@ const SKILLS: readonly SkillSpec[] = [
     name: 'brew',
     doc: `{"skill":"brew","at":[x,y,z],"input":"nether_wart","bottle":"potion","count":3,"fuel":"blaze_powder"}
                                                  下料点火就走,酿一轮约 20 秒,好了有事件提醒;取货用 take 的 at 指着酿造台。
-                                                 **水瓶与所有药水的物品 id 都是 potion**,名字上分不出来;回执带的「内容 #N」
-                                                 是原版药水注册表序号,同一种药水这个数不变,拿它对账。
+                                                 **水瓶与所有药水的物品 id 都是 potion**;包里和回执在括号里写装的是什么(水瓶、粗制的药水、抗火·延长)。
+                                                 回执报台里燃料还能烧几轮、在不在酿;下完料没开酿会直接受阻。
                                                  燃料只吃烈焰粉(一份烧 20 轮),煤不行。
                                                  材料链三段跳不过:水瓶 →(地狱疣)→ 粗制药水 →(效果材料)→ 基础药水
                                                  →(红石延时 / 萤石粉加强 / 火药变喷溅 / 龙息变滞留)。
@@ -1422,7 +1431,7 @@ const SKILLS: readonly SkillSpec[] = [
                                                  玻璃瓶装水:{"skill":"use","item":"glass_bottle","at":水源那一格}`,
     fields: [
       { key: 'input', kind: 'string', required: true, hint: '这一轮加的材料英文 id' },
-      { key: 'bottle', kind: 'string', required: true, hint: '瓶子英文 id(potion / glass_bottle)' },
+      { key: 'bottle', kind: 'string', required: true, hint: '瓶子英文 id(水瓶和药水都是 potion;空玻璃瓶放进去酿不出东西)' },
       { key: 'count', kind: 'int', lo: 1, hi: 3, def: 3, doc: '放几瓶(三个瓶位)' },
       { key: 'fuel', kind: 'string', required: true, hint: '燃料英文 id(原版只吃 blaze_powder)' },
       { key: 'at', kind: 'anchor', error: `brew 的 at 要 [x,y,z](${RELATIVE_HINT})`, doc: '指定用哪一座酿造台' },
@@ -1497,7 +1506,9 @@ const SKILLS: readonly SkillSpec[] = [
     name: 'attack',
     doc: `{"skill":"attack","target":"zombie"}             攻击最近的该目标。mode 不写/auto = 距离判断近战或弓(8 格切弓、5.5 格切回近战);
                                                  melee = 只近战;ranged = 只用弓;kite = 用弓并尽量保持 8–14 格。
-                                                 ranged/kite 没有可用弓箭或看不见目标时会受阻,不会暗换近战`,
+                                                 ranged/kite 没有可用弓箭或看不见目标时会受阻,不会暗换近战;
+                                                 auto 在 8 格外这一箭射不出(被挡、没弹道等)也受阻收手,换站位再下单。
+                                                 end_crystal / ender_dragon 在 128 格内找,其余 32 格`,
     fields: [
       { key: 'target', kind: 'string', required: true, hint: '实体英文 id 或玩家名' },
       {
@@ -1510,11 +1521,13 @@ const SKILLS: readonly SkillSpec[] = [
   {
     name: 'equip',
     doc: `{"skill":"equip","item":"stone_sword"}           手持物品;盔甲、鞘翅、盾牌和不死图腾会自动放进对应装备槽。
-                                                 不写 item = 把主手腾空(骑马、上鞍这类要空手的动作用它)`,
+{"skill":"equip","item":"filled_map","hand":"off"}  hand 指定哪只手:off = 副手,main = 主手;写了就不按物品自动分槽。
+                                                 不写 item = 把那只手腾空(默认主手;骑马、上鞍这类要空手的动作用它)`,
     parse: parseEquip,
     fields: [
-      { key: 'item', kind: 'string', hint: '物品英文 id 或背包显示名', doc: '自定义物品可用 mc_bag 中的显示名;不写 = 把主手腾空' },
+      { key: 'item', kind: 'string', hint: '物品英文 id 或背包显示名', doc: '自定义物品可用 mc_bag 中的显示名;不写 = 把指定手腾空，默认主手' },
       { key: 'pick', kind: 'string' },
+      { key: 'hand', kind: 'enum', values: ['main', 'off'], error: 'equip 的 hand 只认 main/off', doc: '不写 = 按物品分槽' },
     ],
   },
   {
@@ -1542,7 +1555,7 @@ const SKILLS: readonly SkillSpec[] = [
   },
   {
     name: 'stow',
-    doc: `{"skill":"stow","item":"cobblestone","count":64} 存进附近箱子(32 格内)。先找上次看见还有空位的,没有就开最近没开过的
+    doc: `{"skill":"stow","item":"cobblestone","count":64} 存进附近箱子(32 格内)。先找上次看见还有空位的,没有就开最近没开过的;放不下的换下一口接着存
 {"skill":"stow","item":"cobblestone","count":64,"at":[103,63,-31]} 只存进点名坐标的箱子;目标须在已加载的 32 格内,不会改投别的箱子
 {"skill":"use","item":"大背包"},{"skill":"stow","item":"bread","count":32,"into":"open"}
                                                  先右键打开服务端自定义容器,再存进当前打开的窗口;into:open 不会去找地上的箱子
@@ -1565,7 +1578,7 @@ const SKILLS: readonly SkillSpec[] = [
   },
   {
     name: 'take',
-    doc: `{"skill":"take","item":"coal","count":16}        从当前楼层附近箱子取出。先查近处有货/未查的箱子，再去较远有货的；最多 3 个
+    doc: `{"skill":"take","item":"coal","count":16}        从当前楼层附近箱子或运输矿车取出。先查近处有货/未查的箱子，再去较远有货的；最多 3 个
  {"skill":"take","item":"iron_ingot","count":1,"at":[103,63,-31]} 从指定熔炉/箱子直接取；无需先 use at 开窗
  {"skill":"take","item":"furnace","count":1,"from":"open"} 只用于仍开着的自定义容器窗口,不会走向附近的箱子。同一单连续从这个窗口取多类物品,只在最后关窗
                                                  单独 use 查看结束后窗口已关闭；下一单须重新开窗，例如 steps:[{skill:"use",item:"背包显示名"},{skill:"take",item:"furnace",count:1,from:"open"}]

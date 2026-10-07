@@ -30,7 +30,7 @@ SameSite=Strict、Max-Age 取浏览器上限 400 天;请求经 HTTPS 或反向�
 
 | 路由 | 页 | 内容 |
 |---|---|---|
-| `live` | 终端 | 与 bot 对话、时间线、上下文圈、fork;全新部署上多一组开场引导 |
+| `live` | 终端 | 与 bot 对话、时间线、主循环运行阶段、上下文圈、fork;全新部署上多一组开场引导 |
 | `core` | 运行诊断 | run、session、事件、运行日志,以及 Core 自己的数据与配置 |
 | `usage` | 用量与成本 | 按 session、按天的 token 与费用 |
 | `providers` | 模型供应商 | 端点表(见 [providers.md](providers.md)) |
@@ -90,6 +90,7 @@ bot 的展示名。面板、配置组与提示词文档由贡献方声明;
 
 打开控制台时查询 GitHub 上 Cortico 的最新正式 Release。它的版本高于 `package.json` 的版本时，
 左上角字标下出现一行提示，链接到发布说明；版本相同、更低或查询失败时不显示。只提示，不下载也不重启。
+`pnpm start` 启动 bot 时也查一次，有新版本就在终端的启动摘要里打一行 `⚠ Cortico <版本> 已发布`,带同一个链接。
 
 ## 运行控制
 

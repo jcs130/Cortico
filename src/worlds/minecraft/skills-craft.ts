@@ -9,11 +9,15 @@ import { type SkillCall } from './skills.ts';
 import { zhEffect, zhName } from './names.ts';
 import { gridText, zhErrorText } from './receipt.ts';
 import {
-  CRAFT_SETTLE_MS, awaitCraftGain, invCount, invCountById, invGains, invItemNamed, invSnapshot,
-  namedLike, noSuchItem,
+  CRAFT_SETTLE_MS, INVENTORY_SLOTS, awaitCraftGain, invCount, invCountById, invGains,
+  invItemNamed, invSnapshot, invVariantGains, invVariantSnapshot,
+  namedLike, noSuchItem, offHandItem,
 } from './inventory.ts';
-import { CRAFTING_STATION, ensureStation } from './placement.ts';
-import { HANDHELD_SUFFIXES, equipDestOf } from './tools.ts';
+import { CRAFTING_STATION, ensureStation, type Station } from './placement.ts';
+import {
+  WINDOW_SETTLE_MS, openStationWindow, putIntoStation, stationItemFacts,
+} from './containers.ts';
+import { HANDHELD_SUFFIXES, equipDestOf, equippedAlready } from './tools.ts';
 import { DRINKABLES } from './item-facts.ts';
 import { noteAte } from './placed-ledger.ts';
 import { edibleInBag, notFoodText } from './precheck.ts';
@@ -111,6 +115,8 @@ export async function skillCraft(
     if (!def) throw new SkillBlocked(`不认识「${call.item}」这种物品`);
     targetId = def.id;
     label = zhName(def.name);
+    const smithing = smithingInputs(def.name);
+    if (smithing) return smithNetherite(bot, def.name, smithing, call.count, ctx);
     // 配方表里同一样东西可能有好几种摆法(木棍:竹子/木板)。挑手上材料齐的那一种;
     // 都不齐就把配方要的直接材料照实说出来 —— 不再往下递归找"材料的材料"。
     const tagged = taggedCraftChoice(bot, def.name);
@@ -171,6 +177,7 @@ export async function skillCraft(
 
   // 产量一律按库存净增算:服务端给了什么就报什么,不照配方表复述。
   const before = invSnapshot(bot);
+  const variantsBefore = invVariantSnapshot(bot);
   const targetBefore = targetId === null ? 0 : invCountById(bot, targetId);
   /** 当场没读到入包的是第几次:槽位回灌会迟到,这是现场事实,不是判据(见下) */
   const lateRounds: number[] = [];
@@ -200,7 +207,9 @@ export async function skillCraft(
     }
   }
 
-  const gains = invGains(before, bot);
+  // 名字没净增时看同名换新(放大地图的产物还是地图);有名字净增就不另报
+  const named = invGains(before, bot);
+  const gains = named.length > 0 || targetId !== null ? named : invVariantGains(variantsBefore, bot);
   const targetGain = targetId === null ? 0 : invCountById(bot, targetId) - targetBefore;
   ctx.diag?.write({
     lane: 'craft', event: 'verify', taskId: ctx.taskId,
@@ -229,6 +238,85 @@ export async function skillCraft(
   return `${made.length > 0 ? `${made.join('、')};` : ''}合成出来:${product.join('、')}` +
     (otherGains.length ? `;此外库存净增:${otherGains.join('、')}(不计作本次产物)` : '') +
     (targetId !== null && targetGain < call.count ? `(要 ${call.count} 个,只多出 ${targetGain} 个)${late}` : '') +
+    (held ? ',已经拿在手上' : '');
+}
+
+/** 原版锻造台的升级配方只有下界合金这一族:钻石件 + 下界合金锭 + 下界合金升级模板 */
+const NETHERITE_UPGRADES = [
+  'sword', 'axe', 'pickaxe', 'shovel', 'hoe', 'helmet', 'chestplate', 'leggings', 'boots',
+];
+const NETHERITE_TEMPLATE = 'netherite_upgrade_smithing_template';
+const NETHERITE_INGOT = 'netherite_ingot';
+
+export const SMITHING_STATION: Station = {
+  kinds: ['smithing_table'], label: '锻造台', hint: '先 craft 一个锻造台(2 个铁锭 + 4 块木板)',
+};
+/** 1.20 起锻造台的槽位:模板 0、底料 1、添料 2、产出 3 */
+const SMITH_SLOTS = { template: 0, base: 1, addition: 2, result: 3 } as const;
+
+/** netherite_X 在锻造台上的三样材料(模板、底料 diamond_X、锭);不是锻造升级产物时返回 null */
+export function smithingInputs(item: string): string[] | null {
+  const kind = item.startsWith('netherite_') ? item.slice('netherite_'.length) : '';
+  return NETHERITE_UPGRADES.includes(kind) ? [NETHERITE_TEMPLATE, `diamond_${kind}`, NETHERITE_INGOT] : null;
+}
+
+/**
+ * 下界合金装备不在合成配方表里,要在锻造台上升级钻石件。每件消耗模板、钻石件、锭各一个,
+ * 钻石件的附魔与耐久跟到产物上。产量按包里净增算。
+ */
+async function smithNetherite(
+  bot: Bot, item: string, parts: string[], count: number, ctx: SkillContext,
+): Promise<string> {
+  const label = zhName(item);
+  const [template, base, ingot] = parts;
+  const have = parts.map((name) => ({ name, n: invCount(bot, (x) => x === name) }));
+  const short = have.filter((h) => h.n < count);
+  if (short.length > 0) {
+    const bag = have.map((h) => `${zhName(h.name)} ${h.n} 个`).join('、');
+    const stock = invCount(bot, (x) => x === item);
+    if (stock >= count) {
+      return `没现做${label}:锻造台升级要的材料不齐(包里${bag});不过包里本来就有 ${stock} 个,够这一步要的 ${count} 个了`;
+    }
+    throw new SkillBlocked(
+      `${label}要在锻造台上升级:${parts.map((p) => zhName(p)).join(' + ')} 各 1 个出 1 件,` +
+        `做 ${count} 件各要 ${count} 个;包里${bag}`,
+    );
+  }
+  const station = await ensureStation(bot, SMITHING_STATION, ctx);
+  const cell = { x: station.x, y: station.y, z: station.z };
+  const before = invCount(bot, (x) => x === item);
+  const { win } = await openStationWindow(bot, ctx, cell, SMITHING_STATION.kinds, SMITHING_STATION.label);
+  let done = 0;
+  try {
+    for (let n = 0; n < count; n++) {
+      checkAbort(ctx);
+      await putIntoStation(bot, win, (x) => x === template, SMITH_SLOTS.template, zhName(template));
+      await putIntoStation(bot, win, (x) => x === base, SMITH_SLOTS.base, zhName(base));
+      await putIntoStation(bot, win, (x) => x === ingot, SMITH_SLOTS.addition, zhName(ingot));
+      await sleep(WINDOW_SETTLE_MS);
+      if (!win.slots[SMITH_SLOTS.result]) {
+        throw new SkillBlocked(
+          `${station.note};锻造台的产出槽没出东西:${parts.map((p) => zhName(p)).join(' + ')} 都放进去了` +
+            (done > 0 ? `(之前已升级 ${done} 件)` : ''),
+          [], 'server',
+        );
+      }
+      await (bot as unknown as { clickWindow(s: number, b: number, m: number): Promise<void> })
+        .clickWindow(SMITH_SLOTS.result, 0, 1);
+      await sleep(WINDOW_SETTLE_MS);
+      done += 1;
+    }
+  } finally {
+    try { bot.closeWindow(win as never); } catch { /* 已关 */ }
+  }
+  const gained = invCount(bot, (x) => x === item) - before;
+  if (gained <= 0) {
+    throw new SkillBlocked(`${station.note};在锻造台上升级了 ${done} 次,包里${label}一个都没多`, [], 'server');
+  }
+  const result = bot.inventory.items().find((i) => i.name === item) ?? null;
+  const held = await equipIfHandheld(bot, item);
+  return `${station.note};在锻造台上升级出 ${gained} 件${label}(${stationItemFacts(bot, result)})` +
+    (gained < count ? `(要 ${count} 件,只多出 ${gained} 件)` : '') +
     (held ? ',已经拿在手上' : '');
 }
 
@@ -372,14 +460,40 @@ export async function emptyHand(bot: Bot): Promise<string> {
   return `主手腾空了(原来拿的是${zhName(held.name)})`;
 }
 
-/** item 缺省时腾空主手；air 别名由 parseEquip 归一化。 */
+/**
+ * 副手腾空:副手物品挪回背包。mineflayer 的 unequip 在包里既没空格、也没有能并进去的
+ * 同种未满一摞时把它扔到地上,这种包况下不腾,受阻说明;并进去一部分后余下的被扔掉时照实报。
+ */
+async function emptyOffHand(bot: Bot): Promise<string> {
+  const held = offHandItem(bot);
+  if (!held) return '副手本来就是空的';
+  const bag = bot.inventory.items();
+  if (bag.length >= INVENTORY_SLOTS && !bag.some((i) => i.type === held.type && i.count < i.stackSize)) {
+    throw new SkillBlocked(
+      `包里 ${INVENTORY_SLOTS} 格全满,副手的${pickLabel(pickTargetOf(held, bot.registry as never))}放不回包里;` +
+      '没腾,它还挂在副手',
+    );
+  }
+  const before = invCount(bot, (n) => n === held.name);
+  await bot.unequip('off-hand');
+  const left = invCount(bot, (n) => n === held.name);
+  if (left < before + held.count) {
+    return `副手腾空了;包是满的,${zhName(held.name)}×${before + held.count - left}被扔在了脚下`;
+  }
+  return `副手腾空了(原来挂的是${zhName(held.name)})`;
+}
+
+/** item 缺省时腾空 hand 指的那只手(默认主手)；air 别名由 parseEquip 归一化。 */
 export async function skillEquip(bot: Bot, call: Extract<SkillCall, { skill: 'equip' }>): Promise<string> {
   const want = call.item;
-  if (!want) return emptyHand(bot);
+  if (!want) return call.hand === 'off' ? emptyOffHand(bot) : emptyHand(bot);
   // 精确名优先;退而求其次才用后缀(iron→iron_pickaxe),`includes` 会让
   // equip "iron" 命中哪一件全看物品栏顺序,那不是她说的意思
   const items = bot.inventory.items();
   const item = invItemNamed(bot, want, call.pick);
+  const fromOffHand = !!item && item === offHandItem(bot);
+  const worn = item && !fromOffHand ? null : equippedAlready(bot, want, call.hand, call.pick);
+  if (worn) return `${zhName(worn.name)}本来就${worn.where}`;
   if (!item) {
     const same = items.filter((i) => namedLike(want, i.name));
     if (call.pick && same.length > 0) throw noSuchItem(bot, want, call.pick, same);
@@ -388,10 +502,16 @@ export async function skillEquip(bot: Bot, call: Extract<SkillCall, { skill: 'eq
       `包里没有${zhName(want)}` + (near.length > 0 ? `;名字带这几个字的有:${near.join('、')}` : ''),
     );
   }
-  const dest = equipDestOf(item.name, bot.registry);
+  const dest = call.hand === 'off' ? 'off-hand' : call.hand === 'main' ? 'hand' : equipDestOf(item.name, bot.registry);
   await bot.equip(item, dest);
   // 点名拿的时候回执念全标签:「拿起了弓」答不了「拿的是无限那把吗」
   const what = call.pick ? pickLabel(pickTargetOf(item, bot.registry as never)) : itemCustomName(item) ?? zhName(item.name);
+  if (dest === 'hand' && fromOffHand) {
+    // 从副手挪到快捷栏时,目标格原有的东西会被换进副手
+    const nowOff = offHandItem(bot);
+    return `把副手的${what}换到了主手;` +
+      (nowOff ? `快捷栏那格原来的${pickLabel(pickTargetOf(nowOff, bot.registry as never))}换进了副手` : '副手空了');
+  }
   if (dest === 'hand') return `手里拿起了${what}`;
   if (dest === 'off-hand') return `${what}挂上了副手`;
   return `穿上了${what}`;

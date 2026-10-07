@@ -452,8 +452,17 @@ describe('上下文占用 · 纯计算', () => {
     expect(by('toolIO')).toBe(cx.estTok('回执') + 8);
     expect(d.total).toBe(d.cats.reduce((s: number, c: Any) => s + c.tok, 0));
     expect(d.maxTokens).toBe(1000);
-    expect(d.softRatio).toBe(0.5);
+    expect(d.softTokens).toBe(500);
     expect(d.toolCount).toBe(1);
+  });
+
+  it('computeCtx:圈的分母取 Persona 阶段预算与模型输入上限中较小的一个', () => {
+    const messages = records([{ role: 'system', content: 'sys' }]);
+    const tighter = cx.computeCtx({ messages, toolSchemas: [], status: { loop: { context: { hardTokens: 800 } }, context: { maxTokens: 1000, softRatio: 0.5 } } });
+    expect(tighter.maxTokens).toBe(800);
+    expect(tighter.softTokens).toBe(500);
+    const looser = cx.computeCtx({ messages, toolSchemas: [], status: { loop: { context: { hardTokens: 4000 } }, context: { maxTokens: 1000 } } });
+    expect(looser.maxTokens).toBe(1000);
   });
 
   it('标准 Item 的分类使用运行时估算，包含加密推理并完整移除历史 reasoning Item',async()=>{
@@ -611,6 +620,25 @@ describe('live feature 挂载', () => {
     expect((root.find('sesscards') as FakeEl).children.length).toBe(2);
     // 展示名来自部署配置,只落在标题上(品牌名归外壳)
     expect(doc.title).toBe('控制台 · 某某');
+  });
+
+  it('时间线下方那行只按 core 的运行阶段显示:追加 user 消息不显示,phase 帧给出轮次与工具名,idle 收起', () => {
+    const { env, sockets } = fakeEnv();
+    const { ctx, root } = mkCtx({ debug: true, sessions: true });
+    live.createLiveFeature({ env }).mount(ctx);
+    sockets[0].up();
+    const idle = { state: 'idle', running: [], enteredAt: '2026-10-05T10:00:00+08:00' };
+    sockets[0].emit({ t: 'hello', session: [{ role: 'system', content: '前缀' }], status: { loop: { phase: idle } } });
+    const line = root.find('tlthink') as FakeEl;
+    sockets[0].emit({ t: 'session.append', index: 1, message: { role: 'user', content: '在吗' } });
+    expect(line.className).toContain('hidden');
+
+    sockets[0].emit({ t: 'phase', phase: { state: 'tools', round: 2, running: ['walk'], enteredAt: '2026-10-05T10:00:01+08:00' } });
+    expect(line.className).not.toContain('hidden');
+    expect(line.textContent).toBe('执行工具 · 第 2 轮 · 运行中：walk');
+
+    sockets[0].emit({ t: 'phase', phase: idle });
+    expect(line.className).toContain('hidden');
   });
 
   it('工具回执按 call_id 填回等结果的那个槽位,不新开一张卡', () => {
@@ -905,6 +933,21 @@ describe('live feature 挂载', () => {
       'ws://test/ws/providers/world%3Aterminal/panels/chat',
     ]);
   });
+
+  it('终端 World 拒收的帧弹出原因;问候这类普通系统提示不弹', () => {
+    stubFetch(() => ({}));
+    const { env, sockets } = fakeEnv();
+    const { ctx, doc } = mkCtx({ debug: false, sessions: false });
+    live.createLiveFeature({ env }).mount(ctx);
+    const chat = sockets[0];
+    chat.up();
+    chat.emitRaw(JSON.stringify({ type: 'sys', text: '你好,控制台。' }));
+    expect(doc.body.findAll('toast')).toHaveLength(0);
+    chat.emitRaw(JSON.stringify({ type: 'sys', kind: 'rejected', text: 'bot尚未连接,消息未送达' }));
+    const toasts = doc.body.findAll('toast');
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].textContent).toBe('bot尚未连接,消息未送达');
+  });
 });
 
 // ===========================================================================
@@ -918,7 +961,15 @@ const stamp = (at: Date): string => {
 };
 
 describe('导出诊断', () => {
-  it('按一下就取诊断包,文件名带包里的 run id', () => {
+  /** 导出前的说明框里按「确认」。 */
+  const confirmExport = (doc: FakeDoc): void => {
+    const modal = doc.body.find('modal') as FakeEl;
+    expect(modal.textContent).toContain('私人信息');
+    const ok = modal.findAll('btn').find((b) => b.textContent === '确认') as FakeEl;
+    ok.dispatchEvent({ type: 'click' });
+  };
+
+  it('说明包里有什么,确认后取诊断包,文件名带包里的 run id', () => {
     stubFetch(() => ({ kind: 'cortico-diagnostics', run: { id: 'r-20260917-104402-c2ab' } }));
     const { env, sockets } = fakeEnv();
     const { ctx, root, doc, errors } = mkCtx({ debug: true });
@@ -928,6 +979,8 @@ describe('导出诊断', () => {
     const button = root.find('btn-ico') as FakeEl;
     expect(button.textContent).not.toBe('');
     button.dispatchEvent({ type: 'click' });
+    expect(fetched).not.toContain('/api/diagnostics');
+    confirmExport(doc);
     return flush().then(() => {
       expect(fetched).toContain('/api/diagnostics');
       expect(doc.created.filter((el) => el.tagName === 'a').at(-1)?.download)
@@ -942,9 +995,10 @@ describe('导出诊断', () => {
       return Promise.resolve(new Response('{"error":"没有调试通道"}', { status: 503 }));
     });
     const { env } = fakeEnv();
-    const { ctx, root, errors } = mkCtx({ debug: true });
+    const { ctx, root, doc, errors } = mkCtx({ debug: true });
     live.createLiveFeature({ env }).mount(ctx);
     (root.find('btn-ico') as FakeEl).dispatchEvent({ type: 'click' });
+    confirmExport(doc);
     await flush();
     expect(fetched).toContain('/api/diagnostics');
     expect(errors).toHaveLength(1);
@@ -1061,6 +1115,25 @@ describe('fork 视图', () => {
     expect((root.find('forkbanner') as FakeEl).textContent).toContain('已结束');
   });
 
+  it('看着的 fork 结束时再取一次最终消息,之后才停轮询', async () => {
+    let reply = [{ role: 'user', content: 'x' }];
+    stubFetch(() => ({ messages: reply, estTokens: 1 }));
+    const { env, sockets } = fakeEnv();
+    const { ctx, root } = mkCtx({ debug: true, sessions: true });
+    live.createLiveFeature({ env }).mount(ctx);
+    sockets[0].up();
+    sockets[0].emit(helloWithSessions(null));
+    (root.find('sesscards') as FakeEl).children[1].dispatchEvent({ type: 'click' });
+    await flush();
+    fetched.length = 0;
+    reply = [{ role: 'user', content: 'x' }, { role: 'assistant', content: '最后一句' }];
+    sockets[0].emit({ t: 'sessions', sessions: helloWithSessions('2026-08-12T10:00:00Z').sessions });
+    await flush();
+    expect(fetched).toEqual(['/api/sessions/messages?id=f1']);
+    expect(vi.getTimerCount()).toBe(0);
+    expect((root.find('tlinner') as FakeEl).textContent).toContain('最后一句');
+  });
+
   it('返回主 session:停轮询并回到主时间线', async () => {
     stubFetch(() => ({ messages: [{ role: 'user', content: 'x' }], estTokens: 1 }));
     const { env, sockets } = fakeEnv();
@@ -1129,7 +1202,7 @@ describe('开场引导', () => {
     session: [{ role: 'system', content: '前缀' }],
     head: [],
     toolSchemas: [],
-    status: { displayName: 'Cortico Bot', eventCount: 1, onboardingPending: true },
+    status: { displayName: 'Cortico Bot', latestEventCursor: 1, onboardingPending: true },
     sessions: [],
   };
 
@@ -1177,7 +1250,7 @@ describe('开场引导', () => {
   });
 
   it('没有标记就不出现:session 空不空、事件多少都不管', () => {
-    const { root } = mountWith({ ...fresh, session: [], status: { displayName: 'Cortico Bot', eventCount: 0 } });
+    const { root } = mountWith({ ...fresh, session: [], status: { displayName: 'Cortico Bot', latestEventCursor: 0 } });
 
     expect(root.find('onboarding')).toBe(null);
   });

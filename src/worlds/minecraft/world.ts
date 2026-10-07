@@ -15,6 +15,10 @@ import type {
   ConfigGroup, World, WorldHost, WorldConsoleDecl, WorldPanelDecl, WorldRequestFacts,
   EventTag, StoragePart, ToolCallContext, ToolDef, ToolOutcome, TriggerMode,
 } from '../../core/types.ts';
+import { MAP_SIZE, exploredShare, mapStateOf, renderMapPng } from './map-view.ts';
+import { selfDamageText, takeSelfDamage } from './damage-source.ts';
+import { readMapDat } from './level-dat.ts';
+import { readMapId } from './item-facts.ts';
 import { Vec3 } from 'vec3';
 import type { Bot } from 'mineflayer';
 import { nowIso } from '../../core/util.ts';
@@ -187,6 +191,14 @@ interface DimensionPoint extends Vec3like {
 /** 实体接近报告的滞回窗:16 格进、24 格出,中间 8 格吸掉边缘抖动。 */
 const PROXIMITY_ENTER = 16;
 const PROXIMITY_EXIT = 24;
+
+/** 原版客户端动作栏一条文字显示 60 tick(Gui.setOverlayMessage),期间收到同一文字只重置计时。 */
+export const ACTION_BAR_SHOW_MS = 60 * 50;
+
+/** 进出服广播由 playerJoined/playerLeft 成文。 */
+const PLAYER_LIST_TRANSLATES = new Set([
+  'multiplayer.player.joined', 'multiplayer.player.joined.renamed', 'multiplayer.player.left',
+]);
 
 /** mc_escape「第几次回到同一处」的统计窗口 */
 const ESCAPE_REPEAT_WINDOW_MS = 15 * 60_000;
@@ -2084,6 +2096,15 @@ const CHECK_DOC = [
 ].join('\n');
 
 /** 进程内 World 与引擎代理共用工具 schema 和 description；handler 各自接入。 */
+/** 地图图标的中文名;表外的照英文 id 报 */
+const MAP_ICON_ZH: Record<string, string> = {
+  player: '玩家', player_off_map: '玩家(在图外)', player_off_limits: '玩家(远在图外)', frame: '物品展示框',
+  red_marker: '红色标记', blue_marker: '蓝色标记', target_x: '目标 X', target_point: '目标点', red_x: '红叉(宝藏)',
+  mansion: '林地府邸', monument: '海底神殿', village_desert: '沙漠村庄', village_plains: '平原村庄',
+  village_savanna: '热带草原村庄', village_snowy: '雪原村庄', village_taiga: '针叶林村庄',
+  jungle_temple: '丛林神庙', swamp_hut: '女巫小屋',
+};
+
 export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
   {
     name: 'mc_help',
@@ -2446,6 +2467,22 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
       required: ['checks'],
     },
   },
+  {
+    name: 'mc_view_map',
+    tags: ['read'],
+    description:
+      'Look at a filled map you are carrying: returns the map picture (top = north/-z, right = east/+x) '
+      + 'plus its id, scale, how much of it is explored, its world centre when readable, and every icon on it '
+      + '(you, other players, banners, markers) with world coordinates. Read-only and instant. '
+      + 'Without id it shows the map in your main hand, then off hand, then the first one in your bag.',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'integer', description: '地图编号(回执里的 #N);不写 = 手上那张,手上没有就包里第一张' },
+      },
+      required: [],
+    },
+  },
   /* 同轮且读数指纹相同的重复查询返回短回执。 */
   {
     name: 'mc_bag',
@@ -2609,7 +2646,9 @@ export class MinecraftWorld implements World {
   /** 服务端同一条系统提示在短时间连发时只投递首条；原始重复次数进诊断。 */
   private readonly recentSystemMessages = new Map<string, { at: number; repeats: number }>();
   private readonly mcServer: MinecraftServerManager;
-  /** 受管服务器开关串行化；热改反转时，后一个状态总在前一个收尾之后落地。 */
+  /** 受管服务器要不要开着:挂载面板的启停按钮设置,World 启动时取 local.startWithWorld。 */
+  private serverWanted = false;
+  /** 受管服务器启停串行化；连续反转时，后一个状态总在前一个收尾之后落地。 */
   private serverLifecycleQueue: Promise<void> = Promise.resolve();
   private serverLifecycleTarget: string | null = null;
   private serverLifecycleActive = false;
@@ -2772,7 +2811,6 @@ export class MinecraftWorld implements World {
       hint: 'mc_blueprint',
     });
     this.mcServer = new MinecraftServerManager({
-      enabled: () => !this.managedLocalServer() || this.cfg.local.serverEnabled,
       serverDir: () => this.cfg.local.serverDir,
       javaPath: () => this.cfg.local.javaPath,
       jvmArgs: () => this.cfg.local.jvmArgs,
@@ -2884,28 +2922,24 @@ export class MinecraftWorld implements World {
       : '已铺好,下次启动客户端生效';
   }
 
-  serverConsole(): { state(): Promise<MinecraftServerState>; start(): Promise<MinecraftServerState>; stop(): Promise<MinecraftServerState> } {
+  serverConsole(): Record<'state' | 'start' | 'stop', () => Promise<MinecraftServerState & { wanted: boolean }>> {
+    const withTarget = async (state: MinecraftServerState) =>
+      ({ ...state, wanted: !this.managedLocalServer() || this.serverWanted });
     return {
-      state: () => this.mcServer.state(),
+      state: async () => withTarget(await this.mcServer.state()),
       start: async () => {
-        if (this.managedLocalServer() && !this.cfg.local.serverEnabled) {
-          const state = await this.mcServer.state();
-          return { ...state, detail: '受管服务器开关已关闭；先在 Minecraft 连接配置中开启它。' };
-        }
+        this.serverWanted = true;
         // 名单必须先于服务端启动写入；服务端只在启动时读取 ops.json。
         this.ensureCheatOps();
-        if (!this.serverLifecycleActive) return this.mcServer.start();
+        if (!this.serverLifecycleActive) return withTarget(await this.mcServer.start());
         await this.syncManagedServerLifecycle(true);
-        return this.mcServer.state();
+        return withTarget(await this.mcServer.state());
       },
       stop: async () => {
-        if (this.managedLocalServer() && this.cfg.local.serverEnabled) {
-          const state = await this.mcServer.state();
-          return { ...state, detail: '受管服务器开关仍开启；关闭该开关会断开 bot 并保存后关服。' };
-        }
-        if (!this.serverLifecycleActive) return this.mcServer.stop();
+        this.serverWanted = false;
+        if (!this.serverLifecycleActive) return withTarget(await this.mcServer.stop());
         await this.syncManagedServerLifecycle(true);
-        return this.mcServer.state();
+        return withTarget(await this.mcServer.state());
       },
     };
   }
@@ -2915,10 +2949,10 @@ export class MinecraftWorld implements World {
     return this.mcServer.directory().trim() !== '';
   }
 
-  /** 配置开关是受管服务器与 Bridge 的共同目标；远程连接不经过这一开关。 */
+  /** serverWanted 是受管服务器与 Bridge 的共同目标；远程连接不经过它。 */
   private syncManagedServerLifecycle(force = false): Promise<void> {
     const managed = this.managedLocalServer();
-    const enabled = !managed || this.cfg.local.serverEnabled;
+    const enabled = !managed || this.serverWanted;
     const target = `${managed ? 'managed' : 'external'}:${enabled}`;
     if (force || target !== this.serverLifecycleTarget) {
       this.serverLifecycleTarget = target;
@@ -2928,12 +2962,12 @@ export class MinecraftWorld implements World {
           this.bridge?.start();
           return;
         }
-        if (!this.cfg.local.serverEnabled) {
+        if (!this.serverWanted) {
           // Bridge.stop 主动清掉 bot 后会抑制旧 bot 的 end 回调；关服边界必须在这里
           // 显式终结身体租约和旧连接上的任务，重开后不能被 frozen/busyWith 卡住。
           this.detachItemBreak();
           this.detachRanged();
-          this.executor?.onConnectionLost('受管服务器开关关闭');
+          this.executor?.onConnectionLost('受管服务器已停止');
           this.combat?.onConnectionLost();
           const stopped = await Promise.allSettled([
             this.bridge?.stop() ?? Promise.resolve(),
@@ -2947,7 +2981,7 @@ export class MinecraftWorld implements World {
         }
         this.ensureCheatOps();
         const state = await this.mcServer.start();
-        if (!this.serverLifecycleActive || !this.cfg.local.serverEnabled) return;
+        if (!this.serverLifecycleActive || !this.serverWanted) return;
         this.bridge?.start();
         if (state.phase === 'running' || state.reachable) {
           this.bridge?.reconnectNow('受管服务器已就绪');
@@ -2955,7 +2989,7 @@ export class MinecraftWorld implements World {
       }).catch((error: unknown) => {
         // 外部边界失败后留出下一次心跳重试，不把未落地的目标当成已完成。
         this.serverLifecycleTarget = null;
-        this.fallbackLog.error(`受管服务器开关应用失败: ${error instanceof Error ? error.message : String(error)}`);
+        this.fallbackLog.error(`受管服务器启停失败: ${error instanceof Error ? error.message : String(error)}`);
       });
     }
     return this.serverLifecycleQueue;
@@ -3179,7 +3213,10 @@ export class MinecraftWorld implements World {
   } {
     return {
       state: () => this.client.state(),
-      start: () => this.client.start(),
+      start: () => {
+        this.host?.log.info('观察者客户端由控制台面板启动');
+        return this.client.start();
+      },
       stop: () => this.client.stop(),
     };
   }
@@ -3248,13 +3285,13 @@ export class MinecraftWorld implements World {
 
   console(): WorldConsoleDecl {
     const connected = this.bridge?.connected ?? false;
-    const managedServerOff = this.managedLocalServer() && !this.cfg.local.serverEnabled;
+    const managedServerOff = this.managedLocalServer() && !this.serverWanted;
     const task = this.executor?.current;
     // 给人看的画面从哪来:观察者客户端窗口出来了就是它,否则 viewer 网页,都没有就没有
     const origin = this.client.windowHint() ? 'client' : this.bridge?.viewerUrl ? 'viewer' : null;
     const badges: WorldConsoleDecl['badges'] = [
       managedServerOff
-        ? { label: '服务器', value: '受管服务已关闭', tone: 'off' }
+        ? { label: '服务器', value: '未启动', tone: 'off' }
         : connected
           ? { label: '服务器', value: `${this.cfg.host}:${this.cfg.port}`, tone: 'on' }
           : { label: '服务器', value: '未连接', tone: 'off' },
@@ -3273,7 +3310,7 @@ export class MinecraftWorld implements World {
         {
           label: '服务器',
           ...(managedServerOff
-            ? { state: 'offline' as const, hint: '受管服务器已关闭' }
+            ? { state: 'offline' as const, hint: '未启动' }
             : !this.bridge
               ? { state: 'offline' as const, hint: '未启动' }
               : connected
@@ -3910,6 +3947,7 @@ export class MinecraftWorld implements World {
       reactCooldownSec: () => this.cfg.reflex.reactCooldownSec,
       antiDrown: () => this.cfg.reflex.antiDrown,
       antiLava: () => this.cfg.reflex.antiLava,
+      currentTask: () => this.executor?.currentTask ?? null,
       combatHurt: (id, name) => (
         this.executor?.onCombatHurt(id, name) || this.combat?.onHurtBy(id, name) || false
       ),
@@ -3968,6 +4006,7 @@ export class MinecraftWorld implements World {
 
     this.serverLifecycleActive = true;
     this.serverLifecycleTarget = null;
+    this.serverWanted = this.cfg.local.startWithWorld;
     void this.syncManagedServerLifecycle(true);
     this.reflexes.start();
     this.combat.start();
@@ -4078,6 +4117,7 @@ export class MinecraftWorld implements World {
       mc_check: async (args) => this.toolLog('mc_check', args, this.runCheck(args)),
       mc_bag: async (args, ctx) => this.readOnce('mc_bag', ctx,
         () => this.bagReadout(typeof args.item === 'string' ? args.item : undefined)),
+      mc_view_map: async (args) => this.viewMap(args),
       mc_queue: async (_args, ctx) => this.readOnce('mc_queue', ctx, () => this.queueReadout()),
       mc_blocked: async (_args, ctx) => this.readOnce('mc_blocked', ctx, () => this.blockedReadout()),
       mc_stop: async () => {
@@ -4487,6 +4527,54 @@ export class MinecraftWorld implements World {
     return this.readGate.answered(name, round, stamp)
       ? this.toolLog(name, {}, text)
       : this.toolLog(name, {}, REPEATED_QUERY_RECEIPT);
+  }
+
+  /**
+   * mc_view_map:地图画面 + 文字读数。画面来自服务端推给包里地图的像素包(map-view.ts),
+   * 中心坐标只有本机服务端的存档里有;读不到就只报图上坐标,不猜世界坐标。
+   */
+  private viewMap(args: Record<string, unknown>): string | ToolOutcome {
+    const bot = this.bridge?.bot;
+    if (!bot) return this.toolLog('mc_view_map', args, '[mc_view_map] 还没连上服务器,看不了地图');
+    const carried = [bot.heldItem, bot.inventory.slots[bot.getEquipmentDestSlot('off-hand')], ...bot.inventory.items()]
+      .filter((it): it is NonNullable<typeof it> => it?.name === 'filled_map');
+    const ids = [...new Set(carried.map((it) => readMapId(it as never)).filter((n): n is number => n !== null))];
+    if (ids.length === 0) {
+      return this.toolLog('mc_view_map', args, '手上和包里都没有开过的地图(filled_map);空地图 map 要先拿在手上用一下才会开图');
+    }
+    const id = typeof args.id === 'number' ? args.id : ids[0];
+    if (!ids.includes(id)) {
+      return this.toolLog('mc_view_map', args, `身上没有编号 #${id} 的地图;身上有:${ids.map((n) => `#${n}`).join('、')}`);
+    }
+    const m = mapStateOf(bot, id);
+    if (!m || !m.painted) {
+      return this.toolLog('mc_view_map', args, `地图 #${id} 的整张画面还没收到:服务端只在登录后推一次整张,之后只推变了的部分;刚拿到手的图等一两秒再看`);
+    }
+    const identity = worldIdentityOf(this.cfg.local.serverDir, `${this.cfg.host}:${this.cfg.port}`);
+    const dat = identity.local ? readMapDat(join(this.cfg.local.serverDir, identity.key, 'data', `map_${id}.dat`)) : null;
+    const per = 2 ** m.scale;
+    const world = (px: number, pz: number): string => (dat
+      ? `,世界约 (${Math.round(dat.xCenter + (px - MAP_SIZE / 2) * per)}, ${Math.round(dat.zCenter + (pz - MAP_SIZE / 2) * per)})`
+      : '');
+    const lines = [
+      `地图 #${id}:比例 1:${per}(一像素 ${per}×${per} 格,整张 ${MAP_SIZE * per}×${MAP_SIZE * per} 格)`
+        + `${m.locked ? ',已锁定' : ''},已探索 ${Math.round(exploredShare(m) * 100)}%。图上方是北(-z),右边是东(+x)。`,
+      dat
+        ? `中心 (${dat.xCenter}, ${dat.zCenter})${dat.dimension ? `,${zhDimension(dat.dimension)}` : ''}`
+        : '中心坐标读不到(不是本机服务端,或存档里还没写这张图),下面只有图上坐标',
+      ...(m.icons.length === 0 ? ['图上没有图标'] : m.icons.map((i) =>
+        `${MAP_ICON_ZH[i.type] ?? i.type}${i.label ? `「${i.label}」` : ''}:图上 (${Math.round(i.px)}, ${Math.round(i.pz)})`
+        + `${world(i.px, i.pz)},朝向方位角 ${(180 + i.direction * 22.5) % 360}°`)),
+    ];
+    const text = lines.join('\n');
+    this.toolLog('mc_view_map', args, text);
+    return {
+      text,
+      blobs: [{
+        bytes: renderMapPng(m), mime: 'image/png', name: `map_${id}.png`,
+        fallbackText: '[地图画面:这一轮看不了图,只有上面的文字读数]',
+      }],
+    };
   }
 
   /** mc_bag:背包现读。与快照走同一份渲染口径(见 readouts.renderBagReadout) */
@@ -6216,7 +6304,7 @@ export class MinecraftWorld implements World {
     if (phase === 'starting') {
       this.emit('minecraft.event', '[Minecraft] 服务器启动中,世界加载要一阵。', false);
     } else if (phase === 'running') {
-      if (this.managedLocalServer() && !this.cfg.local.serverEnabled) return;
+      if (this.managedLocalServer() && !this.serverWanted) return;
       if (this.bridge?.active) this.bridge.reconnectNow('服务器就绪');
       else this.bridge?.start();
       this.emit('minecraft.event', '[Minecraft] 服务器就绪,世界上线了。', false);
@@ -6553,6 +6641,7 @@ export class MinecraftWorld implements World {
     };
     bot.on('chat', (username: string, message: string, _translate: string, jsonMsg: unknown) => {
       if (markMatched(jsonMsg)) return;
+      if (jsonMsg && typeof jsonMsg === 'object') this.chatClaimed.add(jsonMsg);
       if (username === this.chatName()) {
         // 自己说的话:落库存档,但不投递——拿自己的话叫醒自己没有意义
         this.emit('minecraft.chat', `[MC] ${username}: ${message}`, false, { deliver: false });
@@ -6563,6 +6652,7 @@ export class MinecraftWorld implements World {
     });
     bot.on('whisper', (username: string, message: string, _translate: string, jsonMsg: unknown) => {
       if (markMatched(jsonMsg)) return;
+      if (jsonMsg && typeof jsonMsg === 'object') this.chatClaimed.add(jsonMsg);
       if (username === this.chatName()) return;
       this.interruptIdle('whisper');
       this.emit('minecraft.chat', `[MC 私聊] ${username}: ${message}`, true, undefined, username);
@@ -6608,7 +6698,12 @@ export class MinecraftWorld implements World {
         this.matureAnnounced.clear();
         this.lastDimension = dim;
         this.syncRealm();
-        this.emit('minecraft.event', `[Minecraft] 从${zhDimension(from)}进入了${zhDimension(dim)}。`, true);
+        const cancelled = this.executor?.cancelForDimensionChange(from, dim) ?? null;
+        this.emit(
+          'minecraft.event',
+          `[Minecraft] 从${zhDimension(from)}进入了${zhDimension(dim)}。${cancelled ? `${cancelled}。` : ''}`,
+          true,
+        );
         this.resyncSpectatorForDimension(dim);
       }
       if (dim) this.lastDimension = dim;
@@ -6710,6 +6805,7 @@ export class MinecraftWorld implements World {
         // 动作栏也承载不断刷新的 HUD；只保存明确的交互拒绝理由。
         noteActionFeedback(jsonMsg, key);
         if (this.agentFriendEnabled) this.combatSpells.noteServerMessage(jsonMsg.toString());
+        this.forwardServerMessage(jsonMsg, 'actionBar');
         return;
       }
       if (position !== 'chat' && position !== 'system') return;
@@ -6801,7 +6897,7 @@ export class MinecraftWorld implements World {
         const agentFriend = this.agentFriendEnabled && !key && agentFriendPrefixes.some((p) => text.includes(p));
         if (!privateMessage && !agentFriend && this.suppressRepeatedSystemMessage(text)) return;
         this.emit('minecraft.chat', `[MC ${privateMessage ? '私聊' : agentFriend ? '插件' : '系统'}] ${text}`,
-          privateMessage || agentFriend, undefined, agentFriend ? 'AgentFriend' : undefined);
+          privateMessage || agentFriend, privateMessage || agentFriend ? undefined : { trigger: 'piggyback' }, agentFriend ? 'AgentFriend' : undefined);
       });
     });
     bot.on('soundEffectHeard', (soundName: string, position: { x: number; z: number } | null) => {
@@ -7218,6 +7314,32 @@ export class MinecraftWorld implements World {
   /** 顶部状态条已报过的 25% 档位(按标题) */
   private readonly bossQuarter = new Map<string, number>();
   private lastBoomAt = 0;
+  /** mineflayer 聊天模式已派发成 chat/whisper 的消息对象 */
+  private readonly chatClaimed = new WeakSet<object>();
+  /** 最近一条动作栏文字及收到时刻 */
+  private lastActionBar: { text: string; at: number } | null = null;
+
+  /**
+   * 服务器系统消息与动作栏原文以 piggyback 进 minecraft.chat,随下一批投递,不单独唤醒。
+   * mineflayer 在 message 之后才同步派发 chat/whisper,转发放到微任务里,
+   * 已由那两路处理的同一条消息在此跳过。动作栏同一文字在显示期内重发只是续显,不再入流。
+   */
+  private forwardServerMessage(jsonMsg: { toString(): string }, slot: 'system' | 'actionBar'): void {
+    queueMicrotask(() => {
+      if (this.chatClaimed.has(jsonMsg)) return;
+      const text = jsonMsg.toString().trim();
+      if (!text) return;
+      if (slot === 'system') {
+        this.emit('minecraft.chat', `[MC 系统] ${text}`, false, { trigger: 'piggyback' });
+        return;
+      }
+      const now = Date.now();
+      const prev = this.lastActionBar;
+      this.lastActionBar = { text, at: now };
+      if (prev?.text === text && now - prev.at < ACTION_BAR_SHOW_MS) return;
+      this.emit('minecraft.chat', `[MC 动作栏] ${text}`, false, { trigger: 'piggyback' });
+    });
+  }
 
   private suppressRepeatedSystemMessage(text: string): boolean {
     const now = Date.now();
@@ -7456,6 +7578,7 @@ export class MinecraftWorld implements World {
           && read(c.x, c.y + 1, c.z) && read(c.x, c.y - 1, c.z)) ?? null;
       },
       clearQueue: () => this.executor!.clear(),
+      dropReflexGoal: (holdMs) => this.reflexes?.abandonEscapeGoal('mc_escape 传送,反射的寻路目标作废', holdMs) ?? null,
       sendConsole: (line) => this.mcServer.command(line),
       chat: (text) => { bot.chat(text); },
       playerCommand: this.cfg.escapeCommand,
@@ -7863,6 +7986,9 @@ export class MinecraftWorld implements World {
   private noticeDamage(health: number): void {
     const prev = this.lastHealth;
     this.lastHealth = health;
+    // 每次血量更新都取走攒下的伤害记录,下一次掉血不会认领这一次的来由
+    const bot = this.bridge?.bot;
+    const hits = bot ? takeSelfDamage(bot) : [];
     if (prev === null || health <= 0 || health >= prev) return;
     const lost = prev - health;
     const now = Date.now();
@@ -7875,8 +8001,9 @@ export class MinecraftWorld implements World {
     const urgent = health < 10 || lost >= URGENT_LOSS;
     if (!urgent && now - this.lastDamageNoticeAt < 6_000) return;
     this.lastDamageNoticeAt = now;
-    const culprit = this.nearestHostile();
-    const from = culprit ? `,${culprit.zh}就在 ${Math.round(culprit.distance)} 格外` : '';
+    // 来由只报服务端 damage_event 给的事实;没收到就不说
+    const source = selfDamageText(hits);
+    const from = source ? `(${source})` : '';
     this.emit(
       'minecraft.event',
       `[Minecraft] 我在掉血!少了 ${Math.round(lost)} 点,现在 ${Math.ceil(health)}/20${from}。`,
@@ -7907,12 +8034,6 @@ export class MinecraftWorld implements World {
       `[Minecraft] 我在掉血:${what},现在 ${Math.ceil(health)}/20。`,
       health < 10,
     );
-  }
-
-  private nearestHostile(): { zh: string; distance: number } | null {
-    const snap = this.snapshot();
-    const hostile = snap?.entities.find((e) => e.kind === 'hostile');
-    return hostile ? { zh: zhEntity(hostile.name), distance: hostile.distance } : null;
   }
 
 

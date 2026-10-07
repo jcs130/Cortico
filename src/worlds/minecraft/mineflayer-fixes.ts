@@ -29,6 +29,7 @@ import { armTemporaryScaffoldPlacement, assertTemporaryScaffoldDigSafe, closeTem
   hasPreparedTemporaryScaffoldPlacement, prepareTemporaryScaffoldPlacement, recordTemporaryScaffold } from './temporary-scaffold.ts';
 import { assertInventoryClicksReady, clickInventoryConfirmed, installInventoryClickSync,
   inventoryClickState, isInventoryClickError, isInventoryCursorPacket, sameInventoryStack } from './inventory-click-sync.ts';
+import { PLACE_REACH } from './cell-facts.ts';
 
 /** 摆好材料之后等产出槽被服务端填上的上限 */
 const RESULT_WAIT_MS = 1_500;
@@ -103,8 +104,13 @@ interface PatchedBot extends Bot {
    * 直接技能将其写入回执；寻路另记 pathSupportFailure 并终止当前移动段。
    */
   placeMisses?: Array<{ was: string; x: number; y: number; z: number; at: number }>;
-  /** 最近一次寻路支撑未确认；执行器按 seq 区分本段路径与旧失败。 */
-  pathSupportFailure?: { seq: number; generation: number; was: string; x: number; y: number; z: number };
+  /**
+   * 最近一次寻路支撑未确认；执行器按 seq 区分本段路径与旧失败。
+   * leftReach:重试前人眼离那一格的距离已超出手长,没把三次发满。
+   */
+  pathSupportFailure?: {
+    seq: number; generation: number; was: string; x: number; y: number; z: number; leftReach?: number;
+  };
   /**
    * 此刻有几笔寻路支撑放置在飞。纯诊断读数(零位移探针要的那一格),不参与任何判据 ——
    * 所有权已经改成按 flight 记,不再有"当前那一次"这种全局单槽。
@@ -150,6 +156,7 @@ export function installMineflayerFixes(
   fixToolTierMaterials(bot, log);
   installComponentDigTime(bot);
   installStateIdGuard(bot, diag, () => tracing > 0);
+  installClosedWindowItemsDrop(bot, diag);
   installPacketTrace(bot, trace);
   installInventoryClickSync(bot, diag);
   installConfirmedPlace(bot as PatchedBot, diag, (n) => { tracing += n; });
@@ -159,7 +166,48 @@ export function installMineflayerFixes(
   installLightRelay(bot, log, diag);
   installDismountFix(bot, diag);
   installWallGap();
-  log.info(`mineflayer 修补已装上:合成取服务端产物、放置短超时重发、附魔按组件格式计入挖掘、挖掘等服务端改掉那一格、stateId 认当前窗口、光照段重新落位、水平碰撞留缝${diag ? '' : '(没给 World 日志,包流不留痕)'}`);
+  log.info(`mineflayer 修补已装上:合成取服务端产物、放置短超时重发、附魔按组件格式计入挖掘、挖掘等服务端改掉那一格、stateId 认当前窗口、丢弃关掉的窗口迟到的 window_items、光照段重新落位、水平碰撞留缝${diag ? '' : '(没给 World 日志,包流不留痕)'}`);
+}
+
+/** 带水平随机偏移且有碰撞箱的方块,值是原版的偏移上限(格) */
+const OFFSET_MAX: Record<string, number> = { pointed_dripstone: 0.125, bamboo: 0.25 };
+
+/** 原版 Mth.getSeed(x, 0, z) 起算的水平偏移(BlockBehaviour 的 OffsetType.XZ) */
+export function blockOffsetXZ(x: number, z: number, max: number): [number, number] {
+  let l = BigInt.asIntN(64, BigInt(Math.imul(x, 3129871)) ^ BigInt.asIntN(64, BigInt(z) * 116129781n));
+  l = BigInt.asIntN(64, l * l * 42317861n + l * 11n) >> 16n;
+  const axis = (bits: bigint): number =>
+    Math.min(max, Math.max(-max, (Math.fround(Number(bits & 15n) / 15) - 0.5) * 0.5));
+  return [axis(l), axis(l >> 8n)];
+}
+
+/**
+ * 滴水石锥与竹子的碰撞箱按所在格的原版偏移摆放。minecraft-data 的碰撞箱取自 (0,0,0) 那一格,
+ * 那一格两轴偏移都是负的上限;服务端按每格自己的偏移判碰撞,客户端照原数据走会走进服务端眼里的
+ * 实心,每一拍被拉回原位,人钉在原地。bot 的物理、寻路器和它的跳跃模拟都经 bot.blockAt 读格,改这一处。
+ * 经 bot.loadPlugin 装:要等注册表和 blockAt 都就位。
+ */
+export function installOffsetShapes(bot: Bot): void {
+  const reg = bot.registry as unknown as { blocksByName: Record<string, { id: number } | undefined> };
+  const maxById = new Map<number, number>();
+  for (const [name, max] of Object.entries(OFFSET_MAX)) {
+    const id = reg.blocksByName[name]?.id;
+    if (id !== undefined) maxById.set(id, max);
+  }
+  const origin = new Map([...new Set(maxById.values())].map((max) => [max, blockOffsetXZ(0, 0, max)]));
+  const blockAt = bot.blockAt.bind(bot);
+  bot.blockAt = ((pos: Parameters<Bot['blockAt']>[0], extraInfos?: boolean) => {
+    const block = blockAt(pos, extraInfos);
+    const max = block ? maxById.get(block.type) : undefined;
+    if (block === null || max === undefined) return block;
+    const [ox, oz] = blockOffsetXZ(block.position.x, block.position.z, max);
+    const [bx, bz] = origin.get(max)!;
+    const dx = ox - bx;
+    const dz = oz - bz;
+    // 每次读格都是新的 Block,shapes 却指向注册表里共用的数组:换成新数组,不改原数组
+    block.shapes = block.shapes.map(([x0, y0, z0, x1, y1, z1]) => [x0 + dx, y0, z0 + dz, x1 + dx, y1, z1 + dz]);
+    return block;
+  }) as Bot['blockAt'];
 }
 
 /** 原型上的标记:同一进程里多个连接、多份模块实例只改一次 */
@@ -242,7 +290,7 @@ type PathfinderBlock = {
  */
 export function installPathfinderToolSelection(bot: Bot, log: Logger): void {
   const pathfinder = (bot as unknown as {
-    pathfinder?: { bestHarvestTool?: (block: PathfinderBlock) => ItemLike | null };
+    pathfinder?: { bestHarvestTool?: (block: PathfinderBlock | null) => ItemLike | null };
   }).pathfinder;
   if (typeof pathfinder?.bestHarvestTool !== 'function') {
     log.warn('寻路选工具修补没装上:pathfinder 尚未注入');
@@ -263,6 +311,9 @@ export function installPathfinderToolSelection(bot: Bot, log: Logger): void {
     );
 
   pathfinder.bestHarvestTool = (block): ItemLike | null => {
+    // 区块卸载后上游 blockAt 给 null。回报 null 时上游不换手直接 bot.dig(null),
+    // dig 立即 reject,上游 catch 后 resetPath('dig_error') 重新规划。
+    if (!block) return null;
     const held = bot.heldItem as (ItemLike & { type: number; slot?: number }) | null;
     // 空手时基线就是 null,规划侧读成徒手、执行侧读成不换手,两边都正确
     let best: (ItemLike & { type: number; slot?: number }) | null = held;
@@ -397,6 +448,39 @@ function installComponentDigTime(bot: Bot): void {
       bot.entity.effects,
     );
   }) as Bot['digTime'];
+}
+
+/**
+ * 已关掉的容器窗口迟到的 window_items 整包丢弃。
+ *
+ * mineflayer 把 windowId 既不是 0 也不是当前窗口的 window_items 存进一个从不清空的
+ * 缓存,之后哪次 open_window 的窗口号与它相同,就拿它当新窗口的初始内容并立即发
+ * windowOpen。服务端窗口号在 1–100 里循环,所以一扇关掉的箱子的旧内容会被当成
+ * 隔了一百次开窗之后那扇窗(铁砧、熔炉……)的内容;开窗就读、读完就关的技能读到的是
+ * 旧箱子和旧背包,关窗时 copyInventory 再把它写进 bot.inventory。
+ * 服务端总是先发 open_window 再发该窗口的 window_items,丢掉这类包后 mineflayer
+ * 一律等新窗口自己的 window_items 才发 windowOpen。
+ */
+function installClosedWindowItemsDrop(bot: Bot, diag: MinecraftLog | undefined): void {
+  const client = bot._client as unknown as {
+    emit(name: string, ...args: unknown[]): boolean;
+  };
+  const origEmit = client.emit.bind(client);
+  client.emit = (name: string, ...args: unknown[]): boolean => {
+    if (name === 'window_items') {
+      const pkt = args[0] as { windowId?: number; items?: unknown[] } | undefined;
+      const curId = (bot.currentWindow as { id?: number } | null)?.id ?? null;
+      if (pkt && pkt.windowId !== 0 && pkt.windowId !== curId) {
+        diag?.write({
+          lane: 'skill', event: 'closed-window-items-drop',
+          msg: `丢掉窗口${pkt.windowId}迟到的 window_items(当前窗口${curId ?? '无'}),不让它成为同号新窗口的初始内容`,
+          data: { windowId: pkt.windowId, currentWindowId: curId, slots: pkt.items?.length ?? null },
+        });
+        return true;
+      }
+    }
+    return origEmit(name, ...args);
+  };
 }
 
 /**
@@ -717,9 +801,24 @@ function installConfirmedPlace(
       // 期望落地的是哪一样:`_genericPlace` 放的就是手上这件。取得到方块名才校验身份,
       // 取不到(水桶、红石粉、种子这类"物品名 ≠ 方块名"的)一律降级为旧口径并在 diag 标注
       const want = placedBlockExpectation(bot);
+      const eyeDist = (): number | null => {
+        const feet = bot.entity?.position;
+        return feet
+          ? Math.hypot(feet.x - (dest.x + 0.5), feet.y + 1.62 - (dest.y + 0.5), feet.z - (dest.z + 0.5))
+          : null;
+      };
+      let tries = 0;
+      /** 重试前人已经离开手长(多半是脚下支撑没放上、人掉下去了):再发包服务端也只会拒 */
+      let leftReach: number | null = null;
       setTracing(1);
       try {
         for (let attempt = 1; attempt <= PLACE_TRIES; attempt++) {
+          const d = attempt > 1 ? eyeDist() : null;
+          if (d !== null && d > PLACE_REACH && !changedAt(bot, dest, before, want)) {
+            leftReach = d;
+            break;
+          }
+          tries = attempt;
           // 重试前回读目标位置;前次放置的迟到回包不得触发重复放置。
           const ok = attempt > 1 && changedAt(bot, dest, before, want)
             ? true
@@ -751,10 +850,13 @@ function installConfirmedPlace(
         setTracing(-1);
       }
       const was = before?.name ?? 'air';
-      const misses = (bot.placeMisses ??= []);
-      // at 供寻路器的被拒格黑名单判时效(pathfinder-perf 模块头第 8 条)
-      misses.push({ was, x: dest.x, y: dest.y, z: dest.z, at: Date.now() });
-      if (misses.length > 256) misses.splice(0, misses.length - 256);
+      // 人走出手长而没发满的那一格不算服务端拒放,不进拒放黑名单
+      if (leftReach === null) {
+        const misses = (bot.placeMisses ??= []);
+        // at 供寻路器的被拒格黑名单判时效(pathfinder-perf 模块头第 8 条)
+        misses.push({ was, x: dest.x, y: dest.y, z: dest.z, at: Date.now() });
+        if (misses.length > 256) misses.splice(0, misses.length - 256);
+      }
       // 寻路支撑未获服务端确认时撤销目标，避免再次使用未成立的承重条件。
       // 每次放置由自己的 flight 持有所有权；代次校验用于排除迟到结果。
       const owns = pathPlacement !== null
@@ -765,36 +867,39 @@ function installConfirmedPlace(
         bot.pathSupportFailure = {
           seq, generation: pathPlacement.flight.generation, was,
           x: dest.x, y: dest.y, z: dest.z,
+          ...(leftReach !== null ? { leftReach: Number(leftReach.toFixed(1)) } : {}),
         };
+        const why = leftReach !== null
+          ? `搭路支撑 (${dest.x}, ${dest.y}, ${dest.z}) 没放上,人已离开它 ${leftReach.toFixed(1)} 格`
+          : `搭路支撑 (${dest.x}, ${dest.y}, ${dest.z}) 三次未确认`;
         // 撤的是谁的目标要说得出来:这一路与 executor/combat/反射共用同一本所有权账
-        dropOwnedGoal(bot, 'path-support', `搭路支撑 (${dest.x}, ${dest.y}, ${dest.z}) 三次未确认`, diag);
+        dropOwnedGoal(bot, 'path-support', why, diag);
         diag?.write({
           lane: 'skill', event: 'path-support-unconfirmed',
-          msg: `寻路支撑 (${dest.x}, ${dest.y}, ${dest.z}) 未确认,已取消当前移动段`,
+          msg: `${why},已取消当前移动段`,
           data: {
             seq, generation: pathPlacement.flight.generation, was,
-            at: { x: dest.x, y: dest.y, z: dest.z },
+            at: { x: dest.x, y: dest.y, z: dest.z }, leftReach,
           },
         });
       }
       // 现场几何随案卷:拒放的规律(台架实测"越贴身越拒",脚下低一格 0%)要靠
       // 人在哪、离目标多远、有没有潜行这几个数才能对上号,只有坐标断不了案
       const feet = bot.entity?.position;
-      const eye = feet ? { x: feet.x, y: feet.y + 1.62, z: feet.z } : null;
+      const dist = eyeDist();
       diag?.write({
         lane: 'skill', event: 'place-unconfirmed', durMs: Date.now() - startedAt,
-        msg: `放了 ${PLACE_TRIES} 次,(${dest.x}, ${dest.y}, ${dest.z}) 回读`
+        msg: `放了 ${tries} 次,(${dest.x}, ${dest.y}, ${dest.z}) 回读`
           + (want !== null && bot.blockAt(dest)?.name !== (before?.name ?? null)
             ? `变成了${bot.blockAt(dest)?.name ?? '空气'},不是要放的 ${want}`
-            : `还是${before?.name ?? '空气'}`),
+            : `还是${before?.name ?? '空气'}`)
+          + (leftReach !== null ? `;人离开那一格 ${leftReach.toFixed(1)} 格,超出手长 ${PLACE_REACH},不再重发` : ''),
         data: {
           at: { x: dest.x, y: dest.y, z: dest.z },
           was: before?.name ?? null,
           want, identityChecked: want !== null, now: bot.blockAt(dest)?.name ?? null,
           feet: feet ? { x: Number(feet.x.toFixed(2)), y: Number(feet.y.toFixed(2)), z: Number(feet.z.toFixed(2)) } : null,
-          eyeDist: eye
-            ? Number(Math.hypot(eye.x - (dest.x + 0.5), eye.y - (dest.y + 0.5), eye.z - (dest.z + 0.5)).toFixed(2))
-            : null,
+          eyeDist: dist !== null ? Number(dist.toFixed(2)) : null,
           sneak: (bot as unknown as { controlState?: Record<string, boolean> }).controlState?.sneak ?? null,
           face: faceVector && typeof faceVector === 'object'
             ? { x: (faceVector as { x: number }).x, y: (faceVector as { y: number }).y, z: (faceVector as { z: number }).z }

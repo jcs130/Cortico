@@ -127,7 +127,6 @@ describe('collect registered blueprint sources', () => {
     const natural = new Vec3(0, 64, 1);
     const r = rig({ sites: [binding], targets: [...sources, natural] });
     await skillCollect(r.bot, 'cherry_log', 1, r.ctx, false, false, 'iron_axe');
-    expect(r.queries).toContain(128);
     expect(r.dug).toEqual([natural]);
     expect(sources.every((point) => r.bot.blockAt(point)!.name === 'cherry_log')).toBe(true);
   });
@@ -237,7 +236,6 @@ describe('find registered blueprint sources', () => {
       targets: [...sources, new Vec3(0, 64, 1)] });
     const receipt = await skillFind(r.bot, 'cherry_log', 'north', 16, r.ctx);
     expect(receipt).toContain('blockAt=(0, 64, 1)');
-    expect(r.queries).toContain(128);
     expect(r.dug).toEqual([]);
   });
 

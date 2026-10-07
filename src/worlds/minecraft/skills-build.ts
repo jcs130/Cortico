@@ -138,6 +138,11 @@ export function surfaceStateText(bot: Bot): string {
 }
 
 export async function stableDryFooting(bot: Bot, ctx: SkillContext): Promise<boolean> {
+  // 登岸的寻路回执可能早于落地；物理读数未恢复时限时等待，随后按现场落脚状态结算。
+  const entity = bot.entity as Bot['entity'] & { isInWater?: boolean; isInLava?: boolean };
+  if (!entity.onGround && entity.isInWater !== true && entity.isInLava !== true && !bodyInWater(bot)) {
+    await settleOnGround(bot, ctx, 1_500);
+  }
   if (!hasDryFooting(bot)) return false;
   await sleep(300);
   checkAbort(ctx);

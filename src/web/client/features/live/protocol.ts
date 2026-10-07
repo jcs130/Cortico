@@ -42,7 +42,7 @@ export interface UsageSnapshot {
  * 部分与摘除思维链开关;Persona在顶层 `context` 报自己的阶段预算与软预警线。
  */
 export interface ContextBudget {
-  /** Persona的阶段预算(圈的分母);没报时分母退到 hardTokens */
+  /** Persona 的阶段预算;圈的分母取它与 hardTokens 中较小的一个 */
   maxTokens?: number;
   softRatio?: number;
   keepPastThinking?: boolean;
@@ -50,6 +50,15 @@ export interface ContextBudget {
   hardTokens?: number | null;
   /** estTokens 里上游数过的部分;整份估算时 0 */
   countedTokens?: number;
+}
+
+/** core 主循环的运行阶段:`status.loop.phase` 与 `phase` 帧;字段含义见 core 的 RunPhase。 */
+export interface RunPhase {
+  state: 'idle' | 'delivering' | 'model' | 'tools' | 'backoff' | 'handoff';
+  round?: number;
+  running: readonly string[];
+  retryAt?: string;
+  enteredAt: string;
 }
 
 export interface LoopStatus {
@@ -61,7 +70,12 @@ export interface LoopStatus {
   paused?: boolean;
   scheduleBlocked?: boolean;
   truncating?: boolean;
+  /** 投递水位:最后一条已投递或已了结事件的游标。 */
+  lastDeliveredCursor?: number | null;
+  /** 水位之后该进上下文却还没投递的外部事件数。 */
+  behind?: number | null;
   context?: ContextBudget | null;
+  phase?: RunPhase | null;
 }
 
 /** Persona自报的一枚状态筹码。框架照文本渲染,不解释里面说的是什么。 */
@@ -79,7 +93,8 @@ export interface StatusSnapshot {
    * 文本按 tone 画出来——这是人格概念上状态条的**唯一**出口。
    */
   chips?: StatusChip[] | null;
-  eventCount?: number | null;
+  /** 事件库最新一条的游标。游标跨 run 递增,不是条数。 */
+  latestEventCursor?: number | null;
   /** 部署目录里还挂着开场引导的标记。 */
   onboardingPending?: boolean;
   terminalOnline?: number | null;

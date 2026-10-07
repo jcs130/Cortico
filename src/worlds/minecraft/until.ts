@@ -57,7 +57,7 @@ export interface UntilHit { x: number; y: number; z: number; what: string }
  */
 export function untilHit(bot: Bot, ids: readonly number[], radius: number): UntilHit | null {
   if (ids.length === 0) return null;
-  const found = bot.findBlocks({ matching: [...ids], maxDistance: radius, count: 16 });
+  const found = bot.findBlocks({ matching: [...ids], maxDistance: radius, count: Infinity });
   const p = found.find((q) => canSeeBlockAt(bot, q));
   if (!p) return null;
   return { x: p.x, y: p.y, z: p.z, what: zhName(bot.blockAt(p)?.name ?? 'unknown') };

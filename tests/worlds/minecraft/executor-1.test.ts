@@ -1314,10 +1314,146 @@ describe('toss / pickup 过滤 / 箱子', () => {
     expect(reports[0].text).toContain('存了圆石×64');
     expect(book.get('overworld', { x: 2, y: 64, z: 0 })?.items).toEqual([{ name: 'cobblestone', count: 64 }]);
   });
+
+  it('take:附近只有运输矿车时开它的箱子取,回执点名是运输矿车', async () => {
+    const bag = new Map<string, number>();
+    const cart = new Map<string, number>([['enchanted_book', 1], ['rail', 9]]);
+    const ids: Record<string, number> = { enchanted_book: 13, rail: 14 };
+    const stacks = (m: Map<string, number>) => [...m].filter(([, n]) => n > 0)
+      .map(([name, count]) => ({ type: ids[name], metadata: 0, name, count, slot: 0 }));
+    const opened: unknown[] = [];
+    const cartEntity = { id: 7, name: 'chest_minecart', position: new V(3.5, 64, 0.5), isValid: true };
+    const bot = {
+      entity: { id: 1, position: new V(0.5, 64, 0.5) },
+      entities: { 7: cartEntity },
+      game: { dimension: 'overworld' },
+      registry: { blocksByName: { chest: { id: 54, name: 'chest' } }, itemsByName: {} },
+      inventory: { items: () => stacks(bag) },
+      findBlocks: () => [],
+      blockAt: (p: V) => ({ name: 'air', position: p, boundingBox: 'empty' }),
+      openContainer: async (target: unknown) => {
+        opened.push(target);
+        return {
+          items: () => stacks(bag),
+          containerItems: () => stacks(cart),
+          inventoryStart: 27,
+          firstEmptyInventorySlot: () => 27,
+          withdraw: async (type: number, _m: number | null, n: number) => {
+            const name = Object.keys(ids).find((k) => ids[k] === type)!;
+            const k = Math.min(n, cart.get(name) ?? 0);
+            cart.set(name, (cart.get(name) ?? 0) - k);
+            bag.set(name, (bag.get(name) ?? 0) + k);
+          },
+          close: () => {},
+        };
+      },
+      pathfinder: {
+        stop() {}, setGoal() {},
+        goto: async (g: FakeGoal) => { bot.entity.position = new V(g.x!, g.y!, g.z!); },
+      },
+    };
+    const { exec, reports } = makeExecutorOn(bot);
+    exec.submit([{ skill: 'take', item: 'enchanted_book', count: 1 }]);
+    await waitUntil(() => reports.length === 1, 8000);
+    expect(reports[0].kind).toBe('done');
+    expect(opened).toEqual([cartEntity]);
+    expect(bag.get('enchanted_book')).toBe(1);
+    expect(reports[0].text).toContain('(3, 64, 0) 的运输矿车 取出附魔书×1');
+  });
+
+  it('use 右键运输矿车开出箱子窗口:回执念出里面有什么并关窗', async () => {
+    const cartEntity = { id: 7, name: 'chest_minecart', position: new V(2.5, 64, 0.5), isValid: true, height: 0.7 };
+    const closed: unknown[] = [];
+    const win = {
+      id: 3, type: 'minecraft:generic_9x3', inventoryStart: 27,
+      containerItems: () => [{ name: 'enchanted_book', count: 1 }, { name: 'rail', count: 9 }],
+    };
+    const bot = {
+      entity: { id: 1, position: new V(0.5, 64, 0.5) },
+      entities: { 7: cartEntity },
+      game: { dimension: 'overworld' },
+      health: 20,
+      players: {},
+      heldItem: null,
+      registry: { blocksByName: {}, itemsByName: {}, entitiesByName: { chest_minecart: {} } },
+      inventory: { items: () => [] },
+      currentWindow: null as typeof win | null,
+      closeWindow: (w: unknown) => { closed.push(w); bot.currentWindow = null; },
+      lookAt: async () => {},
+      useOn: async () => { bot.currentWindow = win; },
+      blockAt: (p: V) => ({ name: 'air', position: p, boundingBox: 'empty' }),
+      pathfinder: { stop() {}, setGoal() {}, goto: async () => {} },
+    };
+    const { exec, reports } = makeExecutorOn(bot);
+    exec.submit([{ skill: 'use', target: 'chest_minecart' }]);
+    await waitUntil(() => reports.length === 1, 8000);
+    expect(reports[0].text).toContain('开出了它的箱子窗口,里面:');
+    expect(reports[0].text).toContain('附魔书×1');
+    expect(closed).toEqual([win]);
+  });
+
+  it('stow:首选箱子放不下就换下一口,大箱子另一半不重开,回执逐口报数和剩下的', async () => {
+    let inv = 64;
+    // (2,64,0)+(2,64,1) 是一口朝东的大箱子,两半开出同一扇窗;(5,64,0) 是单箱
+    const boxes = new Map<string, { room: number; held: number }>([
+      ['double', { room: 20, held: 0 }], ['single', { room: 30, held: 0 }],
+    ]);
+    const cells: Record<string, { box: string; props: Record<string, string> }> = {
+      '2,64,0': { box: 'double', props: { facing: 'east', type: 'left' } },
+      '2,64,1': { box: 'double', props: { facing: 'east', type: 'right' } },
+      '5,64,0': { box: 'single', props: { facing: 'east', type: 'single' } },
+    };
+    const opens: string[] = [];
+    const bot = {
+      entity: { id: 1, position: new V(0.5, 64, 0.5) },
+      entities: {},
+      game: { dimension: 'overworld' },
+      registry: { blocksByName: { chest: { id: 54, name: 'chest' } }, itemsByName: {} },
+      inventory: { items: () => (inv > 0 ? [{ type: 4, metadata: 0, name: 'cod', count: inv }] : []) },
+      findBlocks: () => Object.keys(cells).map((k) => new V(...(k.split(',').map(Number) as [number, number, number]))),
+      blockAt: (p: V) => {
+        const c = cells[`${p.x},${p.y},${p.z}`];
+        return c
+          ? { name: 'chest', position: p, boundingBox: 'block', getProperties: () => c.props }
+          : { name: 'air', position: p, boundingBox: 'empty', getProperties: () => ({}) };
+      },
+      openContainer: async (block: { position: V }) => {
+        const box = boxes.get(cells[`${block.position.x},${block.position.y},${block.position.z}`].box)!;
+        opens.push(`${block.position.x},${block.position.y},${block.position.z}`);
+        return {
+          deposit: async (_t: number, _m: number | null, n: number) => {
+            if (box.room === 0) throw new Error('destination full');
+            const k = Math.min(n, box.room);
+            box.room -= k;
+            box.held += k;
+            inv -= k;
+          },
+          withdraw: async () => {},
+          containerItems: () => (box.held > 0 ? [{ type: 4, metadata: 0, name: 'cod', count: box.held }] : []),
+          inventoryStart: 27,
+          close: () => {},
+        };
+      },
+      pathfinder: {
+        stop() {}, setGoal() {},
+        goto: async (g: FakeGoal) => { bot.entity.position = new V(g.x! + 0.5, g.y!, g.z! + 0.5); },
+      },
+    };
+    const { exec, reports } = makeExecutorOn(bot);
+    exec.submit([{ skill: 'stow', item: 'cod', count: 64 }]);
+    await waitUntil(() => reports.length === 1, 8000);
+    expect(reports[0].kind).toBe('done');
+    expect(opens).toEqual(['2,64,0', '5,64,0']);
+    expect(inv).toBe(14);
+    expect(reports[0].text).toContain('分 2 口箱子存,共存进生鳕鱼×50');
+    expect(reports[0].text).toContain('还有生鳕鱼×14没放下');
+    expect(reports[0].text).toContain('往(2, 64, 0) 的箱子存了生鳕鱼×20');
+    expect(reports[0].text).toContain('往(5, 64, 0) 的箱子存了生鳕鱼×30');
+  });
 });
 
 describe('brew · 与 smelt 同构的下料点火就走', () => {
-  it('三个瓶位下料,燃料补一份,回执报一轮 20 秒与取货写法', async () => {
+  it('三个瓶位下料,燃料补一份,回执报燃料轮数、在酿与取货写法', async () => {
     const { bot, stand, slots } = brewBot();
     const { exec, reports } = makeExecutorOn(bot);
     exec.submit([{ skill: 'brew', at: stand, input: 'nether_wart', bottle: 'potion', count: 3, fuel: 'blaze_powder' }]);
@@ -1325,12 +1461,21 @@ describe('brew · 与 smelt 同构的下料点火就走', () => {
     const t = reports[0].text;
     expect(reports[0].kind).toBe('done');
     expect(t).toContain('材料位下界疣');
-    expect(t).toContain('一份烧 20 轮');
-    expect(t).toContain('一轮约 20 秒');
+    expect(t).toContain('燃料位补了烈焰粉');
+    expect(t).toContain('燃料还能烧 20/20 轮');
+    expect(t).toContain('正在酿');
     expect(t).toContain(`{"skill":"take","at":[${stand[0]},${stand[1]},${stand[2]}],"all":true}`);
     expect(slots[3]?.name).toBe('nether_wart');
-    expect(slots[4]?.name).toBe('blaze_powder');
     expect(slots.slice(0, 3).filter(Boolean)).toHaveLength(3);
+  });
+
+  it('台里没燃料、包里也没有烈焰粉:受阻说清,不报「燃料槽本来就有」', async () => {
+    const { bot, stand } = brewBot({ inv: { potion: 3, nether_wart: 1 } });
+    const { exec, reports } = makeExecutorOn(bot);
+    exec.submit([{ skill: 'brew', at: stand, input: 'nether_wart', bottle: 'potion', count: 3, fuel: 'blaze_powder' }]);
+    await waitUntil(() => reports.length === 1, 8000);
+    expect(reports[0].kind).toBe('blocked');
+    expect(reports[0].text).toContain('燃料 0/20 轮、燃料位空,包里也没有烈焰粉');
   });
 
   it('包里没有那样材料:当场受阻,不白跑一趟', async () => {
@@ -1457,6 +1602,29 @@ describe('容器账本:下料入账、到期、抢占点名', () => {
     expect(reports[1].text).toContain('输入槽还留着橡木原木');
     const rec = book.get('overworld', { x: 2, y: 64, z: 0 })!;
     expect(rec.furnace!.input?.name).toBe('oak_log');
+  });
+
+  it('input 写真实 id:包里只有熟鳕鱼时不拿它顶生鳕鱼进炉', async () => {
+    const book = new ChestBook(null);
+    const { bot, slots } = furnaceBot({ inv: { cooked_cod: 16, coal: 2 }, furnaces: FURNACE_AT });
+    const { exec, reports } = makeExecutorWith(bot, book);
+    exec.submit([{ skill: 'smelt', input: 'cod', count: 16, fuel: 'coal' }]);
+    await waitUntil(() => reports.length === 1, 8000);
+    expect(reports[0].kind).toBe('blocked');
+    expect(reports[0].text).toContain('包里没有生鳕鱼');
+    expect(slots().input).toBeNull();
+  });
+
+  it('生熟鳕鱼都在包里:投进去的是生鳕鱼,回执点名投了什么', async () => {
+    const book = new ChestBook(null);
+    const { bot, inv } = furnaceBot({ inv: { cod: 3, cooked_cod: 40, coal: 2 }, furnaces: FURNACE_AT });
+    const { exec, reports } = makeExecutorWith(bot, book);
+    exec.submit([{ skill: 'smelt', input: 'cod', count: 16, fuel: 'coal' }]);
+    await waitUntil(() => reports.length === 1, 8000);
+    expect(reports[0].kind).toBe('done');
+    expect(inv.get('cod')).toBe(0);
+    expect(inv.get('cooked_cod')).toBe(40);
+    expect(reports[0].text).toContain('往输入槽投了包里的生鳕鱼×3');
   });
 
   it('反射抢占的汇报点名账上还压着料的炉子', async () => {
@@ -1625,7 +1793,8 @@ describe('Reflexes 岩浆', () => {
       lookAt: async (p: V) => { looks.push(p); },
       attack: () => {},
       blockAt(p: V) {
-        const name = world[`${p.x},${p.y},${p.z}`] ?? (p.y === 62 ? 'stone' : 'air');
+        const [x, y, z] = [Math.floor(p.x), Math.floor(p.y), Math.floor(p.z)];
+        const name = world[`${x},${y},${z}`] ?? (y === 62 ? 'stone' : 'air');
         return { name, boundingBox: name === 'stone' ? 'block' : 'empty' };
       },
       setControlState(k: string, v: boolean) { controls.push([k, v]); },
@@ -1665,29 +1834,101 @@ describe('Reflexes 岩浆', () => {
     bot.controls.some(([k, v]) => k === 'forward' && v);
 
   /**
-   * 脱离岩浆接触但仍着火时继续持有逃生执行权，将目标转到最近水格。
+   * 离开岩浆后只剩身上着火:岩浆那一轮结算、环境冻结当场解除(bot 自己排的灭火不被压住),
+   * 包里没有水桶时反射走去最近的水里,并把去向报出来。
    */
-  it('脱出后身上还烧着:不松手,逃生目标改下到最近的水格', async () => {
+  it('脱出后身上还烧着:冻结解除,包里没水桶就去最近的水里并报给 bot', async () => {
     const world: Record<string, string> = { '10,63,10': 'lava' };
     const bot = lavaBot(world);
     world['14,62,10'] = 'water';
     Object.assign(bot, {
       registry: { blocksByName: { water: { id: 99 } } },
       findBlocks: () => [new V(14, 62, 10)],
-      canSeeBlock: () => true,
     });
-    const { reflexes } = lavaReflexes(bot);
+    const { reflexes, reports, exec } = lavaReflexes(bot);
     reflexes.start();
     vi.advanceTimersByTime(250); // 岩浆反射触发,开始冲刺
-    // 离开危险格,但身上还烧着:这一轮逃生不能结束,也不能站着挨烧
+    expect(exec.status().hold).toBe('逃离岩浆');
     delete world['10,63,10'];
     bot.setFire(true);
     await vi.advanceTimersByTimeAsync(2_500);
-    expect(reflexes.envActive).toBe(true); // owner 还是 lava,没有松手
-    expect(reflexes.environmentOwnerKind).toBe('lava');
+    expect(reflexes.environmentOwnerKind).toBeNull();
+    expect(exec.status().hold).toBeNull();
     const goal = bot.pf.goal as { x?: number; y?: number; z?: number } | null;
     expect(goal).not.toBeNull();
     expect([goal!.x, goal!.y, goal!.z]).toEqual([14, 62, 10]);
+    expect(reports.some((r) => r.text.includes('去 (14, 62, 10) 的水里灭火'))).toBe(true);
+    reflexes.stop();
+  });
+
+  /** 灭火要用的那几样:水桶倒水/空桶舀水由 activateItem 按手上那件改世界和背包 */
+  function bucketBot(world: Record<string, string>, dimension = 'overworld') {
+    const bot = lavaBot(world);
+    let held: string | null = null;
+    let bag = [{ name: 'water_bucket', count: 1, type: 1 }];
+    const used: string[] = [];
+    Object.assign(bot.entity, { onGround: true });
+    Object.assign(bot, {
+      game: { dimension },
+      inventory: { items: () => bag },
+      equip: async (item: { name: string }) => { held = item.name; },
+      waitForTicks: async () => {},
+      activateItem: async () => {
+        used.push(held ?? '空手');
+        if (held === 'water_bucket') {
+          world['10,63,10'] = 'water';
+          bag = [{ name: 'bucket', count: 1, type: 2 }];
+          held = 'bucket';
+        } else if (held === 'bucket' && world['10,63,10'] === 'water') {
+          delete world['10,63,10'];
+          bag = [{ name: 'water_bucket', count: 1, type: 1 }];
+          held = 'water_bucket';
+        }
+      },
+      used,
+    });
+    return bot as typeof bot & { used: string[] };
+  }
+
+  /**
+   * 着火出了岩浆、包里有水桶:反射对脚下顶面倒水,火灭后用空桶舀回,每一步都报给 bot;
+   * 期间队列不冻结。
+   */
+  it('脱出后身上还烧着、包里有水桶:往脚下倒水灭火,火灭后舀回,都报给 bot', async () => {
+    const world: Record<string, string> = { '10,63,10': 'lava' };
+    const bot = bucketBot(world);
+    const { reflexes, reports, exec } = lavaReflexes(bot);
+    reflexes.start();
+    vi.advanceTimersByTime(250);
+    delete world['10,63,10'];
+    bot.setFire(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(bot.used).toEqual(['water_bucket']);
+    // 瞄的是脚下那格方块的顶面中心:水落进脚这一格
+    expect(bot.looks.map((p) => [p.x, p.y, p.z])).toContainEqual([10.5, 63, 10.5]);
+    expect(reports.some((r) => r.text.includes('往 (10, 63, 10) 倒了水灭火'))).toBe(true);
+    bot.setFire(false);
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(bot.used).toEqual(['water_bucket', 'bucket']);
+    expect(world['10,63,10']).toBeUndefined();
+    expect(reports.some((r) => r.text.includes('舀回来了'))).toBe(true);
+    expect(exec.status().hold).toBeNull();
+    reflexes.stop();
+  });
+
+  it('下界里着火:水桶倒出来会蒸发,不倒,把这件事报给 bot', async () => {
+    const world: Record<string, string> = { '10,63,10': 'lava' };
+    const bot = bucketBot(world, 'the_nether');
+    Object.assign(bot, { registry: { blocksByName: { water: { id: 99 } } }, findBlocks: () => [] });
+    Object.assign(bot, { world: { getColumn: () => ({}) } });
+    const { reflexes, reports } = lavaReflexes(bot);
+    reflexes.start();
+    vi.advanceTimersByTime(250);
+    delete world['10,63,10'];
+    bot.setFire(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(bot.used).toEqual([]);
+    expect(reports.some((r) => r.text.includes('蒸发'))).toBe(true);
     reflexes.stop();
   });
 
@@ -1771,7 +2012,7 @@ describe('Reflexes 岩浆', () => {
     expect(reports[0].text).toContain('身上着火');
   });
 
-  it('离开岩浆但身上仍着火:不写 lava-clear,火灭后才完成这一轮', () => {
+  it('离开岩浆但身上仍着火:站满驻留窗口照样结算,lava-clear 写明还着火', () => {
     const world: Record<string, string> = { '10,64,10': 'lava' };
     const bot = lavaBot(world);
     const diag = new MinecraftLog();
@@ -1780,16 +2021,14 @@ describe('Reflexes 岩浆', () => {
     reflexes.start();
     vi.advanceTimersByTime(250);
     delete world['10,64,10'];
-    vi.advanceTimersByTime(500);
+    vi.advanceTimersByTime(400);
     expect(diag.after(0).filter((e) => e.event === 'lava-clear')).toEqual([]);
-
-    bot.setFire(false);
-    vi.advanceTimersByTime(800); // 火灭之后还要站满驻留窗口
+    vi.advanceTimersByTime(400);
     reflexes.stop();
     const clears = diag.after(0).filter((e) => e.event === 'lava-clear');
     expect(clears).toHaveLength(1);
-    expect(clears[0].data!.onFire).toBe(false);
-    expect(clears[0].msg).toContain('火也灭了');
+    expect(clears[0].data!.onFire).toBe(true);
+    expect(clears[0].msg).toContain('身上还着着火');
   });
 
   /**
@@ -1871,6 +2110,17 @@ describe('Reflexes 岩浆', () => {
     expect(Math.hypot(aim.x - 10, aim.z - 10)).toBeGreaterThanOrEqual(3);
   });
 
+  it('只站在岩浆块上、周围没有烧人的方块:冲刺瞄点是有限坐标', () => {
+    const bot = lavaBot({ '10,62,10': 'magma_block' });
+    const { reflexes } = lavaReflexes(bot);
+    reflexes.start();
+    vi.advanceTimersByTime(250);
+    reflexes.stop();
+    const aim = bot.looks[0];
+    expect(aim).toBeDefined();
+    expect([aim.x, aim.y, aim.z].every(Number.isFinite)).toBe(true);
+  });
+
   it('陷进岩浆里要一直按跳:人在往下沉', () => {
     const bot = lavaBot({ '10,63,10': 'lava' });
     const { reflexes } = lavaReflexes(bot);
@@ -1905,6 +2155,48 @@ describe('Reflexes 岩浆', () => {
     expect(reports).toHaveLength(2);
     expect(reports[1].text).toContain('出来了');
     expect(bot.controls[bot.controls.length - 1]).toEqual(['jump', false]);
+  });
+
+  /** 一片岩浆:x、z 都在 [lo, hi] 里的 y63 格 */
+  function lavaPool(lo: { x: number; z: number }, hi: { x: number; z: number }): Record<string, string> {
+    const world: Record<string, string> = {};
+    for (let x = lo.x; x <= hi.x; x++) {
+      for (let z = lo.z; z <= hi.z; z++) world[`${x},63,${z}`] = 'lava';
+    }
+    return world;
+  }
+
+  /**
+   * 第一拍在扫描窗口边上找到的落脚格,人一跨格窗口就移开、回头的直线又全是岩浆,
+   * 每拍重算会把它丢掉,人改成背着最近一格乱冲。选定的落脚格仍安全就一直朝它走。
+   */
+  it('人跨格后落脚格出了扫描窗口:仍朝第一拍选定的那一格冲', () => {
+    const bot = lavaBot(lavaPool({ x: 8, z: 8 }, { x: 10, z: 12 }), { x: 10.5, z: 10.5 });
+    const { reflexes } = lavaReflexes(bot);
+    reflexes.start();
+    vi.advanceTimersByTime(250);
+    const first = bot.looks[bot.looks.length - 1];
+    expect(Math.floor(first.x)).toBe(14);
+    bot.entity.position = new V(9.9, 63, 10.5);
+    vi.advanceTimersByTime(400);
+    reflexes.stop();
+    const last = bot.looks[bot.looks.length - 1];
+    expect([last.x, last.y, last.z]).toEqual([first.x, first.y, first.z]);
+  });
+
+  /** 找不到落脚格时一直硬冲而不看人动没动,卡在原地十几秒也没人知道。 */
+  it('没有落脚格又冲不动:满 5 秒把卡住的现场报给 bot', () => {
+    const bot = lavaBot(lavaPool({ x: 6, z: 6 }, { x: 14, z: 14 }), { x: 10.5, z: 10.5 });
+    const { reflexes, reports } = lavaReflexes(bot);
+    reflexes.start();
+    vi.advanceTimersByTime(4_800);
+    expect(reports.filter((r) => r.text.includes('卡住'))).toEqual([]);
+    vi.advanceTimersByTime(600);
+    reflexes.stop();
+    const stuck = reports.filter((r) => r.text.includes('卡住'));
+    expect(stuck).toHaveLength(1);
+    expect(stuck[0].text).toContain('人在 (10, 63, 10)');
+    expect(stuck[0].text).toContain('只挪了 0.0 格');
   });
 });
 

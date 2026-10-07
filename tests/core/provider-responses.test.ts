@@ -8,7 +8,8 @@ import { nullLogger } from '../../src/core/util.ts';
 import { ChatResponseAssembly, NativeResponseAssembly } from '../../src/providers/transport/response-assembly.ts';
 import { EventDecoder } from '../../src/providers/transport/response-http.ts';
 import { GenerationError, priceUsage, unknownMeters } from '../../src/core/generation.ts';
-import type { StreamEvent } from '../../src/protocol/open-responses/index.ts';
+import { ResponsesProvider } from '../../src/providers/openai-responses-compat/native.ts';
+import type { FunctionCall, StreamEvent } from '../../src/protocol/open-responses/index.ts';
 
 const sse = (values: unknown[]): Response => new Response(values.map(value => `data: ${JSON.stringify(value)}\n\n`).join('') + 'data: [DONE]\n\n');
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
@@ -59,6 +60,16 @@ describe('Provider standard Responses boundary', () => {
     await expect(client.respond({ model: 'test', input: [{ type: 'message', role: 'user', content: [{ type: 'input_file', file_url: 'https://fixture.test/file' }] }] })).rejects.toThrow('inline file_data');
   });
 
+  it('chat history attaches only image blobs; other blobs stay as their text line', () => {
+    const media = { enabled: () => true, read: () => Buffer.from('x') };
+    const [audio, mixed] = renderMessagesWithMedia([
+      { role: 'tool', content: '[blob log:a audio/mpeg] clip', tool_call_id: 'c1', blobs: [{ handle: 'log:a', mime: 'audio/mpeg' }] },
+      { role: 'user', content: 'look', blobs: [{ handle: 'log:a', mime: 'audio/mpeg' }, { handle: 'log:i', mime: 'image/png' }] },
+    ] as any, media);
+    expect(audio.content).toBe('[blob log:a audio/mpeg] clip');
+    expect(mixed.content).toEqual([{ type: 'text', text: 'look' }, { type: 'image_url', image_url: { url: `data:image/png;base64,${Buffer.from('x').toString('base64')}` } }]);
+  });
+
   it('normalizes partial native usage without representing missing meters as zero', () => {
     const assembly = new NativeResponseAssembly();
     const response = { id: 'partial-usage', model: 'test', output: [], status: 'completed', usage: { input_tokens: 50, output_tokens: 3 } };
@@ -66,6 +77,35 @@ describe('Provider standard Responses boundary', () => {
     assembly.feed({ type: 'response.completed', sequence_number: 1, response }, () => {});
     expect(assembly.finish().usage).toBeNull();
     expect(assembly.meters()).toMatchObject({ input: 50, output: 3, total: 53, cachedInput: null, reasoning: null, native: { input_tokens: 50, output_tokens: 3 } });
+  });
+
+  it('treats a missing function-call status as completed only for a completed native response', () => {
+    const assembly = new NativeResponseAssembly();
+    const initial = { id: 'missing-status', model: 'test', status: 'in_progress', output: [] };
+    const call = { type: 'function_call', id: 'fc1', call_id: 'call1', name: 'inspect', arguments: '{}' } as unknown as FunctionCall;
+    assembly.feed({ type: 'response.created', sequence_number: 0, response: initial }, () => {});
+    assembly.feed({ type: 'response.output_item.added', sequence_number: 1, output_index: 0, item: call }, () => {});
+    assembly.feed({ type: 'response.output_item.done', sequence_number: 2, output_index: 0, item: call }, () => {});
+    assembly.feed({ type: 'response.completed', sequence_number: 3, response: { ...initial, status: 'completed', output: [call] } }, () => {});
+    expect(assembly.finish().output[0]).toMatchObject({ type: 'function_call', status: 'completed' });
+
+    // 截断的响应里没带 status 的调用可能只写了半截参数,保持缺省,Core 不执行它
+    const truncated = new NativeResponseAssembly();
+    truncated.feed({ type: 'response.created', sequence_number: 0, response: initial }, () => {});
+    truncated.feed({ type: 'response.output_item.added', sequence_number: 1, output_index: 0, item: call }, () => {});
+    truncated.feed({ type: 'response.output_item.done', sequence_number: 2, output_index: 0, item: call }, () => {});
+    truncated.feed({ type: 'response.incomplete', sequence_number: 3, response: { ...initial, status: 'incomplete', output: [call] } }, () => {});
+    expect(truncated.finish().output[0]).not.toHaveProperty('status');
+  });
+
+  it('normalizes omitted function-call status in a unary Responses-compatible response', async () => {
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({
+      id: 'unary-missing-status', model: 'test', status: 'completed', output: [
+        { type: 'function_call', id: 'fc1', call_id: 'call1', name: 'inspect', arguments: '{}' },
+      ], usage: null,
+    })));
+    const result = await new ResponsesProvider({ baseUrl: 'https://fixture.test' }).respond({ model: 'test', input: [] });
+    expect(result.response.output[0]).toMatchObject({ type: 'function_call', status: 'completed' });
   });
 
   it('keeps a response whose usage block is malformed, leaving those meters unknown', () => {

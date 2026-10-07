@@ -114,6 +114,7 @@ const WHOLE: Record<string, string> = {
   glass_bottle: '玻璃瓶', potion: '药水', splash_potion: '喷溅药水',
   lingering_potion: '滞留药水', tipped_arrow: '药箭', dragon_breath: '龙息',
   magma_cream: '岩浆膏', fermented_spider_eye: '发酵蜘蛛眼', netherite_scrap: '下界合金碎片',
+  netherite_upgrade_smithing_template: '下界合金升级锻造模板',
   rabbit_foot: '兔子脚', rabbit_hide: '兔子皮', shulker_shell: '潜影壳',
   enchanted_book: '附魔书', written_book: '成书', writable_book: '书与笔', filled_map: '地图',
   dried_kelp: '干海带', dried_kelp_block: '干海带块', beetroot_soup: '甜菜汤',
@@ -208,7 +209,7 @@ const BASE: Record<string, string> = {
 const BASE_KEYS = Object.keys(BASE).sort((a, b) => b.length - a.length);
 
 const ENTITIES: Record<string, string> = {
-  allay: '悦灵', armadillo: '犰狳', armor_stand: '盔甲架', arrow: '箭', axolotl: '美西螈',
+  allay: '悦灵', area_effect_cloud: '区域效果云', armadillo: '犰狳', armor_stand: '盔甲架', arrow: '箭', axolotl: '美西螈',
   bat: '蝙蝠', bee: '蜜蜂', blaze: '烈焰人', boat: '船', bogged: '沼骸', breeze: '旋风人',
   camel: '骆驼', cat: '猫', cave_spider: '洞穴蜘蛛', chest_boat: '运输船',
   chest_minecart: '运输矿车', chicken: '鸡', cod: '鳕鱼', cow: '牛', creeper: '苦力怕',

@@ -304,6 +304,31 @@ describe('runEscape', () => {
     expect(out).toContain('这是 3 分钟内第 2 次回到同一张床。');
   });
 
+  /** 反射的寻路目标按传送前的位置下的,不在发传送指令前撤掉,落地后会把人拽回原处。 */
+  it('传送指令发出前撤掉反射的寻路目标,回执说撤了什么', async () => {
+    const pos = { x: 100, y: 12, z: -30 };
+    const consoles: string[] = [];
+    let consolesAtDrop: number | null = null;
+    const out = await runEscape({
+      getBot: () => ({ entity: { position: pos }, game: { dimension: 'overworld' }, spawnPoint: { x: 8, y: 64, z: 8 } }),
+      playerName: 'corti',
+      personalSpawn: null,
+      clearQueue: () => null,
+      dropReflexGoal: () => {
+        consolesAtDrop = consoles.length;
+        return '撤掉了反射正在走的登岸寻路(目标 (-707, 63, 128))';
+      },
+      sendConsole: (line) => { consoles.push(line); return true; },
+      chat: () => {},
+      hold: () => {},
+      waitMove: async () => { Object.assign(pos, { x: 8, y: 64, z: 8 }); return true; },
+      timeoutMs: 20,
+    });
+    expect(consolesAtDrop).toBe(0);
+    expect(consoles).toHaveLength(1);
+    expect(out).toContain('撤掉了反射正在走的登岸寻路');
+  });
+
   it('runEscape 走最近安全锚:去的是路标不是床,回执列全部候选与距离', async () => {
     const bed = spawnAt({ x: 5360, y: 76, z: 60 }, 'overworld', 'bed');
     const home = spawnAt({ x: 5200, y: 80, z: 50 }, 'overworld', 'mark', '家');
@@ -349,6 +374,26 @@ describe('runEscape', () => {
     expect(out).toContain('本来会把你送到你圈的「家」 [主世界] (20, 71, 4)');
     expect(out).not.toContain('已回到');
     expect(out).not.toContain('已经在');
+  });
+
+  it('传送前先来了一个别的强制位置包:接着等,传送落地后报到达', async () => {
+    const anchor = spawnAt({ x: -150, y: 70, z: 100 }, 'overworld', 'mark', '叹息之墙');
+    const position = { x: -410.8, y: 63.1, z: 156.7 };
+    let calls = 0;
+    const out = await runEscape({
+      getBot: () => ({ entity: { position }, game: { dimension: 'overworld' } }),
+      playerName: 'corti', personalSpawn: null, safeMarks: [anchor],
+      clearQueue: () => null, sendConsole: () => true, chat: () => {}, hold: () => {},
+      waitMove: async () => {
+        calls += 1;
+        if (calls === 2) Object.assign(position, { x: -149.5, y: 70, z: 100.5 });
+        return true;
+      },
+      timeoutMs: 1_000,
+    });
+    expect(calls).toBe(2);
+    expect(out).toContain('已回到你圈的「叹息之墙」');
+    expect(out).not.toContain('没能传送');
   });
 
   it('runEscape 全候选站不住:照去最近的,回执把这个事实说全', async () => {
