@@ -109,7 +109,10 @@ export class ActivityAgenda {
     return this.summary();
   }
   operate(args: Record<string, unknown>): string {
-    if (Object.keys(args).some(key => !['operation', 'id', 'status', 'note', 'offset', 'limit', 'includeCompleted', 'includeClosed'].includes(key))) return '[日程输入错误] 含有未知参数。';
+    if (Object.keys(args).some(key => !['operation', 'id', 'status', 'note', 'when', 'ifBlocked', 'offset', 'limit', 'includeCompleted', 'includeClosed'].includes(key))) return '[日程输入错误] 含有未知参数。';
+    if (args.operation !== 'update' && (args.when !== undefined || args.ifBlocked !== undefined)) {
+      return '[日程输入错误] when/ifBlocked 只能通过 update 连同 note 修订。';
+    }
     if (args.operation === 'read') {
       const offset = args.offset ?? 0, limit = args.limit ?? AGENDA_MAX_ITEMS;
       if (!Number.isSafeInteger(offset) || Number(offset) < 0 || !Number.isSafeInteger(limit)
@@ -142,8 +145,8 @@ export class ActivityAgenda {
       const items = draft.items.map(item => {
         const old = this.ledger.items.find(previous => previous.id === item.id
           && previous.title === item.title && previous.doneWhen === item.doneWhen);
-        return { ...cleanItem(item), status: old?.status ?? 'queued' as AgendaStatus,
-          note: old?.note ?? '', updatedAt: old?.updatedAt ?? this.stamp() };
+        return old ? { ...old } : { ...cleanItem(item), status: 'queued' as AgendaStatus,
+          note: '', updatedAt: this.stamp() };
       });
       // Omission from a generated proposal is not a foreground cancellation decision.
       const retained = this.ledger.items.filter(item => !items.some(next => next.id === item.id));
@@ -163,12 +166,14 @@ export class ActivityAgenda {
       return this.summary();
     }
     if (args.operation !== 'update' || !text(args.note, 400)
-      || (args.status !== undefined && !['queued', 'deferred', 'done', 'cancelled'].includes(String(args.status)))) {
-      return '[日程输入错误] update 需要 note 记录实际进展、受阻依据或明确撤销原因；status 可为 queued/deferred/done/cancelled。';
+      || (args.status !== undefined && !['queued', 'deferred', 'done', 'cancelled'].includes(String(args.status)))
+      || [args.when, args.ifBlocked].some(value => value !== undefined && !text(value, 240))) {
+      return '[日程输入错误] update 需要 note 记录实际进展、受阻依据或明确撤销原因；status 可为 queued/deferred/done/cancelled；when/ifBlocked 可修订为 1 至 240 字符的条件，并在 note 记录依据。';
     }
     if (closed(item)) return `[日程] ${closedLabel(item)}记录保留；新的目的请重新规划。`;
     const items = this.ledger.items.map(entry => entry.id === item.id
-      ? { ...entry, status: (args.status ?? entry.status) as AgendaStatus, note: args.note as string, updatedAt: this.stamp() }
+      ? { ...entry, status: (args.status ?? entry.status) as AgendaStatus, note: args.note as string,
+        when: (args.when ?? entry.when) as string, ifBlocked: (args.ifBlocked ?? entry.ifBlocked) as string, updatedAt: this.stamp() }
       : entry);
     this.save({ ...this.ledger, revision: this.ledger.revision + 1, items });
     return this.summary();
@@ -189,7 +194,7 @@ export class ActivityAgenda {
         : next.length || deferred.length ? '当前阶段尚未选择；结合现场自行选下一项。'
           : '当前没有未完成阶段；完成记录是历史。结合长期目标和现场选择新阶段，可 review 异步请求候选，期间独立行动可以继续。',
       ...(draft ? [`后台候选采样于 ${draft.capturedAt}，共 ${draft.items.length} 项，${draft.baseRevision === this.ledger.revision ? '待核验采用' : '整份已落后于当前进展'}；activity_plan read 带 id 定向核验候选与前提，adopt 指定一项不改现有进展；整份过期则 review。`] : [])];
-    const footer = '阶段变化用 activity_plan update 留证据；明确放弃用 cancelled 加原因，不能假记完成；read 带 id 查详情；日程不阻止交流、应急和新的选择。';
+    const footer = '阶段变化用 activity_plan update 留证据；when/ifBlocked 可据新证据修订；明确放弃用 cancelled 加原因，不能假记完成；read 带 id 查详情；日程不阻止交流、应急和新的选择。';
     const sections = [
       ...(active ? [[`够了就收尾：${clip(active.doneWhen, 160)}`,
         `条件：${clip(active.when, 100)}；受阻：${clip(active.ifBlocked, 100)}`,

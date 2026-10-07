@@ -683,7 +683,7 @@ export class CortiV extends Cormini {
         + 'read pages open stages by default; includeCompleted:true adds completed history, includeClosed:true adds completed and cancelled history; id reads only that stage or candidate with its dated metadata. Closed evidence does not occupy open-stage capacity. '
         + 'Read and verify a background proposal before adopt. adopt with id adds that new candidate while preserving '
         + 'existing progress; omit id to merge the whole proposal only when its revision is current, retaining omitted goals and evidence. focus selects a current stage. update records actual progress '
-        + 'or marks a stage done/deferred/queued/cancelled with evidence or an explicit cancellation reason in note. Cancelled is not completed; neither closed status can be reopened by an old proposal. Plans do not execute World actions; '
+        + 'or marks a stage done/deferred/queued/cancelled with evidence or an explicit cancellation reason in note. update can revise when/ifBlocked with fresh evidence in note while preserving the objective and completion criteria. Adoption preserves existing stage conditions and evidence. Cancelled is not completed; neither closed status can be reopened by an old proposal. Plans do not execute World actions; '
         + 'completion is never inferred from time or task acceptance. Details and references are loaded only when needed.',
       tags: ['write'],
       parameters: {
@@ -699,6 +699,8 @@ export class CortiV extends Cormini {
           includeClosed: { type: 'boolean', description: 'read: include completed and explicitly cancelled history, default false.' },
           status: { type: 'string', enum: ['queued', 'deferred', 'done', 'cancelled'], description: 'update: cancelled explicitly abandons a goal without claiming completion; omit to retain the current stage status.' },
           note: { type: 'string', minLength: 1, maxLength: 400, description: 'update: actual evidence, progress, blocker or explicit reason for cancellation.' },
+          when: { type: 'string', minLength: 1, maxLength: 240, description: 'update: revised execution or resumption conditions, with fresh supporting evidence in note; omit to retain existing conditions.' },
+          ifBlocked: { type: 'string', minLength: 1, maxLength: 240, description: 'update: revised response to a blocker, with fresh supporting evidence in note; objective id and completion criteria stay unchanged.' },
         }, required: ['operation'],
       },
       handler: async (args) => args.operation === 'review'
