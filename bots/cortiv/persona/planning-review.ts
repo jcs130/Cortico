@@ -40,6 +40,33 @@ const FOCUSED_CONTEXT_MAX_TOKENS = 12_000;
 const FOCUSED_OUTPUT_MAX_TOKENS = 1_600;
 const QUESTION_MAX_CHARS = 1_200;
 
+/** Carry bounded source excerpts across a real session replacement, without old tool pairs. */
+export function causalReviewTail(snapshot: readonly ContextRecord[], maxAgeMs: number, now = Date.now()): ContextRecord[] {
+  const reviews = new Map<string, { event: NonNullable<ContextRecord['context']['frame']>['events'][number]; text: string }>();
+  for (const record of snapshot) {
+    if (record.context.head) continue;
+    const body = itemText(record.item);
+    for (const event of record.context.frame?.events ?? []) {
+      if (event.source !== 'persona' || event.type !== CAUSAL_REVIEW) continue;
+      const at = Date.parse(event.ts);
+      if (!Number.isFinite(at) || at > now || now - at > maxAgeMs) continue;
+      const text = body.slice(event.start, event.start + event.chars);
+      if (!text) continue;
+      reviews.set(`${event.cursor}/${event.ts}`, { event, text });
+    }
+  }
+  const selected = [...reviews.values()].sort((a, b) => Date.parse(a.event.ts) - Date.parse(b.event.ts)).slice(-3);
+  if (!selected.length) return [];
+  let text = '[近期后台因果复核；模型建议，不是现场事实或已执行结果；按原时间和较新回执核验]\n';
+  const events = selected.map(({ event, text: body }) => {
+    text += '\n';
+    const start = text.length;
+    text += body;
+    return { ...event, start, chars: body.length };
+  });
+  return [message('user', text, { ts: selected.at(-1)!.event.ts, frame: { events } })];
+}
+
 const CAUSAL_EVIDENCE_PROMPT = [
   '按时间与来源还原目标→调用意图→执行终态→后续观察，核对目标状态的净变化；中间成功或暂时变化不代表效果保留。',
   'assistant自述、旧笔记和待办中的解释是待核验的前提，不能拿重复自述证明原因。后来的实际观测可以否定早先的推断；记录不充分时明确未知。',

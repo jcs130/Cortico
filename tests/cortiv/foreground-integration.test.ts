@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { CortiV } from '../../bots/cortiv/persona/persona.ts';
 import { FOREGROUND_CONTEXT_DEFAULTS } from '../../bots/cortiv/persona/foreground-context.ts';
 import { PLANNING_DEFAULTS } from '../../bots/cortiv/persona/planning-review.ts';
+import { DREAM_DEFAULTS } from '../../bots/cortiv/persona/dream-context.ts';
 import { functionCall, functionResult, itemText, message, type ContextRecord } from '../../src/protocol/open-responses/context.ts';
 import { estimateMessagesTokens, estimateTokens, nullLogger } from '../../src/core/util.ts';
 import { validatePairing } from '../../src/core/truncate.ts';
@@ -31,6 +32,38 @@ function rig(worlds: World[] = [], agendaEnabled = false) {
 }
 
 describe('CortiV foreground request context', () => {
+  it('carries recent causal evidence into a new session after a real handoff, with original provenance and no old tool partners', async () => {
+    const memoryDir = mkdtempSync(join(tmpdir(), 'causal-handoff-')); dirs.push(memoryDir);
+    const options = { memoryDir, tickDelayMs: () => null,
+      dream: () => ({ ...DREAM_DEFAULTS, onHandoff: false }),
+      foreground: () => ({ ...FOREGROUND_CONTEXT_DEFAULTS, enabled: true, maxHistoryTokens: 1, minRecentRounds: 0 }),
+      planning: () => ({ ...PLANNING_DEFAULTS, agendaEnabled: true, maxResultAgeMs: 300_000 }) };
+    const persona = new CortiV(options); persona.attach(makeFakeHarnessApi());
+    const now = Date.now();
+    const review = (cursor: number, age: number, text: string) => functionResult(`batch-${cursor}`, text, { frame: { events: [
+      { source: 'persona', type: 'causal_review', cursor, ts: new Date(now - age).toISOString(), start: 0, chars: text.length },
+    ] } });
+    const stale = review(1, 301_000, '已经过期的机制猜测。');
+    const recent = review(2, 20_000, '原始终态显示回到起点，净高度没有累计。');
+    const latest = review(3, 1_000, '冷却7秒是暂缓，不代表施法成功。');
+    const snapshot = [message('system', 'Contract'), functionCall('batch-1', 'external_event_frame', '{}'), stale,
+      functionCall('batch-2', 'external_event_frame', '{}'), recent,
+      functionCall('batch-3', 'external_event_frame', '{}'), latest];
+    const before = structuredClone(snapshot);
+    const handoff = await persona.onHandoff(snapshot, { hardTokens: null });
+    const restarted = new CortiV(options); restarted.attach(makeFakeHarnessApi());
+    const records = [message('system', 'Contract'), ...handoff.tail!, message('user', '继续当前目标。')];
+    const view = restarted.prepareRequest({ sessionId: 'main', round: 1, messages: records })!;
+    const text = view.map(record => itemText(record.item)).join('\n');
+    expect(text).toContain(itemText(recent.item)); expect(text).toContain(itemText(latest.item));
+    expect(text).not.toContain(itemText(stale.item));
+    const refs = handoff.tail!.flatMap(record => record.context.frame?.events ?? []);
+    expect(refs.map(event => event.cursor)).toEqual([2, 3]);
+    expect(refs[0].ts).toBe(recent.context.frame!.events[0].ts);
+    const nextHandoff = await restarted.onHandoff(records, { hardTokens: null });
+    expect(nextHandoff.tail!.flatMap(record => record.context.frame?.events.map(event => event.cursor) ?? [])).toEqual([2, 3]);
+    expect(validatePairing(view)).toEqual([]); expect(snapshot).toEqual(before);
+  });
   it('retains the latest causal review independently of the current agenda after history compaction', () => {
     const { persona, config, messages } = rig([], true); persona.attach(makeFakeHarnessApi());
     config.maxHistoryTokens = 1;

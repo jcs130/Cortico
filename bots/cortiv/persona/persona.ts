@@ -51,7 +51,7 @@ import { Cormini, HANDOFF_DIR, MAIN, type CorminiOptions } from '../../cormini/p
 import { HANDOFF_NOTE_TYPE } from '../../cormini/persona/handoffNote.ts';
 import { AUTHOR_SELF, type WorkspaceGit } from '../../cormini/persona/workspaceGit.ts';
 import { personaConsoleDecl } from './consoleSurface.ts';
-import { PeriodicPlanningReview, PLANNING, PLANNING_DEFAULTS, type PlanningConfig } from './planning-review.ts';
+import { causalReviewTail, PeriodicPlanningReview, PLANNING, PLANNING_DEFAULTS, type PlanningConfig } from './planning-review.ts';
 import { ActivityAgenda, AGENDA_FILE, AGENDA_MAX_ITEMS } from './activity-agenda.ts';
 import { CortiVSocialAttention, FAST_ATTENTION_DEFAULTS, type FastAttentionConfig } from './attention-adviser.ts';
 import { ActionFailureReflection, FAILURE_REFLECTION_ADVICE } from './failure-reflection.ts';
@@ -1716,6 +1716,10 @@ export class CortiV extends Cormini {
     this.resetDeliveredMemory();
     this.deliverMemoryChanges();
     return result;
+  }
+
+  protected override handoffTail(snapshot: ContextRecord[]): ContextRecord[] {
+    return causalReviewTail(snapshot, this.planningConfig().maxResultAgeMs);
   }
 
   /** 主播口径:入参是拟播内容,观众听没听到看回执;另加后台整理那两句。 */
