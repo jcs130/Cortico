@@ -1451,7 +1451,7 @@ export function probeBlockInfo(block: {
 }
 
 /**
- * GoalNear(range=1) 同时接受脚下取整及其上方一格；候选落脚格采用同一范围。
+ * GoalNear(range=1) 的边界外多保留一层部分碰撞候选，实际脚高仍须执行时核对。
  * 整格碰撞才排除候选，缺失读数或部分形状保留为未确认；这里只诊断，不生成移动路径。
  */
 function goalStandCells(t: { x: number; y: number; z: number }): Array<{ x: number; y: number; z: number }> {
@@ -1475,6 +1475,7 @@ export function standCellsAround(
     const head = read(c.x, c.y + 1, c.z);
     const below = read(c.x, c.y - 1, c.z);
     if (!feet || !head || !below || feet.uncertain || head.uncertain || below.uncertain) { out.push(c); continue; }
+    if (Math.hypot(c.x - t.x, c.y - t.y, c.z - t.z) > 1) continue;
     const passable = !feet.solid && !head.solid;
     const support = below.solid || WATER_BLOCKS.has(feet.name);
     if (passable && support) out.push(c);
