@@ -2694,21 +2694,36 @@ describe('终态四分与受理刻回顾', () => {
     expect(exec.submit([{ skill: 'chat', text: '一' }])).not.toContain('下过同类的单');
   });
 
-  /**
-   * taskSignature 不含坐标，同签名任务可能位于不同地点；引用旧失败原因时须去除具体坐标。
-   */
-  it('回顾句不留伪现场:坐标脱敏成「那一处」,措辞也改成「同类的单」', async () => {
+  it.each(['target', 'position', 'dimension', 'options'] as const)(
+    'changed %s does not inherit a different navigation attempt’s failure', async (changed) => {
+      const bot = combatBot({ goto: () => new Promise<void>(() => {}) });
+      const { exec } = makeExecutorOn(bot);
+      const first: SkillCall = { skill: 'goto', at: [10, 64, 10] };
+      exec.submit([first]);
+      await waitUntil(() => exec.currentTask !== null);
+      expect(exec.blockCurrentFromServer('旧地点的地板缺失，仅属于任务一')).toBe(true);
+      if (changed === 'position') bot.entity.position = new V(3, 64, 0);
+      if (changed === 'dimension') (bot as any).game = { dimension: 'the_nether' };
+      const next: SkillCall = changed === 'target' ? { skill: 'goto', at: [10, 81, 10] }
+        : changed === 'options' ? { ...first, dryRun: true } : first;
+      const receipt = exec.submit([next]);
+      expect(receipt).not.toContain('旧地点的地板缺失');
+      expect(receipt).not.toContain('下过同类的单');
+      exec.shutdown();
+    },
+  );
+
+  it('keeps the original task as the source of a matching historical receipt', async () => {
     const bot = combatBot({});
     const { exec, reports } = makeExecutorOn(bot);
-    const why = '一块都没放上:剩下的那一格 (579, 70, 243) 顶在我脑袋上,现在人在 (579, 69, 243)';
-    (exec as any).priorOutcomes.set('pickup:coal', { kind: 'blocked', why, at: Date.now() });
-    const again = exec.submit([{ skill: 'pickup', item: 'coal' }]);
-    expect(again).toContain('下过同类的单(按技能和目标算,不看坐标)');
-    expect(again).toContain('那一处');
-    expect(again).not.toContain('579');
-    expect(again).not.toContain('下过同样的单');
-    exec.clear();
-    void reports;
+    const steps: SkillCall[] = [{ skill: 'pickup', item: 'coal' }];
+    exec.submit(steps);
+    await waitUntil(() => reports.length === 1);
+    const receipt = exec.submit(steps);
+    expect(receipt).toContain('历史任务#1');
+    expect(receipt).toContain('附近没有煤炭掉落物');
+    expect(receipt).toContain('当时');
+    exec.shutdown();
   });
 
   /**

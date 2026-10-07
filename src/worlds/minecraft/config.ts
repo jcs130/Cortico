@@ -343,7 +343,7 @@ export const MINECRAFT_RHYTHM_CONFIG_GROUP: ConfigGroup = {
       },
       'worlds.minecraft.priorOutcome': {
         type: 'boolean', title: '受理回执带上次下场', 'x-hot': true,
-        description: '下同一件事(技能+目标相同,不看坐标数量)时,受理回执捎一句 15 分钟内上次是什么下场;上次成了就不出声。补的是已经被上下文交接压掉的那一段。关掉则受理回执只说这一单。',
+        description: '维度、受理站位和完整参数相同时，受理回执引用15分钟内的历史任务号、原目标与未达成结果；换坐标、方法或数量不借用旧原因。同类提交次数单独统计，不能据此判定有无进展。关闭时不引用历史原因。',
       },
       'worlds.minecraft.repeatSuccessFallback.enabled': {
         type: 'boolean', title: '同类成功任务暂缓', 'x-hot': true,

@@ -1013,6 +1013,8 @@ interface TaskObservation {
 interface QueuedTask {
   id: number;
   steps: SkillCall[];
+  /** 受理时的维度、站位和完整参数；失败回顾不能借用另一地点或方法的原因。 */
+  priorContext?: string;
   startObservation?: TaskObservation;
   /** 每个定向 find 真正开跑的位置；前面的 goto 完成后才知道起点。 */
   findOrigins?: Map<number, Cell>;
@@ -1286,10 +1288,12 @@ interface PriorOutcome {
   kind: 'blocked' | 'partial' | 'noop';
   why: string;
   at: number;
+  context: string;
+  taskId: number;
+  label: string;
 }
 
-/** 受理回顾只报告同类任务上次未达成的结果，注明为回顾，不作为当前可执行性的判据。 */
-/** 同类签名不含坐标，因此回顾文案中的旧坐标须替换为“那一处”，避免冒充本次现场。 */
+/** 跨形状统计的短摘要隐藏坐标；带来源的同现场历史回执保留原文。 */
 function maskCoords(why: string): string {
   return why.replace(/\(\s*-?\d+\s*,\s*-?\d+\s*,\s*-?\d+\s*\)/g, '那一处');
 }
@@ -1304,9 +1308,9 @@ interface RoundaboutSnapshot {
 function priorOutcomeNote(prev: PriorOutcome, now: number, round: RoundaboutSnapshot | null): string {
   const mins = Math.round((now - prev.at) / 60_000);
   const when = mins <= 1 ? '刚才' : `${mins} 分钟前`;
-  const how = prev.kind === 'partial' ? '好像只做成了一半'
+  const how = prev.kind === 'partial' ? '当时只做成了一部分'
     : prev.kind === 'noop' ? '当时没什么可做的'
-      : '好像没做成';
+      : '当时没做成';
   /* 报告窗口内同类任务的提交与实际开跑次数，不推荐行动。 */
   const spanMin = round ? Math.round(round.spanMs / 60_000) : 0;
   const span = spanMin >= 1 ? `${spanMin} 分钟内` : '这几分钟里';
@@ -1316,7 +1320,7 @@ function priorOutcomeNote(prev: PriorOutcome, now: number, round: RoundaboutSnap
         ? `前 ${round.times - 1} 次一步都没跑过`
         : `前 ${round.times - 1} 次里有 ${round.ranBefore} 次跑过第 1 步`)
     : '';
-  return `${when}下过同类的单(按技能和目标算,不看坐标),${how}:${maskCoords(prev.why)}${tail}`;
+  return `${when}下过同类的单；历史任务#${prev.taskId}「${prev.label}」${how}:${prev.why}${tail}。这是历史结果，本次现场以新试算和执行回执为准`;
 }
 
 /** 成功的同类任务没有失败旧账，仍把重复提交次数交给模型判断。 */
@@ -1324,7 +1328,7 @@ function repeatedSubmissionNote(round: RoundaboutSnapshot): string | null {
   if (round.times < 3) return null;
   const spanMin = Math.round(round.spanMs / 60_000);
   const span = spanMin >= 1 ? `${spanMin} 分钟内` : '这几分钟里';
-  return `这是${span}第 ${round.times} 次提交同类任务(按技能和目标算,不看坐标)`;
+  return `这是${span}第 ${round.times} 次提交同类任务(技能和目标类型相同，坐标与参数可能不同；次数未判定有无进展)`;
 }
 
 /** 拦截重生锚破坏后，在此窗口内原样重发同一任务视为确认。 */
@@ -1813,14 +1817,14 @@ export class Executor {
     at: number; dimension: string; from: Cell;
   }>();
   /**
-   * 每种「同一件事」上一次的下场。键是整单的技能+目标序列(见 taskSignature),
-   * 只留没做成/做了一半的那些 —— 成功不入账,受理刻也就不会为它出声。
+   * 每种技能+目标类型最近一次未达成的结果，引用前另核对受理时的完整现场和参数。
+   * 成功清除相同现场的旧账；不同现场的原因不会转交给新尝试。
    */
   private readonly priorOutcomes = new Map<string, PriorOutcome>();
   private readonly unresolvedIntents = new Map<string, {
     attempts: number; at: number; evidence: string; after: TaskObservation | null;
   }>();
-  /** 同类签名在 15 分钟内的提交时刻及开跑首步次数；与 priorOutcomes 共用键和窗口。 */
+  /** 同类签名在 15 分钟内的提交时刻及开跑首步次数，不据此推断目标未推进。 */
   private readonly roundabout = new Map<string, { submits: Array<{ id: number; at: number; started: boolean }> }>();
   /** 实际成功的步骤按目标技能归并；启用 fallback 前也保留窗口内事实。 */
   private readonly successfulIntents = new Map<string, number[]>();
@@ -2053,7 +2057,8 @@ export class Executor {
       receipt: `[${this.clock(at)}] ${satisfiedGoto}`, accepted: true, completedImmediately: true,
     };
     const id = this.opts.nextId();
-    const task: QueuedTask = { id, steps: [...calls], enqueuedAt: at };
+    const task: QueuedTask = { id, steps: [...calls], enqueuedAt: at,
+      priorContext: this.priorOutcomeContext(calls) ?? undefined };
     const emptyFindHold = this.emptyFindNote(task.steps, at);
     const directionalSweep = this.directionalSweepNote(task.steps, at);
     const directionalSweepHold = directionalSweep?.refuse ? directionalSweep.text : null;
@@ -2230,7 +2235,7 @@ export class Executor {
       // 受理试算只读并报告否定结果，不改变执行。
       precheck,
       // 同一件事上次的下场:补的是已经滑出上下文的那一段
-      this.priorNote(task.steps, at, round) ?? repeatedSubmissionNote(round),
+      this.priorNote(task, at, round) ?? repeatedSubmissionNote(round),
       // 相对锚点转为绝对坐标的差异优先呈现。
       echo.hoist,
     ].filter(Boolean);
@@ -3937,11 +3942,19 @@ export class Executor {
    * 15 分钟窗口:再往前的账她多半已经换了打法,拿出来只会误导。
    * 顺手清掉过期项——这张表按签名开条目,一场几百种,不清会一直长。
    */
-  private priorNote(steps: SkillCall[], now: number, round: RoundaboutSnapshot | null): string | null {
+  private priorOutcomeContext(steps: readonly SkillCall[]): string | null {
+    const bot = this.opts.getBot();
+    const position = bot?.entity?.position;
+    if (!bot || !position || ![position.x, position.y, position.z].every(Number.isFinite)) return null;
+    const from = { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) };
+    return JSON.stringify([normalizeDimension(dimensionOf(bot)), from, exactTaskKey(steps)]);
+  }
+
+  private priorNote(task: QueuedTask, now: number, round: RoundaboutSnapshot | null): string | null {
     if (this.opts.priorOutcome?.() === false) return null;
     for (const [k, v] of this.priorOutcomes) if (now - v.at > PRIOR_OUTCOME_WINDOW_MS) this.priorOutcomes.delete(k);
-    const prev = this.priorOutcomes.get(taskSignature(steps));
-    return prev ? priorOutcomeNote(prev, now, round) : null;
+    const prev = this.priorOutcomes.get(taskSignature(task.steps));
+    return task.priorContext && prev?.context === task.priorContext ? priorOutcomeNote(prev, now, round) : null;
   }
 
   /**
@@ -4502,7 +4515,7 @@ export class Executor {
     this.abortTask(task, reason);
     this.detachCheckpointOwner(task.id);
     this.noteBlockedReason(reason, at, { task: `任务#${task.id}「${label}」`, step });
-    this.notePriorOutcome(taskSignature(task.steps), 'blocked', reason, at);
+    this.notePriorOutcome(task, 'blocked', reason, at);
     const repeatFailure = this.noteRepeatOutcome(task, 'blocked', at);
     this.recordExactOutcome(task.steps, true, reason);
     const failedCall = task.steps[task.stepIndex];
@@ -5723,13 +5736,12 @@ export class Executor {
     // (上次没成这次成了,再拿旧账去提醒她就是散布过期事实)。
     // 一步没成、全程无事可做也算没达到目的 —— 找牛找了 20 分钟一头没见着,
     // 任务层面是「做完了」,可她想要的那件事一次没发生。
-    const sig = taskSignature(steps);
     const kind: PriorOutcome['kind'] | null = blockedSteps.length > 0 ? 'blocked'
       : partialSteps.length > 0 ? 'partial'
         : results.length === 0 && noopSteps.length > 0 ? 'noop'
           : null;
     const finishedAt = Date.now();
-    this.notePriorOutcome(sig, kind, firstWhy ?? '没说清为什么', finishedAt);
+    this.notePriorOutcome(task, kind, firstWhy ?? '没说清为什么', finishedAt);
     const repeatFailure = this.noteRepeatOutcome(task, kind, finishedAt);
     this.recordExactOutcome(steps, kind === 'blocked' || kind === 'noop', firstWhy ?? '没说清为什么');
     if (steps.length > 1) {
@@ -5794,12 +5806,14 @@ export class Executor {
     });
   }
 
-  private notePriorOutcome(sig: string, kind: PriorOutcome['kind'] | null, why: string, at: number): void {
+  private notePriorOutcome(task: QueuedTask, kind: PriorOutcome['kind'] | null, why: string, at: number): void {
+    if (!task.priorContext) return;
+    const sig = taskSignature(task.steps);
     if (kind === null) {
-      this.priorOutcomes.delete(sig);
+      if (this.priorOutcomes.get(sig)?.context === task.priorContext) this.priorOutcomes.delete(sig);
       return;
     }
-    this.priorOutcomes.set(sig, { kind, why, at });
+    this.priorOutcomes.set(sig, { kind, why, at, context: task.priorContext, taskId: task.id, label: labelOf(task) });
   }
 
   private observeTask(steps: readonly SkillCall[]): TaskObservation | null {
