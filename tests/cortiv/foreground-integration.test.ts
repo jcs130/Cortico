@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CortiV } from '../../bots/cortiv/persona/persona.ts';
 import { FOREGROUND_CONTEXT_DEFAULTS } from '../../bots/cortiv/persona/foreground-context.ts';
+import { PLANNING_DEFAULTS } from '../../bots/cortiv/persona/planning-review.ts';
 import { functionCall, functionResult, itemText, message, type ContextRecord } from '../../src/protocol/open-responses/context.ts';
 import { estimateMessagesTokens, estimateTokens, nullLogger } from '../../src/core/util.ts';
 import { validatePairing } from '../../src/core/truncate.ts';
@@ -12,11 +13,12 @@ import { makeFakeHarnessApi } from '../core/helpers.ts';
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
-function rig(worlds: World[] = []) {
+function rig(worlds: World[] = [], agendaEnabled = false) {
   const memoryDir = mkdtempSync(join(tmpdir(), 'foreground-persona-'));
   dirs.push(memoryDir);
   const config = { ...FOREGROUND_CONTEXT_DEFAULTS, enabled: true, maxHistoryTokens: 1024, minRecentRounds: 1 };
-  const persona = new CortiV({ memoryDir, foreground: () => config, worlds });
+  const persona = new CortiV({ memoryDir, foreground: () => config, worlds,
+    planning: () => ({ ...PLANNING_DEFAULTS, agendaEnabled }) });
   const messages: ContextRecord[] = [message('system', 'Environment contract')];
   for (let i = 0; i < 12; i++) {
     messages.push(functionCall(`c${i}`, 'inspect', '{}', { responseId: `r${i}` }),
@@ -29,6 +31,25 @@ function rig(worlds: World[] = []) {
 }
 
 describe('CortiV foreground request context', () => {
+  it('retains the latest causal review independently of the current agenda after history compaction', () => {
+    const { persona, config, messages } = rig([], true); persona.attach(makeFakeHarnessApi());
+    config.maxHistoryTokens = 1;
+    const review = (cursor: number, text: string) => message('user', text, { frame: { events: [
+      { source: 'persona', type: 'causal_review', cursor, ts: '2026-01-01T00:00:00Z', start: 0, chars: text.length },
+    ] } });
+    const old = review(1, '旧复核：原方案尚未证实。');
+    messages.splice(1, 0, old);
+    const first = persona.prepareRequest({ sessionId: 'main', round: 1, messages })!;
+    expect(first).toContainEqual(old);
+    expect(first.map(record => itemText(record.item)).join('\n')).toContain('排队 0 项');
+    const latest = review(2, '新复核：实际回到起点，净变化为零；原因未知。');
+    const records = [...messages, latest, functionCall('later-review', 'inspect', '{}', { responseId: 'later-review' }),
+      functionResult('later-review', '较晚现场'.repeat(1000)), message('user', '新的同伴发言。')];
+    const before = structuredClone(records);
+    const next = persona.prepareRequest({ sessionId: 'main', round: 2, messages: records })!;
+    expect(next).toContainEqual(latest); expect(next).not.toContainEqual(old);
+    expect(validatePairing(next)).toEqual([]); expect(records).toEqual(before);
+  });
   it('keeps an older action receipt and adjacent chat while replacing its covered obsolete snapshot body with a source pointer', () => {
     const world: World = { id: 'game', envPromptVars: () => ({}), tools: () => [],
       start: async () => {}, stop: async () => {}, requestFacts: () => ({

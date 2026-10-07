@@ -28,7 +28,7 @@ export interface ForegroundProjection {
 
 interface Group { start: number; end: number; }
 const FRAME_TOOL = 'external_event_frame';
-const PINNED_TYPES = new Set([HANDOFF_NOTE_TYPE, 'pending_work', 'recent_speech', 'planning', 'activity_plan', 'recent_memory', 'memory_index']);
+const PINNED_TYPES = new Set([HANDOFF_NOTE_TYPE, 'pending_work', 'recent_speech', 'planning', 'causal_review', 'activity_plan', 'recent_memory', 'memory_index']);
 
 function prefix(record: ContextRecord): boolean {
   return record.context.head === true || (record.item.type === 'message'

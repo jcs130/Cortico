@@ -92,6 +92,7 @@ describe('Persona长期复盘', () => {
     expect(r.forks[0].tools).toEqual([]); expect(r.gate).not.toHaveBeenCalled();
     expect(r.agenda.state()).toEqual(before);
     expect(r.injected[0].text).toContain('后台因果复核');
+    expect(r.injected[0].kind).toBe('causal_review');
     r.reply(async () => candidate);
     expect(r.review.review().accepted).toBe(true);
     await vi.advanceTimersByTimeAsync(0);
@@ -343,8 +344,9 @@ describe('Persona长期复盘', () => {
     expect(input).toContain('调用 mc_do'); expect(input).toContain('实际工具回执');
     await vi.advanceTimersByTimeAsync(0);
     r.snapshot([message('user', '上周刷塔', { ts: '2025-12-25T10:00:00Z' }),
-      message('user', '自己的复盘', { frame: { events: [{ source: 'persona', type: 'planning', cursor: 5,
-        ts: stamp(), start: 0, chars: 5 }] } })]);
+      ...['planning', 'causal_review'].map((type, i) => message('user', '自己的复盘', { frame: { events: [
+        { source: 'persona', type, cursor: 5 + i, ts: stamp(), start: 0, chars: 5 },
+      ] } }))]);
     expect(r.review.review().accepted).toBe(false);
     expect(r.forks).toHaveLength(1);
   });

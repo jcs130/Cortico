@@ -6,6 +6,7 @@ import { message, itemText, type ContextRecord } from 'cortico/protocol/open-res
 import type { ActivityAgenda } from './activity-agenda.ts';
 
 export const PLANNING = 'planning';
+export const CAUSAL_REVIEW = 'causal_review';
 export const PLANNING_TIMER_OWNER = 'cortiv.planning';
 export interface PlanningConfig {
   enabled: boolean;
@@ -42,6 +43,7 @@ const QUESTION_MAX_CHARS = 1_200;
 const CAUSAL_EVIDENCE_PROMPT = [
   '按时间与来源还原目标→调用意图→执行终态→后续观察，核对目标状态的净变化；中间成功或暂时变化不代表效果保留。',
   'assistant自述、旧笔记和待办中的解释是待核验的前提，不能拿重复自述证明原因。后来的实际观测可以否定早先的推断；记录不充分时明确未知。',
+  '没有证据支持与已有反证否定要分开；时间先后或结果相同不能证明因果机制。只给尚未验证的原因标为候选解释，不改写成已证实的新原因。',
 ].join('\n');
 
 const FOCUSED_REVIEW_PROMPT = [
@@ -196,7 +198,7 @@ export class PeriodicPlanningReview {
       if (events?.length) {
         const body = itemText(item);
         for (const event of events) {
-          if (event.source === 'persona' && event.type === 'planning') continue;
+          if (event.source === 'persona' && (event.type === PLANNING || event.type === CAUSAL_REVIEW)) continue;
           this.noteActivity(`${event.source}/${event.type}/${event.cursor}/${event.ts}`, event.ts,
             `[事件 ${event.source}/${event.type} cursor=${event.cursor}] ${body.slice(event.start, event.start + event.chars)}`);
         }
@@ -348,7 +350,7 @@ export class PeriodicPlanningReview {
           return;
         }
         core.injectInternal(`[${question ? '后台因果复核' : '后台长期复盘'}；依据 ${capturedAt} 之前的记录，建议尚未执行]\n${bounded}`,
-          'planning');
+          question ? CAUSAL_REVIEW : PLANNING);
         finish('completed');
       } catch (error) {
         if (!controller.signal.aborted) {
