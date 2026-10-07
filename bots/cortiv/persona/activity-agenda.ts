@@ -208,8 +208,10 @@ export class ActivityAgenda {
         `已撤销 id=${JSON.stringify(item.id)} ${clip(item.title, 24)}；${item.updatedAt} 原因：${clip(item.note, 64)}；不表示完成。`),
     ].filter(part => part.length);
     const remaining = AGENDA_SUMMARY_MAX_CHARS - [...lines, footer].join('\n').length - sections.length;
-    const budget = sections.length ? Math.max(0, Math.floor(remaining / sections.length)) : 0;
-    return [...lines, ...sections.map(part => section(part, budget)), footer].join('\n');
+    const activeBudget = active ? Math.min(Math.max(0, remaining), sections[0].join('\n').length) : 0;
+    const otherCount = sections.length - (active ? 1 : 0);
+    const budget = otherCount ? Math.max(0, Math.floor((remaining - activeBudget) / otherCount)) : 0;
+    return [...lines, ...sections.map((part, index) => section(part, active && index === 0 ? activeBudget : budget)), footer].join('\n');
   }
   /** Background planning reads open objectives and bounded, separately labelled closure evidence. */
   planningReadout(): string {
