@@ -1,0 +1,35 @@
+{
+  "name": "mc-modern-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Minecraft 高级 3D 网页可视化（现代画面）的独立形态：引擎 + 1.21.1 资产 + 宿主桥接 + 点地走/轨迹注入。默认视图即高级 3D。",
+  "license": "SEE LICENSE IN README.md",
+  "keywords": [
+    "minecraft",
+    "mineflayer",
+    "webgl",
+    "viewer",
+    "3d"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "mc-modern-viewer": "./bin/mc-modern-viewer.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "tools",
+    "README.md",
+    "DIFF.md"
+  ],
+  "scripts": {
+    "start": "node ./bin/mc-modern-viewer.mjs",
+    "import-assets": "node ./tools/import-modern-viewer.mjs",
+    "patch-avatar": "python ./tools/patch_official_avatar.py",
+    "serve": "powershell -NoProfile -ExecutionPolicy Bypass -File ../viewer-service/serve.ps1"
+  },
+  "comment": "这个包就是『在跑的那份』：viewer-service/server.mjs 从这里加载桥接，assets/ 放派生资源（不入库，用 import-assets 自备）。bin/ 的启动器让它能脱离那个宿主单独起。发布前需用户确认资产随包分发，见 docs/PUBLISHING.md。"
+}

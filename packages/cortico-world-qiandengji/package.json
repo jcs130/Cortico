@@ -1,0 +1,50 @@
+{
+  "name": "cortico-world-qiandengji",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "千灯纪 Minecraft server World for Cortico",
+  "license": "MIT",
+  "keywords": [
+    "cortico-world",
+    "cortico",
+    "minecraft"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@11.5.0",
+  "main": "./src/index.ts",
+  "cortico": {
+    "kind": "world",
+    "api": 5,
+    "displayName": "千灯纪",
+    "consoleClient": "dist/console.js"
+  },
+  "files": [
+    "src",
+    "dist",
+    "references",
+    "README.md",
+    "DEPLOYMENT.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/build-console.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "mineflayer": "^4.37.1",
+    "mineflayer-pathfinder": "^2.4.5",
+    "prismarine-viewer": "^1.33.0",
+    "vec3": "^0.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "cortico": "workspace:*",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

@@ -1,0 +1,23 @@
+node_modules/
+dist/
+__pycache__/
+*.pyc
+# 本地导出的 Minecraft 资源与浏览器产物，源码发布不包含这些文件。
+packages/modern-viewer/renderer-src/output/
+*.log
+.DS_Store
+.vitest/
+client/app.js
+viewer-service/node_modules/
+viewer-service/package-lock.json
+packages/modern-viewer/assets/mod-assets/
+packages/modern-viewer/assets/character-assets/
+packages/modern-viewer/assets/npc-portraits/
+packages/modern-viewer/assets/*.js
+packages/modern-viewer/assets/*.wasm
+
+# 例外：assets/ 下的 *.js 一律是派生资源（引擎 / mesher / worker），唯独这份是我们自己写的注入脚本。
+!packages/modern-viewer/assets/mc-control.js
+
+# 派生资源的本地备份（改 bundle/桥接前先备份，但不入库）
+packages/modern-viewer/assets/*.bak-*

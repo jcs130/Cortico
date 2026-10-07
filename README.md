@@ -33,6 +33,13 @@
 
 Cortico is an agent harness designed around an event stream, built for autonomous, continuously running agents with mixed real-time input. It suits persona bots, AI streamers, roleplay, companionship, and many other downstream tasks. A Cortico bot is far more than a chat bot: with an extensible agent system designed around the event stream, Cortico helps you build persistent AI agents capable of handling complex inputs. It supports flexible external extensions, allowing a single bot to simultaneously observe and act across multiple environments—including chat platforms, live games, and even physical environments. Cortico's goal: bring your AI to the world!
 
+## This fork: bundled deployment
+
+This fork ships the Qiandengji World, VTuber performance and modern Minecraft viewer under `packages/`.
+Clone `jcs130/Cortico` on `main`, install from the root, and run `pnpm setup:bundled`.
+See the [deployment guide](docs/bundled-deployment.md) for startup, resources and private data migration.
+Each package retains its own license.
+
 ## Features
 
 1. 🆓 Free and open source!
@@ -47,7 +54,7 @@ Cortico is an agent harness designed around an event stream, built for autonomou
 
 Use [cortico-world-vtuber](https://github.com/Pal-AI-Lab/cortico-world-vtuber) to start creating your own AI VTuber right away: it drives a Live2D model through VTube Studio, speaks through streaming TTS, times subtitles with a forced aligner and pushes the overlay into OBS, all as one Cortico World.
 
-It is released under its own source license (AGPL-3.0 + CLA), so it lives in a separate repository instead of the Cortico main tree.
+The bundled copy is in `packages/cortico-world-vtuber` and retains its AGPL-3.0-or-later license and CLA files.
 
 ## Build Extensions with Cortina
 

@@ -1,0 +1,6 @@
+node_modules/
+dist/
+src/voxcpm2-server/
+scratch/
+__pycache__/
+*.log

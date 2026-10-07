@@ -33,6 +33,12 @@
 
 Cortico 是基于事件流系统设计的 Agent Harness，用于自主响应、持续运行、混合实时输入场景的智能体开发，适用于人格 Bot、AI 主播、角色扮演、聊天陪伴等多种下游任务。Cortico Bot 远不只是聊天 Bot：得益于围绕事件流设计的 Agent 系统，Cortico 可以帮助构建长期持续存在、适用于复杂输入的 AI 智能体，它支持自由的外部扩展，能够同时观察和操作多个外部环境，包括聊天平台、实时游戏、甚至现实环境。Cortico 的目标是：把你的 AI 带到这个世界！（Bring your AI to the world！）
 
+## 此 fork 的统一部署
+
+千灯纪 World、VTuber 演出和现代 Minecraft 网页渲染器均在 `packages/`。
+拉取 `jcs130/Cortico` 的 `main`，在根目录安装依赖后执行 `pnpm setup:bundled`。
+启动、资源安装及私人数据迁移见 [统一部署说明](docs/bundled-deployment.md)。各模块保留自己的许可。
+
 ## 特性
 
 1. 🆓 免费开源！
@@ -47,7 +53,7 @@ Cortico 是基于事件流系统设计的 Agent Harness，用于自主响应、�
 
 使用 [cortico-world-vtuber](https://github.com/Pal-AI-Lab/cortico-world-vtuber) 立刻开始创造你的 AI VTuber：经 VTube Studio 驱动 Live2D 模型、流式 TTS 出声、强制对齐器给字幕定时、overlay 画面推进 OBS，作为一个 Cortico World 整体提供。
 
-它遵循独立的源码协议（AGPL-3.0 + CLA），因此以独立仓库发布，不在 Cortico 主干上。
+此 fork 中的副本位于 `packages/cortico-world-vtuber`，保留其 AGPL-3.0-or-later 许可与 CLA 文件。
 
 ## 用 Cortina 编写扩展
 

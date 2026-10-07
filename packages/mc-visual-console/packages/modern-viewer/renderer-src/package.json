@@ -1,0 +1,31 @@
+{
+  "name": "@mc-visual-console/renderer-source",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Portable browser renderer and offline Minecraft 1.20.6 asset build tools for Mineflayer viewers",
+  "dependencies": {
+    "@pixiv/three-vrm": "3.5.5",
+    "mc-assets": "0.2.83",
+    "minecraft-data": "3.113.2",
+    "minecraft-renderer": "0.1.96",
+    "prismarine-chunk": "1.41.0",
+    "socket.io-client": "4.8.3",
+    "three": "0.184.0",
+    "valtio": "1.13.2",
+    "vec3": "0.1.10"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "esbuild-plugin-polyfill-node": "0.3.0",
+    "prismarine-block": "1.23.0"
+  },
+  "scripts": {
+    "export:assets": "python tools/export-minecraft-viewer-assets.py",
+    "build:client": "node tools/build-minecraft-viewer-client.mjs .",
+    "verify:assets": "node tools/verify-minecraft-viewer-assets.mjs",
+    "export:sounds": "node tools/export-minecraft-viewer-sounds.mjs",
+    "test:tools": "node --test tools/test/*.test.mjs"
+  }
+}

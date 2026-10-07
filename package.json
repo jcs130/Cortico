@@ -23,6 +23,9 @@
     "audit:release": "tsx scripts/release-audit.ts",
     "publish:package": "tsx scripts/publish-package.ts",
     "check:extension": "tsx scripts/extension-check.ts",
+    "setup:bundled": "tsx scripts/setup-bundled.ts",
+    "test:bundled": "pnpm --filter cortico-world-qiandengji test && pnpm --filter cortico-world-vtuber test && pnpm --filter mc-visual-console test",
+    "typecheck:bundled": "pnpm --filter cortico-world-qiandengji typecheck && pnpm --filter cortico-world-vtuber typecheck && pnpm --filter mc-visual-console typecheck",
     "logq": "tsx scripts/logq.ts",
     "dev:console": "tsx scripts/dev-console.ts",
     "bots": "tsx src/launcher.ts --list"

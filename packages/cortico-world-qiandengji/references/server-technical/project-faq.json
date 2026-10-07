@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "id": "project-faq",
+  "title": "可缇项目技术问答",
+  "updatedAt": "2026-10-07T22:50:12.2094013+08:00",
+  "source": "本机现役代码、配置与运行状态核对；2026-10-07",
+  "reading": "按观众的问题查相关问答，用白话简短解释。模型和音色是采样时的配置，后续变化时订正本资料。",
+  "questions": [
+    {
+      "question": "可缇使用什么框架？",
+      "answer": "使用Cortico，一个用TypeScript编写、在Node.js上运行的事件驱动Agent框架。它把运行调度、人格与上下文、记忆、外部环境分开组织。",
+      "sources": [
+        "https://github.com/jcs130/Cortico/blob/59c71e2931d3932868ed131220c98caa662e8979/package.json",
+        "https://github.com/jcs130/Cortico/blob/59c71e2931d3932868ed131220c98caa662e8979/PHILOSOPHY.md"
+      ]
+    },
+    {
+      "question": "她怎么自主玩游戏、接弹幕和聊天？",
+      "answer": "游戏状态、玩家聊天和弹幕作为事件进入框架。她结合当前目标与记忆选择工具，连续动作交给执行队列，之后读取执行结果调整下一步。游戏任务执行期间仍可以处理交流。",
+      "sources": [
+        "https://github.com/jcs130/Cortico/blob/59c71e2931d3932868ed131220c98caa662e8979/bots/cortiv/persona/persona.ts",
+        "https://github.com/jcs130/Cortico/blob/59c71e2931d3932868ed131220c98caa662e8979/src/worlds/minecraft/README.md"
+      ]
+    },
+    {
+      "question": "她用什么模型？为什么分快慢系统？",
+      "answer": "本次核对的前台模型名称是qwen3.8-27b。日常判断与交流走前台，较重的规划和整理有单独的异步后台通道；StartLUX轻量选择器参与场景分类、注意力和资料主题选择。具体模型可以通过配置更换。",
+      "sources": [
+        "现役/api/status与planning、fastAttention、fastReference配置，2026-10-07"
+      ]
+    },
+    {
+      "question": "她能看画面、评价建筑吗？",
+      "answer": "可以按需要读取游戏画面截图做视觉观察，并结合位置、方块、库存等现场读数判断。复杂看图可以在后台进行，结果回来后再继续依赖这张图的步骤。",
+      "sources": [
+        "https://github.com/jcs130/Cortico/blob/59c71e2931d3932868ed131220c98caa662e8979/src/worlds/minecraft/visual-capture.ts",
+        "https://github.com/jcs130/cortico-world-qiandengji/blob/main/src/guides/vision.md"
+      ]
+    },
+    {
+      "question": "她怎么记住观众、经历和技术资料？",
+      "answer": "记忆保存在文件工作区中，包含观众档案、交流记录、项目进展和经验，并有后台整理。按目录、关键词和相关段落检索；当前事实需要用较新的记录与现场结果核对。技术资料只在问到时读取相关内容。",
+      "sources": [
+        "https://github.com/jcs130/Cortico/blob/59c71e2931d3932868ed131220c98caa662e8979/bots/cortiv/README.md",
+        "https://github.com/jcs130/Cortico/blob/59c71e2931d3932868ed131220c98caa662e8979/bots/cortiv/persona/reference-library.ts"
+      ]
+    },
+    {
+      "question": "说话用什么语音和音色？支持流式吗？",
+      "answer": "口播接入IndexTTS 2.5，当前使用桃子音色。语音适配器由演出扩展管理，支持按标点分句的流式播报，并处理多音字、等级读法和演出动作标记。",
+      "sources": [
+        "现役8012健康状态，2026-10-07",
+        "https://github.com/jcs130/cortico-world-vtuber/blob/5cc074b/adapters/indextts/README.md"
+      ]
+    },
+    {
+      "question": "她的歌是怎么生成的？唱歌和说话是同一个功能吗？",
+      "answer": "歌曲由后台音乐流程制作：ACE-Step根据歌词和风格生成歌曲，分离人声后用Seed-VC参考授权录音转换歌声，再与伴奏混合并核验音频和歌词。口播与歌曲使用各自的处理流程；新歌在后台制作，完成后择时播放。",
+      "sources": [
+        "https://github.com/jcs130/cortico-world-vtuber/blob/5cc074b/src/MUSIC_VOICE.md"
+      ]
+    }
+  ],
+  "scope": "2026-10-07的部署快照；迁移后核对控制台中的现役模型、音色与服务状态，再订正配置类问答。"
+}

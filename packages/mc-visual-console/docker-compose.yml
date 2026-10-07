@@ -1,0 +1,37 @@
+# mc-visual-console 的 Linux 侧服务：画面（prismarine-viewer）+ 协议（本仓库）
+#
+#   docker compose up -d --build
+#
+# 为什么在容器里：prismarine-viewer 的服务端要原生 node-canvas，
+# 而它在 Windows 上需要 Visual Studio 工具链；Linux 下一次装好（配方见 viewer-service/Dockerfile）。
+#
+# 加入世界是"对外状态变更"：默认只起服务，MC_HOST 指向哪里由你决定；
+# 指向真实服务器会让一个名为 viewer-bot 的玩家进服。
+
+services:
+  viewer:
+    # 上下文必须是仓库根：server.mjs 要 import ../packages/modern-viewer/、控制台页要 ../client/
+    # （见 viewer-service/Dockerfile 顶部说明）。构建前先在宿主机跑 `corepack pnpm build:client`。
+    build:
+      context: .
+      dockerfile: viewer-service/Dockerfile
+    image: mc-visual-console-viewer:dev
+    container_name: mc-visual-console-viewer
+    ports:
+      # 默认只绑回环：这两个口都能驱动玩家（7801 允许 claim 后直接下令，7800 的画面可点地走），
+      # 对 0.0.0.0 发布等于把控制权交给整个局域网（2026-09-23 审查指出）。
+      # 确实要远程看，请显式改成 "7800:7800" 并自行加鉴权/反代。
+      - "127.0.0.1:7800:7800"   # prismarine-viewer 的画面（浏览器打开它）
+      - "127.0.0.1:7801:7801"   # 本仓库的协议（/health /state + WS）
+    environment:
+      MC_HOST: ${MC_HOST:-host.docker.internal}
+      MC_PORT: ${MC_PORT:-25702}
+      MC_USERNAME: ${MC_USERNAME:-ag_xiaozhi}
+      MC_VERSION: ${MC_VERSION:-1.21.1}
+      VIEWER_PORT: "7800"
+      PROTOCOL_PORT: "7801"
+      VIEW_DISTANCE: ${VIEW_DISTANCE:-6}
+      FIRST_PERSON: ${FIRST_PERSON:-0}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

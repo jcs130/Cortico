@@ -1,0 +1,172 @@
+# cortico-world-vtuber
+
+[Cortico](https://github.com/Pal-AI-Lab/Cortico) 的 VTuber 演出 World,以独立 npm 包发布。
+
+World 把一段台本变成**连续演出**:文本经流式 TTS 出声,同一段文本解析出的动作记号驱动
+Live2D 模型(经 VTube Studio 的 Public API 注入参数),字幕按强制对齐器给出的时间点
+跟着念,OBS 里的 overlay 画面由 World 自带的演出流服务直接推。控制台里它有八个面板:
+挂载、模型档案、Overlay、动作调参、声线档案、时间点标注、演出日志、演出诊断。
+
+World 内部的分层、演出包格式、台本记号与 Live2D 适配写在 [`src/README.md`](src/README.md)、
+[`src/vtuber_performance_module_design.md`](src/vtuber_performance_module_design.md) 与
+[`src/models/LIVE2D-ADAPTATION.md`](src/models/LIVE2D-ADAPTATION.md)。
+
+## 与 Cortico 的关系
+
+这是一个**扩展包**,不是 Cortico 的一部分。它按 Cortico 的扩展契约声明自己:
+
+```jsonc
+"cortico": { "kind": "world", "api": 4, "consoleClient": "dist/console.js", "consoleStyle": "dist/console.css" }
+```
+
+运行时它以 `cortico/<框架 src 下的路径>` import 框架(`cortico/world.ts`、
+`cortico/core/types.ts` …)。这些 specifier 由框架 `src/extensions/runtime.ts` 注册的模块
+钩子解析到框架源码本身,**同一份实例**——扩展与框架共用一个 `WorldAssembly`、一套
+日志锚点。因此包必须是 `"type": "module"`:CommonJS 包经 require 会拿到框架源码的
+第二份副本。
+
+浏览器侧(`src/console/**`)对 `cortico/*` **只 `import type`**:框架的前端代码不随本包
+发布,面板 bundle 也不该把它打进来。要用到的运行时值在包内自带(`console/disposable.ts`
+的 `toDisposable`,`console/model.ts` 里那枚目录图标)。
+
+## 安装
+
+先在本目录构建面板产物——`dist/` 不进版本库,没有它控制台的 VTuber 页是空的:
+
+```bash
+corepack pnpm install
+corepack pnpm build
+```
+
+然后二选一装进 Cortico:
+
+- 控制台「扩展」页手动安装,填本目录的绝对路径;
+- 或在 `<Cortico>/extensions/` 下 `corepack pnpm add --ignore-workspace <本目录绝对路径>`。
+
+**装完要整进程重启 Cortico**:World 定义在装配表里,热激活开关管不到扩展的装载。
+
+## 开发
+
+`tsconfig.json` 的 `paths` 与 `vitest.config.ts` 的 `resolve.alias` 都把 `cortico/*` 指向
+`../BOT/src/`——也就是**与本目录同级的框架 checkout**。框架放在别处时改这两处(它们必须
+同步)。生产里不靠这两条:那时解析由框架的模块钩子完成。
+
+```bash
+corepack pnpm typecheck   # tsc --noEmit,Node 侧与浏览器侧一份配置一起 check
+corepack pnpm test        # vitest run
+corepack pnpm build       # esbuild → dist/console.{js,css}
+```
+
+测试全程 mock:不连 VTube Studio、不起真 TTS server、不开声卡。构建脚本**不给
+`cortico/*` 配 alias 也不 external**——报 "Could not resolve cortico/…" 就说明浏览器侧
+漏了一处运行时依赖,去把它本地化,不要在构建里放行。
+
+## TTS 运行时与权重
+
+语音服务返回 HTTP 410 且 JSON `error:dedup` 时，表示服务端跳过重复文本。本段不播出、不回落整段重试，保留此前的 TTS 状态，演出队列继续处理后续内容；其他 HTTP 错误仍按合成失败报告。
+
+World 不带二进制也不带权重,控制台的 TTS 面板负责把它们取来:
+
+- **运行时**装到 `<运行时根>/llama.cpp-omni/<release>/<平台后端>/`。二进制来自
+  [Phantivia/llama.cpp-omni](https://github.com/Phantivia/llama.cpp-omni) 的 `tts-*` release
+  (上游 `tc-mb/llama.cpp-omni` 不发这几个可执行文件),Windows CUDA 版另取 ggml-org 的
+  cudart 包。自己编的构建填进「TTS 运行时目录」就不再下载。
+- **权重**下到 `<模型根>/vtuber/`:VoxCPM2 的两个 GGUF 走 HuggingFace 钉住的 revision,
+  面板上点一下就下。对齐器的两个要自己转,见下。来源与许可见
+  [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
+- **参考音频**属于部署私有资产,放「声线库目录」,留空时落在权重目录旁边。
+
+### 对齐器权重
+
+对齐器给字幕逐字时间点。全网没有现成的 GGUF,本包也不转发 Qwen 的权重,自己转一次:
+
+```bash
+# 原始权重,任意目录
+huggingface-cli download Qwen/Qwen3-ForcedAligner-0.6B-hf --local-dir ./aligner-hf
+
+# 转成两个 GGUF,直接落进权重目录
+tsx scripts/aligner-gguf.ts --src ./aligner-hf --out <模型根>/vtuber
+```
+
+出 `Qwen3-Aligner-LM-F16.gguf`(1.20 GB)与 `Qwen3-Aligner-Audio-F16.gguf`(0.66 GB)。
+两个文件在 `<模型根>/vtuber/` 里就自动认;放别处就在 `config.json` 的 `worlds.vtuber`
+节里指过去:
+
+```jsonc
+"ttsAlignerLmFile":    "D:/weights/Qwen3-Aligner-LM-F16.gguf",
+"ttsAlignerAudioFile": "D:/weights/Qwen3-Aligner-Audio-F16.gguf"
+```
+
+**这两项一旦填了就是必须加载**:文件不在,TTS server 不启动,并报出缺的那个路径。
+两项都留空、默认位置也没有文件时,TTS 照常出声,只是没有逐字时间点,字幕与锚点回落按
+字符比例估计。
+
+真机跑一遍全流程(对齐器权重要先转好,不然它直接报缺):
+
+```bash
+tsx scripts/check-tts-runtime.ts
+```
+
+它会装运行时、下 VoxCPM2 权重、起 server,然后打 `/health`、流式合成、对齐各一次。
+联网,要显卡,默认装在 `scratch/tts-runtime-check/` 下,不碰真部署。
+
+## 第三方资产
+
+**Live2D 模型、TTS 声学/对齐模型权重、参考声线音频一律不入库。**
+
+`src/models/examples/cortico.profile.json` 是一份写完的接线档案(适配 Type-H1),当读物用;
+它**不会被加载**,见 [`src/models/examples/README.md`](src/models/examples/README.md)。
+Type-H1 的许可 §4.5 禁止 AI 用途,模型文件本身从不出现在这个仓库里。
+
+## 发布到 npm
+
+`main` 现在指向 `./src/index.ts`:框架进程跑在 tsx 下,TS 入口可直接 import,开发期
+省一次构建。真要发到 npm 时把它改成 JS 产物(并把 `src` 换成 `dist` 进 `files`),
+否则装到没有 tsx 的宿主上会起不来。
+
+## 许可
+
+AGPL-3.0-or-later,见 [LICENSE](LICENSE)。框架 Cortico 是 MIT,两者经 HTTP 与扩展契约相连,
+许可各归各。想提 PR 见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+## IndexTTS 语音服务管理
+
+`src/tts-service.ts` 统一管理语音服务。`worlds.vtuber.ttsService.kind` 选择
+`voxcpm2`、`indextts` 或 `external`，`ttsUrl` 是客户端连接的根地址。
+`autoStart` 默认关闭；开启后随演出扩展启动。
+
+IndexTTS 适配器随本扩展发布，Python 依赖见
+[适配器说明](adapters/indextts/README.md)。部署配置示例：
+
+```json
+{
+  "worlds": {
+    "vtuber": {
+      "ttsUrl": "http://127.0.0.1:8012",
+      "ttsService": {
+        "kind": "indextts",
+        "autoStart": true,
+        "pythonFile": "D:/runtime/python.exe",
+        "upstreamUrl": "http://127.0.0.1:8087",
+        "preferencesFile": "D:/deployment/voice.json",
+        "pronunciationModelDir": "D:/models/reading",
+        "pronunciationTokenizerDir": "D:/models/tokenizer"
+      }
+    }
+  }
+}
+```
+
+服务地址、类型与进程配置变化需重载演出扩展。「挂载」与「声线档案」页显示进程归属，
+可启停选定的服务；「声线档案」页可重启托管适配器。
+适配器启动前检查现有端点；符合协议的现有服务记为外部服务，不会再启动一份。
+其他服务占用端口时报告错误。托管实例通过随机健康凭据确认归属，正常停止或宿主
+异常退出时结束子进程。退出及连续三次健康失败触发有界恢复；恢复间隔逐次加倍，
+达到 `maxRestarts` 后停止重试，手动启动重置次数。
+
+模型网关通过 `upstreamUrl` 连接，其进程仍由部署者管理，可供其他应用共用。
+开启 `worlds.vtuber.ttsSpeech.enabled` 后，网页保存的音色、语速与语气配置通过框架
+配置接口持久化，热更新到演出引擎，并应用于下一次普通或流式合成。关闭时使用适配器
+偏好文件。可选音色来自模型网关的 `/voices`；VoxCPM2 档案字段仅用于 VoxCPM2。
+权重、参考音频和部署偏好不随包发布。
+
+控制台静态资源以包版本缓存；更新浏览器代码时同时更新包版本，宿主重载后使用新的资源地址。

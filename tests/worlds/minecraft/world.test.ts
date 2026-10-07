@@ -120,6 +120,24 @@ describe('同类成功任务 fallback 的 World 受理边界', () => {
       .toContain('任务#');
     exec.clear();
   });
+
+  it('旧配置缺少 fallback 字段时仍默认关闭', async () => {
+    const config = cfg();
+    delete (config as Partial<typeof config>).repeatSuccessFallback;
+    const world = new MinecraftWorld({ cfg: config });
+    const bot = combatBot({});
+    const { exec, reports } = makeExecutorOn(bot);
+    stub(world, { host: new FakeHost(), executor: exec, bridge: { bot } });
+    for (let i = 1; i <= 3; i++) {
+      exec.submit([{ skill: 'goto', at: [i * 2, 64, 0] }]);
+      await vi.waitFor(() => expect(reports).toHaveLength(i));
+    }
+    const accepted = (world as any).enqueueTool('mc_do', {
+      steps: [{ skill: 'goto', at: [8, 64, 0] }],
+    }, parseSteps);
+    expect(accepted).toContain('任务#');
+    exec.clear();
+  });
 });
 
 

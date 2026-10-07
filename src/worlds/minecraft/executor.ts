@@ -2004,7 +2004,8 @@ export class Executor {
     const windowMs = config.windowMinutes * 60_000;
     for (const target of steps) {
       if (!allowed.has(target.skill)
-        || ['attack', 'flee', 'surface', 'eat', 'chat'].includes(target.skill)) continue;
+        || ['attack', 'flee', 'surface', 'eat', 'chat'].includes(target.skill)
+        || ('dryRun' in target && target.dryRun === true)) continue;
       const recent = (this.successfulIntents.get(taskSignature([target])) ?? [])
         .filter((at) => now - at < windowMs);
       if (recent.length < config.maxSuccesses) continue;
