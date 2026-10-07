@@ -1563,12 +1563,40 @@ export async function skillTrade(
 
 /* ========== 锚点几何技能族:probe / build / excavate / tunnel ========== */
 
-/** 作物与耕地附各自的服务端属性，属性未读到时不推断。 */
+/** 作物、耕地和液体附服务端属性，属性未读到时不推断。 */
 export function probeStateText(bot: Bot, c: Cell): string {
+  const block = blockAtCell(bot, c);
+  if (block?.name === 'water' || block?.name === 'lava') {
+    const level = blockProp(block, 'level');
+    return level === null ? '(level未读,source未知)' : `(level=${level},source=${level === '0'})`;
+  }
   const age = cropAgeOfCell(bot, c);
   if (age) return `(age ${age.value}/${age.max})`;
   const moisture = farmlandMoistureAt(bot, c);
   return moisture ? `(moisture ${moisture.value}/${moisture.max})` : '';
+}
+
+interface ProbeCellReading {
+  c: Cell;
+  name: string | null;
+  state: string;
+  fluidLevel: string | null;
+}
+
+/** 源方块另列坐标，最近的流动液体不会挤掉可舀取的源格。 */
+function probeFluidText(bot: Bot, pre: readonly ProbeCellReading[]): string {
+  return ['water', 'lava'].flatMap((name) => {
+    const fluid = pre.filter((e) => e.name === name);
+    if (!fluid.length) return [];
+    const sources = fluid.filter((e) => e.fluidLevel === '0');
+    const unknown = fluid.filter((e) => e.fluidLevel === null).length;
+    const me = bot.entity.position;
+    sources.sort((a, b) => Math.hypot(a.c.x - me.x, a.c.y - me.y, a.c.z - me.z)
+      - Math.hypot(b.c.x - me.x, b.c.y - me.y, b.c.z - me.z));
+    const shown = sources.slice(0, PROBE_WHERE_SHOWN).map((e) => cellText(e.c)).join('、');
+    return [`${zhName(name)}液体状态:源方块(level=0)×${sources.length}${shown ? `:${shown}` : ''}`
+      + `;流动×${fluid.length - sources.length - unknown}${unknown ? `;level未读×${unknown}` : ''}`];
+  }).join('。');
 }
 
 /** probe.where 直接检查指定区域的区块数据，不经过视线闸；零匹配也明确回报。 */
@@ -1576,24 +1604,24 @@ export function probeWhereText(
   bot: Bot,
   call: Extract<SkillCall, { skill: 'probe' }>,
   where: readonly string[],
-  pre: ReadonlyArray<{ c: Cell; name: string | null }>,
+  pre: readonly ProbeCellReading[],
   unloaded: number,
 ): string {
   const want = untilBlockIds(bot, where);
   const names = blockNamesOf(bot, want.ids);
   const me = bot.entity.position;
-  const found = new Map<string, Cell[]>();
+  const found = new Map<string, ProbeCellReading[]>();
   for (const e of pre) {
     if (e.name === null || !names.has(e.name)) continue;
     const list = found.get(e.name) ?? [];
-    list.push(e.c);
+    list.push(e);
     found.set(e.name, list);
   }
   const lines = [...found]
     .map(([name, at]) => {
-      at.sort((a, b) => Math.hypot(a.x - me.x, a.y - me.y, a.z - me.z)
-        - Math.hypot(b.x - me.x, b.y - me.y, b.z - me.z));
-      const shown = at.slice(0, PROBE_WHERE_SHOWN).map(cellText).join('、');
+      at.sort((a, b) => Math.hypot(a.c.x - me.x, a.c.y - me.y, a.c.z - me.z)
+        - Math.hypot(b.c.x - me.x, b.c.y - me.y, b.c.z - me.z));
+      const shown = at.slice(0, PROBE_WHERE_SHOWN).map((e) => `${cellText(e.c)}${e.state}`).join('、');
       return `${zhName(name)}×${at.length}${at.length > PROBE_WHERE_SHOWN ? `,最近的 ${shown}` : `:${shown}`}`;
     })
     .sort();
@@ -1620,7 +1648,8 @@ export function probeWhereText(
   const oreNote = lines.length === 0 && where.some((id) => /(?:^|:)\w+_ore$/.test(id))
     ? '；零命中只代表客户端收到的区块数据没有目标，服务器可能隐藏未暴露的矿石'
     : '';
-  return `${head}${miss}${body}${ents}${unknownNote}${tail}。这一档直接读区块,不受遮挡与视线限制${oreNote}`;
+  const fluid = probeFluidText(bot, pre.filter((e) => e.name !== null && names.has(e.name)));
+  return `${head}${miss}${body}${ents}${unknownNote}${fluid ? `。${fluid}` : ''}${tail}。这一档直接读区块,不受遮挡与视线限制${oreNote}`;
 }
 
 /**
@@ -1635,15 +1664,16 @@ export async function skillProbe(bot: Bot, call: Extract<SkillCall, { skill: 'pr
   );
   const pre = cells.map((c) => {
     const b = blockAtCell(bot, c);
-    return { c, name: b?.name ?? null };
+    return { c, name: b?.name ?? null, state: b ? probeStateText(bot, c) : '',
+      fluidLevel: b?.name === 'water' || b?.name === 'lava' ? blockProp(b, 'level') : null };
   });
   const unloaded = pre.filter((e) => e.name === null).length;
   const memo = ctx.probeMemo;
   const geoKey = fnv32(`${locating ? `where:${call.where!.join('|')}` : 'all'}|${call.shape}|${cells.map((c) => `${c.x},${c.y},${c.z}`).join(';')}`);
-  // 同材质的龄期与水分变化也构成新读数。
+  // 同材质的龄期、水分和液体来源变化也构成新读数。
   const readHash = fnv32(pre.map((e) => {
     if (e.name === null) return '?';
-    return `${e.name}${e.name in CROP_MAX_AGE || e.name === 'farmland' ? probeStateText(bot, e.c) : ''}`;
+    return `${e.name}${e.state}`;
   }).join(','));
   const previous = memo?.entries?.get(geoKey) ?? memo?.last;
   if (previous && previous.key === geoKey && previous.hash === readHash) {
@@ -1675,12 +1705,13 @@ export async function skillProbe(bot: Bot, call: Extract<SkillCall, { skill: 'pr
       lines.push(`${head}: 全是空气。`);
     } else {
       const airTail = airCells.length > 0 ? `;其余 ${airCells.length} 格是空气` : '';
-      lines.push(`${head},逐格: ${listed.map((e) => `(${e.c.x},${e.c.y},${e.c.z}):${zhName(e.name!)}${probeStateText(bot, e.c)}`).join('、')}${airTail}。`);
+      lines.push(`${head},逐格: ${listed.map((e) => `(${e.c.x},${e.c.y},${e.c.z}):${zhName(e.name!)}${e.state}`).join('、')}${airTail}。`);
     }
     pushPocketLine(bot, lines, cells, airCells);
   } else {
     const reading = readRegion(bot, cells);
-    lines.push(`${head}: ${compositionText(reading, true)}。坐标是各材质的最近样本，样本上方空间仍需逐格核对。`);
+    const fluid = probeFluidText(bot, pre);
+    lines.push(`${head}: ${compositionText(reading, true)}。坐标是各材质的最近样本，样本上方空间仍需逐格核对。${fluid ? `${fluid}。` : ''}`);
     pushPocketLine(bot, lines, cells, reading.air);
   }
   if (unloaded > 0) lines.push(`${unloaded} 格区块没加载,没读到。`);
