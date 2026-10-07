@@ -62,6 +62,7 @@ import { farmingClickCell, isHoeUseItem } from './farming-target.ts';
 import { publishViewerCastCommand } from './viewer-cast.ts';
 import { skillGesture } from './skills-social.ts';
 import { skillLook } from './skills-look.ts';
+import { skillControl } from './skills-control.ts';
 import { flyToLanding, flyToPosition, landFlight, flightState, previewFlight } from './flight.ts';
 import { promoteTemporaryScaffold, reclaimPendingTemporaryScaffold } from './temporary-scaffold.ts';
 import { inventoryReadConfirmed } from './inventory-window-sync.ts';
@@ -834,6 +835,10 @@ async function runSkill(bot: Bot, call: SkillCall, ctx: SkillContext): Promise<s
       }
     }
     case 'look': return skillLook(bot, call, ctx);
+    case 'control': {
+      dropGoal(bot, 'task', '短时直接控制', ctx.diag);
+      return skillControl(bot, call, ctx);
+    }
     case 'flight': {
       const at = resolveAt(bot, call.at);
       if (call.dryRun) return `飞行试算（未移动、未施法；仅核对当前已加载地形，执行时重验）：${JSON.stringify(previewFlight(
@@ -1095,7 +1100,7 @@ type QueueHoldSlot = 'environment' | 'fall';
 function reRunnable(call: SkillCall | undefined): boolean {
   if (!call) return true;
   switch (call.skill) {
-    case 'craft': case 'smelt': case 'toss': case 'stow': case 'take': case 'brew': case 'transit': return false;
+    case 'craft': case 'smelt': case 'toss': case 'stow': case 'take': case 'brew': case 'transit': case 'control': return false;
     // 只看报价那一形没有副作用,重跑无妨;下过手的那一形扣了等级与青金石,不重跑
     case 'enchant': return call.index === undefined;
     case 'use': return (call.times ?? 1) <= 1 && call.index === undefined;
@@ -4452,7 +4457,7 @@ export class Executor {
     const step = describeSkill(f.steps[Math.min(at, f.steps.length - 1)]);
     const carried = resumedCollect(f, at);
     return f.interrupted !== null && f.interrupted !== undefined
-      ? `刚才任务#${f.id} 的第 ${f.interrupted + 1} 步做到一半被打断,那一步不重做(重做会再扣一次料),后面的接着来`
+      ? `刚才任务#${f.id} 的第 ${f.interrupted + 1} 步做到一半被打断,那一步不重做(${f.steps[f.interrupted]?.skill === 'control' ? '重放会重复移动，需重新观察' : '重做会再扣一次料'}),后面的接着来`
       : `刚才做到一半的任务#${f.id} 接着做(第 ${at + 1} 步:${step}${carried ? `,${carried.note}` : ''})`;
   }
 
@@ -4977,7 +4982,8 @@ export class Executor {
       log.push({ step, what: describeSkill(call), outcome: 'cut', why });
     };
     if (typeof task.interrupted === 'number') {
-      cut(task.interrupted + 1, '做到一半被打断,重做会重复扣料');
+      cut(task.interrupted + 1, task.steps[task.interrupted]?.skill === 'control'
+        ? '按键做到一半被打断，重放会重复移动，需重新观察' : '做到一半被打断,重做会重复扣料');
     }
     if (progress && progress.step === log.length + 1) {
       cut(progress.step, progress.count ? `进度 ${progress.count.done}/${progress.count.total}` : null);
@@ -5244,8 +5250,11 @@ export class Executor {
         // 战斗挂起后的续做:被打断的非幂等步不重跑(重跑会重复扣料),按没做成算;
         // 更早的步战前已做完,按做成计入闸门,结局回执不重述
         if (i === task.interrupted) {
-          const line = `${stepLabel(i)} 做到一半被打断,没重做(这一步重做会重复扣料),按没做成算`;
-          land(i, 'fail', '做到一半被打断,没重做(重做会重复扣料)', line);
+          const why = call.skill === 'control' ? '按键做到一半被打断，没重放（会重复移动），需重新观察'
+            : '做到一半被打断,没重做(重做会重复扣料)';
+          const line = call.skill === 'control' ? `${stepLabel(i)} ${why}`
+            : `${stepLabel(i)} 做到一半被打断,没重做(这一步重做会重复扣料),按没做成算`;
+          land(i, 'fail', why, line);
           blockedSteps.push(line);
           if (call.skill === 'transit') transitBoundary = i + 1;
           continue;

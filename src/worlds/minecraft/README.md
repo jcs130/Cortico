@@ -1,4 +1,4 @@
-<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/flight.ts, src/worlds/minecraft/flight-preview.ts, src/worlds/minecraft/executor.ts, src/worlds/minecraft/skills.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts -->
+<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/flight.ts, src/worlds/minecraft/flight-preview.ts, src/worlds/minecraft/executor.ts, src/worlds/minecraft/skills.ts, src/worlds/minecraft/skills-control.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts -->
 
 # worlds/minecraft
 
@@ -13,6 +13,8 @@
 仍然值得提。
 
 ## 结构
+
+`control` 在 `mc_do` 的同一身体队列内提供 50–2000 毫秒的方向、跳跃、潜行、疾跑与相对视角输入。地面模式保留 Mineflayer 普通物理；飞行模式依据服务端许可和速度读数逐帧移动，每帧核对已加载的身位碰撞。输入结束、中断、死亡、断线或位置修正时释放；接管先撤旧输入，旧异步收尾不清新持有者的按键。它没有目的地寻路，终态报告实际起终点、位移、耗时及飞行状态；被打断后不自动重放。已知动作可用 `needs` 同单连接，用 `expect` 检查结果。
 
 动作目录与完整文档由 `skills.ts` 的注册表生成。`mc_do` 常驻参数说明携带全部技能的字段签名、通用坐标规则和容器窗口的任务生命周期；`mc_help {}` 返回同一目录，`mc_help {"skill":"use"}` 或 `{"skills":["build","take"]}` 按需读取最多四项的完整示例、条件与限制。帮助工具只读，不发游戏命令，也不占任务队列。字段 schema 和 `parseSteps` 的校验保持同源。自定义容器的开窗和 `from/into:"open"` 搬运须在同一 `mc_do.steps` 内；每单结束都会关窗。
 
