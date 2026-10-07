@@ -204,6 +204,30 @@ describe('server-granted flight movement', () => {
     expect(client.write.mock.calls).toHaveLength(0);
   });
 
+  it('keeps corrected and repeated previews out of physical no-progress feedback', async () => {
+    const { bot, client, positions } = flightBot();
+    Object.assign(bot, { inventory: { items: () => [] }, pathfinder: { stop() {}, setGoal() {} } });
+    const reports: TaskReport[] = [];
+    const exec = new Executor({ getBot: () => bot, log, nextId: nextTaskId(), precheck: () => false,
+      report: report => reports.push(report) });
+    releases.push(() => exec.shutdown());
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const parsed = parseScoutSteps([{ skill: 'flight', at: [0, 68, 0], land: attempt === 0 }]);
+      if (!('steps' in parsed)) throw new Error(parsed.error);
+      exec.submit(parsed.steps);
+      await vi.advanceTimersByTimeAsync(500);
+    }
+    expect(reports).toHaveLength(5);
+    expect(reports[0].kind).toBe('blocked');
+    expect(reports[0].text).toContain('没有已加载的安全落脚方块');
+    expect(reports.slice(1).map(report => report.kind)).toEqual(['done', 'done', 'done', 'done']);
+    expect(reports.slice(1).every(report => report.text.includes('"allowed":false'))).toBe(true);
+    expect(reports.map(report => report.repeatFailure)).toEqual(Array(5).fill(undefined));
+    expect(positions).toHaveLength(0);
+    expect(client.write.mock.calls).toHaveLength(0);
+    expect(flightState(bot).allowed).toBe(false);
+  });
+
   it.each([true, false])('continues a queued cast, flight segments and landing only when permission is granted: %s', async (granted) => {
     const { bot, client, positions } = flightBot();
     const said: string[] = [];

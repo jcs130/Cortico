@@ -841,7 +841,7 @@ async function runSkill(bot: Bot, call: SkillCall, ctx: SkillContext): Promise<s
     }
     case 'flight': {
       const at = resolveAt(bot, call.at);
-      if (call.dryRun) return `飞行试算（未移动、未施法；仅核对当前已加载地形，执行时重验）：${JSON.stringify(previewFlight(
+      if (call.dryRun) return `飞行试算（未移动、未施法；仅核对当前已加载地形，执行时重验；allowed只表示采样时是否已有飞行许可，false不表示几何试算失败，remainingMs/timeEnough为null表示未知）：${JSON.stringify(previewFlight(
         bot, { x: at.x + 0.5, y: at.y, z: at.z + 0.5 }, { land: call.land !== false },
       ))}`;
       return call.land === false
@@ -5892,6 +5892,9 @@ export class Executor {
   }
 
   private noteRepeatOutcome(task: QueuedTask, kind: PriorOutcome['kind'] | null, at: number): TaskReport['repeatFailure'] {
+    // Inspection leaves physical observations unchanged by contract and must not
+    // join or clear the progress history of an actual action at the same target.
+    if (task.steps.every(step => 'dryRun' in step && step.dryRun === true)) return undefined;
     const before = task.startObservation ?? null;
     const after = this.observeTask(task.steps);
     const changed = this.observationChanged(before, after);

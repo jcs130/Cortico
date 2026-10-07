@@ -4138,7 +4138,7 @@ export class MinecraftWorld implements World {
         try {
           const result = previewFlightPlan(bot, parsed.steps, parsed.budgetMs);
           return { text: this.toolLog('mc_flight_plan', args,
-            `整段飞行试算（未施法、未移动；后续起点是假定上一段到达，实际执行重验；估时仅含所列移动，每段含500毫秒余量）：${JSON.stringify(result)}`),
+            `整段飞行试算（未施法、未移动；后续起点是假定上一段到达，实际执行重验；估时仅含所列移动，每段含500毫秒余量；各段allowed仅表示采样时的飞行许可，不表示几何试算成败；null为未知，末段悬停不表示已有落脚支撑）：${JSON.stringify(result)}`),
           ...(!result.complete || result.fitsBudget === false ? { failed: true } : {}) };
         } catch (error) {
           if (!(error instanceof SkillBlocked)) throw error;

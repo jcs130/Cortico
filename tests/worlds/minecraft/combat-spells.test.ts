@@ -62,8 +62,14 @@ describe('服务端公布的战斗法术', () => {
     spells.noteServerMessage(combatNotice);
     expect(spells.manualCastBlock('starbolt', 100_000)).toBeNull();
     spells.noteManualCast('starbolt', 100_000);
-    expect(spells.manualCastBlock('starbolt', 101_000)).toContain('还需约 5 秒');
-    expect(spells.manualCastBlock('frostnova', 101_000)).toContain('上一条施法命令');
+    const sameSpell = spells.manualCastBlock('starbolt', 101_000);
+    expect(sameSpell).toContain('还需约 5 秒');
+    expect(sameSpell).toContain('按最近已知冷却估算');
+    expect(sameSpell).toContain('本次未发送');
+    const nextSpell = spells.manualCastBlock('frostnova', 101_000);
+    expect(nextSpell).toContain('上一条施法命令');
+    expect(nextSpell).toContain('客户端暂缓');
+    expect(nextSpell).toContain('不证明服务端存在公共冷却');
     expect(spells.manualCastBlock('frostnova', 101_500)).toBeNull();
     expect(spells.manualCastBlock('starbolt', 106_000)).toBeNull();
   });

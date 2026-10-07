@@ -200,9 +200,9 @@ export class CombatSpells {
     const serverLeft = (this.serverReadyAt.get(spell) ?? Number.NEGATIVE_INFINITY) - now;
     if (serverLeft > 0) return `${spell}冷却还需约 ${Math.ceil(serverLeft / 1000)} 秒；等服务端状态更新`;
     const left = this.cooldownOf(spell) - (now - (this.lastSent.get(spell) ?? Number.NEGATIVE_INFINITY));
-    if (left > 0) return `${spell}刚发送过，冷却还需约 ${Math.ceil(left / 1000)} 秒；等服务端回执或换技能`;
+    if (left > 0) return `客户端暂缓：${spell}刚发送过，按最近已知冷却估算还需约 ${Math.ceil(left / 1000)} 秒；本次未发送，实际施法结果和剩余冷却以服务端回执为准`;
     if (spell !== 'selfheal' && now - this.lastAny < GLOBAL_GAP_MS)
-      return '上一条施法命令刚发送过；稍后再试';
+      return '客户端暂缓：上一条施法命令刚发送过，正在限制连续发送；本次未发送，这不证明服务端存在公共冷却';
     if (this.manaLoading) return '服务端魔力资料尚未加载；等状态快照再试';
     if (now < this.manaBlockedUntil) return `${spell}暂因魔力不足而受限；等魔力恢复或服务端新读数`;
     if (!this.hasMana(spell, now)) return `${spell}所需魔力高于最近服务端读数；等魔力恢复再试`;
