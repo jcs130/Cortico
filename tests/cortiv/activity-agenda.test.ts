@@ -49,6 +49,68 @@ describe('persistent Persona activity agenda', () => {
     expect(new ActivityAgenda(dir, now).state()).toEqual(agenda.state());
     expect(new ActivityAgenda(dir, now).summary()).toContain('待实际通行');
   });
+  it('revises an existing strategy with dated evidence while retaining its objective and closed history', () => {
+    const { dir } = rig();
+    let at = now();
+    const agenda = new ActivityAgenda(dir, () => at); adopt(agenda);
+    agenda.operate({ operation: 'update', id: 'finish-home', status: 'done', note: '入口实际通行验收通过' });
+    agenda.operate({ operation: 'focus', id: 'river' });
+    const original = agenda.state();
+    at += 60_000;
+    const revision = agenda.revision();
+    agenda.operate({ operation: 'update', id: 'river', when: '补给已补足，现场路线可走',
+      ifBlocked: '核验具体阻碍，保留已走通的路段再选替代路线', note: '现场已查到食物和可走的河岸路线，原缺粮条件已改变' });
+    const restored = new ActivityAgenda(dir, () => at);
+    expect(restored.revision()).toBe(revision + 1);
+    expect(restored.state().items[0]).toEqual(original.items[0]);
+    expect(restored.state().items[1]).toMatchObject({ ...original.items[1],
+      when: '补给已补足，现场路线可走', ifBlocked: '核验具体阻碍，保留已走通的路段再选替代路线',
+      note: '现场已查到食物和可走的河岸路线，原缺粮条件已改变', updatedAt: new Date(at).toISOString() });
+    expect(restored.summary()).toContain('补给已补足，现场路线可走');
+    expect(restored.summary()).not.toContain(plan().items[1].ifBlocked);
+    const revisedWhen = restored.state().items[1].when;
+    restored.operate({ operation: 'update', id: 'river', ifBlocked: '只记录实际不可通行的位置，再探查旁路', note: '进一步探路发现前方一处落差' });
+    expect(restored.state().items[1].when).toBe(revisedWhen);
+  });
+  it('adoption cannot silently restore obsolete strategy conditions or rewrite closed records', () => {
+    const { dir, agenda } = rig(); adopt(agenda);
+    agenda.operate({ operation: 'update', id: 'finish-home', status: 'done', note: '验收通过' });
+    agenda.operate({ operation: 'focus', id: 'river' });
+    const captured = agenda.revision();
+    agenda.operate({ operation: 'update', id: 'river', when: '新观察确认可以继续', ifBlocked: '定向探路后重新选择路线', note: '原阻碍已消失' });
+    const revised = agenda.state().items;
+    agenda.propose(JSON.stringify(plan()), captured, stamp);
+    expect(agenda.operate({ operation: 'adopt' })).toContain('不能覆盖');
+    const candidate = plan();
+    candidate.items[0].when = '后台改写的已完成阶段条件';
+    candidate.items[1].ifBlocked = '旧候选又要求补给后休息';
+    adopt(agenda, candidate);
+    expect(new ActivityAgenda(dir, now).state().items).toEqual(revised);
+  });
+  it('invalid strategy revisions and revisions on other operations leave the persisted agenda unchanged', () => {
+    const { dir, agenda } = rig(); adopt(agenda);
+    const before = readFileSync(join(dir, AGENDA_FILE), 'utf8');
+    const state = agenda.state();
+    for (const invalid of [{ when: '' }, { when: '   ' }, { when: null }, { when: 12 },
+      { when: '条'.repeat(241) }, { ifBlocked: [] }, { ifBlocked: '' }, { ifBlocked: '条'.repeat(241) },
+      { doneWhen: '偷偷改变完成目标' }]) {
+      expect(agenda.operate({ operation: 'update', id: 'river', note: '新证据', ...invalid })).toContain('错误');
+    }
+    expect(agenda.operate({ operation: 'update', id: 'river', when: '缺少依据的修订' })).toContain('错误');
+    expect(agenda.operate({ operation: 'focus', id: 'river', when: '不能偷偷修订' })).toContain('错误');
+    expect(agenda.state()).toEqual(state);
+    expect(readFileSync(join(dir, AGENDA_FILE), 'utf8')).toBe(before);
+  });
+  it('explicit condition revisions cannot modify completed or cancelled evidence', () => {
+    const { dir, agenda } = rig(); adopt(agenda);
+    agenda.operate({ operation: 'update', id: 'finish-home', status: 'done', note: '通行验收通过' });
+    agenda.operate({ operation: 'update', id: 'river', status: 'cancelled', note: '用户撤销行程' });
+    const before = readFileSync(join(dir, AGENDA_FILE), 'utf8');
+    for (const id of ['finish-home', 'river']) {
+      expect(agenda.operate({ operation: 'update', id, when: '重新出发', ifBlocked: '重新安排', note: '后台建议重做' })).toContain('记录保留');
+    }
+    expect(readFileSync(join(dir, AGENDA_FILE), 'utf8')).toBe(before);
+  });
   it('a late proposal cannot overwrite foreground progress or completion', () => {
     const { agenda } = rig(); adopt(agenda);
     const captured = agenda.revision();
@@ -397,6 +459,58 @@ describe('persistent Persona activity agenda', () => {
     expect(view!.map(record => itemText(record.item)).join('\n')).toContain('沿河探索');
     expect((persona as unknown as { writeGuard: (operation: 'write', path: string, role: string) => string | null })
       .writeGuard('write', AGENDA_FILE, 'main')).toContain('activity_plan');
+  });
+  it('a tool revision replaces obsolete strategy conditions in the next short request and survives Persona restoration', async () => {
+    const { dir, agenda } = rig(); adopt(agenda); agenda.operate({ operation: 'focus', id: 'river' });
+    const persona = new CortiV({ memoryDir: dir, tickDelayMs: () => null,
+      foreground: () => ({ ...FOREGROUND_CONTEXT_DEFAULTS, enabled: true }) });
+    persona.attach(makeFakeHarnessApi());
+    const tool = persona.declareSessions().find(session => session.id === 'main')!.tools().find(tool => tool.name === 'activity_plan')!;
+    await tool.handler({ operation: 'update', id: 'river', when: '现场确认补给已补足',
+      ifBlocked: '核验具体阻碍再选替代路线', note: '河岸已探明，保留已走通的部分' }, { role: 'main', log: nullLogger() });
+    const restored = new CortiV({ memoryDir: dir, tickDelayMs: () => null,
+      foreground: () => ({ ...FOREGROUND_CONTEXT_DEFAULTS, enabled: true }) });
+    restored.attach(makeFakeHarnessApi());
+    for (const instance of [persona, restored]) {
+      const view = instance.prepareRequest({ sessionId: 'main', round: 1, messages: [message('user', '继续沿河探索')] })!;
+      const summary = view.map(record => itemText(record.item)).find(text => text.startsWith('[活动日程'))!;
+      expect(summary).toContain('现场确认补给已补足');
+      expect(summary).toContain('核验具体阻碍再选替代路线');
+      expect(summary).not.toContain(plan().items[1].when);
+      expect(summary).not.toContain(plan().items[1].ifBlocked);
+    }
+    expect(new ActivityAgenda(dir, now).state().items[1]).toMatchObject({ id: 'river', status: 'active', doneWhen: plan().items[1].doneWhen });
+  });
+  it('crowded agenda context retains revised active conditions and evidence beside proposals and closed history', () => {
+    const { dir, agenda } = rig();
+    adopt(agenda, { ...plan(), items: Array.from({ length: 4 }, (_, index) => ({ ...plan().items[0], id: `closed-${index}` })) });
+    for (const [index, item] of agenda.state().items.entries()) {
+      agenda.operate({ operation: 'update', id: item.id, status: index === 0 ? 'cancelled' : 'done', note: '历史记录及依据'.repeat(30) });
+    }
+    adopt(agenda, { ...plan(), items: Array.from({ length: AGENDA_MAX_ITEMS }, (_, index) => ({ ...plan().items[1], id: `open-${index}`,
+      doneWhen: '发现一个新地点，现场确认可站立的落脚点、去程与返程路线、视野及附近环境，记录坐标和实际到达回执，并留下一条与此处有关的新观察，未达成这些条件不关闭阶段。' })) });
+    for (const item of agenda.state().items.filter(item => item.status === 'queued')) {
+      agenda.operate({ operation: 'update', id: item.id, status: 'deferred', note: '此前的阻碍和待复核条件'.repeat(20) });
+    }
+    agenda.operate({ operation: 'focus', id: 'open-0' });
+    const when = '补给已确认足够，路线的各段都有落脚点，当前现场安全，可以沿已核验的路线继续';
+    const ifBlocked = '先核验本次具体阻碍，保留已走通的路段；只对受阻位置重新探路，未知区域保留待查';
+    const note = '现场回执确认已到河岸上层，原缺粮条件已变化。';
+    agenda.operate({ operation: 'update', id: 'open-0', when, ifBlocked, note });
+    agenda.propose(JSON.stringify({ ...plan(), items: Array.from({ length: AGENDA_MAX_ITEMS }, (_, index) => ({
+      ...plan().items[1], id: `candidate-${index}`, title: '后台候选活动标题'.repeat(10),
+    })) }), agenda.revision(), stamp);
+    const persona = new CortiV({ memoryDir: dir, tickDelayMs: () => null,
+      foreground: () => ({ ...FOREGROUND_CONTEXT_DEFAULTS, enabled: true }) });
+    persona.attach(makeFakeHarnessApi());
+    const request = persona.prepareRequest({ sessionId: 'main', round: 1, messages: [message('user', '继续当前路线')] })!;
+    const summary = request.map(record => itemText(record.item)).find(text => text.startsWith('[活动日程'))!;
+    expect(summary.length).toBeLessThanOrEqual(AGENDA_SUMMARY_MAX_CHARS);
+    expect(summary).toContain(when);
+    expect(summary).toContain(ifBlocked);
+    expect(summary).toContain(note);
+    expect(summary).toContain(agenda.state().items.find(item => item.id === 'open-0')!.doneWhen);
+    expect(summary).toContain('activity_plan read');
   });
   it('restored Persona tools retain cancellation evidence in the request without putting the goal back in the open list', async () => {
     const { dir, agenda } = rig(); adopt(agenda);
