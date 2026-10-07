@@ -759,6 +759,25 @@ describe('Executor 编排', () => {
     expect(exec.submitDetailed(plan('west')).accepted).toBe(true);
   });
 
+  it('原地搜索受阻后允许首次先移动再搜索，不把新前置动作当作原地重试', () => {
+    const { bot } = chestBot();
+    const { exec } = makeExecutorOn(bot);
+    const guard = exec as unknown as {
+      navigationBurstNote(steps: SkillCall[], now: number): string | null;
+    };
+    const start = Date.now();
+    const find: SkillCall = { skill: 'find', target: 'chest', distance: 32 };
+    try {
+      expect(guard.navigationBurstNote([find], start)).toBeNull();
+      expect(guard.navigationBurstNote([find], start + 1000)).toBeNull();
+      expect(guard.navigationBurstNote([find], start + 2000)).not.toBeNull();
+      const approach: SkillCall = { skill: 'goto', at: [11, 64, 0] };
+      expect(guard.navigationBurstNote([approach, find], start + 3000)).toBeNull();
+      expect(guard.navigationBurstNote([approach, find], start + 4000)).toBeNull();
+      expect(guard.navigationBurstNote([approach, find], start + 5000)).not.toBeNull();
+    } finally { exec.shutdown(); }
+  });
+
   it('小范围移动并变化搜索半径不会刷新同一目标的观察预算', () => {
     const { bot } = chestBot();
     const { exec } = makeExecutorOn(bot);
@@ -3413,7 +3432,7 @@ describe('probe 逐格/target/差分 + goto 地表 + surface 陆地脱困', () =
     expect(seen.at(-1)?.constructor.name).toBe('GoalNearXZ');
   });
 
-  it('goto [x,z] 目标是水面时报告水深，不把水面当作干燥落脚格', async () => {
+  it('goto [x,z] 到达水域时只报告水平接近，不把水面当作干燥落脚格', async () => {
     const bot = probeBot({
       '10,60,5': 'stone',
       '10,64,5': 'water',
@@ -3426,10 +3445,10 @@ describe('probe 逐格/target/差分 + goto 地表 + surface 陆地脱困', () =
     const receipt = exec.submit([{ skill: 'goto', at: [10, 0, 5], groundY: true }]);
     expect(receipt).toContain('水平坐标 (10,5) 附近');
     await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('是水面:水面那格 y=65,水深 5 格');
-    expect(reports[0].text).toContain('挑岸上的一格');
-    expect(bot.entity.position).toEqual(new V(0.5, 64, 0.5));
+    expect(reports[0].kind).toBe('done');
+    expect(reports[0].text).toContain('本次只满足水平接近条件');
+    expect(reports[0].text).toContain('仍在水中，未确认登岸');
+    expect(bot.entity.position).toEqual(new V(10, 64, 5));
   });
 
   it('地表读数不把树冠和树干顶部当作地面', () => {
@@ -3442,17 +3461,14 @@ describe('probe 逐格/target/差分 + goto 地表 + surface 陆地脱困', () =
     expect(surfaceFeetAt(bot as never, [10, 0, 5])).toEqual({ x: 10, y: 66, z: 5 });
   });
 
-  /**
-   * 目标区块未加载时不猜测 Y；受阻回执说明可用的输入方式。
-   */
-  it('goto [x,z] 目标区块没加载:照实受阻,并说清怎么改', async () => {
+  it('goto [x,z] 不因未知终点高度拒绝水平寻路', async () => {
     const bot = probeBot({}, { unloadedFromX: 50 });
     const { exec, reports } = makeExecutorOn(bot);
     exec.submit([{ skill: 'goto', at: [60, 0, 5], groundY: true }]);
     await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('(60, 5) 那里还没加载,先走近些再用 [x,z];或者直接给 y');
-    expect(reports[0].text).not.toContain('猜不了');
+    expect(reports[0].kind).toBe('done');
+    expect(bot.entity.position).toEqual(new V(60, 64, 5));
+    expect(reports[0].text).toContain('本次只满足水平接近条件');
   });
 
   it('surface 在无遮挡陆地:确认站稳并报告零爬升', async () => {

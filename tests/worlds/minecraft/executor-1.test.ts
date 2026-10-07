@@ -2732,6 +2732,23 @@ describe('终态四分与受理刻回顾', () => {
     exec.clear();
   });
 
+  it('重复回顾的执行次数只统计仍在窗口内的提交', async () => {
+    const { exec, reports } = makeExecutorOn(combatBot({}));
+    const steps: SkillCall[] = [{ skill: 'pickup', item: 'coal' }];
+    try {
+      exec.submit(steps);
+      await waitUntil(() => reports.length === 1);
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      exec.submit(steps);
+      await waitUntil(() => reports.length === 2);
+      await vi.advanceTimersByTimeAsync(6 * 60_000);
+      const receipt = exec.submit(steps);
+      expect(receipt).toContain('第 2 次下同形状的单');
+      expect(receipt).toContain('前 1 次里有 1 次跑过第 1 步');
+      expect(receipt).not.toContain('有 2 次跑过');
+    } finally { exec.shutdown(); }
+  });
+
   it('成功的同类任务第三次提交时也向模型报告重复次数', async () => {
     const { exec, reports } = makeExecutorOn(combatBot({}));
     const steps: SkillCall[] = [{ skill: 'chat', text: '一' }];

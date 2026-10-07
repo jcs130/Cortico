@@ -42,6 +42,34 @@ const take = (count = 1): Extract<SkillCall, { skill: 'take' }> =>
 afterEach(() => { vi.useRealTimers(); });
 
 describe('Executor admission feedback', () => {
+  it('walks toward an unloaded horizontal destination through local legs without inventing its height', async () => {
+    vi.useFakeTimers();
+    const bot = withBotEvents(combatBot({}));
+    const goals: Array<{ x?: number; y?: number; z?: number }> = [];
+    Object.assign(bot, {
+      blockAt: (p: V) => Math.hypot(p.x - bot.entity.position.x, p.z - bot.entity.position.z) > 96
+        ? null : { name: p.y < 64 ? 'stone' : 'air', position: p,
+          boundingBox: p.y < 64 ? 'block' : 'empty' },
+    });
+    bot.pathfinder.goto = async (goal: { x?: number; y?: number; z?: number }) => {
+      expect(Math.hypot(goal.x! - bot.entity.position.x, goal.z! - bot.entity.position.z)).toBeLessThanOrEqual(96);
+      goals.push(goal);
+      bot.entity.position = new V(goal.x!, 64 + Math.floor(goal.x! / 60), goal.z!);
+    };
+    const { exec, reports } = makeExecutorOn(bot);
+    const parsed = parseSteps([{ skill: 'goto', at: [300, 5] }]);
+    if ('error' in parsed) throw new Error(parsed.error);
+    try {
+      expect(exec.submitDetailed(parsed.steps).accepted).toBe(true);
+      await waitUntil(() => reports.length === 1);
+      expect(reports[0].kind).toBe('done');
+      expect(goals.length).toBeGreaterThan(1);
+      expect(goals.every(goal => goal.y === undefined)).toBe(true);
+      expect(bot.entity.position).toEqual(new V(300, 69, 5));
+      expect(reports[0].text).toContain('本次只满足水平接近条件');
+    } finally { exec.shutdown(); }
+  });
+
   it('allows a failed airborne goto to be retried after landing in the same cell', async () => {
     vi.useFakeTimers();
     const client = Object.assign(new EventEmitter(), { write() {} });

@@ -130,7 +130,7 @@ import {
   NO_PLACE_REFERENCE, PLACE_REACH, PROBE_CELLWISE_MAX, PROBE_CELL_CAP, PROBE_WHERE_CELL_CAP,
   SHAPE_ZH, blockAtCell, blockNamesOf, cellKeyOf, cellText, chebyshev, cropAgeOfCell, faceText,
   feetOf, fnv32, nearLavaAt, readRegion, refAt, refCellOf, resolveAt, shapeCells, skyVisibleAt,
-  solidAt, surfaceFeetAt, type RegionReading,
+  solidAt, type RegionReading,
 } from './cell-facts.ts';
 import {
   CRAFT_SETTLE_MS, INVENTORY_SLOTS, PICKUP_SETTLE_MS, askedLabel, awaitCraftGain, awaitInvConfirm,
@@ -672,9 +672,10 @@ async function runSkill(bot: Bot, call: SkillCall, ctx: SkillContext): Promise<s
           + '先用 transit 穿门,不能把两边坐标直接拿来算路',
         );
       }
-      const target = call.groundY ? surfaceFeetAt(bot, call.at) : resolveAt(bot, call.at);
-      // [x,z] chooses a reachable X/Z arrival; the highest block in the column
-      // may be a roof above a valid entrance. Keep probes and movement aligned.
+      const resolved = resolveAt(bot, call.at);
+      // Horizontal goals have no destination height. The current feet Y is only
+      // a diagnostic reference; unloaded destination columns do not prevent travel.
+      const target = call.groundY ? { ...resolved, y: feetOf(bot).y } : resolved;
       const finalGoal = gotoArrivalGoal(call, target);
       if (call.dryRun) {
         const probes = ctx.probeRoutes?.(target, call.groundY || call.exact ? finalGoal : undefined);
@@ -1244,13 +1245,15 @@ function taskSignature(steps: readonly SkillCall[]): string {
   }).join('>');
 }
 
-/** Short approach moves, direction and radius changes do not make a fresh search of the same target. */
+/** Repeated short approaches share a budget, but adding an approach changes a stationary search. */
 function navigationIntentKey(steps: readonly SkillCall[]): string {
+  const firstFind = steps.findIndex((step) => step.skill === 'find');
+  const approach = firstFind > 0 && steps.slice(0, firstFind).some((step) => step.skill === 'goto');
   const search = steps.some((step) => step.skill === 'find')
     && steps.every((step) => step.skill === 'find' || step.skill === 'goto')
     ? steps.filter((step) => step.skill === 'find') : steps;
-  return JSON.stringify(search.map((step) => step.skill === 'find'
-    ? { ...step, direction: undefined, distance: undefined } : step));
+  return JSON.stringify({ approach, steps: search.map((step) => step.skill === 'find'
+    ? { ...step, direction: undefined, distance: undefined } : step) });
 }
 
 /** 与失败归并签名不同：在途去重必须包含坐标、数量和选项。 */
@@ -1818,7 +1821,7 @@ export class Executor {
     attempts: number; at: number; evidence: string; after: TaskObservation | null;
   }>();
   /** 同类签名在 15 分钟内的提交时刻及开跑首步次数；与 priorOutcomes 共用键和窗口。 */
-  private readonly roundabout = new Map<string, { submits: number[]; ran: number }>();
+  private readonly roundabout = new Map<string, { submits: Array<{ id: number; at: number; started: boolean }> }>();
   /** 实际成功的步骤按目标技能归并；启用 fallback 前也保留窗口内事实。 */
   private readonly successfulIntents = new Map<string, number[]>();
   /** 原样重试的失败账；换目标、站位或维度后重新计数。 */
@@ -2143,7 +2146,7 @@ export class Executor {
     }
     // 受理了才进打转账;没接的那几单不算她"下过一次"。快照要在 pump 之前取
     const sig = taskSignature(task.steps);
-    const round = this.noteSubmitted(sig, at);
+    const round = this.noteSubmitted(sig, at, id);
     this.noteStorageIntent(task.steps, at);
     if ([3, 6, 10].includes(round.times)) {
       this.opts.diag?.write({ lane: 'task', event: 'repeated-intent', taskId: id,
@@ -3945,23 +3948,23 @@ export class Executor {
    * 记录窗口内同类签名的提交与首步开跑次数，仅报告事实。
    * 必须在 pump() 前取快照，避免将本次开跑计入先前尝试。
    */
-  private noteSubmitted(sig: string, at: number): RoundaboutSnapshot {
+  private noteSubmitted(sig: string, at: number, id: number): RoundaboutSnapshot {
     for (const [k, v] of this.roundabout) {
-      v.submits = v.submits.filter((t) => at - t <= PRIOR_OUTCOME_WINDOW_MS);
+      v.submits = v.submits.filter((submission) => at - submission.at <= PRIOR_OUTCOME_WINDOW_MS);
       if (v.submits.length === 0) this.roundabout.delete(k);
     }
-    const entry = this.roundabout.get(sig) ?? { submits: [], ran: 0 };
-    const ranBefore = entry.ran;
-    const first = entry.submits[0] ?? at;
-    entry.submits.push(at);
+    const entry = this.roundabout.get(sig) ?? { submits: [] };
+    const ranBefore = entry.submits.filter((submission) => submission.started).length;
+    const first = entry.submits[0]?.at ?? at;
+    entry.submits.push({ id, at, started: false });
     this.roundabout.set(sig, entry);
     return { times: entry.submits.length, spanMs: at - first, ranBefore };
   }
 
   /** 这一签名的单真开跑了(第 1 步进了执行循环) */
-  private noteStarted(sig: string): void {
-    const entry = this.roundabout.get(sig);
-    if (entry) entry.ran += 1;
+  private noteStarted(sig: string, id: number): void {
+    const submission = this.roundabout.get(sig)?.submits.find((item) => item.id === id);
+    if (submission) submission.started = true;
   }
 
   /**
@@ -4306,7 +4309,7 @@ export class Executor {
     const flag: AbortFlag = { aborted: false, by: null, epoch: this.executionEpoch };
     const now = Date.now();
     // 打转账只记第一次开跑:断点续做是同一单接着跑,不是又下了一单
-    if (next.startedAt === undefined) this.noteStarted(taskSignature(next.steps));
+    if (next.startedAt === undefined) this.noteStarted(taskSignature(next.steps), next.id);
     this.task = {
       ...next, startObservation: next.startObservation ?? this.observeTask(next.steps) ?? undefined,
       stepLog: next.stepLog ?? [], flag, escape: { active: false },
