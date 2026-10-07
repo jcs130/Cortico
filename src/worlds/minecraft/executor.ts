@@ -558,7 +558,7 @@ const retryGuardApplies = (steps: readonly SkillCall[]): boolean => steps.some((
   || step.skill === 'craft'
   || (step.skill === 'take' && (step.from === 'open' || Boolean(step.at))));
 function lastAbsoluteGoto(steps: readonly SkillCall[]): { x: number; y: number; z: number } | null {
-  const step = [...steps].reverse().find((item) => item.skill === 'goto');
+  const step = [...steps].reverse().find((item) => item.skill === 'goto' && !item.dryRun);
   if (!step || step.skill !== 'goto' || !Array.isArray(step.at)
     || step.at.length !== 3 || !step.at.every((value) => typeof value === 'number' && Number.isFinite(value))) return null;
   return { x: step.at[0] as number, y: step.at[1] as number, z: step.at[2] as number };
