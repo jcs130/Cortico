@@ -42,6 +42,23 @@ const take = (count = 1): Extract<SkillCall, { skill: 'take' }> =>
 afterEach(() => { vi.useRealTimers(); });
 
 describe('Executor admission feedback', () => {
+  it('an exact ascent from a full lower layer is executed and cannot report arrival without rising', async () => {
+    vi.useFakeTimers();
+    const bot = withBotEvents(combatBot({}));
+    bot.entity.position = new V(0.5, 96, 0.5);
+    let attempts = 0;
+    bot.pathfinder.goto = async () => { attempts++; };
+    const { exec, reports } = makeExecutorOn(bot);
+    try {
+      expect(exec.submitDetailed([{ skill: 'goto', at: [0, 97, 0], exact: true }]).accepted).toBe(true);
+      await waitUntil(() => reports.length === 1);
+      expect(attempts).toBeGreaterThan(0);
+      expect(reports[0].kind).toBe('blocked');
+      expect(reports[0].text).not.toContain('已满足精确落脚格到达条件');
+      expect(bot.entity.position.y).toBe(96);
+    } finally { exec.shutdown(); }
+  });
+
   it('walks toward an unloaded horizontal destination through local legs without inventing its height', async () => {
     vi.useFakeTimers();
     const bot = withBotEvents(combatBot({}));

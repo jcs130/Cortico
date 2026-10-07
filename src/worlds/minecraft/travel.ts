@@ -733,11 +733,12 @@ export async function gotoGoalOnce(bot: Bot, goal: InstanceType<typeof goals.Goa
   }
 }
 
-/** 半砖等位置同时检查脚下取整坐标及其上方一格，与寻路库到达判据一致。 */
+/** 部分方块的分数脚高可对应上方寻路格；整层落脚不能借上一格通过校验。 */
 export function travelGoalReached(bot: Bot, goal: InstanceType<typeof goals.Goal>): boolean {
   const at = bot.entity.position;
   const p = new Vec3(at.x, at.y, at.z).floored();
-  return goal.isEnd(p as never) || goal.isEnd(p.offset(0, 1, 0) as never);
+  return goal.isEnd(p as never)
+    || (at.y - p.y > 0.001 && goal.isEnd(p.offset(0, 1, 0) as never));
 }
 
 /** 看门狗跳闸时记录控制、寻路与持有权的结构化快照；只进诊断日志，不进回执。 */
