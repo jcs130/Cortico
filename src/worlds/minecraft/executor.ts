@@ -1865,7 +1865,7 @@ export class Executor {
     target: { x: number; y: number; z: number };
     from: { x: number; y: number; z: number };
   }> = [];
-  /** 同一格重复提交同一个单步 goto 的短窗口；避免“已在水平容差内”被当作新进展。 */
+  /** 位置与移动状态未变时，重复提交同一个单步 goto 的短窗口。 */
   private readonly recentGotoRequests = new Map<string, number>();
   private readonly inspections = new InspectionGuard();
   /** 定向 find 在起点命中同一可见物、实际未行军时，不让同地重复观测刷成进展。 */
@@ -2093,7 +2093,7 @@ export class Executor {
       ?? refusal(this.activeCombatAttackNote(task.steps, mode), 'combat.active')
       ?? refusal(this.immediateAttackTargetNote(task.steps, mode), 'attack.noTarget', 'correction')
       ?? refusal(this.pendingAttackPlanNote(task.steps, mode), 'combat.pending')
-      ?? refusal(this.repeatStationaryGotoNote(task.steps, p, at), 'goto.stationary', 'repeat')
+      ?? refusal(this.repeatStationaryGotoNote(task.steps, botForInspection, at), 'goto.stationary', 'repeat')
       ?? refusal(this.spatialFailureNote(task.steps, at), 'navigation.failed', 'repeat')
       ?? refusal(storageAccessHold, 'storage.access')
       ?? refusal(this.staleKnownContainerUseNote(task.steps), 'use.staleContainer', 'correction')
@@ -2869,10 +2869,10 @@ export class Executor {
       + '本次无移动、未创建新任务。';
   }
 
-  /** 同目标且下单位置未变，十五秒内再下同一条单步 goto 不会增加位移。 */
+  /** 同目标、位置与移动前提未变时，十五秒内重复提交不会增加位移。 */
   private repeatStationaryGotoNote(
     steps: readonly SkillCall[],
-    pos: { x: number; y: number; z: number } | undefined,
+    bot: Bot | null,
     now: number,
   ): string | null {
     for (const [key, at] of this.recentGotoRequests) {
@@ -2887,9 +2887,11 @@ export class Executor {
     if (same) {
       return `同一个 goto 已在任务#${same.id} 执行或排队；新单未接，原队列保留。等那单的结局再判断`;
     }
-    if (!pos) return null;
+    const pos = bot?.entity?.position;
+    if (!bot || !pos) return null;
     const here = `${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)}`;
-    const key = `${JSON.stringify(steps[0])}@${here}`;
+    const movement = flightState(bot).flying ? 'flying' : 'ground';
+    const key = `${JSON.stringify(steps[0])}@${normalizeDimension(dimensionOf(bot))}:${here}:${movement}`;
     if (this.recentGotoRequests.has(key)) {
       return `同一个 goto 刚从 (${here}) 提交过，现在仍在同一格；重复走这个目标不会增加进展。先核对现场，换可站的三维落点或另一条路线`;
     }

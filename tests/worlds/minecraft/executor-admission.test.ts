@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ChestBook } from '../../../src/worlds/minecraft/chests.ts';
 import { MINECRAFT_DEFAULTS } from '../../../src/worlds/minecraft/config.ts';
@@ -5,8 +6,9 @@ import {
   Executor, parseSteps, type SkillCall, type TaskAdmissionRejection, type TaskReport,
 } from '../../../src/worlds/minecraft/executor.ts';
 import { MinecraftWorld } from '../../../src/worlds/minecraft/world.ts';
+import { flightState, watchFlightAbilities } from '../../../src/worlds/minecraft/flight.ts';
 import { FakeHost } from '../../helpers/fake-host.ts';
-import { chestBot, combatBot, log, makeExecutorOn, nextTaskId, V } from './executor-harness.ts';
+import { chestBot, combatBot, log, makeExecutorOn, nextTaskId, V, waitUntil, withBotEvents } from './executor-harness.ts';
 
 function rig(precheck = false) {
   const { bot, inv } = chestBot();
@@ -40,6 +42,36 @@ const take = (count = 1): Extract<SkillCall, { skill: 'take' }> =>
 afterEach(() => { vi.useRealTimers(); });
 
 describe('Executor admission feedback', () => {
+  it('allows a failed airborne goto to be retried after landing in the same cell', async () => {
+    vi.useFakeTimers();
+    const client = Object.assign(new EventEmitter(), { write() {} });
+    const bot = withBotEvents(Object.assign(combatBot({}), {
+      _client: client,
+      blockAt: (p: V) => ({ name: p.y < 64 ? 'stone' : 'air', position: p,
+        boundingBox: p.y < 64 ? 'block' : 'empty', shapes: p.y < 64 ? [[0, 0, 0, 1, 1, 1]] : [] }),
+    }));
+    const release = watchFlightAbilities(bot as never);
+    const { exec, reports } = makeExecutorOn(bot);
+    const steps: SkillCall[] = [{ skill: 'goto', at: [8, 64, 0] }];
+    try {
+      client.emit('abilities', { flags: 6 });
+      expect(exec.submitDetailed(steps).accepted).toBe(true);
+      await waitUntil(() => reports.length === 1);
+      expect(reports[0]).toMatchObject({ kind: 'blocked', text: expect.stringContaining('悬停') });
+      expect(exec.submitDetailed(steps)).toMatchObject({ accepted: false,
+        rejection: { rule: 'goto.stationary', kind: 'repeat' } });
+      expect(exec.submitDetailed([{ skill: 'land' }]).accepted).toBe(true);
+      await waitUntil(() => reports.length === 2);
+      expect(reports[1].kind).toBe('done');
+      expect(flightState(bot as never).flying).toBe(false);
+      expect(bot.entity.position).toEqual(new V(0.5, 64, 0.5));
+      expect(exec.submitDetailed(steps).accepted).toBe(true);
+      await waitUntil(() => reports.length === 3);
+      expect(reports[2].kind).toBe('done');
+      expect(bot.entity.position.x).toBe(8);
+    } finally { exec.shutdown(); release(); }
+  });
+
   it('an immediate attack without a target cannot cancel existing work; a later observed target is admitted', () => {
     const r = rig();
     Object.assign(r.bot, { world: { raycast: () => null } });
