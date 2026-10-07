@@ -7873,7 +7873,9 @@ export class MinecraftWorld implements World {
           ? r.repeatFailure.scope === 'target'
             ? '本次起止位置、背包物品数量与目标方块读数未变'
             : '本次起止位置与背包物品数量未变'
-          : '部分现场读数不可比'}；回执是否证明原目标达成需核对。`
+          : r.repeatFailure.observation === 'changed'
+            ? '本次现场采样读数有变化，整单仍未完成'
+            : '部分现场读数不可比'}；回执是否证明原目标达成需核对。`
         + `${r.repeatFailure.previousReceipt ? `上次回执：${r.repeatFailure.previousReceipt}` : ''}`
       : '';
     const reportText = `${r.text}${repeatEvidence}`;

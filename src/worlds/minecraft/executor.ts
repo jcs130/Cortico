@@ -925,7 +925,7 @@ export interface TaskReport {
   /** Last completed step of a successful task. */
   lastSkill?: SkillCall['skill'];
   /** 同形状任务在短时间内再次未达整体目标时，附上上一回的受阻事实。 */
-  repeatFailure?: { attempts: number; previousReceipt: string; scope: 'target' | 'shape'; observation: 'unchanged' | 'unavailable' };
+  repeatFailure?: { attempts: number; previousReceipt: string; scope: 'target' | 'shape'; observation: 'changed' | 'unchanged' | 'unavailable' };
   /** 这条汇报已经讲明了掉血的来由;World 据此不再复述一遍掉血播报 */
   hurt?: boolean;
 }
@@ -5886,12 +5886,15 @@ export class Executor {
     }
     // 动作显示完成却未改变这些采样读数，只对同一空间目标提示复盘；
     // 没有坐标的成功动作可能在未采样的外部状态上已经奏效。
-    if (changed === true || (kind === null && (changed !== false || before?.scope !== 'target'))) {
+    const unfinishedTarget = before?.scope === 'target' && kind !== null;
+    // A failed spatial task can move, toggle a gate or collect items while its
+    // final target remains unmet. Preserve that outcome alongside the changes.
+    if (!unfinishedTarget && (changed === true || (kind === null && (changed !== false || before?.scope !== 'target')))) {
       this.unresolvedIntents.delete(key);
       return undefined;
     }
     const prior = this.unresolvedIntents.get(key);
-    const repeated = prior && this.observationChanged(prior.after, before) !== true;
+    const repeated = prior && (unfinishedTarget || this.observationChanged(prior.after, before) !== true);
     const attempts = repeated ? prior.attempts + 1 : 1;
     const landing = [...(task.stepLog ?? [])].reverse().find((step) =>
       step.outcome === 'fail' || step.outcome === 'noop' || step.outcome === 'partial')
@@ -5904,7 +5907,8 @@ export class Executor {
     if (!(attempts === 2 || attempts === 5 || attempts % 10 === 0)) return undefined;
     return {
       attempts, previousReceipt: maskCoords(repeated ? prior.evidence : '').slice(0, 180),
-      scope: before?.scope ?? after?.scope ?? 'shape', observation: changed === false ? 'unchanged' : 'unavailable',
+      scope: before?.scope ?? after?.scope ?? 'shape',
+      observation: changed === true ? 'changed' : changed === false ? 'unchanged' : 'unavailable',
     };
   }
 

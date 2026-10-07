@@ -23,7 +23,7 @@ export function actionEvidence(
       : tools.read.has(call.name) ? '读取' : null;
     if (kind) calls.unshift({ record, kind });
   }
-  if (!calls.some(call => call.kind !== '读取')) return '';
+  if (!calls.length) return '';
   const counts = (kind: string) => calls.filter(call => call.kind === kind).length;
   const actions = calls.filter(call => call.kind === '行动').slice(-ACTION_EVIDENCE_MAX_RECEIPTS);
   const lines = [`[行动对账] 最近 ${calls.length} 条相关工具请求：行动 ${counts('行动')}、发言 ${counts('发言')}、读取 ${counts('读取')}。请求次数不证明受理、进展或当前忙闲。`];

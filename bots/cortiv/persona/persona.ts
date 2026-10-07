@@ -1506,13 +1506,14 @@ export class CortiV extends Cormini {
       return typeof taskId === 'number' && Number.isInteger(taskId)
         && typeof attempts === 'number' && Number.isInteger(attempts) && attempts >= 2
         && (scope === 'target' || scope === 'shape')
-        && (observation === 'unchanged' || observation === 'unavailable')
+        && (observation === 'changed' || observation === 'unchanged' || observation === 'unavailable')
         ? [{ taskId, attempts, scope, observation }] : [];
     }).at(-1);
     if (repeated) {
       this.core?.injectInternal(
         `[system] 任务#${repeated.taskId}是 15 分钟内第 ${repeated.attempts} 次${repeated.scope === 'target' ? '同一坐标目标' : '同形状任务'}尝试；` +
-        `${repeated.observation === 'unchanged' ? '本地采样读数未变' : '部分采样读数不可比'}，回执是否证明原目标达成需自行核对。` +
+        `${repeated.observation === 'changed' ? '现场采样有变化，整单仍未完成'
+          : repeated.observation === 'unchanged' ? '本地采样读数未变' : '部分采样读数不可比'}，回执是否证明原目标达成需自行核对。` +
         FAILURE_REFLECTION_ADVICE,
         'reflection',
       );

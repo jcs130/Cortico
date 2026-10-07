@@ -46,6 +46,18 @@ function rig() {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('受阻任务辅助判断', () => {
+  it('现场有变化的重复受阻保留未完成事实，不标成静止无进展', () => {
+    const { world, host } = rig();
+    (world as any).onTaskReport({
+      kind: 'blocked', taskId: 17, text: '爬到中途，最终平台仍未到达',
+      repeatFailure: { attempts: 2, previousReceipt: '上一次最终平台未到达',
+        scope: 'target', observation: 'changed' },
+    });
+    expect(host.events[0].text).toContain('现场采样读数有变化，整单仍未完成');
+    expect(host.events[0].text).not.toContain('读数未变');
+    expect(host.events[0].meta).toMatchObject({ repeatFailure: { observation: 'changed', attempts: 2 } });
+  });
+
   it('重复无进展证据随原任务终态投递，保留为 World 私有元数据', () => {
     const { world, host } = rig();
     (world as any).onTaskReport({

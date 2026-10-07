@@ -67,6 +67,21 @@ describe('action evidence', () => {
     expect(note.indexOf(`observed state ${first}`)).toBeLessThan(note.indexOf(`observed state ${first + 1}`));
     expect(note).toContain('任务结束不等于目标完成');
     expect(records).toEqual(before);
-    expect(actionEvidence(exchange('read-only', 'inspect', {}, 'scene'), tools)).toBe('');
+    expect(actionEvidence(exchange('read-only', 'inspect', {}, 'scene'), tools)).toContain('行动 0、发言 0、读取 1');
+    expect(actionEvidence([message('user', 'No tool requests yet.')], tools)).toBe('');
+  });
+
+  it('keeps the evidence of a read-only streak after the previous action leaves the bounded window', () => {
+    const records = [
+      ...exchange('prior', 'game_execute', { destination: 'tower' }, 'accepted, still running'),
+      ...Array.from({ length: ACTION_EVIDENCE_MAX_CALLS + 2 }, (_, index) =>
+        exchange(`r${index}`, 'inspect', { focus: 'entrance' }, 'entrance remains outside this view')).flat(),
+    ];
+    const before = structuredClone(records);
+    const note = actionEvidence(records, tools);
+    expect(note).toContain(`行动 0、发言 0、读取 ${ACTION_EVIDENCE_MAX_CALLS}`);
+    expect(note).toContain('较早的任务是否仍在执行，以 World 当前队列和终态为准');
+    expect(note).not.toContain('accepted, still running');
+    expect(records).toEqual(before);
   });
 });

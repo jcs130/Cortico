@@ -3078,6 +3078,28 @@ describe('build 单锚点 / use:位置由她定,结果按服务端回读认', ()
     expect(reports[4].repeatFailure).toMatchObject({ attempts: 2, scope: 'target', observation: 'unchanged' });
   });
 
+  it('往返移动后同一目标仍受阻，保留整单未完成次数并如实报告现场变化', async () => {
+    const bot = placeBot({ ...GROUND }, []);
+    let direction = 1;
+    bot.pathfinder.goto = async () => {
+      bot.entity.position = bot.entity.position.offset(direction, 0, 0);
+      direction *= -1;
+      throw new Error('No path');
+    };
+    const { exec, reports } = makeExecutorOn(bot);
+    const steps: SkillCall[] = [{ skill: 'goto', at: [20, 64, 0], exact: true }];
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      exec.submit(steps);
+      await waitUntil(() => reports.length === attempt, 8000);
+    }
+    expect(reports.map(report => report.kind)).toEqual(['blocked', 'blocked']);
+    expect(bot.entity.position).toEqual(new V(0.5, 64, 0.5));
+    expect(reports[1].repeatFailure).toMatchObject({ attempts: 2, scope: 'target', observation: 'changed' });
+    exec.submit([{ skill: 'goto', at: [40, 64, 0], exact: true }]);
+    await waitUntil(() => reports.length === 3, 8000);
+    expect(reports[2].repeatFailure).toBeUndefined();
+  });
+
   it('批次末尾转头不会把未成功的交互目标改为取景目标', async () => {
     const bot = placeBot({ ...GROUND, '1,64,0': 'wheat' }, []);
     bot.activateBlock = async () => {};

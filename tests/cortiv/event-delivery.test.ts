@@ -64,6 +64,14 @@ describe('CortiV 外界事件投递', () => {
     expect(injected.some((text) => text.includes('修正原假设'))).toBe(true);
 
     injected.length = 0;
+    persona.onDelivery({ events: [{ ...task,
+      meta: { repeatFailure: { taskId: 17, attempts: 2, scope: 'target', observation: 'changed' } },
+    }] });
+    const changed = injected.find((text) => text.includes('修正原假设'));
+    expect(changed).toContain('现场采样有变化，整单仍未完成');
+    expect(changed).not.toContain('读数未变');
+
+    injected.length = 0;
     persona.onDelivery({ events: [{ ...task, source: 'minecraft', type: 'mymc.task' }] });
     expect(injected.some((text) => text.includes('修正原假设'))).toBe(false);
 
