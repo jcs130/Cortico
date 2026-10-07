@@ -29,6 +29,54 @@ function rig() {
 function text(records: readonly ContextRecord[]): string { return records.map(row => itemText(row.item)).join('\n'); }
 
 describe('latest continuity note in foreground requests', () => {
+  it('retains configured long-term intentions after the rolling note is replaced or removed, including after a new Persona is created', () => {
+    const r = rig();
+    Object.assign(r.config, { memoryFiles: 'goals/projects.md' });
+    const projects = '# 未完成成果\n- 房屋改善：入口和外观待验收。\n- 修路：先核验起止地形。\n';
+    r.persona.memory.writeFileAtomic('goals/projects.md', projects);
+    r.persona.memory.writeFileAtomic(RECENT_FILE, '房屋和修路待办见 goals/projects.md。');
+    r.prepare();
+    r.persona.memory.writeFileAtomic(RECENT_FILE, '刚交付面包，背包有两块铜。');
+    const view = r.prepare();
+    expect(text(view)).toContain('房屋改善');
+    expect(text(view)).toContain('修路');
+    rmSync(join(r.memoryDir, RECENT_FILE));
+    const restored = new CortiV({ memoryDir: r.memoryDir, foreground: () => r.config });
+    const next = restored.prepareRequest({ sessionId: 'main', round: 1, messages: [message('user', '委托结束了，接下来做什么？')] })!;
+    expect(text(next)).toContain('房屋改善');
+    expect(text(next)).toContain('修路');
+    expect(text(next)).toContain('goals/projects.md');
+    expect(r.persona.memory.readFile('goals/projects.md')).toBe(projects);
+    expect(validatePairing(next)).toEqual([]);
+  });
+
+  it('places a bounded independent Memory index before current World facts, then appends only changed source content', () => {
+    const r = rig();
+    Object.assign(r.config, { memoryFiles: 'goals/projects.md\ngoals/preferences.md' });
+    r.persona.memory.writeFileAtomic('goals/projects.md', '# 项目\n- 旧观察：工作间尚未完成。\n- 建桥：先勘测。\n');
+    r.persona.memory.writeFileAtomic('goals/preferences.md', '# 偏好\n自由探索、与同伴交往。');
+    const first = r.prepare();
+    const index = first.findIndex(row => itemText(row.item).startsWith('[长期记忆索引]'));
+    expect(index).toBeGreaterThan(-1);
+    expect(first.findIndex(row => itemText(row.item).includes('workshop complete'))).toBeGreaterThan(index);
+    expect(itemText(first[index].item)).toContain('历史线索');
+    expect(r.prepare()).toEqual(first);
+    r.persona.memory.writeFileAtomic('goals/projects.md', '# 项目\n- 建桥：勘测已核验，下一步准备桥面。');
+    const second = r.prepare();
+    expect(second.slice(0, first.length)).toEqual(first);
+    expect(text(second.slice(first.length))).toContain('勘测已核验');
+    expect(r.prepare()).toEqual(second);
+    rmSync(join(r.memoryDir, 'goals/projects.md'));
+    expect(text(r.prepare())).toContain('文件不可读');
+    const injected: string[] = [];
+    r.persona.attach(makeFakeHarnessApi({ injectInternal: (body, type) => { if (type === 'memory_index') injected.push(body); } }));
+    r.config.enabled = false;
+    r.persona.onDelivery({ events: [] });
+    r.persona.onDelivery({ events: [] });
+    expect(injected).toHaveLength(1);
+    expect(injected[0]).toContain('goals/preferences.md');
+  });
+
   it('retains an existing intention and its detail pointer, followed by newer World facts, without changing Memory or the session', () => {
     const r = rig();
     const note = '# 续做入口\n## 未完成成果\n修路尚未验收，先勘测。详情 goals/projects.md。\n';

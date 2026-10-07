@@ -173,6 +173,8 @@ export const CORTIV_FOREGROUND_CONFIG_GROUP: ConfigGroup = {
       'foreground.maxHistoryTokens': { type: 'integer', minimum: 1024, title: '近期历史预算(token估算)', 'x-hot': true,
         description: '不含完整系统前缀和工具定义；未处理输入和原子调用组超预算时完整保留。' },
       'foreground.minRecentRounds': { type: 'integer', minimum: 1, maximum: 16, title: '至少保留的近期轮次', 'x-hot': true },
+      'foreground.memoryFiles': { type: 'string', title: '长期记忆索引入口', 'x-hot': true,
+        description: '每行一个工作区相对文件路径。最多8份合计4000字符原文节选，独立于近期短笺；完整内容按需读取。空值不增加入口。' },
     },
   },
 };

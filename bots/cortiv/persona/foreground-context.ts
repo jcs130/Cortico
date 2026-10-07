@@ -7,11 +7,13 @@ export interface ForegroundContextConfig {
   enabled: boolean;
   maxHistoryTokens: number;
   minRecentRounds: number;
+  /** Newline-separated Memory indexes, independently retained across rolling note rewrites. */
+  memoryFiles?: string;
 }
 
 /** Optional deployment fallback for models whose routine calls benefit from shorter history. */
 export const FOREGROUND_CONTEXT_DEFAULTS: ForegroundContextConfig = {
-  enabled: false, maxHistoryTokens: 6_000, minRecentRounds: 2,
+  enabled: false, maxHistoryTokens: 6_000, minRecentRounds: 2, memoryFiles: '',
 };
 
 export interface ForegroundProjection {
@@ -26,7 +28,7 @@ export interface ForegroundProjection {
 
 interface Group { start: number; end: number; }
 const FRAME_TOOL = 'external_event_frame';
-const PINNED_TYPES = new Set([HANDOFF_NOTE_TYPE, 'pending_work', 'recent_speech', 'planning', 'activity_plan', 'recent_memory']);
+const PINNED_TYPES = new Set([HANDOFF_NOTE_TYPE, 'pending_work', 'recent_speech', 'planning', 'activity_plan', 'recent_memory', 'memory_index']);
 
 function prefix(record: ContextRecord): boolean {
   return record.context.head === true || (record.item.type === 'message'

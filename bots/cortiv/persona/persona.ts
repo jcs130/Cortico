@@ -65,6 +65,7 @@ import { DreamContext, DREAM_DEFAULTS, dreamHistoryWithinBudget, normalizeDreamC
 import { DreamTaskQueue, DreamTaskStoppedError, dreamAbortable, dreamDelay } from './dream-task-queue.ts';
 import { DreamMemory, dreamWorkspaceTools } from './dream-memory.ts';
 import { MemoryNoteProvenance, NOTE_PROVENANCE_DIR } from './note-provenance.ts';
+import { memoryIndex } from './memory-index.ts';
 import { ToolCallRecoveryFallback, TOOL_CALL_RECOVERY_DEFAULTS, type ToolCallRecoveryConfig } from './tool-call-recovery.ts';
 import { SleepReview, SLEEP_REVIEW_DEFAULTS, type SleepReviewConfig } from './sleep-review.ts';
 import { SocialMemoryReview, socialReviewPrompt, verifySocialReviewProof } from './social-memory-review.ts';
@@ -450,6 +451,8 @@ export class CortiV extends Cormini {
   private deliveredReferenceNote = '';
   private deliveredRecentNote = '';
   private hadRecentMemoryNote = false;
+  private deliveredMemoryIndex = '';
+  private hadMemoryIndex = false;
   private pendingWork: PendingWork | null = null;
   private readonly planningConfig: () => PlanningConfig;
   private readonly dreamConfig: () => DreamConfig;
@@ -578,12 +581,18 @@ export class CortiV extends Cormini {
     this.deliveredAgendaNote = '';
     this.deliveredReferenceNote = '';
     this.deliveredRecentNote = '';
+    this.deliveredMemoryIndex = '';
   }
 
   /** Changed facts append at delivery boundaries so earlier request content remains cacheable. */
   private deliverMemoryChanges(): void {
     const core = this.core;
     if (!core) return;
+    const index = this.longTermMemoryIndex();
+    if (index && index !== this.deliveredMemoryIndex) {
+      core.injectInternal(index, 'memory_index');
+      this.deliveredMemoryIndex = index;
+    }
     const recent = this.recentMemoryNote();
     if (!this.foregroundConfig().enabled && recent !== this.deliveredRecentNote) {
       core.injectInternal(recent || '[续做笔记] 当前没有短笺。', 'recent_memory');
@@ -728,15 +737,17 @@ export class CortiV extends Cormini {
     }
     const facts = this.requestWorldFacts();
     const recentMemory = this.recentMemoryNote();
+    const index = this.longTermMemoryIndex();
     const recentSpeech = this.recentSpeech.note();
     const pending = this.pendingWork?.summary() || '[待办] 当前没有等待中或待复核的事项。';
     const agenda = this.activityAgenda?.summary() ?? '';
     const coveredCheckpoints = [
       ...(recentMemory ? ['recent_memory'] : []),
+      ...(index ? ['memory_index'] : []),
       ...(recentSpeech ? ['recent_speech'] : []), ...(this.pendingWork ? ['pending_work'] : []),
       ...(agenda ? ['activity_plan', ...(this.planningConfig().agendaEnabled ? ['planning'] : [])] : []),
     ];
-    const pins = [...(recentMemory ? [message('user', recentMemory)] : []), ...facts.pins, ...[recentSpeech, this.actionEvidence(ctx.messages), pending, agenda, this.viewerRecallContext.text(), this.referenceLibrary.context()].filter(Boolean)
+    const pins = [...[recentMemory, index].filter(Boolean).map(text => message('user', text)), ...facts.pins, ...[recentSpeech, this.actionEvidence(ctx.messages), pending, agenda, this.viewerRecallContext.text(), this.referenceLibrary.context()].filter(Boolean)
       .map((text) => message('user', text))];
     const handoffSources = new Map<string, { digest: string; original: boolean }>();
     this.foregroundCurrentHandoffs = ctx.messages.flatMap((record) => {
@@ -1979,6 +1990,14 @@ export class CortiV extends Cormini {
       + `需要未展示的细节时用 read_file 读取 ${RECENT_FILE}。重要意图或结论改变时再更新笔记，现场快照由 World 持续提供。`;
   }
 
+  private longTermMemoryIndex(): string {
+    const index = memoryIndex(this.memory, this.foregroundConfig().memoryFiles ?? '');
+    if (index) this.hadMemoryIndex = true;
+    return index || (this.hadMemoryIndex
+      ? '[长期记忆索引] 当前未配置独立入口；旧节选仅作历史线索，入口移除不证明目标已完成或取消。'
+      : '');
+  }
+
   private dreamPrompt(config: DreamConfig): string {
     const constitution = readFileSync(join(this.memoryDir, 'CONSTITUTION.md'), 'utf8').trim();
     return [
@@ -2017,7 +2036,7 @@ export class CortiV extends Cormini {
       '   已完成的活动若要重做，写清当次的新目的或变化；没有就不要列作待办。',
       '   不要罗列、不要编号、不要照抄我的原句,也不要转抄上一份交接笔记或反复传递旧台词。',
       '   调用入参是拟发内容;观众是否听到、听到多少以实际回执和后续事件为准,保留失败、未播完和修订的区别。',
-      '   主意识会原样读到整份文件,用它自然接续当前话题或动作;不必口头表示意识到暂停、清空或交接。',
+      '   主意识会读到最新短笺节选及全文入口，用它接续当前话题或动作；长期项目另有独立索引，不必为续做重抄整份项目。',
       `2. 人物档案:值得记住的人写/并入 ${VIEWERS_DIR}/<来源>/<键>.md。`,
       '   键=[memory] 行里给出的那个 id(「××(id 12345)还没有档案」/「你记得××的12345:…」),',
       '   记录里没给 id 的人就别立档——猜一个键出来,下次认人会永远查不到。',
