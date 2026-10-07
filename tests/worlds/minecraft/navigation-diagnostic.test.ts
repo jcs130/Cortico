@@ -82,7 +82,8 @@ describe('旧不可站记录重新核验', () => {
     return { bot, exec, target, reports };
   }
 
-  it.each([null, { kind: 'open' } as TargetDiag])('新读数 %j 不沿用旧不可站结论', async (diag) => {
+  it.each([null, { kind: 'open' } as TargetDiag,
+    { kind: 'noSupport', at: { x: 10, y: 64, z: 0 } } as TargetDiag])('新读数 %j 不沿用旧不可站结论', async (diag) => {
     const { bot, exec, target, reports } = rig(diag);
     expect(exec.submitDetailed([target]).accepted).toBe(true);
     await waitUntil(() => reports.length === 1);

@@ -166,6 +166,17 @@ describe('server-granted flight movement', () => {
     expect(client.write.mock.calls).toHaveLength(0);
   });
 
+  it('states the effective landing mode when an airborne target has no floor', async () => {
+    const { bot, client } = flightBot();
+    client.emit('abilities', { flags: 4 });
+    await expect(flyToPosition(bot, { x: 0.5, y: 66, z: 0.5 }, () => false, { land: true }))
+      .rejects.toThrow('当前 land:true 要求落地；空中悬停用 land:false');
+    expect(client.write.mock.calls).toHaveLength(0);
+    await finish(flyToPosition(bot, { x: 0.5, y: 66, z: 0.5 }, () => false, { land: false }));
+    expect(bot.entity.position.y).toBe(66);
+    expect(flightState(bot).flying).toBe(true);
+  });
+
   it.each([
     ['dirt', '碰撞方块 dirt'],
     ['water', '危险方块或液体 water'],

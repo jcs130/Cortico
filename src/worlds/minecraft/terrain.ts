@@ -19,6 +19,7 @@ import { itemCustomName } from './item-display.ts';
 import { animalStateNote, type FactBot, type FactEntity } from './animal-state.ts';
 import { BURNING_BLOCKS, SCORCHING_FLOOR, hazardBodyBounds } from './hazard-geometry.ts';
 import { remainingEffectTicks } from './status-effects.ts';
+import type { TargetDiag } from './skill-context.ts';
 export { BURNING_BLOCKS, SCORCHING_FLOOR } from './hazard-geometry.ts';
 
 /** 八方位罗盘。北=-z 南=+z 东=+x 西=-x,与 move 技能同一套词。 */
@@ -1453,20 +1454,23 @@ export function probeBlockInfo(block: {
  * GoalNear(range=1) 同时接受脚下取整及其上方一格；候选落脚格采用同一范围。
  * 整格碰撞才排除候选，缺失读数或部分形状保留为未确认；这里只诊断，不生成移动路径。
  */
-export function standCellsAround(
-  read: BlockReader,
-  t: { x: number; y: number; z: number },
-): Array<{ x: number; y: number; z: number }> {
+function goalStandCells(t: { x: number; y: number; z: number }): Array<{ x: number; y: number; z: number }> {
   const goalCells = [
     { x: t.x, y: t.y, z: t.z },
     { x: t.x + 1, y: t.y, z: t.z }, { x: t.x - 1, y: t.y, z: t.z },
     { x: t.x, y: t.y + 1, z: t.z }, { x: t.x, y: t.y - 1, z: t.z },
     { x: t.x, y: t.y, z: t.z + 1 }, { x: t.x, y: t.y, z: t.z - 1 },
   ];
-  const candidates = [...new Map(goalCells.flatMap((cell) => [cell, { ...cell, y: cell.y - 1 }])
+  return [...new Map(goalCells.flatMap((cell) => [cell, { ...cell, y: cell.y - 1 }])
     .map((cell) => [`${cell.x},${cell.y},${cell.z}`, cell] as const)).values()];
+}
+
+export function standCellsAround(
+  read: BlockReader,
+  t: { x: number; y: number; z: number },
+): Array<{ x: number; y: number; z: number }> {
   const out: Array<{ x: number; y: number; z: number }> = [];
-  for (const c of candidates) {
+  for (const c of goalStandCells(t)) {
     const feet = read(c.x, c.y, c.z);
     const head = read(c.x, c.y + 1, c.z);
     const below = read(c.x, c.y - 1, c.z);
@@ -1476,6 +1480,24 @@ export function standCellsAround(
     if (passable && support) out.push(c);
   }
   return out;
+}
+
+/** Empty body space with no floor does not establish an occupied target. */
+export function diagnoseTargetSpace(read: BlockReader, target: { x: number; y: number; z: number }): TargetDiag {
+  const stand = standCellsAround(read, target);
+  if (!stand.length) {
+    for (const at of goalStandCells(target)) {
+      const feet = read(at.x, at.y, at.z), head = read(at.x, at.y + 1, at.z);
+      const below = read(at.x, at.y - 1, at.z);
+      if (feet && head && below && !feet.uncertain && !head.uncertain && !below.uncertain
+        && !feet.solid && !head.solid && !below.solid && !WATER_BLOCKS.has(feet.name)) {
+        return { kind: 'noSupport', at };
+      }
+    }
+    return { kind: 'noStand' };
+  }
+  const size = pocketScan(read, stand);
+  return size === null ? { kind: 'open' } : { kind: 'sealed', size };
 }
 
 /**

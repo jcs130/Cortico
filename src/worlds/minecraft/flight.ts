@@ -227,7 +227,7 @@ export async function flyToPosition(bot: Bot, targetAt: { x: number; y: number; 
     let start = bot.entity.position.clone();
     let distance = start.distanceTo(target);
     if (distance > MAX_FLIGHT_DISTANCE) throw new SkillBlocked(`飞行单段最多 ${MAX_FLIGHT_DISTANCE} 格；目标的三维直线距离 ${distance} 格`);
-    if (options.land && !hasSupport(bot, target)) throw new SkillBlocked('飞行目标下方没有已加载的安全落脚方块；先选一处可站立的平台');
+    if (options.land && !hasSupport(bot, target)) throw new SkillBlocked('飞行目标下方没有已加载的安全落脚方块；当前 land:true 要求落地；空中悬停用 land:false，落地须选已核实的平台');
     const waitUntil = Date.now() + 2_000;
     while (!(flightFlags(bot) & 4) && Date.now() < waitUntil) {
       if (aborted()) throw new SkillBlocked('飞行任务已取消');

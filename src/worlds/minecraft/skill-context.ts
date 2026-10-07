@@ -46,6 +46,7 @@ export interface RouteProbe {
 export type TargetDiag =
   | { kind: 'open' }
   | { kind: 'noStand' }
+  | { kind: 'noSupport'; at: { x: number; y: number; z: number } }
   | { kind: 'sealed'; size: number };
 
 /** 技能受阻是业务终态；scene 携带受阻时的坐标、可见性与试算事实，随回执返回。 */

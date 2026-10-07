@@ -28,7 +28,7 @@ import {
 import { isGravityBlock, isSpawnAnchorBlock } from './policy.ts';
 import { isStableScaffoldMaterial } from './scaffold-material.ts';
 import type { ShowTempo } from './show.ts';
-import { pocketScan, probeBlockInfo, standCellsAround } from './terrain.ts';
+import { diagnoseTargetSpace, probeBlockInfo } from './terrain.ts';
 import { walkOnlyPath } from './travel.ts';
 import { installPartialBlockStartRepair } from './pathfinder-start.ts';
 import { parseSkillsPayload, VIEWER_STATE_CHANNEL } from './viewer-state.ts';
@@ -939,10 +939,7 @@ export class Bridge {
       return b ? probeBlockInfo(b) : null;
     };
     const t = { x: Math.floor(target.x), y: Math.floor(target.y), z: Math.floor(target.z) };
-    const stand = standCellsAround(read, t);
-    if (stand.length === 0) return { kind: 'noStand' };
-    const size = pocketScan(read, stand);
-    return size === null ? { kind: 'open' } : { kind: 'sealed', size };
+    return diagnoseTargetSpace(read, t);
   }
 
   /** 每类寻路记录使用独立的五秒窗口；期间重复项计数，下一次输出附抑制数量。 */

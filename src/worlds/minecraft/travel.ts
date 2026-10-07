@@ -190,6 +190,7 @@ export function fmtDist(d: number): string {
  */
 export function diagText(diag: TargetDiag | null | undefined): string | null {
   if (diag?.kind === 'noStand') return '目标那一格站不进人:它和四周都被方块占着';
+  if (diag?.kind === 'noSupport') return `目标附近有能容身的空位 (${diag.at.x}, ${diag.at.y}, ${diag.at.z})，但脚下缺少支撑；没有核实到该高度可站立的落点`;
   if (diag?.kind === 'sealed') return `目标封在一个约 ${diag.size} 格的死角里`;
   return null;
 }

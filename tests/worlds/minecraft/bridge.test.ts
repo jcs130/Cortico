@@ -103,6 +103,38 @@ function searchUp(bot: unknown, movements: Movements): { status: string; place: 
   return { status: res.status, place };
 }
 
+describe('bridge target space evidence', () => {
+  function targetProbe(world: ReturnType<typeof makeWorld>) {
+    const bridge = makeBridge([], []);
+    (bridge as unknown as { _bot: unknown })._bot = makeBot(world);
+    return bridge;
+  }
+
+  it('distinguishes open body space without a floor from occupied space', () => {
+    const world = makeWorld();
+    const bridge = targetProbe(world);
+    const result = bridge.probeTarget({ x: 0, y: 81, z: 0 });
+    expect(result).toMatchObject({ kind: 'noSupport' });
+    if (result?.kind === 'noSupport') {
+      expect(world.getBlock(new Vec3(result.at.x, result.at.y - 1, result.at.z)).name).toBe('air');
+    }
+    expect(bridge.probeTarget({ x: 0, y: 64, z: 0 })).toMatchObject({ kind: 'open' });
+  });
+
+  it('retains an occupied-space diagnosis when every body-space candidate is a full cube', () => {
+    const world = makeWorld();
+    for (let x = -2; x <= 2; x++) for (let y = 67; y <= 73; y++) for (let z = -2; z <= 2; z++) {
+      world.setBlockStateId(new Vec3(x, y, z), STONE);
+    }
+    expect(targetProbe(world).probeTarget({ x: 0, y: 70, z: 0 })).toEqual({ kind: 'noStand' });
+  });
+
+  it('does not infer a missing floor from unloaded body-space candidates', () => {
+    const bridge = targetProbe(makeWorld());
+    expect(bridge.probeTarget({ x: 500, y: 81, z: 500 })).toMatchObject({ kind: 'open' });
+  });
+});
+
 describe('bridge 垫脚名单', () => {
   it('partial support materials do not become one-block tower nodes or a hidden default', () => {
     const warns: string[] = [];
