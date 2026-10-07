@@ -88,7 +88,7 @@ export type SkillCall = StepBounds & (
   | { skill: 'find'; target: string; distance: number; direction?: Direction; until?: string[] }
   | { skill: 'flee'; distance: number }
   | { skill: 'surface' }
-  | { skill: 'flight'; at: Anchor; land?: boolean }
+  | { skill: 'flight'; at: Anchor; land?: boolean; dryRun?: boolean }
   | { skill: 'land' }
   | { skill: 'collect'; block: string; count: number; buried?: boolean; mature?: boolean; tool?: string }
   | { skill: 'fish'; at?: Anchor }
@@ -1106,11 +1106,14 @@ const SKILLS: readonly SkillSpec[] = [
 {"skill":"flight","at":[103,71,-31],"land":false}  飞至空中并悬停，供就近施工、转头或视觉观察；坐标是脚底格中心。
 {"skill":"flight","at":["~6","~3","~6"],"land":false} 相对本步起点近移；12 格按起点到终点的三维直线距离计算，不是每轴各 12 格。
                                                  路径和身位须已加载且无遮挡。取得权限的方法由当前服务器说明提供。
+                                                 dryRun:true 在施法前从当前位置试算碰撞、落点和单段耗时；不施法、不移动，不要求已有许可。
+                                                 限时许可的已知后续移动可与授予许可的 chat 命令同单排队，用 needs 连接各段；不在施法后逐段等模型。
 {"skill":"land"}                                从悬停位置沿下方已加载、安全的落脚面下降落地，再进行普通地面寻路。`,
     fields: [
       { key: 'at', kind: 'anchor', required: true,
         error: `flight 要 at:[x,y,z](落脚格；${RELATIVE_HINT})` },
       { key: 'land', kind: 'flag', retainFalse: true, doc: 'false=抵达后悬停；省略或true=平台落地' },
+      { key: 'dryRun', kind: 'flag', doc: '只试算当前已加载路线；回报预计毫秒、速度来源和当前许可' },
     ],
   },
   { name: 'land', doc: '{"skill":"land"}  从飞行悬停位置下降到下方已加载的安全地面，恢复普通地面动作。', fields: [] },
@@ -1943,6 +1946,7 @@ export function parseSteps(
 function asScoutStep(step: SkillCall): SkillCall {
   switch (step.skill) {
     case 'goto':
+    case 'flight':
     case 'build':
     case 'excavate':
     case 'tunnel':

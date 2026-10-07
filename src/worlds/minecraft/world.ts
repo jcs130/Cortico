@@ -2131,6 +2131,7 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
       'Cast one server-listed /mycli spell immediately, even during combat or retreat. '
       + 'This does not enter the task queue or take movement control. The reply only confirms sending; '
       + 'the server message and observed effects determine whether the spell worked. '
+      + 'For planned timed movement, prepare the route first and queue the cast chat command with dependent flight steps in one mc_do group; do not start the timer while earlier queued work is still running. '
       + 'Pass server-required arguments as separate tokens, such as arguments:["bread"] for a creation spell. '
       + 'Use /mycli goddess skills or /mycli spells to discover available spell IDs.',
     parameters: {
@@ -2173,7 +2174,7 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
     name: 'mc_do',
     tags: ['act'],
     description:
-      'Queue an ordered group of Minecraft skills and return immediately with a task id. Known next steps in one intention can be submitted together; steps and queued tasks continue in the background without another model turn. Use queue:"append" to add work after existing tasks. Use queue:"afterCheckpoint" to do this group at a safe checkpoint of current work, then resume that work; container and transaction groups wait until their operation is complete. Each task reports completion or obstruction as a minecraft.task event; a blocked task leaves later tasks queued. A single plain chat or vanilla /msg, /tell, /w to a named player, with default queue and no needs/expect, sends immediately while movement continues. Other slash commands and chat inside a multi-step group retain queue order.',
+      'Queue an ordered group of Minecraft skills and return immediately with a task id. Known next steps in one intention can be submitted together; steps and queued tasks continue in the background without another model turn. Put a timed permission chat command and its planned movement in the same group, linked by needs. Flight waits up to 2 seconds for actual server permission; sending a command alone does not prove its effect. Use queue:"append" to add work after existing tasks. Use queue:"afterCheckpoint" to do this group at a safe checkpoint of current work, then resume that work; container and transaction groups wait until their operation is complete. Each task reports completion or obstruction as a minecraft.task event; a blocked task leaves later tasks queued. A single plain chat or vanilla /msg, /tell, /w to a named player, with default queue and no needs/expect, sends immediately while movement continues. Other slash commands and chat inside a multi-step group retain queue order.',
     parameters: {
       type: 'object',
       properties: {
@@ -2193,7 +2194,7 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
     name: 'mc_scout',
     tags: ['read'],
     description:
-      'Queue a read-only trial of the same skills as mc_do: probe, plus goto/build/excavate/tunnel (always dry-run). Same queue and task events; does not change the world.',
+      'Queue a read-only trial of the same skills as mc_do: probe, plus goto/flight/build/excavate/tunnel (always dry-run). Flight checks current loaded geometry and estimates one segment before permission is granted; it does not simulate future steps or grant permission. Same queue and task events; does not change the world.',
     parameters: {
       type: 'object',
       properties: {

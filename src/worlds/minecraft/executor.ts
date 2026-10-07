@@ -62,7 +62,7 @@ import { farmingClickCell, isHoeUseItem } from './farming-target.ts';
 import { publishViewerCastCommand } from './viewer-cast.ts';
 import { skillGesture } from './skills-social.ts';
 import { skillLook } from './skills-look.ts';
-import { flyToLanding, flyToPosition, landFlight, flightState } from './flight.ts';
+import { flyToLanding, flyToPosition, landFlight, flightState, previewFlight } from './flight.ts';
 import { promoteTemporaryScaffold, reclaimPendingTemporaryScaffold } from './temporary-scaffold.ts';
 import { inventoryReadConfirmed } from './inventory-window-sync.ts';
 import { assertInventoryClicksReady, isInventoryClickError } from './inventory-click-sync.ts';
@@ -830,6 +830,9 @@ async function runSkill(bot: Bot, call: SkillCall, ctx: SkillContext): Promise<s
     case 'look': return skillLook(bot, call, ctx);
     case 'flight': {
       const at = resolveAt(bot, call.at);
+      if (call.dryRun) return `飞行试算（未移动、未施法；仅核对当前已加载地形，执行时重验）：${JSON.stringify(previewFlight(
+        bot, { x: at.x + 0.5, y: at.y, z: at.z + 0.5 }, { land: call.land !== false },
+      ))}`;
       return call.land === false
         ? flyToPosition(bot, { x: at.x + 0.5, y: at.y, z: at.z + 0.5 }, () => ctx.aborted())
         : flyToLanding(bot, at, () => ctx.aborted());

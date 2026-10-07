@@ -1,4 +1,4 @@
-<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts -->
+<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/flight.ts, src/worlds/minecraft/executor.ts, src/worlds/minecraft/skills.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts -->
 
 # worlds/minecraft
 
@@ -234,6 +234,9 @@ bot 死亡、重连及 `client.resyncSec` 周期触发重新附身。
 `/w` 字面玩家名私聊，使用默认队列且未声明 `needs/expect` 时直接发送，不改变身体
 任务与待办。其他斜杠命令、多步组里的聊天及
 显式排队聊天按原有顺序执行。聊天出口校验单行和 256 字符限制，提交回执只证明已发送。
+限时移动许可的命令可与已规划的 `flight`、`land` 一起提交，用 `needs` 串联依赖。
+`flight` 等待至多两秒接收真实飞行许可；未获准或移动失败时，依赖该步的尾部不会执行。
+路线上各段须在限时内完成，试算、查资料和规划应在发送授予许可的命令之前完成。
 
 ### 启动前的设置调整
 
@@ -301,7 +304,7 @@ World 将所选文件保存在部署的 `data/minecraft-skin-{bot,player}.png`�
 |---|---|
 | `mc_cast(spell, arguments?)` | 向支持该命令的服务端立即发送一次 `/mycli cast <技能ID> [参数…]`；`arguments` 是按顺序分开的字符串数组，例如造物目标。战斗或撤退中也不排队、不抢移动控制；发送成功不等于生效，须核对服务端回执和现场状态 |
 | `mc_do(steps, queue?)` | 提交任务。立即返回带时刻与任务号（#N）的受理回执；后台依次执行，结果以同一任务号的 `minecraft.task` 事件返回。`queue` 模式见「队列」 |
-| `mc_scout(steps, queue?)` | `tags:['read']`。与 `mc_do` 共用队列和回执，执行 probe，以及按 dryRun 入队的 goto / build / excavate / tunnel。后续操作仍可入队 |
+| `mc_scout(steps, queue?)` | `tags:['read']`。与 `mc_do` 共用队列和回执，执行 probe，以及按 dryRun 入队的 goto / flight / build / excavate / tunnel。后续操作仍可入队 |
 | `mc_check(checks)` | `tags:['read']`。提交至多 16 条断言（单格 `at/is`、区域 `count/all/air/sealed`、背包 `inv`、蓝图 `blueprint`、路标 `mark`），对照世界后只报差异。同步返回、不进队列、不移动，只读已加载区块；未加载单独报告。`sealed` 按流入通路判断，水和岩浆算通路 |
 | `mc_view_map(id?)` | `tags:['read']`。看身上一张已开图的地图：回执带 512×512 的 PNG 画面（上北右东）与文字读数：编号、比例、已探索比例、图标位置。本机服务端能读到存档 `data/map_<id>.dat` 时再给中心坐标和图标的世界坐标。画面来自服务端推给包里地图的像素包 |
 | `mc_policy(六格，全可选)` | `tags:['write']`。设置垫脚/照明名单、照明场合、赶路取向、保留工具、主动交战条件。不进队列、不占任务号，同步回执；空调用只回读。见「策略面」 |
@@ -394,6 +397,10 @@ agent 可以在同一轮发出多次调用以提交已确定的后续任务。
 **受阻回执包含结论和现场事实。** `SkillBlocked.message` 给出原因，`scene` 渲染受阻时的读数。寻路失败可附当前位置、目标方位与高差、三种走法的试算结果（`renderRouteMenu`）。不可见目标不在回执中暴露处数或坐标；后续路线由 agent 决定。
 
 `flight.ts` 用玩家碰撞箱与方块实际形状检查目标和路径。受阻回执给出首次阻挡的格坐标，并区分碰撞方块、危险方块或液体、未加载读数；超距回执保留三维直线距离，不能把略大于上限的距离舍入成上限。候选路径因服务端飞行速度超过移动时限时单独报告，不推断有障碍。
+`flight dryRun:true` 与 `mc_scout` 的飞行步骤共用实际移动的路线检查，无需已有飞行许可。
+回执给出当前起点、目标、三维距离、预计单段毫秒、速度来源、许可与已知剩余时间；
+预计耗时含 500 毫秒余量。尚未观察速度时注明使用默认值，未获准或期限未知时不判断时间足够。
+试算不发送能力包、不移动，也不模拟前序步骤的未来位置；执行时按实际位置、速度、地形重新检查。
 
 **结论句点明实际阻碍。** 例如 `take` 因背包已满失败时，先说明背包容量问题。
 

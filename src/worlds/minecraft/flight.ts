@@ -6,6 +6,7 @@ interface FlightAbilities {
   flags: number;
   observedAtMs: number;
   flyingSpeed: number;
+  speedObserved: boolean;
   requestedFlying?: boolean;
   expiresAtMs?: number;
   expiryTimer?: ReturnType<typeof setTimeout>;
@@ -26,6 +27,17 @@ export interface FlightMoveOptions {
   /** End flight on a safe supporting surface. Otherwise retain flight for the next action. */
   land?: boolean;
 }
+export interface FlightPreview {
+  from: [number, number, number];
+  at: [number, number, number];
+  land: boolean;
+  distance: number;
+  estimatedDurationMs: number;
+  speedSource: 'server' | 'default';
+  allowed: boolean;
+  remainingMs: number | null;
+  timeEnough: boolean | null;
+}
 const abilities = new WeakMap<Bot, FlightAbilities>();
 const controls = new WeakMap<Bot, FlightControl>();
 const moving = new WeakSet<Bot>();
@@ -43,10 +55,11 @@ export function watchFlightAbilities(bot: Bot): () => void {
   const onAbilities = (packet: { flags?: number; flyingSpeed?: number }): void => {
     const old = abilities.get(bot);
     const flags = Number(packet.flags ?? 0);
+    const speedObserved = !!packet.flyingSpeed && Number.isFinite(packet.flyingSpeed) && packet.flyingSpeed > 0;
     const state: FlightAbilities = {
       flags, observedAtMs: Date.now(),
-      flyingSpeed: packet.flyingSpeed && Number.isFinite(packet.flyingSpeed) && packet.flyingSpeed > 0
-        ? packet.flyingSpeed : old?.flyingSpeed ?? DEFAULT_FLYING_SPEED,
+      flyingSpeed: speedObserved ? packet.flyingSpeed! : old?.flyingSpeed ?? DEFAULT_FLYING_SPEED,
+      speedObserved: speedObserved || old?.speedObserved === true,
       expiresAtMs: flags & 4 ? old?.expiresAtMs : undefined,
       expiryTimer: flags & 4 ? old?.expiryTimer : undefined,
     };
@@ -214,6 +227,34 @@ function flightRoute(bot: Bot, start: Vec3, target: Vec3): Vec3[] {
   throw new SkillBlocked(`按服务端飞行速度，候选路径均超过单段 ${MAX_FLIGHT_MOVE_MS / 1000} 秒的移动时限；请缩短这段路径`);
 }
 
+function flightPlan(bot: Bot, start: Vec3, target: Vec3, options: FlightMoveOptions): Vec3[] {
+  if (![target.x, target.y, target.z].every(Number.isFinite)) throw new SkillBlocked('飞行目标坐标必须是有限数字');
+  const distance = start.distanceTo(target);
+  if (distance > MAX_FLIGHT_DISTANCE) throw new SkillBlocked(`飞行单段最多 ${MAX_FLIGHT_DISTANCE} 格；目标的三维直线距离 ${distance} 格`);
+  if (options.land && !hasSupport(bot, target)) throw new SkillBlocked('飞行目标下方没有已加载的安全落脚方块；当前 land:true 要求落地；空中悬停用 land:false，落地须选已核实的平台');
+  const targetObstruction = spaceObstruction(bot, target);
+  if (targetObstruction) throw new SkillBlocked(`飞行目标空间${targetObstruction}`);
+  return flightRoute(bot, start, target);
+}
+
+/** Inspect the current loaded route without requesting flight permission or moving the player. */
+export function previewFlight(bot: Bot, targetAt: { x: number; y: number; z: number },
+  options: FlightMoveOptions = {}): FlightPreview {
+  if (!bot.entity?.position) throw new SkillBlocked('还没进入世界，不能试算飞行');
+  const start = bot.entity.position.clone();
+  const target = new Vec3(targetAt.x, targetAt.y, targetAt.z);
+  const route = flightPlan(bot, start, target, options);
+  const state = flightState(bot);
+  const remainingMs = state.expiresAtMs === undefined ? null : Math.max(0, state.expiresAtMs - Date.now());
+  const estimatedDurationMs = route.length * FLIGHT_TICK_MS + 500;
+  return {
+    from: [start.x, start.y, start.z], at: [target.x, target.y, target.z],
+    land: options.land === true, distance: start.distanceTo(target), estimatedDurationMs,
+    speedSource: abilities.get(bot)?.speedObserved ? 'server' : 'default', allowed: state.allowed, remainingMs,
+    timeEnough: state.allowed && remainingMs !== null ? remainingMs >= estimatedDurationMs : null,
+  };
+}
+
 /** Exact feet coordinates support takeoff, ascent, descent and an airborne building/viewing position. */
 export async function flyToPosition(bot: Bot, targetAt: { x: number; y: number; z: number },
   aborted: () => boolean, options: FlightMoveOptions = {}): Promise<string> {
@@ -237,9 +278,7 @@ export async function flyToPosition(bot: Bot, targetAt: { x: number; y: number; 
     start = bot.entity.position.clone();
     distance = start.distanceTo(target);
     if (distance > MAX_FLIGHT_DISTANCE) throw new SkillBlocked(`等待飞行许可时位置已变化；目标现在的三维直线距离 ${distance} 格，超过单段 ${MAX_FLIGHT_DISTANCE} 格`);
-    const targetObstruction = spaceObstruction(bot, target);
-    if (targetObstruction) throw new SkillBlocked(`飞行目标空间${targetObstruction}`);
-    const route = flightRoute(bot, start, target);
+    const route = flightPlan(bot, start, target, options);
     const expiresAt = abilities.get(bot)?.expiresAtMs;
     if (expiresAt !== undefined && expiresAt - Date.now() < route.length * FLIGHT_TICK_MS + 500) {
       throw new SkillBlocked('服务端声明的飞行剩余时间不足以抵达目标；先就近落地');

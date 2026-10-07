@@ -5,9 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Vec3 } from 'vec3';
 import type { Bot } from 'mineflayer';
 import type { Block } from 'prismarine-block';
-import { describeSkill, parseSteps } from '../../../src/worlds/minecraft/executor.ts';
+import { describeSkill, parseSteps, Executor, type TaskReport } from '../../../src/worlds/minecraft/executor.ts';
+import { parseScoutSteps } from '../../../src/worlds/minecraft/skills.ts';
+import { log, nextTaskId } from './executor-harness.ts';
 import { flightFlags, flightState, flyToLanding, flyToPosition, landFlight, MAX_FLIGHT_DISTANCE,
-  setFlightExpiry, stopFlight, watchFlightAbilities } from '../../../src/worlds/minecraft/flight.ts';
+  previewFlight, setFlightExpiry, stopFlight, watchFlightAbilities } from '../../../src/worlds/minecraft/flight.ts';
 
 const require = createRequire(import.meta.url);
 const dependency = createRequire(require.resolve('mineflayer'));
@@ -53,6 +55,109 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2025-01-01T00:
 afterEach(() => { releases.splice(0).forEach(release => release()); vi.useRealTimers(); });
 
 describe('server-granted flight movement', () => {
+  it('previews a loaded airborne route without permission, packets or movement', () => {
+    const { bot, client, positions } = flightBot();
+    const preview = previewFlight(bot, { x: 0.5, y: 68, z: 0.5 });
+    expect(preview).toMatchObject({ from: [0.5, 64, 0.5], at: [0.5, 68, 0.5],
+      distance: 4, land: false, allowed: false, speedSource: 'default', remainingMs: null, timeEnough: null });
+    expect(preview.estimatedDurationMs).toBeGreaterThan(0);
+    expect(positions).toHaveLength(0);
+    expect(client.write.mock.calls).toHaveLength(0);
+    expect(bot.physicsEnabled).toBe(true);
+  });
+
+  it('detects a roof and a missing landing surface before spending permission', () => {
+    const { bot, set, client, positions } = flightBot();
+    const target = { x: 0.5, y: 68, z: 0.5 };
+    expect(() => previewFlight(bot, target, { land: true })).toThrow('没有已加载的安全落脚方块');
+    set(new Vec3(0, 66, 0), block('stone'));
+    expect(() => previewFlight(bot, target)).toThrow('飞行路径有碰撞方块 stone @ (0,66,0)');
+    expect(positions).toHaveLength(0);
+    expect(client.write.mock.calls).toHaveLength(0);
+  });
+
+  it('reports observed speed and the actual remaining deadline without renewing it', () => {
+    const { bot, client } = flightBot();
+    client.emit('abilities', { flags: 4, flyingSpeed: 0.1 });
+    setFlightExpiry(bot, Date.now() + 600);
+    const preview = previewFlight(bot, { x: 0.5, y: 68, z: 0.5 });
+    expect(preview).toMatchObject({ speedSource: 'server', allowed: true, remainingMs: 600, timeEnough: false });
+    expect(preview.estimatedDurationMs).toBeGreaterThan(600);
+    expect(client.write.mock.calls).toHaveLength(0);
+  });
+
+  it('revalidates geometry changed after a successful preview', async () => {
+    const { bot, client, set, positions } = flightBot();
+    const target = { x: 0.5, y: 68, z: 0.5 };
+    previewFlight(bot, target);
+    set(new Vec3(0, 66, 0), block('stone'));
+    client.emit('abilities', { flags: 4 });
+    await expect(flyToPosition(bot, target, () => false)).rejects.toThrow('飞行路径有碰撞方块');
+    expect(positions).toHaveLength(0);
+  });
+
+  it('executes flight scout steps as read-only through the real task executor', async () => {
+    const { bot, client, positions } = flightBot();
+    Object.assign(bot, { inventory: { items: () => [] }, pathfinder: { stop() {}, setGoal() {} } });
+    const reports: TaskReport[] = [];
+    const exec = new Executor({ getBot: () => bot, log, nextId: nextTaskId(), precheck: () => false,
+      report: report => reports.push(report) });
+    releases.push(() => exec.shutdown());
+    const parsed = parseScoutSteps([{ skill: 'flight', at: [0, 68, 0], land: false }]);
+    if (!('steps' in parsed)) throw new Error(parsed.error);
+    expect(parsed.steps).toEqual([{ skill: 'flight', at: [0, 68, 0], land: false, dryRun: true }]);
+    expect(describeSkill(parsed.steps[0])).toContain('试算飞行');
+    exec.submit(parsed.steps);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(reports).toHaveLength(1);
+    expect(JSON.stringify(reports[0])).toContain('estimatedDurationMs');
+    expect(JSON.stringify(reports[0])).toContain('未移动、未施法');
+    expect(positions).toHaveLength(0);
+    expect(client.write.mock.calls).toHaveLength(0);
+  });
+
+  it.each([true, false])('continues a queued cast, flight segments and landing only when permission is granted: %s', async (granted) => {
+    const { bot, client, positions } = flightBot();
+    const said: string[] = [];
+    Object.assign(bot, { inventory: { items: () => [] }, pathfinder: { stop() {}, setGoal() {} },
+      chat: (text: string) => {
+        said.push(text);
+        if (text === '/test grant-flight' && granted) setTimeout(() => {
+          client.emit('abilities', { flags: 4, flyingSpeed: 0.05 });
+          setFlightExpiry(bot, Date.now() + 21_000);
+        }, 50);
+      },
+    });
+    const reports: TaskReport[] = [];
+    const exec = new Executor({ getBot: () => bot, log, nextId: nextTaskId(), precheck: () => false,
+      report: report => reports.push(report) });
+    releases.push(() => exec.shutdown());
+    exec.submit([
+      { skill: 'chat', text: '/test grant-flight' },
+      { skill: 'flight', at: [0, 68, 0], land: false, needs: [1] },
+      { skill: 'flight', at: [4, 68, 0], land: false, needs: [2] },
+      { skill: 'land', needs: [3] },
+      { skill: 'chat', text: '已经落地', needs: [4] },
+    ]);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(positions.length > 0).toBe(granted);
+    expect(said).toEqual(['/test grant-flight']);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(reports).toHaveLength(1);
+    if (granted) {
+      expect(said).toEqual(['/test grant-flight', '已经落地']);
+      expect(bot.entity.position).toEqual(new Vec3(4.5, 64, 0.5));
+      expect(Math.max(...positions.map(pos => pos.y))).toBe(68);
+    } else {
+      expect(said).toEqual(['/test grant-flight']);
+      expect(positions).toHaveLength(0);
+      expect(JSON.stringify(reports[0])).toContain('尚未授予飞行能力');
+      expect(reports[0].kind).toBe('blocked');
+    }
+    expect(bot.physicsEnabled).toBe(true);
+    expect(flightState(bot).flying).toBe(false);
+  });
+
   it('keeps the existing integer-cell landing action compatible', () => {
     const parsed = parseSteps([{ skill: 'flight', at: [2, 65, 0] }]);
     expect('steps' in parsed).toBe(true);
