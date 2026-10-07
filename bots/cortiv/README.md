@@ -1,4 +1,4 @@
-<!-- Owner: bots/cortiv/index.ts, bots/cortiv/persona/persona.ts -->
+<!-- Owner: bots/cortiv/index.ts, bots/cortiv/persona/persona.ts, bots/cortiv/persona/ORIENTATION.md -->
 
 # bots/cortiv
 
@@ -46,6 +46,8 @@ pnpm start cortiv
 ## Memory
 
 Memory 使用工作区文件，由 [Persona](persona/persona.ts) 管理。
+
+工作区读写工具允许自主编写、修订和检索 `methods/` 下的方法及 JSON 动作序列，沿用工作区路径边界和 Git 提交。`methods/index.md` 提供按需入口，实际执行仍使用当前 World 声明的工具与当次现场参数；保存方法不证明外部执行成功。这组权限不包含客户端源码、系统服务或模型权重的修改工具。
 
 | 功能 | 行为 |
 |---|---|
