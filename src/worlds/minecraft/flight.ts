@@ -147,6 +147,65 @@ export function stopFlight(bot: Bot): void {
   releaseFlight(bot, '飞行已停止', true);
 }
 
+async function awaitFlightPermission(bot: Bot, aborted: () => boolean): Promise<void> {
+  const waitUntil = Date.now() + 2_000;
+  while (!(flightFlags(bot) & 4) && Date.now() < waitUntil) {
+    if (aborted()) throw new SkillBlocked('飞行任务已取消');
+    await sleep(FLIGHT_TICK_MS);
+  }
+  if (aborted()) throw new SkillBlocked('飞行任务已取消');
+  if (!(flightFlags(bot) & 4)) throw new SkillBlocked('服务端尚未授予飞行能力；先取得飞行许可并查看成功回执');
+}
+
+function beginFlight(bot: Bot): FlightControl {
+  const current = controls.get(bot);
+  if (current) return current;
+  const control = { physicsEnabled: bot.physicsEnabled, gravity: bot.physics.gravity };
+  if (!flightState(bot).flying) bot._client.write('abilities', { flags: 2 });
+  abilities.get(bot)!.requestedFlying = true;
+  controls.set(bot, control);
+  bot.clearControlStates();
+  bot.physicsEnabled = false;
+  bot.physics.gravity = 0;
+  return control;
+}
+
+/** Direction is a world-space input vector. Each tick starts at the current observed position. */
+export async function flyWithInput(bot: Bot, direction: Vec3, durationMs: number,
+  aborted: () => boolean, sample: () => void): Promise<void> {
+  if (!bot.entity?.position) throw new SkillBlocked('还没进入世界，不能飞行');
+  if (moving.has(bot)) throw new SkillBlocked('另一段飞行移动尚未结束');
+  moving.add(bot);
+  try {
+    await awaitFlightPermission(bot, aborted);
+    const control = beginFlight(bot);
+    const until = Date.now() + durationMs;
+    while (Date.now() < until) {
+      if (aborted()) throw new SkillBlocked('飞行控制已中断，保持当前悬停位置');
+      if (control.interrupted) throw new SkillBlocked(control.interrupted, [], 'server');
+      if (!(flightFlags(bot) & 4)) throw new SkillBlocked('服务端飞行许可已结束', [], 'server');
+      const tickMs = Math.min(FLIGHT_TICK_MS, until - Date.now());
+      const step = Math.min(0.3, abilities.get(bot)!.flyingSpeed * 3) * tickMs / FLIGHT_TICK_MS;
+      const offset = direction.norm() > 0 ? direction.scaled(step / direction.norm()) : new Vec3(0, 0, 0);
+      const next = bot.entity.position.plus(offset);
+      const obstruction = spaceObstruction(bot, next);
+      if (obstruction) throw new SkillBlocked(`直接飞行受阻：${obstruction}；已停止移动并悬停`);
+      bot.entity.velocity = new Vec3(0, 0, 0);
+      bot.entity.onGround = false;
+      bot.entity.position = next;
+      await sleep(tickMs);
+      sample();
+    }
+    await sleep(150);
+    sample();
+    if (aborted()) throw new SkillBlocked('飞行控制已中断');
+    if (control.interrupted) throw new SkillBlocked(control.interrupted, [], 'server');
+    if (!(flightFlags(bot) & 4)) throw new SkillBlocked('服务端飞行许可已结束', [], 'server');
+  } finally {
+    moving.delete(bot);
+  }
+}
+
 function collisionShapes(block: NonNullable<ReturnType<Bot['blockAt']>>): number[][] {
   return block.shapes ?? (block.boundingBox === 'block' ? [[0, 0, 0, 1, 1, 1]] : []);
 }
@@ -270,12 +329,7 @@ export async function flyToPosition(bot: Bot, targetAt: { x: number; y: number; 
     let distance = start.distanceTo(target);
     if (distance > MAX_FLIGHT_DISTANCE) throw new SkillBlocked(`飞行单段最多 ${MAX_FLIGHT_DISTANCE} 格；目标的三维直线距离 ${distance} 格`);
     if (options.land && !hasSupport(bot, target)) throw new SkillBlocked('飞行目标下方没有已加载的安全落脚方块；当前 land:true 要求落地；空中悬停用 land:false，落地须选已核实的平台');
-    const waitUntil = Date.now() + 2_000;
-    while (!(flightFlags(bot) & 4) && Date.now() < waitUntil) {
-      if (aborted()) throw new SkillBlocked('飞行任务已取消');
-      await sleep(FLIGHT_TICK_MS);
-    }
-    if (!(flightFlags(bot) & 4)) throw new SkillBlocked('服务端尚未授予飞行能力；先取得飞行许可并查看成功回执');
+    await awaitFlightPermission(bot, aborted);
     start = bot.entity.position.clone();
     distance = start.distanceTo(target);
     if (distance > MAX_FLIGHT_DISTANCE) throw new SkillBlocked(`等待飞行许可时位置已变化；目标现在的三维直线距离 ${distance} 格，超过单段 ${MAX_FLIGHT_DISTANCE} 格`);
@@ -285,17 +339,7 @@ export async function flyToPosition(bot: Bot, targetAt: { x: number; y: number; 
       throw new SkillBlocked('服务端声明的飞行剩余时间不足以抵达目标；先就近落地');
     }
     if (aborted()) throw new SkillBlocked('飞行任务已取消');
-    control = controls.get(bot);
-    if (!control) {
-      control = { physicsEnabled: bot.physicsEnabled, gravity: bot.physics.gravity };
-      if (!flightState(bot).flying) bot._client.write('abilities', { flags: 2 });
-      const ability = abilities.get(bot)!;
-      ability.requestedFlying = true;
-      controls.set(bot, control);
-      bot.clearControlStates();
-      bot.physicsEnabled = false;
-      bot.physics.gravity = 0;
-    }
+    control = beginFlight(bot);
     for (const pos of route) {
       if (aborted()) throw new SkillBlocked('飞行任务已取消，保持当前位置悬停；可调用落地');
       if (control.interrupted) throw new SkillBlocked(control.interrupted, [], 'server');

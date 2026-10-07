@@ -82,6 +82,7 @@ export type AttackMode = 'auto' | 'melee' | 'ranged' | 'kite';
 export type SkillCall = StepBounds & (
   | { skill: 'goto'; at: Anchor; dimension?: string; groundY?: true; exact?: boolean; walkOnly?: boolean; dryRun?: boolean }
   | { skill: 'look'; at: Anchor }
+  | { skill: 'control'; keys: ControlKey[]; durationMs: number; mode: 'ground' | 'flight'; yawDeg?: number; pitchDeg?: number }
   | { skill: 'transit'; at: Anchor }
   | { skill: 'goto_player'; name: string }
   | { skill: 'follow'; name: string }
@@ -376,6 +377,38 @@ export function parseNoteText(n: ParseNote): string {
 }
 
 type ParseResult = { step: SkillCall; notes?: StepNote[] } | { error: string };
+
+export const CONTROL_KEYS = ['forward', 'back', 'left', 'right', 'jump', 'sneak', 'sprint'] as const;
+export type ControlKey = typeof CONTROL_KEYS[number];
+export const CONTROL_DURATION = { minMs: 50, maxMs: 2_000, defaultMs: 500 } as const;
+
+function parseControl(c: Record<string, unknown>, at: string): ParseResult {
+  if (!Array.isArray(c.keys) || !c.keys.every(key => CONTROL_KEYS.includes(key as ControlKey))) {
+    return { error: `${at} control 的 keys 要数组，成员为 ${CONTROL_KEYS.join('/')}` };
+  }
+  const keys = [...new Set(c.keys)] as ControlKey[];
+  for (const [a, b] of [['forward', 'back'], ['left', 'right'], ['jump', 'sneak']] as const) {
+    if (keys.includes(a) && keys.includes(b)) return { error: `${at} control 不能同时按 ${a} 和 ${b}` };
+  }
+  const durationMs = c.durationMs ?? CONTROL_DURATION.defaultMs;
+  if (typeof durationMs !== 'number' || !Number.isInteger(durationMs)
+    || durationMs < CONTROL_DURATION.minMs || durationMs > CONTROL_DURATION.maxMs) {
+    return { error: `${at} control 的 durationMs 要 ${CONTROL_DURATION.minMs}–${CONTROL_DURATION.maxMs} 之间的整数毫秒` };
+  }
+  const mode = c.mode ?? 'ground';
+  if (mode !== 'ground' && mode !== 'flight') return { error: `${at} control 的 mode 要 ground 或 flight` };
+  if (mode === 'flight' && keys.includes('sprint')) return { error: `${at} flight 控制不支持 sprint；速度取服务端飞行能力读数` };
+  for (const [field, limit] of [['yawDeg', 180], ['pitchDeg', 90]] as const) {
+    const value = c[field];
+    if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value) || Math.abs(value) > limit)) {
+      return { error: `${at} control 的 ${field} 要 -${limit}–${limit} 之间的有限角度` };
+    }
+  }
+  if (!keys.length && !c.yawDeg && !c.pitchDeg) return { error: `${at} control 至少提供一个按键或非零转角` };
+  return { step: { skill: 'control', keys, durationMs, mode,
+    ...(c.yawDeg === undefined ? {} : { yawDeg: c.yawDeg as number }),
+    ...(c.pitchDeg === undefined ? {} : { pitchDeg: c.pitchDeg as number }) } };
+}
 
 interface SkillSpec {
   name: SkillCall['skill'];
@@ -1007,6 +1040,22 @@ const ANCHOR_SCHEMA = {
 
 /** 注册表本体。顺序即 SKILL_NAMES 与 SKILL_DOC 的出场顺序 */
 const SKILLS: readonly SkillSpec[] = [
+  {
+    name: 'control',
+    doc: `{"skill":"control","keys":["forward","jump"],"durationMs":500,"mode":"ground"} 短时直接按键，不计算寻路、不挖方块。每步 50–2000 毫秒，结束或中断松开按键；跳跃、服务端跃空的冲量由普通游戏物理处理。
+{"skill":"control","keys":["forward","jump"],"durationMs":1000,"mode":"flight","yawDeg":30} 先相对当前视角左转 30 度，再向前上方斜飞。飞行必须已有服务端许可，可与授予许可的 chat 同单用 needs 连接；最多等待许可 2 秒。
+keys: forward/back/left/right/jump/sneak/sprint；相反方向不能同按。flight 中 jump 上升、sneak 下降，方向按视角水平朝向，pitch 不改变升降；不支持 sprint。yawDeg 正数左转、pitchDeg 正数抬头；单位度。空 keys 配转角可原地转头。
+ground 使用普通物理，飞行悬停时先 land 或改用 flight。flight 检查身位碰撞和区块加载，遇遮挡停止；不会绕路。位置修正、死亡、断线或身体被其他任务接管时结束本步，不从旧坐标继续移动。
+回执给实际起终点、位移和中断原因；按完键不证明到达目的地。已知连续步骤可同单排队，needs 串联、expect 检查实际终态；被打断的 control 不自动重放，重新观察后再排。`,
+    fields: [
+      { key: 'keys', kind: 'opaque', required: true, schema: { type: 'array', items: { type: 'string', enum: [...CONTROL_KEYS] } } },
+      { key: 'durationMs', kind: 'int', lo: CONTROL_DURATION.minMs, hi: CONTROL_DURATION.maxMs, def: CONTROL_DURATION.defaultMs, unit: '毫秒' },
+      { key: 'mode', kind: 'enum', values: ['ground', 'flight'], error: 'control 的 mode 要 ground 或 flight' },
+      { key: 'yawDeg', kind: 'opaque', schema: { type: 'number', minimum: -180, maximum: 180 }, doc: '相对视角，正数左转，单位度' },
+      { key: 'pitchDeg', kind: 'opaque', schema: { type: 'number', minimum: -90, maximum: 90 }, doc: '相对视角，正数抬头，单位度' },
+    ],
+    parse: parseControl,
+  },
   {
     name: 'look',
     doc: `{"skill":"look","at":[100,68,-20]} 原地转头看向目标格中心，不移动、不右键或挖掘。换观察方向后可用 mc_visual 拍摄。

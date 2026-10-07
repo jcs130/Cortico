@@ -19,6 +19,7 @@ import { type Cell } from './geometry.ts';
 import { probabilisticDropsOf } from './inventory.ts';
 import { PLACE_REACH } from './cell-facts.ts';
 import { flightState } from './flight.ts';
+import { cancelControlInput } from './skills-control.ts';
 
 export const { goals } = pathfinderPkg;
 
@@ -413,6 +414,7 @@ export function noteGoalOwner(
   intent: string,
   diag?: MinecraftLog,
 ): void {
+  cancelControlInput(bot, `${kind} 接管身体：${intent}`);
   const prev = goalOwnerOf(bot);
   if (prev && prev.kind !== kind && prev.goal !== goal) {
     noteGoalOverride(prev, kind, `改下 ${intent}`, diag);
@@ -480,6 +482,7 @@ export function releaseBody(
   by: GoalOwnerKind = 'task',
 ): void {
   if (!bot?.entity) return;
+  cancelControlInput(bot, `交还身体：${reason}`);
   const escaping = onEscapeGoal(bot);
   if (!escaping) {
     dropGoal(bot, by, `交还身体(${reason})`, diag);
