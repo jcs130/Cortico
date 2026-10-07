@@ -1504,6 +1504,89 @@ describe('Executor 编排', () => {
     guard.recordExactOutcome([{ skill: 'take', item: 'rotten_flesh', count: 1, from: 'open' }], false, '已取出');
     expect(guard.fullOpenStorageNote(stow('crossbow'), Date.now())).toBeNull();
   });
+  it.each([19, 1])('满窗失败后，同单先取 %i 件再存物按执行时容量裁决', async (takeCount) => {
+    type Stack = { name: string; type: number; metadata: number; count: number };
+    const slots: Array<Stack | null> = Array.from({ length: 63 }, (_, i) => i < 26
+      ? { name: 'cobblestone', type: 3, metadata: 0, count: 64 } : null);
+    slots[26] = { name: 'wheat_seeds', type: 1, metadata: 0, count: 19 };
+    slots[27] = { name: 'dirt', type: 2, metadata: 0, count: 8 };
+    const client = Object.assign(new EventEmitter(), { write() {} });
+    const win = { id: 5, type: 'minecraft:generic_9x3', title: 'Chest', slots,
+      inventoryStart: 27, inventoryEnd: 63,
+      items: () => slots.slice(27).filter((item): item is Stack => item !== null) };
+    let deposits = 0;
+    const bot = {
+      entity: { id: 1, position: new V(0.5, 64, 0.5) },
+      registry: { itemsByName: {
+        wheat_seeds: { id: 1, name: 'wheat_seeds', stackSize: 64 },
+        dirt: { id: 2, name: 'dirt', stackSize: 64 },
+        cobblestone: { id: 3, name: 'cobblestone', stackSize: 64 },
+      } },
+      inventory: { items: win.items }, _client: client,
+      currentWindow: null as typeof win | null,
+      chat: () => {
+        bot.currentWindow = win;
+        client.emit('open_window', { windowId: win.id, inventoryType: win.type, windowTitle: win.title });
+        client.emit('window_items', { windowId: win.id, stateId: 1,
+          items: slots.map((stack) => stack
+            ? { itemId: stack.type, itemCount: stack.count, components: [] } : { itemCount: 0 }),
+          carriedItem: { itemCount: 0 } });
+        events.emit('windowOpen', win);
+      },
+      transfer: async ({ itemType, count, sourceStart, sourceEnd, destStart, destEnd }: {
+        itemType: number; count: number; sourceStart: number; sourceEnd: number;
+        destStart: number; destEnd: number;
+      }) => {
+        if (destStart === 0) deposits++;
+        const from = slots.findIndex((item, i) => i >= sourceStart && i < sourceEnd && item?.type === itemType);
+        const to = slots.findIndex((item, i) => i >= destStart && i < destEnd && item === null);
+        if (from < 0 || to < 0) throw new Error('destination full');
+        const stack = slots[from]!;
+        const moved = Math.min(count, stack.count);
+        slots[to] = { ...stack, count: moved };
+        stack.count -= moved;
+        if (stack.count === 0) slots[from] = null;
+      },
+      closeWindow: () => { bot.currentWindow = null; events.emit('windowClose', win); },
+    };
+    const events = withBotEvents(bot);
+    const { exec, reports } = makeExecutorOn(bot);
+    const opener: SkillCall = { skill: 'chat', text: '/storage open' };
+    const stow: SkillCall = { skill: 'stow', item: 'dirt', count: 8, into: 'open' };
+    for (let i = 1; i <= 2; i++) {
+      expect(exec.submitDetailed([opener, stow]).accepted).toBe(true);
+      await waitUntil(() => reports.length === i);
+      expect(reports[i - 1].kind).toBe('blocked');
+      expect(reports[i - 1].text).toContain('当前窗口没有存进');
+    }
+    expect(exec.submitDetailed([opener, stow]).rejection?.rule).toBe('storage.full');
+    const repair = exec.submitDetailed([opener,
+      { skill: 'take', item: 'wheat_seeds', count: takeCount, from: 'open' },
+      { ...stow, needs: [2] },
+    ]);
+    expect(repair.accepted).toBe(true);
+    await waitUntil(() => reports.length === 3);
+    expect(reports[2].kind).toBe(takeCount === 19 ? 'done' : 'blocked');
+    expect(slots.slice(0, 27).find((item) => item?.name === 'dirt')?.count ?? 0)
+      .toBe(takeCount === 19 ? 8 : 0);
+    expect(win.items().find((item) => item.name === 'wheat_seeds')?.count).toBe(takeCount);
+    expect(deposits).toBe(3);
+  });
+  it('取物在存物之后或在另一容器时，不解除满窗重复拦截', () => {
+    const { exec } = makeExecutor();
+    const guard = exec as unknown as {
+      recordExactOutcome(steps: SkillCall[], failed: boolean, why: string): void;
+    };
+    const opener: SkillCall = { skill: 'chat', text: '/storage open' };
+    const stow: SkillCall = { skill: 'stow', item: 'dirt', count: 8, into: 'open' };
+    const take: SkillCall = { skill: 'take', item: 'wheat_seeds', count: 19, from: 'open' };
+    guard.recordExactOutcome([opener, stow], true, '当前窗口没有存进泥土:那一边没空位了');
+    guard.recordExactOutcome([opener, stow], true, '当前窗口没有存进泥土:那一边没空位了');
+    expect(exec.submitDetailed([opener, stow, take]).rejection?.rule).toBe('storage.full');
+    expect(exec.submitDetailed([take, opener, stow]).rejection?.rule).toBe('storage.full');
+    expect(exec.submitDetailed([{ skill: 'use', at: [9, 64, 0] }, take, opener, stow])
+      .rejection?.rule).toBe('storage.full');
+  });
   it('技能罗盘的箱形 GUI 是选择菜单，不从图标取物', async () => {
     const icon = { name: 'ender_pearl', type: 1, metadata: 0, count: 1 };
     const slots = new Array(63).fill(null);

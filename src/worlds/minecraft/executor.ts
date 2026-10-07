@@ -2835,6 +2835,14 @@ export class Executor {
     const key = this.openStorageKey(steps);
     const entry = key ? this.fullOpenStorageFailures.get(key) : null;
     if (!entry || entry.count < 2) return null;
+    const firstStow = steps.findIndex((step) => step.skill === 'stow' && step.into === 'open');
+    const before = steps.slice(0, firstStow);
+    const opener = before.reduce((last, step, index) => step.skill === 'use'
+      || (step.skill === 'chat' && step.text.startsWith('/')) ? index : last, -1);
+    // Earlier changes to this window invalidate its old capacity failure.
+    // The transfer still checks the live slots and reports insufficient room.
+    if (before.slice(opener + 1).some((step) => step.skill === 'compact'
+      || (step.skill === 'take' && step.from === 'open'))) return null;
     return `同一打开方式的容器最近 ${entry.count} 次存入都因没有空位失败；换物品不会腾出格子。先从该容器取走物品、整理出可并堆格，或换另一处容器；原队列保留。上次:${entry.why}`;
   }
 
