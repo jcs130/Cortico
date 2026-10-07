@@ -4588,7 +4588,7 @@ export class Executor {
     return { released: true, note: this.resume('queue') };
   }
 
-  /** 终止当前危险任务并保留排队计划；恢复由安全落脚事件显式触发。 */
+  /** 终止当前危险任务并保留排队计划；恢复由安全状态事件显式触发。 */
   stopCurrent(reason: string): QueueHoldToken {
     const token: QueueHoldToken = { owner: Symbol('queue-hold') };
     this.queueHolds.fall = { token, reason };
@@ -4634,7 +4634,7 @@ export class Executor {
     return out;
   }
 
-  /** 安全落脚后继续仍在队列中的计划(除非环境那一槽还冻着)。 */
+  /** 坠落危险解除后继续仍在队列中的计划(除非环境那一槽还冻着)。 */
   resumeQueue(token: QueueHoldToken): boolean {
     return this.releaseHold('fall', token).released;
   }
@@ -6058,7 +6058,7 @@ interface ReflexOptions {
   resumeEnvironment: (token: QueueHoldToken) => QueueResumeResult;
   /** 深坠落只终止当前危险任务，排队与冻结计划继续保留。 */
   stopFallTask: (reason: string) => QueueHoldToken | null;
-  /** 深坠落后仅在稳定干燥落脚时恢复排队计划。 */
+  /** 深坠落结束并满足安全恢复条件后，释放对应队列租约。 */
   resumeAfterFall: (token: QueueHoldToken) => boolean;
   /** 执行器的当前任务正在逃(flee/surface/战斗撤退):受击反应整个让路,不添乱 */
   escapeActive?: () => boolean;
@@ -6139,8 +6139,10 @@ const FALL_UNSAFE_BLOCKS = new Set([
   'campfire', 'soul_campfire', 'magma_block', 'fire', 'soul_fire', 'lava',
 ]);
 
-function safeFallFooting(bot: Bot): boolean {
-  if ((bot.health ?? 0) <= 0 || !hasDryFooting(bot)) return false;
+function safeFallFooting(bot: Bot, allowWaterSurface = false): boolean {
+  if ((bot.health ?? 0) <= 0 || (!hasDryFooting(bot)
+    && !(allowWaterSurface && bodyInWater(bot) && !headInWater(bot)
+      && bot.blockAt(bot.entity.position.offset(0, 1, 0))?.boundingBox === 'empty'))) return false;
   const touch = hazardTouch(bot);
   if (touch.touching !== null || touch.onFire) return false;
   const p = bot.entity.position;
@@ -6418,7 +6420,7 @@ export class Reflexes {
   }
 
   /**
-   * 冻结看门狗。深坠与环境两条 hold 都只在"稳定干燥落脚"时解冻,超时强制交还队列。
+   * 冻结看门狗。安全恢复条件长期不满足时，超时交还对应的队列租约。
    * 走反射心跳,不另开定时器。环境侧解冻后置 forfeited,否则下一拍 beginEnvironment
    * 立刻再冻一次;深坠侧直接丢掉本轮落体记录,重新起跳会重新计数。
    */
@@ -7221,6 +7223,7 @@ export class Reflexes {
     holdSince: number;
     safeSince: number | null;
     safeAt: { x: number; y: number; z: number } | null;
+    safeInWater: boolean;
   } | null = null;
 
   /** 深坠落使原路径失效；反射不尝试空中动作，只停止任务与寻路。 */
@@ -7236,35 +7239,40 @@ export class Reflexes {
       && this.fall.fromY - y >= FALL_TASK_STOP_BLOCKS;
     if (!falling && !landedDeep) {
       if (this.fall?.stopped) {
-        if (this.environmentOwnerKind !== null || !safeFallFooting(bot)) {
+        if (this.environmentOwnerKind !== null || !safeFallFooting(bot, true)) {
           this.fall.safeSince = null;
           this.fall.safeAt = null;
           return;
         }
         const now = Date.now();
         const p = bot.entity.position;
+        const inWater = bodyInWater(bot);
         const moved = this.fall.safeAt === null
           ? Infinity
           : Math.hypot(p.x - this.fall.safeAt.x, p.y - this.fall.safeAt.y, p.z - this.fall.safeAt.z);
-        if (this.fall.safeSince === null || moved > FALL_SAFE_MOVE) {
+        // 水面换气连续成立即可；游动与浮沉不要求身体保持在同一个坐标。
+        if (this.fall.safeSince === null || this.fall.safeInWater !== inWater
+          || (!inWater && moved > FALL_SAFE_MOVE)) {
           this.fall.safeSince = now;
           this.fall.safeAt = { x: p.x, y: p.y, z: p.z };
+          this.fall.safeInWater = inWater;
           return;
         }
         if (now - this.fall.safeSince < FALL_SAFE_FOOTING_MS) return;
         const resumed = this.fall.hold !== null && this.opts.resumeAfterFall(this.fall.hold);
+        const recovery = inWater ? '浮在水面且连续换气' : '稳定落脚';
         // 令牌对不上号有两种可能:执行器换了冻结租约,或者 mc_stop/抢占已经把冻结
         // 清掉了。反射这边分不出来,措辞就只说租约失效,不替队列断言还冻着。
         this.opts.diag?.write({
           lane: 'reflex', event: 'falling-safe',
-          msg: `深坠落后已在 ${cellText(feetOf(bot))} 稳定落脚,`
+          msg: `深坠落后已在 ${cellText(feetOf(bot))} ${recovery},`
             + (resumed ? '排队计划恢复' : '旧恢复租约已失效'),
           data: { position: bot.entity.position, health: bot.health, resumed },
         });
         if (resumed) {
           this.opts.report({
             kind: 'reflex',
-            text: `[反射] 深坠落后已在 ${cellText(feetOf(bot))} 稳定落脚,深坠那一处队列冻结解除。`,
+            text: `[反射] 深坠落后已在 ${cellText(feetOf(bot))} ${recovery},深坠那一处队列冻结解除。`,
           });
         }
       }
@@ -7274,7 +7282,7 @@ export class Reflexes {
     if (this.fall === null) {
       this.fall = {
         fromY: y, logged: false, handled: false, stopped: false,
-        hold: null, holdSince: 0, safeSince: null, safeAt: null,
+        hold: null, holdSince: 0, safeSince: null, safeAt: null, safeInWater: false,
       };
       return;
     }
