@@ -80,7 +80,7 @@ export type AttackMode = 'auto' | 'melee' | 'ranged' | 'kite';
 
 /** 一步技能:动作参数,外加边界声明(StepBounds)。 */
 export type SkillCall = StepBounds & (
-  | { skill: 'goto'; at: Anchor; dimension?: string; groundY?: true; exact?: boolean; dryRun?: boolean }
+  | { skill: 'goto'; at: Anchor; dimension?: string; groundY?: true; exact?: boolean; walkOnly?: boolean; dryRun?: boolean }
   | { skill: 'look'; at: Anchor }
   | { skill: 'transit'; at: Anchor }
   | { skill: 'goto_player'; name: string }
@@ -407,6 +407,7 @@ function parseGoto(c: Record<string, unknown>, at: string, marks?: MarkLookup): 
   // [x,z] 两分量 = 在对应水平位置找可达落脚点；不强制站上屋顶。
   const flat = Array.isArray(c.at) && c.at.length === 2;
   if (c.exact !== undefined && typeof c.exact !== 'boolean') return { error: `${at} goto 的 exact 要布尔值` };
+  if (c.walkOnly !== undefined && typeof c.walkOnly !== 'boolean') return { error: `${at} goto 的 walkOnly 要布尔值` };
   if (flat && c.exact === true) return { error: `${at} goto 的 exact 需要完整 [x,y,z] 落脚格` };
   const to = anchorOf(flat ? [(c.at as unknown[])[0], 0, (c.at as unknown[])[1]] : c.at, marks);
   if (!to) {
@@ -421,6 +422,7 @@ function parseGoto(c: Record<string, unknown>, at: string, marks?: MarkLookup): 
       ...(str(c.dimension) ? { dimension: normalizeDimension(str(c.dimension)) } : {}),
       ...(flat ? { groundY: true as const } : {}),
       ...(c.exact === true ? { exact: true } : {}),
+      ...(c.walkOnly === true ? { walkOnly: true } : {}),
       ...(c.dryRun === true ? { dryRun: true } : {}),
     },
   };
@@ -1023,6 +1025,7 @@ const SKILLS: readonly SkillSpec[] = [
                                                  dryRun 只计算路线，不移动身体。穿过门洞要选择门另一侧的可站立空气格，并核对实际位置。
                                                  at 也收 mc_map 的路标名:{"skill":"goto","at":"家"}。
                                                  赶路可能挖方块或搭路；已绑定蓝图范围内不生成这些动作，完工后仍生效。
+                                                 walkOnly:true 只沿现有通路走，不挖掘或垫脚；只靠走试算可达时，可用同一目标加此字段实际执行。与 dryRun 同用时只试算这条走法。
                                                  走不通时核对门洞、通道与落点；改结构用显式 dig/build，按现场和权限核验。`,
     parse: parseGoto,
     fields: [
@@ -1034,6 +1037,7 @@ const SKILLS: readonly SkillSpec[] = [
       },
       { key: 'dimension', kind: 'string', doc: '可选的当前维度前置条件(overworld/the_nether/the_end)' },
       { key: 'exact', kind: 'flag', doc: '完整 [x,y,z] 的精确落脚格；缺省允许邻格到达' },
+      { key: 'walkOnly', kind: 'flag', doc: '只沿现有通路走，不挖掘或垫脚；dryRun 也只试算这条走法' },
       { key: 'dryRun', kind: 'flag' },
     ],
   },

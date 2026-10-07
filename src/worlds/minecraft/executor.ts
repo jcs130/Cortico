@@ -677,8 +677,11 @@ async function runSkill(bot: Bot, call: SkillCall, ctx: SkillContext): Promise<s
       // a diagnostic reference; unloaded destination columns do not prevent travel.
       const target = call.groundY ? { ...resolved, y: feetOf(bot).y } : resolved;
       const finalGoal = gotoArrivalGoal(call, target);
+      const travelContext: SkillContext = call.walkOnly && ctx.probeRoutes ? {
+        ...ctx, probeRoutes: (at, goal) => ctx.probeRoutes!(at, goal)?.filter((route) => route.profile === 'walk') ?? null,
+      } : ctx;
       if (call.dryRun) {
-        const probes = ctx.probeRoutes?.(target, call.groundY || call.exact ? finalGoal : undefined);
+        const probes = travelContext.probeRoutes?.(target, call.groundY || call.exact ? finalGoal : undefined);
         if (!probes || probes.length === 0) throw new SkillBlocked('探路器不可用(没连上服务器)');
         const me = bot.entity.position;
         const startDist = call.groundY
@@ -688,9 +691,10 @@ async function runSkill(bot: Bot, call: SkillCall, ctx: SkillContext): Promise<s
           startDist, diag: call.groundY ? null : ctx.probeTarget?.(target) ?? null,
         });
       }
-      const note = routeNote(bot, ctx, target, call.groundY || call.exact ? finalGoal : undefined);
+      const note = routeNote(bot, travelContext, target, call.groundY || call.exact ? finalGoal : undefined);
       const startedAt = Date.now();
       let sceneTarget = target;
+      const releaseWalkOnly = call.walkOnly ? walkOnlyPath(bot) : undefined;
       try {
         let legs = 0;
         for (;;) {
@@ -699,26 +703,28 @@ async function runSkill(bot: Bot, call: SkillCall, ctx: SkillContext): Promise<s
           if (!leg) break;
           if (++legs > 64) throw new SkillBlocked('长途分段超过 64 段仍未到目标附近，停止这条路线');
           sceneTarget = { x: leg.x, y: Math.floor(from.y), z: leg.z };
-          await gotoGoal(bot, levelTravelGoal(leg.x, leg.z), ctx);
+          await gotoGoal(bot, levelTravelGoal(leg.x, leg.z), travelContext);
           const moved = Math.hypot(bot.entity.position.x - from.x, bot.entity.position.z - from.z);
           if (moved < 4) throw new SkillBlocked('长途这一段没有足够位移，停止原路线');
         }
         sceneTarget = target;
-        await gotoGoal(bot, finalGoal, ctx);
+        await gotoGoal(bot, finalGoal, travelContext);
       } catch (err) {
         // 长途失败只试算当前短段，避免再次用远处终点耗尽寻路预算。
         throw withRouteScene(
-          bot, ctx, err, sceneTarget,
+          bot, travelContext, err, sceneTarget,
           [...digBackoffScene(ctx, startedAt), ...(note ? [note] : []),
             ...(sceneTarget !== target ? [`长途最终目标 ${cellText(target)}，这一段先去 ${cellText(sceneTarget)}`] : [])],
           call.groundY || call.exact ? (sceneTarget === target ? finalGoal : levelTravelGoal(sceneTarget.x, sceneTarget.z)) : undefined,
         );
+      } finally {
+        releaseWalkOnly?.();
       }
       const water = headInWater(bot) || bodyInWater(bot);
       const arrival = call.groundY ? ';本次只满足水平接近条件，高度未作为到达条件'
         : call.exact ? ';已满足精确落脚格到达条件' : '';
       const footing = water ? ';仍在水中，未确认登岸' : '';
-      return `到了 ${cellText(feetOf(bot))}${arrival}${footing}${note ? `。\n${note}` : ''}`;
+      return `到了 ${cellText(feetOf(bot))}${arrival}${footing}${call.walkOnly ? ';沿现有通路到达，未挖掘或垫脚' : ''}${note ? `。\n${note}` : ''}`;
     }
     case 'transit': return skillTransit(bot, call, ctx);
     case 'find': return skillFind(bot, call.target, call.direction, call.distance, ctx, call.until);

@@ -20,7 +20,7 @@ describe('Minecraft action skill help', () => {
     const names = directory.split('\n').flatMap((line) => /^([a-z_]+)\(/.exec(line)?.[1] ?? []);
     expect(names).toEqual(SKILL_NAMES);
     expect((SKILL_STEP_SCHEMA.properties as any).skill.enum).toEqual(SKILL_NAMES);
-    expect(directory).toContain('goto(at*,dimension?,exact?,dryRun?)');
+    expect(directory).toContain('goto(at*,dimension?,exact?,walkOnly?,dryRun?)');
     expect(directory).toContain('chat(text*)');
     expect(directory).toContain('fish(at?)');
     expect(directory).toContain('use(item?,at?,target?');
