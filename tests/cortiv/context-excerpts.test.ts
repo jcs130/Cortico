@@ -29,6 +29,27 @@ const refText = (record: ContextRecord, index: number): string => {
 };
 
 describe('请求副本的旧交接笔记节选', () => {
+  it('can replace covered current state without excerpting adjacent instructions, failures or media', () => {
+    const original = mixed();
+    const refs = original.context.frame!.events;
+    refs[0].source = 'game'; refs[0].type = 'game.state'; refs[0].tags = ['snapshot'];
+    refs[2].type = 'activity_plan';
+    original.context.blobs = [{ handle: 'mem:current.png', mime: 'image/png', fallbackText: '本次画面' }];
+    const before = structuredClone(original);
+    const result = excerptHandoffRecords([original], selected, {
+      replaceCurrentState: true, protectedRecords: [original],
+      coveredSnapshots: [{ source: 'game', type: 'game.state' }], coveredCheckpoints: ['activity_plan'],
+    })[0];
+    expect(refText(result, 0)).toContain('本次 game/game.state 快照');
+    expect(refText(result, 2)).toContain('已由本轮最新状态替代');
+    expect(refText(result, 1)).toBe(refText(original, 1));
+    expect(refText(result, 3)).toBe(refText(original, 3));
+    expect(result.context.blobs).toBe(original.context.blobs);
+    expect(original).toEqual(before);
+    expect(itemText(result.item).length).toBeLessThan(itemText(original.item).length / 4);
+    expect(excerptHandoffRecords([original], selected, { replaceCurrentState: true })[0]).toBe(original);
+  });
+
   it('excerpts only historical snapshots covered by complete current World facts and preserves adjacent chat and media', () => {
     const original = mixed();
     const refs = original.context.frame!.events;

@@ -18,6 +18,10 @@ export type ForegroundEpochProjector = (
   records: readonly ContextRecord[], options: ForegroundEpochOptions, pins: readonly ContextRecord[],
 ) => ForegroundProjection;
 
+export type ForegroundEpochAppender = (
+  records: readonly ContextRecord[], options: ForegroundEpochOptions,
+) => ContextRecord[];
+
 export type ForegroundEpochReason = 'initial' | 'reset' | 'source_changed' | 'options_changed'
   | 'handoff' | 'history_budget' | 'pairing' | 'append' | 'unchanged';
 
@@ -121,7 +125,10 @@ export class ForegroundEpoch {
   private epoch = 0;
   private resetPending = false;
 
-  constructor(private readonly project: ForegroundEpochProjector = projectForeground) {}
+  constructor(
+    private readonly project: ForegroundEpochProjector = projectForeground,
+    private readonly prepareAppend: ForegroundEpochAppender = records => [...records],
+  ) {}
 
   reset(): void {
     this.current = null;
@@ -155,7 +162,7 @@ export class ForegroundEpoch {
     }
 
     if (previous && reason === 'unchanged') {
-      const appended = [...delta, ...changedPins];
+      const appended = [...this.prepareAppend(delta, options), ...changedPins];
       const next = [...previous.view.messages, ...appended];
       const tokens = historyTokens(next);
       if (validatePairing(next).length) reason = 'pairing';

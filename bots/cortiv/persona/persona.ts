@@ -475,10 +475,15 @@ export class CortiV extends Cormini {
       protectedRecords: pins, currentHandoffs: this.foregroundCurrentHandoffs,
       coveredCheckpoints: options.coveredCheckpoints,
       coveredSnapshots: options.coveredSnapshots,
+      replaceCurrentState: true,
     });
     const replacements = new Map(records.map((record, index) => [record, reading[index]]));
     return projectForeground(reading, options, pins.map((pin) => replacements.get(pin) ?? pin));
-  });
+  }, (records, options) => excerptHandoffRecords(records, text => text, {
+    coveredCheckpoints: options.coveredCheckpoints,
+    coveredSnapshots: options.coveredSnapshots,
+    replaceCurrentState: true,
+  }));
 
   constructor(opts: CortiVOptions) {
     super(opts);

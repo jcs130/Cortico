@@ -26,8 +26,9 @@ function deferred<T>() {
 
 function image() { return { png, mode: 'first' as const, width: 1280, height: 720, capturedAt }; }
 
-function rig(connected = true) {
+function rig(connected = true, background = MINECRAFT_DEFAULTS.visual.background as boolean) {
   const cfg = structuredClone(MINECRAFT_DEFAULTS) as MinecraftConfigSection;
+  cfg.visual.background = background;
   const world = new MinecraftWorld({ cfg });
   const host = new FakeHost();
   const bot = { entity: { position: new Vec3(1.5, 64, -3.5), onGround: true }, game: { dimension: 'overworld' },
@@ -266,6 +267,26 @@ describe('mc_visual scene observation', () => {
 });
 
 describe('mc_visual background observation', () => {
+  it('uses the configured background mode when omitted and preserves an explicit synchronous override', async () => {
+    const { host, tool, ctx } = rig(true, true);
+    const analysis = deferred<{ text: string }>();
+    Object.assign(host, { cognition: { request: async () => analysis.promise } });
+    const accepted = await tool.handler({ focus: '门口' }, ctx) as ToolOutcome;
+    expect(accepted.text).toContain('已受理');
+    expect(host.events).toHaveLength(0);
+    analysis.resolve({ text: '门口有台阶。' });
+    await vi.waitFor(() => expect(host.events).toHaveLength(1));
+    const next = deferred<{ text: string }>();
+    Object.assign(host, { cognition: { request: async () => next.promise } });
+    let settled = false;
+    const pending = tool.handler({ background: false }, ctx).then(value => { settled = true; return value; });
+    await vi.waitFor(() => expect(captureMinecraftView).toHaveBeenCalledTimes(2));
+    expect(settled).toBe(false);
+    next.resolve({ text: '第二次观察完成。' });
+    expect((await pending as ToolOutcome).text).toContain('第二次观察完成');
+    expect(host.events).toHaveLength(1);
+  });
+
   it('accepts before capture settles and later delivers actual bytes as an external observation event', async () => {
     const { host, tool, ctx } = rig();
     const capture = deferred<ReturnType<typeof image>>();

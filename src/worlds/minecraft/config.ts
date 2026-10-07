@@ -20,6 +20,8 @@ export const MINECRAFT_DEFAULTS = {
   viewerAssetsDir: '',
   /** 网页画面中语音气泡显示的称呼；空 = 游戏内用户名 */
   viewerSpeakerName: '',
+  /** Omitted mc_visual.background follows this mode; explicit arguments take precedence. */
+  visual: { background: false },
   /** 普通玩家可用的脱困传送指令；空值沿用受管服务器的控制台传送。 */
   escapeCommand: '',
   /** 挂载面板启停的本地服务器(空 = 未配置,按钮会提示去配置) */
@@ -194,6 +196,7 @@ export interface MinecraftConfigSection {
   viewerPort: number;
   viewerAssetsDir: string;
   viewerSpeakerName: string;
+  visual: { background: boolean };
   escapeCommand: string;
   local: {
     startWithWorld: boolean;
@@ -282,6 +285,10 @@ export const MINECRAFT_CONFIG_GROUP: ConfigGroup = {
       'worlds.minecraft.viewerSpeakerName': {
         type: 'string', title: '网页语音气泡称呼', 'x-hot': false,
         description: '空=游戏内用户名；在现代画面中随实际语音播放显示。',
+      },
+      'worlds.minecraft.visual.background': {
+        type: 'boolean', title: '后台观察画面', 'x-hot': true,
+        description: '未指定 background 的看图调用立即受理，结果通过事件返回；显式 background:false 仍等待结果。',
       },
       'worlds.minecraft.escapeCommand': {
         type: 'string', title: '普通玩家脱困指令', 'x-hot': false,

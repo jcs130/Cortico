@@ -25,6 +25,33 @@ function source(): ContextRecord[] {
 function text(records: readonly ContextRecord[]): string { return records.map(({ item }) => itemText(item)).join('\n'); }
 
 describe('前台上下文缓存epoch', () => {
+  it('excerpts newly appended covered snapshots once while retaining wire prefix, fresh pins and adjacent chat', () => {
+    const coverage = { ...options, coveredSnapshots: [{ source: 'game', type: 'game.state' }] };
+    const epoch = new ForegroundEpoch(projectForeground, (records, cfg) => excerptHandoffRecords(records, text => text, {
+      coveredSnapshots: cfg.coveredSnapshots, replaceCurrentState: true,
+    }));
+    const records = [message('system', '契约'), ...action('first')];
+    const first = epoch.prepare(records, coverage, [message('user', '完整当前事实：原地点。')]);
+    const snapshot = '本次现场快照。'.repeat(250);
+    const chat = '同伴：请帮我开门。';
+    const input = message('user', snapshot + '\n' + chat, { frame: { events: [
+      { source: 'game', type: 'game.state', cursor: 10, ts: '2026-01-01T10:01:00Z', start: 0, chars: snapshot.length, tags: ['snapshot'] },
+      { source: 'game', type: 'game.chat', cursor: 11, ts: '2026-01-01T10:01:00Z', start: snapshot.length + 1, chars: chat.length },
+    ] } });
+    const pin = message('user', '完整当前事实：已到门前。');
+    const next = epoch.prepare([...records, input], coverage, [pin]);
+    expect(next.rebuilt).toBe(false);
+    expect(wire(next.messages).slice(0, first.messages.length)).toEqual(wire(first.messages));
+    expect(text(next.messages)).toContain(chat);
+    expect(text(next.messages)).toContain('本次 game/game.state 快照');
+    expect(text(next.messages)).not.toContain(snapshot);
+    expect(next.messages.at(-1)).toEqual(pin);
+    expect(text([input])).toContain(snapshot);
+    const stable = epoch.prepare([...records, input, ...action('reply')], coverage, [pin]);
+    expect(wire(stable.messages).slice(0, next.messages.length)).toEqual(wire(next.messages));
+    expect(validatePairing(stable.messages)).toEqual([]);
+  });
+
   it('checkpoint coverage changes rebuild the request so replaced historical plans are no longer protected', () => {
     const epoch = new ForegroundEpoch();
     const planning = frame('persona', 'planning', '旧的计划说明。'.repeat(300), 1);

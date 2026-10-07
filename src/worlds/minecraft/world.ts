@@ -2260,7 +2260,7 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
         },
         include_hud: { type: 'boolean', description: 'Include visible health, items, notices and open menus. Default false captures the 3D scene alone.' },
         raw: { type: 'boolean', description: 'Return the image directly instead of a separate focused observation. Default false.' },
-        background: { type: 'boolean', description: 'Accept a background observation job and deliver its actual result in a minecraft.visual event. Analyzed reports retain saved image references; raw or fallback results include the image. Default false waits for the result. Local waiting is capped at 75 seconds; a model request already running may finish later.' },
+        background: { type: 'boolean', description: 'Accept a background observation job and deliver its actual result in a minecraft.visual event. Analyzed reports retain saved image references; raw or fallback results include the image. Omitted follows the World visual.background setting (default false). Explicit false waits for the result. Local background waiting is capped at 75 seconds; a model request already running may finish later.' },
       },
       required: [],
     },
@@ -4213,13 +4213,14 @@ export class MinecraftWorld implements World {
       controller: new AbortController(), callId: ctx.callId, timedOut: false,
     };
     this.visualInFlight = job;
-    const signal = args.background !== true && ctx.signal
+    const background = typeof args.background === 'boolean' ? args.background : this.cfg.visual.background;
+    const signal = !background && ctx.signal
       ? AbortSignal.any([ctx.signal, job.controller.signal]) : job.controller.signal;
     const work = this.visualReadout(args, { ...ctx, signal });
     // A timed-out cognition request may still be running; keep its slot until it actually settles.
     const release = () => { if (this.visualInFlight === job) this.visualInFlight = null; };
     void work.then(release, release);
-    if (args.background !== true) return work;
+    if (!background) return work;
     void this.deliverVisualObservation(job, work);
     return { text: this.toolLog('mc_visual', args,
       `[mc_visual 已受理] job_id:${job.id}；画面和分析尚未完成，结果稍后通过 minecraft.visual 事件交回。`

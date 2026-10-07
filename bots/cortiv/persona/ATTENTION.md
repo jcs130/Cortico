@@ -1,4 +1,4 @@
-Owner: `attention-adviser.ts`, `reference-library.ts`, `reference-adviser.ts`, `reference-routing.ts`, `planning-review.ts`, `failure-reflection.ts`, `action-evidence.ts` and `persona.ts`.
+Owner: `attention-adviser.ts`, `reference-library.ts`, `reference-adviser.ts`, `reference-routing.ts`, `planning-review.ts`, `failure-reflection.ts`, `action-evidence.ts`, `context-excerpts.ts`, `foreground-epoch.ts` and `persona.ts`.
 
 # CortiV 的即时观察与长期复盘
 
@@ -71,6 +71,8 @@ Persona 通过 `onToolOutcome` 观察主会话的动作回执。同参数调用�
 复核同时读取当前 World 事实、日程和待办，不等待生成、不调度动作；同一游标不重复请求，archive-only 历史不触发。已有复盘在途时保留即时反思及原回执。
 `task-causal-review` 日志记录触发游标、任务号、尝试次数和受理结果，供执行终态与后台请求对账。
 近期行动对账保留纯读取窗口的调用计数；零次新行动请求不证明较早的身体任务已经停止。
+
+即时请求已有完整 World 事实或 Persona 状态时，同源同类型的快照与检查点正文改为带游标的引用，包括本批新输入。相邻聊天、执行终态、未被完整读数覆盖的快照和附件保留原文。缓存 epoch 只在首次追加时制作副本，后续轮次保留实际请求前缀；原始会话和 expand_context 仍能读取完整记录。
 
 `activity_plan review` 可附 `question`，控制台 `planning/review` 接受 `[{question:"要核对的问题"}]`。
 定向复核只核对证据与因果前提，输入上限取配置与12000估算token的较小值，输出上限取配置与1600token的较小值；不更换现有日程或候选，也不消耗周期规划的活动版本。

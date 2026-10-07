@@ -13,6 +13,8 @@ interface HandoffExcerptOptions {
   coveredCheckpoints?: readonly string[];
   /** Only these unchanged automatic spans may be excerpted inside protected/latest input. */
   currentHandoffs?: readonly FrameEventRef[];
+  /** Complete replacement pins also cover matching state spans in the newest input. */
+  replaceCurrentState?: boolean;
 }
 
 function inputBoundary(records: readonly ContextRecord[]): number {
@@ -53,7 +55,7 @@ function editedText(text: string, start: number, edits: readonly Edit[]): string
 
 function excerptRecord(
   record: ContextRecord, excerpt: (text: string) => string, covered: ReadonlySet<string>,
-  snapshots: ReadonlySet<string>, allowed?: ReadonlySet<FrameEventRef>,
+  snapshots: ReadonlySet<string>, allowed?: ReadonlySet<FrameEventRef>, replaceCurrentState = false,
 ): ContextRecord {
   const refs = record.context.frame?.events;
   if (!refs?.some((ref) => (ref.source === 'persona' && (ref.type === HANDOFF_NOTE_TYPE || covered.has(ref.type)))
@@ -66,16 +68,16 @@ function excerptRecord(
   const edits: Edit[] = [];
   try {
     for (const ref of refs) {
-      if (!allowed && ref.tags?.includes('snapshot') && ref.chars > 0
+      if ((!allowed || replaceCurrentState) && ref.tags?.includes('snapshot') && ref.chars > 0
         && snapshots.has(JSON.stringify([ref.source, ref.type]))) {
-        const text = `[历史 ${ref.source}/${ref.type} 快照；事件#${ref.cursor}，记录于${ref.ts}。`
+        const text = `[${allowed ? '本次' : '历史'} ${ref.source}/${ref.type} 快照；事件#${ref.cursor}，记录于${ref.ts}。`
           + '当前完整读数另附，原文可用 expand_context 查看。]';
         if (text.length < ref.chars) edits.push({ start: ref.start, end: ref.start + ref.chars, text });
         continue;
       }
-      if (ref.source === 'persona' && covered.has(ref.type) && ref.chars > 0 && !allowed) {
+      if (ref.source === 'persona' && covered.has(ref.type) && ref.chars > 0 && (!allowed || replaceCurrentState)) {
         edits.push({ start: ref.start, end: ref.start + ref.chars,
-          text: `[历史 ${ref.type} 状态；已由本轮最新状态替代，原文可用 expand_context 查看。]` });
+          text: `[${allowed ? '本次' : '历史'} ${ref.type} 状态；已由本轮最新状态替代，原文可用 expand_context 查看。]` });
         continue;
       }
       if (ref.source !== 'persona' || ref.type !== HANDOFF_NOTE_TYPE || ref.chars === 0
@@ -131,5 +133,6 @@ export function excerptHandoffRecords(
   const covered = new Set(options.coveredCheckpoints);
   const snapshots = new Set((options.coveredSnapshots ?? []).map(({ source, type }) => JSON.stringify([source, type])));
   return records.map((record, index) => record.context.head ? record
-    : excerptRecord(record, excerpt, covered, snapshots, index >= boundary || protectedRecords.has(record) ? current : undefined));
+    : excerptRecord(record, excerpt, covered, snapshots,
+      index >= boundary || protectedRecords.has(record) ? current : undefined, options.replaceCurrentState));
 }
