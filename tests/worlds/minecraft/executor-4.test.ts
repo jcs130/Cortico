@@ -2440,6 +2440,59 @@ describe('use 开容器:那一眼不白开(记进账本)', () => {
     expect(rec.furnace?.input).toEqual({ name: 'raw_iron', count: 3 });
     expect(rec.furnace?.expectedDoneAt).toBeNull();
   });
+
+  it.each(['furnace', 'smoker', 'blast_furnace'])('%s 重新开窗读到所需产物后解除旧取货失败限制', async (blockName) => {
+    type Stack = { name: string; count: number; type: number; metadata: number };
+    const slots: Array<Stack | null> = [
+      { name: 'raw_iron', count: 8, type: 1, metadata: 0 }, null, null,
+    ];
+    const bag = new Map<string, Stack>();
+    const base = useBot({ id: 1, inventoryStart: 3, slots }, blockName);
+    const transfer = async (slot: number): Promise<void> => {
+      const item = slots[slot];
+      if (item) bag.set(item.name, { ...item, count: (bag.get(item.name)?.count ?? 0) + item.count });
+      slots[slot] = null;
+    };
+    const bot = Object.assign(base, {
+      inventory: { items: () => [...bag.values()] },
+      registry: { ...base.registry, itemsByName: { iron_ingot: { id: 2, name: 'iron_ingot' } } },
+      openFurnace: async () => ({
+        inputItem: () => slots[0], fuelItem: () => slots[1], outputItem: () => slots[2],
+        takeInput: () => transfer(0), takeFuel: () => transfer(1), takeOutput: () => transfer(2),
+        close() {},
+      }),
+    });
+    const book = new ChestBook(null);
+    const { exec, reports } = makeExecutorWith(bot, book);
+    const take: SkillCall = { skill: 'take', item: 'iron_ingot', count: 7, at: [2, 64, 0] };
+    try {
+      expect(exec.submitDetailed([take]).accepted).toBe(true);
+      await waitUntil(() => reports.length === 1);
+      expect(reports[0].kind).toBe('blocked');
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(exec.submitDetailed([take]).accepted).toBe(true);
+      await waitUntil(() => reports.length === 2);
+      expect(reports[1].kind).toBe('blocked');
+      expect(exec.submitDetailed([take]).rejection?.kind).toBe('repeat');
+
+      slots[2] = { name: 'charcoal', count: 7, type: 3, metadata: 0 };
+      exec.submit([{ skill: 'use', at: [2, 64, 0] }]);
+      await waitUntil(() => reports.length === 3);
+      expect(reports[2].kind).toBe('done');
+      expect(exec.submitDetailed([take]).rejection?.kind).toBe('repeat');
+
+      slots[2] = { name: 'iron_ingot', count: 7, type: 2, metadata: 0 };
+      await vi.advanceTimersByTimeAsync(1);
+      exec.submit([{ skill: 'use', at: [2, 64, 0] }]);
+      await waitUntil(() => reports.length === 4);
+      expect(reports[3].text).toContain('输出铁锭×7');
+      expect(exec.submitDetailed([take]).accepted).toBe(true);
+      await waitUntil(() => reports.length === 5);
+      expect(reports[4].kind).toBe('done');
+      expect(bag.get('iron_ingot')?.count).toBe(7);
+      expect(slots[2]).toBeNull();
+    } finally { exec.shutdown(); }
+  });
 });
 
 describe('smelt:下料点火就走(B1 解耦)', () => {
