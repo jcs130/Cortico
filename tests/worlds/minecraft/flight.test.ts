@@ -166,6 +166,43 @@ describe('server-granted flight movement', () => {
     expect(client.write.mock.calls).toHaveLength(0);
   });
 
+  it.each([
+    ['dirt', '碰撞方块 dirt'],
+    ['water', '危险方块或液体 water'],
+    [null, '未加载区域'],
+  ] as const)('identifies %s in the ascent path without moving or claiming a different cause', async (name, cause) => {
+    const { bot, client, set, positions } = flightBot();
+    const obstruction = new Vec3(0, 66, 0);
+    set(obstruction, name === null ? null : block(name));
+    client.emit('abilities', { flags: 4 });
+    const failure = await flyToPosition(bot, { x: 0.5, y: 70, z: 0.5 }, () => false)
+      .catch(error => error as Error);
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain(`飞行路径有${cause} @ (${obstruction.x},${obstruction.y},${obstruction.z})`);
+    expect(positions).toHaveLength(0);
+    expect(client.write.mock.calls).toHaveLength(0);
+  });
+
+  it('reports the exact three-dimensional distance when horizontal offset exceeds a vertical segment limit', async () => {
+    const { bot, client } = flightBot();
+    const target = new Vec3(1, bot.entity.position.y + MAX_FLIGHT_DISTANCE, 1);
+    const distance = bot.entity.position.distanceTo(target);
+    expect(distance).toBeGreaterThan(MAX_FLIGHT_DISTANCE);
+    expect(distance.toFixed(1)).toBe(MAX_FLIGHT_DISTANCE.toFixed(1));
+    await expect(flyToPosition(bot, target, () => false))
+      .rejects.toThrow(`三维直线距离 ${distance} 格`);
+    expect(client.write.mock.calls).toHaveLength(0);
+  });
+
+  it('distinguishes a movement time limit from a collision when the server grants a low flying speed', async () => {
+    const { bot, client, positions } = flightBot();
+    client.emit('abilities', { flags: 4, flyingSpeed: 0.001 });
+    await expect(flyToPosition(bot, { x: 2.5, y: 64, z: 0.5 }, () => false))
+      .rejects.toThrow('按服务端飞行速度，候选路径均超过');
+    expect(positions).toHaveLength(0);
+    expect(client.write.mock.calls).toHaveLength(0);
+  });
+
   it('waits for a real permission packet instead of treating a sent spell as success', async () => {
     const { bot, client } = flightBot();
     const result = expect(flyToPosition(bot, { x: 0.5, y: 65, z: 0.5 }, () => false)).rejects.toThrow('尚未授予飞行能力');
@@ -218,7 +255,8 @@ describe('server-granted flight movement', () => {
   it('checks newly changed collision shapes during flight and holds before the obstruction', async () => {
     const { bot, client, set } = flightBot();
     client.emit('abilities', { flags: 4 });
-    const result = expect(flyToPosition(bot, { x: 3.5, y: 64, z: 0.5 }, () => false)).rejects.toThrow('途中空间发生变化');
+    const result = expect(flyToPosition(bot, { x: 3.5, y: 64, z: 0.5 }, () => false))
+      .rejects.toThrow('途中空间发生变化：有碰撞方块 stone @ (1,64,0)');
     await vi.advanceTimersByTimeAsync(10);
     set(new Vec3(1, 64, 0), block('stone'));
     await vi.runAllTimersAsync();

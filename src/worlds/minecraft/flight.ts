@@ -138,7 +138,7 @@ function collisionShapes(block: NonNullable<ReturnType<Bot['blockAt']>>): number
   return block.shapes ?? (block.boundingBox === 'block' ? [[0, 0, 0, 1, 1, 1]] : []);
 }
 
-function openForPlayer(bot: Bot, pos: Vec3): boolean {
+function spaceObstruction(bot: Bot, pos: Vec3): string | undefined {
   const min = [pos.x - HALF_WIDTH + EPSILON, pos.y + EPSILON, pos.z - HALF_WIDTH + EPSILON];
   const max = [pos.x + HALF_WIDTH - EPSILON, pos.y + PLAYER_HEIGHT - EPSILON, pos.z + HALF_WIDTH - EPSILON];
   // Shapes can extend outside their cell (fences and walls are 1.5 blocks high).
@@ -146,17 +146,30 @@ function openForPlayer(bot: Bot, pos: Vec3): boolean {
     for (let y = Math.floor(min[1]) - 1; y <= Math.floor(max[1]); y++) {
       for (let z = Math.floor(min[2]); z <= Math.floor(max[2]); z++) {
         const block = bot.blockAt(new Vec3(x, y, z));
-        if (!block) return false;
-        if (y >= Math.floor(min[1]) && HAZARDS.test(block.name)) return false;
+        const at = `(${x},${y},${z})`;
+        if (!block) return `有未加载区域 @ ${at}`;
+        if (y >= Math.floor(min[1]) && HAZARDS.test(block.name)) return `有危险方块或液体 ${block.name} @ ${at}`;
         for (const shape of collisionShapes(block)) {
           if (min[0] < x + shape[3] && max[0] > x + shape[0]
             && min[1] < y + shape[4] && max[1] > y + shape[1]
-            && min[2] < z + shape[5] && max[2] > z + shape[2]) return false;
+            && min[2] < z + shape[5] && max[2] > z + shape[2]) return `有碰撞方块 ${block.name} @ ${at}`;
         }
       }
     }
   }
-  return true;
+  return undefined;
+}
+
+function openForPlayer(bot: Bot, pos: Vec3): boolean {
+  return spaceObstruction(bot, pos) === undefined;
+}
+
+function routeObstruction(bot: Bot, positions: Vec3[]): string | undefined {
+  for (const pos of positions) {
+    const obstruction = spaceObstruction(bot, pos);
+    if (obstruction) return obstruction;
+  }
+  return undefined;
 }
 
 function hasSupport(bot: Bot, pos: Vec3): boolean {
@@ -187,13 +200,18 @@ function flightRoute(bot: Bot, start: Vec3, target: Vec3): Vec3[] {
   // Vanilla's non-sprinting creative speed is three times its ability speed per tick.
   const step = Math.min(0.3, (abilities.get(bot)?.flyingSpeed ?? DEFAULT_FLYING_SPEED) * 3);
   const direct = flightPositions(start, [target], step);
-  if ((direct.length || start.distanceTo(target) < EPSILON) && direct.every(pos => openForPlayer(bot, pos))) return direct;
+  let obstruction = routeObstruction(bot, direct);
+  if ((direct.length || start.distanceTo(target) < EPSILON) && !obstruction) return direct;
   for (const rise of [0, 0.5, 1, 2]) {
     const y = Math.max(start.y, target.y) + rise;
     const route = flightPositions(start, [new Vec3(start.x, y, start.z), new Vec3(target.x, y, target.z), target], step);
-    if (route.length && route.every(pos => openForPlayer(bot, pos))) return route;
+    if (!route.length) continue;
+    const blocked = routeObstruction(bot, route);
+    if (!blocked) return route;
+    obstruction ??= blocked;
   }
-  throw new SkillBlocked('飞行路径有碰撞、液体或未加载区域；换一个已加载的空中目标');
+  if (obstruction) throw new SkillBlocked(`飞行路径${obstruction}；请核对这处身体空间并选择能绕开的路径`);
+  throw new SkillBlocked(`按服务端飞行速度，候选路径均超过单段 ${MAX_FLIGHT_MOVE_MS / 1000} 秒的移动时限；请缩短这段路径`);
 }
 
 /** Exact feet coordinates support takeoff, ascent, descent and an airborne building/viewing position. */
@@ -208,7 +226,7 @@ export async function flyToPosition(bot: Bot, targetAt: { x: number; y: number; 
     const target = new Vec3(targetAt.x, targetAt.y, targetAt.z);
     let start = bot.entity.position.clone();
     let distance = start.distanceTo(target);
-    if (distance > MAX_FLIGHT_DISTANCE) throw new SkillBlocked(`飞行单段最多 ${MAX_FLIGHT_DISTANCE} 格；目标相距 ${distance.toFixed(1)} 格`);
+    if (distance > MAX_FLIGHT_DISTANCE) throw new SkillBlocked(`飞行单段最多 ${MAX_FLIGHT_DISTANCE} 格；目标的三维直线距离 ${distance} 格`);
     if (options.land && !hasSupport(bot, target)) throw new SkillBlocked('飞行目标下方没有已加载的安全落脚方块；先选一处可站立的平台');
     const waitUntil = Date.now() + 2_000;
     while (!(flightFlags(bot) & 4) && Date.now() < waitUntil) {
@@ -218,8 +236,9 @@ export async function flyToPosition(bot: Bot, targetAt: { x: number; y: number; 
     if (!(flightFlags(bot) & 4)) throw new SkillBlocked('服务端尚未授予飞行能力；先取得飞行许可并查看成功回执');
     start = bot.entity.position.clone();
     distance = start.distanceTo(target);
-    if (distance > MAX_FLIGHT_DISTANCE) throw new SkillBlocked(`等待飞行许可时位置已变化；目标现在相距 ${distance.toFixed(1)} 格，超过单段 ${MAX_FLIGHT_DISTANCE} 格`);
-    if (!openForPlayer(bot, target)) throw new SkillBlocked('飞行目标空间有碰撞、液体或未加载区域');
+    if (distance > MAX_FLIGHT_DISTANCE) throw new SkillBlocked(`等待飞行许可时位置已变化；目标现在的三维直线距离 ${distance} 格，超过单段 ${MAX_FLIGHT_DISTANCE} 格`);
+    const targetObstruction = spaceObstruction(bot, target);
+    if (targetObstruction) throw new SkillBlocked(`飞行目标空间${targetObstruction}`);
     const route = flightRoute(bot, start, target);
     const expiresAt = abilities.get(bot)?.expiresAtMs;
     if (expiresAt !== undefined && expiresAt - Date.now() < route.length * FLIGHT_TICK_MS + 500) {
@@ -241,7 +260,8 @@ export async function flyToPosition(bot: Bot, targetAt: { x: number; y: number; 
       if (aborted()) throw new SkillBlocked('飞行任务已取消，保持当前位置悬停；可调用落地');
       if (control.interrupted) throw new SkillBlocked(control.interrupted, [], 'server');
       if (!(flightFlags(bot) & 4)) throw new SkillBlocked('服务端飞行许可已结束', [], 'server');
-      if (!openForPlayer(bot, pos)) throw new SkillBlocked('途中空间发生变化，已停止移动并悬停');
+      const obstruction = spaceObstruction(bot, pos);
+      if (obstruction) throw new SkillBlocked(`途中空间发生变化：${obstruction}；已停止移动并悬停`);
       bot.entity.velocity = new Vec3(0, 0, 0);
       bot.entity.onGround = false;
       bot.entity.position = pos;
