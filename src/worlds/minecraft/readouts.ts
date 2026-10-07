@@ -11,7 +11,7 @@ import type { QueueStatus, BlockedRecord } from './executor.ts';
 import { matchItemName, type ChestRecord } from './chests.ts';
 import { renderQueue } from './executor.ts';
 import type { GearPiece, GearSlot, ItemStack, WorldSnapshot } from './terrain.ts';
-import { enchantSuffix, narrateInventory } from './terrain.ts';
+import { enchantSuffix, narrateCursor, narrateInventory } from './terrain.ts';
 import { zhName } from './names.ts';
 import { PLAYER_SLOTS } from './precheck.ts';
 
@@ -41,6 +41,7 @@ export function renderBagReadout(s: WorldSnapshot): string {
     `[背包] ${used}/${PLAYER_SLOTS} 格占着,空 ${PLAYER_SLOTS - used} 格。`,
     used > 0 ? `包里:${narrateInventory(s.inventory)}。\n工具物品名:${[...new Set(s.inventory.map((i) => i.name))].join('、')}。` : '包里什么都没有。',
     `${held}。`,
+    narrateCursor(s),
     worn.length > 0 ? `穿着:${worn.map(gearPhrase).join('、')}。` : '身上没穿护甲。',
   ];
   lines.push(off ? `${gearPhrase(off)}。` : '副手空着。');
@@ -60,6 +61,7 @@ export function renderStoredItemReadout(
   const matches = (name: string) => matchItemName(item, name) || zhName(name) === item;
   const carried = s.inventory.filter((stack) => matches(stack.name))
     .reduce((total, stack) => total + stack.count, 0);
+  const cursor = s.cursorItem && matches(s.cursorItem.name) ? narrateCursor(s) : '';
   const label = zhName(item);
   const currentWindow = openWindow
     ? `当前打开的「${openWindow.title}」里${label}×${openWindow.items.filter((stack) => matches(stack.name))
@@ -78,7 +80,7 @@ export function renderStoredItemReadout(
       : '旧档无时间';
     return `(${record.x},${record.y},${record.z}) 上次见到×${count}（${when}）`;
   });
-  return `[物资查询] 随身${label}×${carried}。${currentWindow}${locations.length
+  return `[物资查询] 随身${label}×${carried}。${cursor}${currentWindow}${locations.length
     ? `本维度容器历史记录：${locations.join('；')}。到场开窗重查后再取；这些不是随身数量。`
     : `本维度容器账本没记到${label}；不等于其他容器里没有。`}`;
 }
@@ -128,6 +130,7 @@ export function bagStamp(s: WorldSnapshot | null): string {
     [...s.inventory].map((i) => `${i.name}:${i.displayName ?? ''}${enchantSuffix(i.enchantments)}`
       + `${i.durability ? `:${i.durability.left}/${i.durability.max}` : ''}×${i.count}`).sort().join(','),
     `${s.heldItem ?? 'bare'}:${s.heldItemDisplayName ?? ''}`,
+    narrateCursor(s),
     [...s.equipment].map((p) => `${p.slot}:${p.name}`).sort().join(','),
   ].join('|');
 }

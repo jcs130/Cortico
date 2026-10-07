@@ -75,6 +75,18 @@ function canonical(value: unknown): unknown {
   return value;
 }
 
+/** Stack compatibility includes component patches; count and slot do not identify the item. */
+export function sameInventoryStack(a: unknown, b: unknown): boolean {
+  const kind = (value: unknown): string => {
+    const item = value as { type: number; metadata?: number | null; nbt?: unknown;
+      components?: unknown[]; removedComponents?: unknown[] };
+    return JSON.stringify(canonical({ type: item.type, metadata: item.metadata ?? null, nbt: item.nbt ?? null,
+      components: [...(item.components ?? [])].map(canonical).sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y))),
+      removedComponents: [...(item.removedComponents ?? [])].sort() }));
+  };
+  return kind(a) === kind(b);
+}
+
 function stackKey(value: unknown): string {
   const item = value as { present?: boolean; blockId?: number; itemCount?: number; itemId?: number;
     itemDamage?: number; nbtData?: unknown; components?: unknown[]; removeComponents?: unknown[] } | null;
@@ -297,17 +309,12 @@ export async function clickInventoryConfirmed(bot: Bot, slot: number, button: nu
 export async function resumeInventoryCursor(bot: Bot): Promise<void> {
   assertInventoryClicksReady(bot);
   const window = activeWindow(bot);
-  const kind = (item: unknown): string => {
-    const stack = item as Record<string, unknown>;
-    return JSON.stringify(canonical({ type: stack.type, metadata: stack.metadata ?? null,
-      nbt: stack.nbt ?? null, components: stack.components ?? [], removedComponents: stack.removedComponents ?? [] }));
-  };
   for (let attempt = 0; window.selectedItem && attempt <= window.inventoryEnd - window.inventoryStart; attempt++) {
     const cursor = window.selectedItem;
     let dest: number | null = null;
     for (let slot = window.inventoryStart; slot < window.inventoryEnd; slot++) {
       const item = window.slots[slot];
-      if (item && item.count < item.stackSize && kind(item) === kind(cursor)) { dest = slot; break; }
+      if (item && item.count < item.stackSize && sameInventoryStack(item, cursor)) { dest = slot; break; }
       if (!item && dest === null) dest = slot;
     }
     if (dest === null) throw new InventoryClickSyncError('背包没有位置归还服务端游标物品，材料保留在游标上', 'rollback');

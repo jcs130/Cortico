@@ -71,6 +71,19 @@ describe('背包读数(mc_bag)', () => {
     expect(bagStamp(null)).toBe('nobot');
   });
 
+  it('cursor ownership is visible without inflating bag slots or the carried item count', () => {
+    const before = snap({ inventory: [], heldItem: null });
+    const after = snap({ inventory: [], heldItem: null, cursorItem: { name: 'wooden_hoe', count: 1 } });
+    const text = renderBagReadout(after);
+    expect(text).toContain('0/36 格占着');
+    expect(text).toContain('手里空着');
+    expect(text).toContain('鼠标光标：木锄');
+    expect(text).toContain('wooden_hoe');
+    expect(text).toContain('尚未放回背包');
+    expect(bagStamp(after)).not.toBe(bagStamp(before));
+    expect(renderStoredItemReadout(after, [], 'wooden_hoe')).toContain('鼠标光标');
+  });
+
   it('按物品查仓储历史，不把箱内数量混入随身余额', () => {
     const text = renderStoredItemReadout(snap({ inventory: [] }), [
       { x: -549, y: 63, z: -380, dimension: 'overworld', usedSlots: 27, slots: 27,

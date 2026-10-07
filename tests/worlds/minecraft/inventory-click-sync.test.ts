@@ -216,6 +216,92 @@ describe('server inventory click snapshots', () => {
     expect(rig.server.selectedItem.count).toBe(64);
   });
 
+  it.each([false, true])('full inventory rejects the whole server product before pickup (explicit grid: %s)', async (explicitGrid) => {
+    vi.useFakeTimers();
+    const rig = inventoryServer();
+    for (let slot = rig.inventory.inventoryStart; slot < rig.inventory.inventoryEnd; slot++) rig.seed(slot, 'stone', 64);
+    rig.seed(18, 'cherry_log', 64);
+    // One slot has room for only one of the four server-produced planks.
+    rig.seed(19, 'cherry_planks', 63);
+    installMineflayerFixes(rig.bot, log);
+    const craft = rig.bot.craft({ ingredients: [{ id: rig.registry.itemsByName.cherry_log.id }],
+      result: { id: explicitGrid ? null : rig.registry.itemsByName.cherry_planks.id, count: 4 }, requiresTable: false } as never, 1);
+    const rejected = expect(craft).rejects.toThrow('背包容量不足');
+    await vi.runAllTimersAsync(); await rejected;
+    expect(rig.sent.filter(packet => packet.slot === 0)).toHaveLength(0);
+    expect(rig.server.selectedItem).toBeNull();
+    expect(rig.server.slots[18].count).toBe(64);
+    expect(rig.server.slots[19].count).toBe(63);
+    expect(rig.server.slots.slice(1, 5).filter(Boolean)).toHaveLength(0);
+  });
+
+  it('full inventory can craft when the consumed ingredient frees a slot', async () => {
+    vi.useFakeTimers();
+    const rig = inventoryServer();
+    for (let slot = rig.inventory.inventoryStart; slot < rig.inventory.inventoryEnd; slot++) rig.seed(slot, 'stone', 64);
+    rig.seed(18, 'cherry_log', 1);
+    installMineflayerFixes(rig.bot, log);
+    const craft = rig.bot.craft({ ingredients: [{ id: rig.registry.itemsByName.cherry_log.id }],
+      result: { id: rig.registry.itemsByName.cherry_planks.id, count: 4 }, requiresTable: false } as never, 1);
+    await vi.runAllTimersAsync(); await craft;
+    expect(rig.server.slots[18].name).toBe('cherry_planks');
+    expect(rig.server.slots[18].count).toBe(4);
+    expect(rig.server.selectedItem).toBeNull();
+  });
+
+  it('craft product fills several compatible partial stacks before completing', async () => {
+    vi.useFakeTimers();
+    const rig = inventoryServer();
+    for (let slot = rig.inventory.inventoryStart; slot < rig.inventory.inventoryEnd; slot++) rig.seed(slot, 'stone', 64);
+    rig.seed(18, 'cherry_log', 64);
+    rig.seed(19, 'cherry_planks', 62);
+    rig.seed(20, 'cherry_planks', 62);
+    installMineflayerFixes(rig.bot, log);
+    const craft = rig.bot.craft({ ingredients: [{ id: rig.registry.itemsByName.cherry_log.id }],
+      result: { id: rig.registry.itemsByName.cherry_planks.id, count: 4 }, requiresTable: false } as never, 1);
+    await vi.runAllTimersAsync(); await craft;
+    expect(rig.server.slots[19].count).toBe(64);
+    expect(rig.server.slots[20].count).toBe(64);
+    expect(rig.server.selectedItem).toBeNull();
+    expect(rig.inventory.selectedItem).toBeNull();
+  });
+
+  it('component-bearing stacks do not provide capacity for an ordinary craft product', async () => {
+    vi.useFakeTimers();
+    const rig = inventoryServer();
+    for (let slot = rig.inventory.inventoryStart; slot < rig.inventory.inventoryEnd; slot++) rig.seed(slot, 'stone', 64);
+    rig.seed(18, 'cherry_log', 64);
+    rig.seed(19, 'cherry_planks', 4);
+    for (const window of [rig.inventory, rig.server]) {
+      window.slots[19].components = [{ type: 'custom_name', data: 'Decorative planks' }];
+    }
+    installMineflayerFixes(rig.bot, log);
+    const craft = rig.bot.craft({ ingredients: [{ id: rig.registry.itemsByName.cherry_log.id }],
+      result: { id: rig.registry.itemsByName.cherry_planks.id, count: 4 }, requiresTable: false } as never, 1);
+    const rejected = expect(craft).rejects.toThrow('背包容量不足');
+    await vi.runAllTimersAsync(); await rejected;
+    expect(rig.sent.filter(packet => packet.slot === 0)).toHaveLength(0);
+    expect(rig.server.selectedItem).toBeNull();
+    expect(rig.server.slots[19].count).toBe(4);
+  });
+
+  it('each craft round checks capacity again and returns the next round materials', async () => {
+    vi.useFakeTimers();
+    const rig = inventoryServer();
+    for (let slot = rig.inventory.inventoryStart; slot < rig.inventory.inventoryEnd; slot++) rig.seed(slot, 'stone', 64);
+    rig.seed(18, 'cherry_log', 64);
+    rig.seed(19, 'cherry_planks', 60);
+    installMineflayerFixes(rig.bot, log);
+    const craft = rig.bot.craft({ ingredients: [{ id: rig.registry.itemsByName.cherry_log.id }],
+      result: { id: rig.registry.itemsByName.cherry_planks.id, count: 4 }, requiresTable: false } as never, 2);
+    await Promise.all([expect(craft).rejects.toThrow('背包容量不足'), vi.runAllTimersAsync()]);
+    expect(rig.sent.filter(packet => packet.slot === 0)).toHaveLength(1);
+    expect(rig.server.slots[18].count).toBe(63);
+    expect(rig.server.slots[19].count).toBe(64);
+    expect(rig.server.selectedItem).toBeNull();
+    expect(rig.server.slots.slice(1, 5).filter(Boolean)).toHaveLength(0);
+  });
+
   it('a real Mineflayer hotbar delay cannot click a replacement window and releases its unsent reservation after settling', async () => {
     vi.useFakeTimers();
     const registry = dependency('prismarine-registry')('1.20.6');

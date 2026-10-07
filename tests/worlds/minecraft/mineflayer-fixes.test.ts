@@ -327,11 +327,12 @@ describe('合成采用服务端确认的产物', () => {
     installMineflayerFixes(bot as never, log);
 
     await expect((bot as unknown as { craft(r: unknown, n: number): Promise<void> }).craft(STICK, 1))
-      .rejects.toThrow('包满了,产物没地方放');
+      .rejects.toThrow('背包容量不足');
 
     expect(world.clicks.some((c) => c.at === 1 && c.cursor === 1)).toBe(true);
-    expect(world.window.selectedItem?.type).toBe(99); // 余料已回包，产物因满包暂留光标
-    expect(world.clicks.filter((c) => c.slot === 0)).toHaveLength(1);
+    expect(world.window.selectedItem).toBeNull();
+    expect(world.clicks.filter((c) => c.slot === 0)).toHaveLength(0);
+    expect(world.slots.slice(1, 5).filter(Boolean)).toHaveLength(0);
   });
 
   it('来源材料和产物都能合并时,满包也完成合成', async () => {
@@ -356,7 +357,7 @@ describe('合成采用服务端确认的产物', () => {
     installMineflayerFixes(bot as never, log);
 
     await expect((bot as unknown as { craft(r: unknown, n: number): Promise<void> }).craft(STICK, 1))
-      .rejects.toThrow('手上还攥着');
+      .rejects.toThrow('鼠标光标还持有');
 
     expect(world.clicks.filter((c) => c.slot === 0)).toHaveLength(0);
   });

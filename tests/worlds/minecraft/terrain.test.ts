@@ -232,6 +232,23 @@ describe('snapshotFromBot 的现实时刻', () => {
   it('指定了就按指定的那个时区报', () => {
     expect(snapshotFromBot(bareBot(), { timezone: 'UTC' }).realTime).toMatch(/\+00:00$/);
   });
+
+  it('active-window cursor is separate from the hand and inventory and changes snapshot facts', () => {
+    const bot = bareBot();
+    const cursor = { name: 'wooden_hoe', count: 1 };
+    const before = snapshotFromBot(bot);
+    const after = snapshotFromBot({ ...bot, currentWindow: { selectedItem: cursor } });
+    expect(after.cursorItem).toMatchObject(cursor);
+    expect(after.inventory).toEqual([]);
+    expect(after.heldItem).toBeNull();
+    expect(narrateWorld(after)).toContain('鼠标光标：木锄');
+    expect(snapshotFingerprint(after)).not.toBe(snapshotFingerprint(before));
+    const gear = (s: WorldSnapshot) => narrateWorldSegments(s).find(segment => segment.key === 'gear')!;
+    expect(gear(after).cmp).not.toBe(gear(before).cmp);
+    // An empty current-window cursor takes precedence over an old inventory-window copy.
+    const cleared = snapshotFromBot({ ...bot, inventory: { items: () => [], selectedItem: cursor }, currentWindow: { selectedItem: null } });
+    expect(cleared.cursorItem).toBeNull();
+  });
 });
 
 describe('天候读的是雨量不是 isRaining', () => {
@@ -1012,17 +1029,17 @@ describe('narrateWorldSegments(分段去重的数据源)', () => {
       narrateWorldSegments(snap(), null, prevBag).find((g) => g.key === 'gear')!.text;
     // 一条都没变
     expect(gear([{ name: 'oak_log', count: 17 }, { name: 'bread', count: 3 }]))
-      .toBe('手里拿着石镐。');
+      .toBe('手里拿着石镐。鼠标光标空着。');
     // 数字变了的按现在的存量印,没变的那条不印
     expect(gear([{ name: 'oak_log', count: 17 }, { name: 'bread', count: 1 }]))
-      .toBe('手里拿着石镐。包里变的：面包×3。');
+      .toBe('手里拿着石镐。包里变的：面包×3。鼠标光标空着。');
     // 新出现的一样按存量印
-    expect(gear([{ name: 'oak_log', count: 17 }])).toBe('手里拿着石镐。包里变的：面包×3。');
+    expect(gear([{ name: 'oak_log', count: 17 }])).toBe('手里拿着石镐。包里变的：面包×3。鼠标光标空着。');
     // 整个不见了的列不出存量,单说一句
     expect(gear([{ name: 'oak_log', count: 17 }, { name: 'bread', count: 3 }, { name: 'torch', count: 4 }]))
-      .toBe('手里拿着石镐。火把没了。');
+      .toBe('手里拿着石镐。火把没了。鼠标光标空着。');
     // 不给基线(全量锚那一拍、还没有基线)照旧整份印
-    expect(gear(null)).toBe('手里拿着石镐。包里有：橡木原木×17、面包×3。');
+    expect(gear(null)).toBe('手里拿着石镐。包里有：橡木原木×17、面包×3。鼠标光标空着。');
   });
 
   it('比对键只认当刻存量,与给不给基线无关', () => {

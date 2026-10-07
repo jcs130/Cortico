@@ -103,6 +103,12 @@ export interface ItemStack {
   enchantments?: ItemEnchant[];
 }
 
+export function narrateCursor(s: Pick<WorldSnapshot, 'cursorItem'>): string {
+  return s.cursorItem
+    ? `鼠标光标：${narrateInventory([s.cursorItem])}（${s.cursorItem.name}），尚未放回背包。`
+    : '鼠标光标空着。';
+}
+
 /** 装备槽。手上那件走 `heldItem`,这里只收穿在身上的与副手 */
 export type GearSlot = 'head' | 'chest' | 'legs' | 'feet' | 'offhand';
 
@@ -146,6 +152,8 @@ export interface WorldSnapshot {
   heldItem: string | null;
   heldItemDisplayName?: string | null;
   inventory: ItemStack[];
+  /** Active window cursor, counted separately from player inventory and the equipped hand. */
+  cursorItem?: ItemStack | null;
   /** 经验条上的整数；未收到经验读数时为 null。 */
   xpLevel: number | null;
   /** 穿在身上的与副手,空槽不占条目 */
@@ -333,6 +341,7 @@ export function snapshotFingerprint(s: WorldSnapshot): string {
     s.invSynced ? 'inv' : 'nosync',
     `${s.heldItem ?? 'bare'}:${s.heldItemDisplayName ?? ''}`,
     s.inventory.map((i) => `${i.name}:${i.displayName ?? ''}x${i.count}`).sort().join(','),
+    narrateCursor(s),
     // 穿着什么、身上有什么效果:一件盔甲耗尽消失、中毒开始与抗火到期都不是她下的令,
     // 快照不报她就无从知道。耐久与剩余秒不进(每秒都在动,进了这道闸就等于没有)
     s.equipment.map((p) => `${p.slot}:${p.name}`).sort().join(','),
@@ -398,14 +407,14 @@ export function narrateWorldSegments(
   let gear: string;
   if (s.invSynced) {
     const held = s.heldItem ? `手里拿着${s.heldItemDisplayName ?? zhName(s.heldItem)}` : '两手空空';
-    gear = `${held}。${prevBag ? narrateBagChange(prevBag, s.inventory) : bagFull}`;
+    gear = `${held}。${prevBag ? narrateBagChange(prevBag, s.inventory) : bagFull}${narrateCursor(s)}`;
   } else {
     gear = '背包还在从服务器同步，这份清单还没到。';
   }
   segs.push({
     key: 'gear',
     text: gear,
-    cmp: s.invSynced ? `${s.heldItem ?? 'bare'}|${bagFull}` : 'nosync',
+    cmp: s.invSynced ? `${s.heldItem ?? 'bare'}|${bagFull}|${narrateCursor(s)}` : 'nosync',
   });
 
   // 装备与状态自成一段:背包每挖一块土就变,盔甲与效果几十分钟才动一次,
@@ -1774,6 +1783,16 @@ export function snapshotFromBot(
 
   // 亮度按"眼睛看到的"算,天光入夜要扣,所以采样得先知道是不是夜里
   const timeOfDay = bot.time?.timeOfDay ?? 0;
+  const describeItem = (it: ItemLike & { count: number }): ItemStack => {
+    const ench = readEnchants(it, bot.registry);
+    const displayName = itemCustomName(it);
+    const durability = readDurability(it);
+    return { name: it.name, count: it.count,
+      ...(displayName ? { displayName } : {}),
+      ...(durability ? { durability } : {}),
+      ...(ench.length > 0 ? { enchantments: ench } : {}) };
+  };
+  const cursor = (bot.currentWindow ?? bot.inventory)?.selectedItem;
 
   return {
     position: { x: pos.x, y: pos.y, z: pos.z },
@@ -1792,15 +1811,8 @@ export function snapshotFromBot(
     gameMode: String(bot.game.gameMode ?? 'survival'),
     heldItem: bot.heldItem ? bot.heldItem.name : null,
     heldItemDisplayName: bot.heldItem ? itemCustomName(bot.heldItem) : null,
-    inventory: (bot.inventory?.items() ?? []).map((it: any) => {
-      const ench = readEnchants(it, bot.registry);
-      const displayName = itemCustomName(it);
-      const durability = readDurability(it);
-      return { name: it.name, count: it.count,
-        ...(displayName ? { displayName } : {}),
-        ...(durability ? { durability } : {}),
-        ...(ench.length > 0 ? { enchantments: ench } : {}) };
-    }),
+    inventory: (bot.inventory?.items() ?? []).map(describeItem),
+    cursorItem: cursor ? describeItem(cursor) : null,
     xpLevel: typeof bot.experience?.level === 'number' && Number.isFinite(bot.experience.level)
       ? bot.experience.level : null,
     equipment: readEquipment(bot),

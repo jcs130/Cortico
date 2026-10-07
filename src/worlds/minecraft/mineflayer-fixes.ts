@@ -28,7 +28,7 @@ import { installOwnedFishing } from './fishing.ts';
 import { armTemporaryScaffoldPlacement, assertTemporaryScaffoldDigSafe, closeTemporaryScaffoldPlacement,
   hasPreparedTemporaryScaffoldPlacement, prepareTemporaryScaffoldPlacement, recordTemporaryScaffold } from './temporary-scaffold.ts';
 import { assertInventoryClicksReady, clickInventoryConfirmed, installInventoryClickSync,
-  inventoryClickState, isInventoryClickError, isInventoryCursorPacket } from './inventory-click-sync.ts';
+  inventoryClickState, isInventoryClickError, isInventoryCursorPacket, sameInventoryStack } from './inventory-click-sync.ts';
 
 /** 摆好材料之后等产出槽被服务端填上的上限 */
 const RESULT_WAIT_MS = 1_500;
@@ -72,15 +72,12 @@ type DigBlock = Bot['targetDigBlock'];
 interface WindowLike {
   id: number;
   type: string;
-  slots: Array<{ type: number; count: number; metadata?: number | null; nbt?: unknown } | null>;
-  selectedItem: { type: number; count: number; metadata?: number | null; nbt?: unknown } | null;
+  slots: Array<{ type: number; count: number; stackSize?: number; metadata?: number | null; nbt?: unknown;
+    components?: unknown[]; removedComponents?: unknown[] } | null>;
+  selectedItem: WindowLike['slots'][number];
   inventoryStart: number;
   inventoryEnd: number;
   findInventoryItem(item: number, metadata: number | null, notFull?: boolean): { slot: number } | null;
-  findItemRange(
-    start: number, end: number, itemType: number, metadata?: number | null,
-    notFull?: boolean, nbt?: unknown,
-  ): { slot: number } | null;
   firstEmptySlotRange(start: number, end: number): number | null;
 }
 
@@ -1264,15 +1261,22 @@ async function craftOnce(
   }
 
   await show?.beat('result'); // 产出槽在摄像机画面上亮一拍再收
+  // Count capacity after placing ingredients: consuming the last ingredient can free a slot.
+  // The server's actual result also covers explicit grids and component-bearing products.
+  let room = 0;
+  const max = result.stackSize ?? bot.registry.items[result.type]?.stackSize ?? 64;
+  for (let slot = window.inventoryStart; slot < window.inventoryEnd; slot++) {
+    const item = window.slots[slot];
+    if (!item) room += max;
+    else if (sameInventoryStack(item, result)) room += Math.max(0, (item.stackSize ?? max) - item.count);
+  }
+  if (room < result.count) {
+    trace('output-no-room', '背包容量不足，未取出合成产物', { item: result.type, count: result.count, room });
+    throw new Error(`背包容量不足：${itemLabel(bot, result.type)}×${result.count} 只有 ${room} 个存放余量；产物尚未取出，先腾出空间`);
+  }
   await click(bot, 0, 0, 0, window); // 拿起真产物;不伪造,changedSlots 才和服务端对得上
   if (!window.selectedItem) throw new Error('产物槽点了,产物没到手上');
-
-  const merge = window.findItemRange(
-    window.inventoryStart, window.inventoryEnd, result.type, result.metadata, true, result.nbt,
-  );
-  const dest = merge ? merge.slot : window.firstEmptySlotRange(window.inventoryStart, window.inventoryEnd);
-  if (dest === null || dest === undefined) throw new Error('包满了,产物没地方放');
-  await click(bot, dest, 0, 0, window);
+  await stashCursor(bot, window, null);
 }
 
 /**
@@ -1302,21 +1306,24 @@ async function stashCursor(
     await click(bot, preferred, 0, 0, window);
     if (!window.selectedItem) return;
   }
-  const held = window.selectedItem;
-  const merge = window.findItemRange(
-    window.inventoryStart, window.inventoryEnd, held.type, held.metadata, true, held.nbt,
-  );
-  if (merge) {
-    await click(bot, merge.slot, 0, 0, window);
-    if (!window.selectedItem) return;
+  // One result can span several partial stacks; each click is server-confirmed.
+  for (let slot = window.inventoryStart; slot < window.inventoryEnd; slot++) {
+    const held = window.selectedItem;
+    const item = window.slots[slot];
+    if (!held) return;
+    const max = item?.stackSize ?? (item ? bot.registry.items[item.type]?.stackSize : undefined) ?? 64;
+    if (item && item.count < max && sameInventoryStack(item, held)) {
+      await click(bot, slot, 0, 0, window);
+    }
   }
+  if (!window.selectedItem) return;
   const empty = window.firstEmptySlotRange(window.inventoryStart, window.inventoryEnd);
   if (empty !== null && empty !== undefined) {
     await click(bot, empty, 0, 0, window);
     if (!window.selectedItem) return;
   }
   const stillHeld = window.selectedItem;
-  throw new Error(`包满了,手上还攥着${itemLabel(bot, stillHeld.type)}×${stillHeld.count},放不回背包`);
+  throw new Error(`包满了,鼠标光标还持有${itemLabel(bot, stillHeld.type)}×${stillHeld.count},放不回背包`);
 }
 
 /**
