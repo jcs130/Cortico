@@ -97,6 +97,7 @@ describe('容器账本:炉子族与工作站', () => {
       t0, t0 + 80_000);
     const rec = a.get('overworld', P)!;
     expect(rec.name).toBe('furnace');
+    expect(rec.observedAt).toBe(t0);
     // items 同步成非空槽清单:快照「近处」那行照读
     expect(rec.items).toEqual([{ name: 'raw_iron', count: 8 }, { name: 'coal', count: 2 }]);
     expect(a.due(t0 + 79_999)).toHaveLength(0);
@@ -107,6 +108,7 @@ describe('容器账本:炉子族与工作站', () => {
     const b = new ChestBook(file);
     expect(b.due(t0 + 80_000)).toHaveLength(0);
     expect(b.get('overworld', P)?.furnace?.input?.count).toBe(8);
+    expect(b.get('overworld', P)?.observedAt).toBe(t0);
   });
 
   it('loadedFurnaces 只回本维度、槽里有料/有成品的;取空之后不再点名', () => {

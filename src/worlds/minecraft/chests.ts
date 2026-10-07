@@ -170,6 +170,7 @@ export class ChestBook {
     this.map.set(k, {
       x: p.x, y: p.y, z: p.z, dimension,
       items, usedSlots: items.length, slots: 3,
+      observedAt: loadedAt,
       name,
       ...(prev?.placedAt !== undefined ? { placedAt: prev.placedAt } : {}),
       furnace: { ...state, loadedAt, expectedDoneAt },
