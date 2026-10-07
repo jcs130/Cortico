@@ -76,6 +76,26 @@ describe('Persona长期复盘', () => {
     expect(r.review.review().accepted).toBe(true);
     await vi.advanceTimersByTimeAsync(0);
   });
+  it('针对问题的因果复核使用短预算，不替换日程，也不消耗常规规划的活动版本', async () => {
+    const r = rig({ agendaEnabled: true, maxContextTokens: 24_000, maxOutputTokens: 3200 });
+    r.agenda.propose(candidate, 0, stamp()); r.agenda.operate({ operation: 'adopt' });
+    const before = r.agenda.state();
+    r.reply(async () => '回到原高度，净增量为零；缓降导致失败还未证实。');
+    expect(r.review.review('回执显示75→97→75，能否据此声称高度可以累积？').accepted).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    const input = r.forks[0].messages.map(record => itemText(record.item)).join('\n');
+    expect(input).toContain('75→97→75');
+    expect(input).toContain('净变化'); expect(input).toContain('自述');
+    expect(input).not.toContain('只返回JSON');
+    expect(r.forks[0].maxOutputTokens).toBeLessThanOrEqual(1600);
+    expect(estimateMessagesTokens(r.forks[0].messages)).toBeLessThanOrEqual(12_000);
+    expect(r.forks[0].tools).toEqual([]); expect(r.gate).not.toHaveBeenCalled();
+    expect(r.agenda.state()).toEqual(before);
+    expect(r.injected[0].text).toContain('后台因果复核');
+    r.reply(async () => candidate);
+    expect(r.review.review().accepted).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+  });
   it('新规划读取当前阶段证据，旧背景说明仍在账本中但不作为当前事实重复投递', async () => {
     const r = rig({ agendaEnabled: true });
     const oldSummary = '背包全满，必须先一直整理箱子才能探索';
@@ -329,6 +349,30 @@ describe('Persona长期复盘', () => {
     expect(r.forks).toHaveLength(1);
   });
 
+  it('按事件保存时间、来源和游标，长批次末尾的终态仍可读取，自述不混作观测事实', async () => {
+    const r = rig();
+    const segments = ['旧库存'.repeat(1800), '升到97', '落回75', '后台猜测'];
+    let start = 0;
+    const events = segments.map((text, i) => {
+      const ref = { source: i === 3 ? 'persona' : 'custom', type: i === 3 ? 'planning' : 'custom.observation',
+        cursor: 100 + i, ts: new Date(Date.now() - (3 - i) * 1000).toISOString(), start, chars: text.length };
+      start += text.length;
+      return ref;
+    });
+    r.snapshot([message('user', segments.join(''), { ts: stamp(), frame: { events } }),
+      message('assistant', '已经累计升高，都是缓降造成的', { ts: stamp() })]);
+    r.review.review();
+    const input = r.forks[0].messages.map(record => itemText(record.item)).join('\n');
+    expect(input).toContain('custom/custom.observation cursor=101');
+    expect(input).toContain(events[1].ts); expect(input).toContain('升到97'); expect(input).toContain('落回75');
+    expect(input).toContain('assistant自述'); expect(input).toContain('尚未核验');
+    expect(input).not.toContain('后台猜测');
+    await vi.advanceTimersByTimeAsync(0);
+    const sameEventsInNewFrame = message('user', segments.join(''), { ts: stamp(), frame: { events } });
+    r.snapshot([sameEventsInNewFrame]);
+    expect(r.review.review().accepted).toBe(false);
+  });
+
   it('材料按token估算预算裁剪并说明缺失；保留最新活动，不导入完整main前缀', () => {
     const records = planningMessages({ constitution: '原则'.repeat(10_000),
       memories: [{ file: 'goal.md', text: '旧目标'.repeat(10_000) }], pending: '',
@@ -362,6 +406,33 @@ describe('Persona长期复盘', () => {
     expect(console.panels?.find((panel) => panel.id === 'planning')?.getMethods).toEqual(['state']);
     expect(await console.invoke!('planning', 'review', [])).toMatchObject({ accepted: false, reason: '长期复盘未启用' });
     expect(await console.invoke!('planning', 'state', [])).toMatchObject({ enabled: false, running: false });
+  });
+
+  it('重复的真实动作失败可异步请求一次因果复核；读工具与后台回执不触发', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cortiv-focused-failure-'));
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+    const forks: ForkOptions[] = [];
+    let finish!: (text: string) => void;
+    const persona = new CortiV({ memoryDir: dir, tickDelayMs: () => null,
+      planning: () => ({ ...PLANNING_DEFAULTS, enabled: true, provider: 'configured-planner', agendaEnabled: true }) });
+    persona.attach({ ...makeFakeHarnessApi({ toolsTagged: tag => tag === 'act' ? new Set(['custom_act']) : new Set() }),
+      sessionInfo: () => ({ id: 'main', running: 0, snapshot: [message('user', '实际回到起点', { ts: stamp() })],
+        estTokens: null, hardTokens: null }),
+      spawnFork: async options => { forks.push(options); return new Promise(resolve => { finish = resolve; }); } });
+    persona.startRhythm(); cleanup.push(() => persona.stopRhythm());
+    const ctx = { role: 'main', tool: 'custom_act', args: { at: [1, 2, 3] },
+      outcome: { text: '实际失败：条件尚未改变', failed: true as const } };
+    persona.onToolOutcome({ ...ctx, role: 'dream' }); persona.onToolOutcome({ ...ctx, tool: 'custom_read' });
+    expect(persona.onToolOutcome(ctx)).toBeNull(); expect(forks).toEqual([]);
+    expect(persona.onToolOutcome(ctx)).toContain('已异步请求后台因果复核');
+    expect(forks).toHaveLength(1); expect(forks[0].tools).toEqual([]);
+    expect(forks[0].messages.map(record => itemText(record.item)).join('\n')).toContain(ctx.outcome.text);
+    expect(persona.onToolOutcome(ctx)).toBeNull(); expect(forks).toHaveLength(1);
+    finish('(nothing)'); await vi.advanceTimersByTimeAsync(0);
+    const console = persona.console();
+    expect(await console.invoke!('planning', 'review', [{ question: '原假设是否符合回执？' }])).toMatchObject({ accepted: true });
+    expect(forks).toHaveLength(2);
+    finish('(nothing)'); await vi.advanceTimersByTimeAsync(0);
   });
 
   it('owner配置默认关闭，provider引用和文件指针可热更，模型强度保留provider配置', () => {

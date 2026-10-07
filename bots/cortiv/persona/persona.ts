@@ -674,6 +674,7 @@ export class CortiV extends Cormini {
     }, {
       name: 'activity_plan',
       description: 'Read a persistent flexible activity agenda; review requests asynchronous planning and returns immediately. '
+        + 'review with question requests a focused causal check of receipts and assumptions without replacing the agenda. '
         + 'read pages open stages by default; includeCompleted:true adds completed history, includeClosed:true adds completed and cancelled history; id reads only that stage or candidate with its dated metadata. Closed evidence does not occupy open-stage capacity. '
         + 'Read and verify a background proposal before adopt. adopt with id adds that new candidate while preserving '
         + 'existing progress; omit id to merge the whole proposal only when its revision is current, retaining omitted goals and evidence. focus selects a current stage. update records actual progress '
@@ -684,6 +685,8 @@ export class CortiV extends Cormini {
         type: 'object', additionalProperties: false,
         properties: {
           operation: { type: 'string', enum: ['read', 'review', 'adopt', 'focus', 'update'] },
+          question: { type: 'string', minLength: 1, maxLength: 1200,
+            description: 'review: optional focused question about evidence, net progress or an uncertain cause; omit for a full agenda proposal.' },
           id: { type: 'string', minLength: 1, maxLength: 80, description: 'Exact adopted item id for focus/update; read: one stage or unadopted candidate, including closed evidence; adopt: one verified new candidate id, even if other stages changed.' },
           offset: { type: 'integer', minimum: 0, description: 'read: pagination offset, default 0.' },
           limit: { type: 'integer', minimum: 1, maximum: AGENDA_MAX_ITEMS, description: 'read: page size, default 8.' },
@@ -694,7 +697,8 @@ export class CortiV extends Cormini {
         }, required: ['operation'],
       },
       handler: async (args) => args.operation === 'review'
-        ? JSON.stringify(this.planningReview?.review() ?? { accepted: false, reason: 'Persona未连接' })
+        ? JSON.stringify(this.planningReview?.review(typeof args.question === 'string' ? args.question : '')
+          ?? { accepted: false, reason: 'Persona未连接' })
         : this.activityAgenda?.operate(args) ?? '[日程 unavailable] Persona is not attached.',
     }, ...super.mainTailTools()];
   }
@@ -827,7 +831,11 @@ export class CortiV extends Cormini {
       catch (error) { this.core.log.warn('观众交流回执归档失败', { error: String(error) }); }
     }
     if (ctx.role !== MAIN || !this.core?.toolsTagged('act').has(ctx.tool)) return null;
-    return this.actionFailureReflection.observe(ctx.tool, ctx.args, ctx.outcome);
+    const reflection = this.actionFailureReflection.observe(ctx.tool, ctx.args, ctx.outcome);
+    if (!reflection) return null;
+    const review = this.planningReview?.review(`${reflection}\n触发本次复核的调用：${ctx.tool} ${JSON.stringify(ctx.args).slice(0, 300)}`
+      + `\n本次实际工具回执：${ctx.outcome.text.slice(0, 600)}`);
+    return reflection + (review?.accepted ? '\n已异步请求后台因果复核；当前行动与交流继续，结果尚未返回。' : '');
   }
 
   private captureRecentSpeech(snapshot: readonly ContextRecord[]): void {
@@ -890,7 +898,15 @@ export class CortiV extends Cormini {
         if (panel === 'planning') {
           if (!this.planningReview) throw new Error('Persona尚未连接Core');
           if (method === 'state') return { ...this.planningReview.state(), agenda: this.activityAgenda?.state() };
-          if (method === 'review') return this.planningReview.review();
+          if (method === 'review') {
+            const request = args[0];
+            if (request === undefined) return this.planningReview.review();
+            if (!request || typeof request !== 'object' || Array.isArray(request)
+              || typeof (request as Record<string, unknown>).question !== 'string') {
+              throw new Error('review 参数须为含 question 文本的对象');
+            }
+            return this.planningReview.review((request as { question: string }).question);
+          }
           throw new Error(`未知面板方法: ${panel}.${method}`);
         }
         return surface.invoke!(panel, method, args);
