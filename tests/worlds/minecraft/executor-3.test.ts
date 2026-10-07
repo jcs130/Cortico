@@ -2593,7 +2593,7 @@ describe('Reflexes 摔落', () => {
     reflexes.stop();
   });
 
-  it('深坠后落在仙人掌或水里:危险仍在时不恢复', () => {
+  it('深坠后落在仙人掌或水下:危险仍在时不恢复', () => {
     const bot = fallBot();
     const { hold, reflexes, resumed } = recoveryReflex(bot);
     crossStopThreshold(bot, reflexes);
@@ -2716,6 +2716,106 @@ describe('Reflexes 摔落', () => {
     return { bot, exec, reflexes, reports };
   }
 
+  it('深坠后浮出水面:连续换气窗口后执行排队的上岸动作', async () => {
+    const diag = new MinecraftLog();
+    const { bot, exec, reflexes, reports } = fallHoldRig(diag);
+    exec.submit([{ skill: 'goto', at: [20, 80, 0] }]);
+    crossStopThreshold(bot, reflexes);
+    await vi.advanceTimersByTimeAsync(50);
+    exec.submit([
+      { skill: 'goto', at: [2, 73, 0] },
+      { skill: 'chat', text: '上岸后继续' },
+    ], 'append');
+    bot.entity.velocity.y = 0;
+    bot.blockAt = ((p: V) => Math.floor(p.y) <= 73
+      ? { name: 'water', boundingBox: 'empty' }
+      : { name: 'air', boundingBox: 'empty' }) as typeof bot.blockAt;
+    bot.pf.goto = async () => {
+      bot.entity.position = new V(2.5, 73, 0.5);
+      bot.entity.onGround = true;
+      bot.blockAt = ((p: V) => Math.floor(p.y) === 72
+        ? { name: 'stone', boundingBox: 'block' }
+        : { name: 'air', boundingBox: 'empty' }) as typeof bot.blockAt;
+    };
+
+    for (let tick = 0; tick < 3; tick++) {
+      bot.entity.position = new V(0.5, tick % 2 ? 73.2 : 73, 0.5);
+      await vi.advanceTimersByTimeAsync(200);
+    }
+    expect(exec.status().hold).toContain('深坠落');
+    expect(bot.said).toEqual([]);
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(exec.status().hold).toBeNull();
+    expect(bot.entity.position).toEqual(new V(2.5, 73, 0.5));
+    expect(bot.said).toEqual(['上岸后继续']);
+    expect(reports.some((r) => r.kind === 'done' && r.taskId === 2)).toBe(true);
+    expect(diag.after(0).some((e) => e.event === 'falling-safe'
+      && e.msg.includes('浮在水面') && e.data?.resumed === true)).toBe(true);
+    expect(diag.after(0).some((e) => e.event === 'hold-timeout')).toBe(false);
+    reflexes.stop();
+    exec.shutdown();
+  });
+
+  it('深坠后短暂出水又下沉:连续换气窗口重新计时', () => {
+    const bot = fallBot();
+    const { hold, reflexes, resumed } = recoveryReflex(bot);
+    crossStopThreshold(bot, reflexes);
+    bot.entity.velocity.y = 0;
+    let submerged = false;
+    bot.blockAt = ((p: V) => Math.floor(p.y) <= (submerged ? 75 : 73)
+      ? { name: 'water', boundingBox: 'empty' }
+      : { name: 'air', boundingBox: 'empty' }) as typeof bot.blockAt;
+    vi.advanceTimersByTime(400);
+    submerged = true;
+    vi.advanceTimersByTime(200);
+    submerged = false;
+    vi.advanceTimersByTime(600);
+    expect(resumed).toEqual([]);
+    vi.advanceTimersByTime(200);
+    expect(resumed).toEqual([hold]);
+    reflexes.stop();
+  });
+
+  it('深坠后水面头部方块未加载:不把未知当作已能换气', () => {
+    const bot = fallBot();
+    const { hold, reflexes, resumed } = recoveryReflex(bot);
+    crossStopThreshold(bot, reflexes);
+    bot.entity.velocity.y = 0;
+    let loaded = false;
+    bot.blockAt = ((p: V) => Math.floor(p.y) <= 73
+      ? { name: 'water', boundingBox: 'empty' }
+      : loaded ? { name: 'air', boundingBox: 'empty' } : null) as typeof bot.blockAt;
+    vi.advanceTimersByTime(1_000);
+    expect(resumed).toEqual([]);
+    loaded = true;
+    vi.advanceTimersByTime(800);
+    expect(resumed).toEqual([hold]);
+    reflexes.stop();
+  });
+
+  it('深坠后浮出水面只解除坠落租约:独立环境冻结仍保留', async () => {
+    const diag = new MinecraftLog();
+    const { bot, exec, reflexes } = fallHoldRig(diag);
+    const environment = exec.pauseForEnvironment('独立环境接管');
+    crossStopThreshold(bot, reflexes);
+    exec.submit([{ skill: 'chat', text: '环境恢复后再执行' }], 'append');
+    bot.entity.velocity.y = 0;
+    bot.blockAt = ((p: V) => Math.floor(p.y) <= 73
+      ? { name: 'water', boundingBox: 'empty' }
+      : { name: 'air', boundingBox: 'empty' }) as typeof bot.blockAt;
+    await vi.advanceTimersByTimeAsync(800);
+    expect(exec.status().hold).toBe('独立环境接管');
+    expect(bot.said).toEqual([]);
+    expect(diag.after(0).some((e) => e.event === 'hold-partial-release'
+      && e.data?.slot === 'fall')).toBe(true);
+    exec.resumeAfterEnvironment(environment);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(bot.said).toEqual(['环境恢复后再执行']);
+    reflexes.stop();
+    exec.shutdown();
+  });
+
   it('深坠冻结期间 mc_stop:冻结跟着撤单一起解除,后来的任务照常开跑', async () => {
     const { bot, exec, reflexes } = fallHoldRig();
     exec.submit([{ skill: 'goto', at: [20, 80, 0] }]);
@@ -2750,12 +2850,12 @@ describe('Reflexes 摔落', () => {
     exec.submit([{ skill: 'chat', text: '解冻后才轮到我' }], 'append');
     crossStopThreshold(bot, reflexes);
 
-    // 落进一格水坑:onGround 了,但身体泡在水里 —— 干燥落脚这个条件永远不成立
+    // 仍在水下，恢复条件一直不成立。
     bot.entity.velocity.y = 0;
     bot.entity.onGround = true;
     bot.blockAt = ((p: V) => {
       const y = Math.floor(p.y);
-      if (y === 73) return { name: 'water', boundingBox: 'empty' };
+      if (y === 73 || y === 74) return { name: 'water', boundingBox: 'empty' };
       if (y === 72) return { name: 'stone', boundingBox: 'block' };
       return { name: 'air', boundingBox: 'empty' };
     }) as typeof bot.blockAt;
@@ -2786,12 +2886,12 @@ describe('Reflexes 摔落', () => {
     crossStopThreshold(bot, reflexes);
     expect(exec.status().hold).toBe('防溺水上浮找岸、深坠落超过 6 格');
 
-    // 落进一格水坑:干燥落脚永远不成立,深坠那一槽只能靠看门狗
+    // 仍在水下，深坠那一槽由看门狗释放。
     bot.entity.velocity.y = 0;
     bot.entity.onGround = true;
     bot.blockAt = ((p: V) => {
       const y = Math.floor(p.y);
-      if (y === 73) return { name: 'water', boundingBox: 'empty' };
+      if (y === 73 || y === 74) return { name: 'water', boundingBox: 'empty' };
       if (y === 72) return { name: 'stone', boundingBox: 'block' };
       return { name: 'air', boundingBox: 'empty' };
     }) as typeof bot.blockAt;
