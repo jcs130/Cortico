@@ -7,6 +7,9 @@ import type { Bot } from 'mineflayer';
 import type { Block } from 'prismarine-block';
 import { describeSkill, parseSteps, Executor, type TaskReport } from '../../../src/worlds/minecraft/executor.ts';
 import { parseScoutSteps } from '../../../src/worlds/minecraft/skills.ts';
+import { parseFlightPlan, previewFlightPlan } from '../../../src/worlds/minecraft/flight-preview.ts';
+import { MinecraftWorld } from '../../../src/worlds/minecraft/world.ts';
+import { MINECRAFT_DEFAULTS } from '../../../src/worlds/minecraft/config.ts';
 import { log, nextTaskId } from './executor-harness.ts';
 import { flightFlags, flightState, flyToLanding, flyToPosition, landFlight, MAX_FLIGHT_DISTANCE,
   previewFlight, setFlightExpiry, stopFlight, watchFlightAbilities } from '../../../src/worlds/minecraft/flight.ts';
@@ -55,6 +58,91 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2025-01-01T00:
 afterEach(() => { releases.splice(0).forEach(release => release()); vi.useRealTimers(); });
 
 describe('server-granted flight movement', () => {
+  it('projects every relative leg and rejects an over-budget whole route before casting', () => {
+    const { bot, client, positions } = flightBot();
+    client.emit('abilities', { flags: 0, flyingSpeed: 0.035 });
+    const parsed = parseFlightPlan({ points: Array.from({ length: 5 }, () => ({ at: ['~0', '~11', '~0'], land: false })), budgetMs: 21_000 });
+    if ('error' in parsed) throw new Error(parsed.error);
+    const result = previewFlightPlan(bot, parsed.steps, parsed.budgetMs);
+    expect(result).toMatchObject({ complete: true, budgetMs: 21_000, budgetSource: 'caller', fitsBudget: false, endsOnSupport: false });
+    expect(result.segments.map(segment => segment.at[1])).toEqual([75, 86, 97, 108, 119]);
+    expect(result.segments.at(-1)?.from).toEqual(result.segments.at(-2)?.at);
+    expect(result.estimatedDurationMs).toBe(result.segments.reduce((sum, segment) => sum + segment.estimatedDurationMs, 0));
+    expect(result.estimatedDurationMs).toBeGreaterThan(21_000);
+    expect(positions).toHaveLength(0);
+    expect(client.write.mock.calls).toHaveLength(0);
+    expect(flightState(bot).allowed).toBe(false);
+  });
+
+  it('checks a later leg collision and leaves the uninspected tail unknown', () => {
+    const { bot, set, client, positions } = flightBot();
+    set(new Vec3(4, 68, 0), block('stone'));
+    const parsed = parseFlightPlan({ points: [
+      { at: [0, 68, 0], land: false }, { at: [4, 68, 0], land: false }, { at: [4, 64, 0] },
+    ] });
+    if ('error' in parsed) throw new Error(parsed.error);
+    const result = previewFlightPlan(bot, parsed.steps);
+    expect(result).toMatchObject({ complete: false, blockedStep: 2, estimatedDurationMs: null, fitsBudget: null, endsOnSupport: null });
+    expect(result.reason).toContain('stone @ (4,68,0)');
+    expect(result.segments).toHaveLength(1);
+    expect(positions).toHaveLength(0);
+    expect(client.write.mock.calls).toHaveLength(0);
+  });
+
+  it('includes the declared descent and preserves the real server deadline', async () => {
+    const { bot, client } = flightBot();
+    client.emit('abilities', { flags: 4, flyingSpeed: 0.05 });
+    const deadline = Date.now() + 8_000;
+    setFlightExpiry(bot, deadline);
+    const parsed = parseFlightPlan({ points: [
+      { at: [0, 68, 0], land: false }, { at: [4, 68, 0], land: false }, { at: [4, 64, 0] },
+    ], budgetMs: 60_000 });
+    if ('error' in parsed) throw new Error(parsed.error);
+    const result = previewFlightPlan(bot, parsed.steps, parsed.budgetMs);
+    expect(result).toMatchObject({ complete: true, budgetMs: 8_000, budgetSource: 'caller-and-server-expiry', fitsBudget: true, endsOnSupport: true });
+    expect(result.estimatedDurationMs).toBeGreaterThan(result.segments[0].estimatedDurationMs + result.segments[1].estimatedDurationMs);
+    expect(flightState(bot).expiresAtMs).toBe(deadline);
+    const start = Date.now();
+    for (const step of result.segments) {
+      const move = flyToPosition(bot, { x: step.at[0], y: step.at[1], z: step.at[2] }, () => false, { land: step.land });
+      await vi.advanceTimersByTimeAsync(step.estimatedDurationMs);
+      await move;
+    }
+    expect(Date.now() - start).toBeLessThanOrEqual(result.estimatedDurationMs!);
+    expect(bot.entity.position).toEqual(new Vec3(4.5, 64, 0.5));
+  });
+
+  it('does not infer a duration from a route or from permission without a deadline', () => {
+    const { bot, client } = flightBot();
+    client.emit('abilities', { flags: 4 });
+    const parsed = parseFlightPlan({ points: [{ at: [0, 68, 0], land: false }] });
+    if ('error' in parsed) throw new Error(parsed.error);
+    expect(previewFlightPlan(bot, parsed.steps)).toMatchObject({ complete: true, budgetMs: null, budgetSource: null, fitsBudget: null, endsOnSupport: false });
+  });
+
+  it('validates flight plan input before reading or acting on the world', () => {
+    expect(parseFlightPlan({ points: [{ at: [0, 68, 0], land: 'false' }] })).toHaveProperty('error');
+    expect(parseFlightPlan({ points: [{ at: [0, 68, 0] }], budgetMs: 0 })).toHaveProperty('error');
+    expect(parseFlightPlan({ points: [] })).toHaveProperty('error');
+    expect(parseFlightPlan({ points: [{ at: [0, 68, 0], text: '/test grant-flight' }] })).toHaveProperty('error');
+  });
+
+  it('reports whole-route failure through the read-only World tool without enqueueing or sending packets', async () => {
+    const { bot, client, positions } = flightBot();
+    const world = new MinecraftWorld({ cfg: structuredClone({ ...MINECRAFT_DEFAULTS, enabled: true }) });
+    const submitted: unknown[] = [];
+    Object.assign(world, { bridge: { bot }, executor: { submit: (steps: unknown) => submitted.push(steps) } });
+    const tool = world.tools().find(tool => tool.name === 'mc_flight_plan')!;
+    const result = await tool.handler({ points: [{ at: [0, 68, 0], land: false }, { at: [30, 68, 0], land: false }] }, {} as never);
+    expect(result).toMatchObject({ failed: true });
+    expect(JSON.stringify(result)).toContain('blockedStep');
+    expect(JSON.stringify(result)).toContain('飞行单段最多');
+    expect(tool.tags).toEqual(['read']);
+    expect(submitted).toHaveLength(0);
+    expect(positions).toHaveLength(0);
+    expect(client.write.mock.calls).toHaveLength(0);
+  });
+
   it('previews a loaded airborne route without permission, packets or movement', () => {
     const { bot, client, positions } = flightBot();
     const preview = previewFlight(bot, { x: 0.5, y: 68, z: 0.5 });

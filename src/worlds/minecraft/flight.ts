@@ -237,11 +237,12 @@ function flightPlan(bot: Bot, start: Vec3, target: Vec3, options: FlightMoveOpti
   return flightRoute(bot, start, target);
 }
 
-/** Inspect the current loaded route without requesting flight permission or moving the player. */
+/** Inspect loaded geometry from the observed or explicitly projected origin without side effects. */
 export function previewFlight(bot: Bot, targetAt: { x: number; y: number; z: number },
-  options: FlightMoveOptions = {}): FlightPreview {
+  options: FlightMoveOptions = {}, origin?: { x: number; y: number; z: number }): FlightPreview {
   if (!bot.entity?.position) throw new SkillBlocked('还没进入世界，不能试算飞行');
-  const start = bot.entity.position.clone();
+  const from = origin ?? bot.entity.position;
+  const start = new Vec3(from.x, from.y, from.z);
   const target = new Vec3(targetAt.x, targetAt.y, targetAt.z);
   const route = flightPlan(bot, start, target, options);
   const state = flightState(bot);

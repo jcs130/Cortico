@@ -28,6 +28,7 @@ import { captureMinecraftView, closeMinecraftViewCapture, warmMinecraftViewCaptu
 import { PlayerObservations, playerObservationMeta, renderPlayerObservation, type PlayerObservation } from './player-observation.ts';
 import { precheckEmptyUseTarget } from './precheck.ts';
 import { blockAtCell, resolveAt } from './cell-facts.ts';
+import { FLIGHT_PLAN_MAX_POINTS, parseFlightPlan, previewFlightPlan } from './flight-preview.ts';
 import { createDecisionAdviser, type DecisionAdvice } from './decision-adviser.ts';
 import { IdleBehaviorController, type IdleBehaviorScene } from './idle-behavior.ts';
 import { sampleIdleActions, executeIdleAction } from './idle-actions.ts';
@@ -2191,6 +2192,25 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
     }
   },
   {
+    name: 'mc_flight_plan',
+    tags: ['read'],
+    description: 'Preview a whole flight route before casting, without moving or consuming permission. Each point starts at the previous projected endpoint, including relative coordinates. Returns collisions, per-leg and total time, whether the supplied budget fits, and whether the last point has safe support. Only loaded geometry is checked; execution revalidates. Unknown duration is not unlimited.',
+    parameters: {
+      type: 'object',
+      properties: {
+        points: { type: 'array', minItems: 1, maxItems: FLIGHT_PLAN_MAX_POINTS,
+          items: { type: 'object', properties: {
+            at: { anyOf: [{ type: 'string' }, { type: 'array', minItems: 3, maxItems: 3,
+              items: { anyOf: [{ type: 'number' }, { type: 'string' }] } }] },
+            land: { type: 'boolean', description: 'false=hover; default=true requires safe support at this point' },
+          }, required: ['at'], additionalProperties: false } },
+        budgetMs: { type: 'integer', minimum: 1,
+          description: 'Available milliseconds from current server instructions, supplied by caller; does not grant or renew flight' },
+      },
+      required: ['points'],
+    },
+  },
+  {
     name: 'mc_scout',
     tags: ['read'],
     description:
@@ -4110,6 +4130,21 @@ export class MinecraftWorld implements World {
       // 路标表在受理这一刻取一次:at 写名字时按当刻登记解析
       mc_do: async (args) => this.enqueueTool('mc_do', args, (raw) => parseSteps(raw, this.markLookup())),
       mc_scout: async (args) => this.enqueueTool('mc_scout', args, (raw) => parseScoutSteps(raw, this.markLookup())),
+      mc_flight_plan: async (args) => {
+        const parsed = parseFlightPlan(args, this.markLookup());
+        const bot = this.bridge?.bot;
+        if ('error' in parsed || !bot) return { text: this.toolLog('mc_flight_plan', args,
+          `[mc_flight_plan 失败] ${'error' in parsed ? parsed.error : '尚未连接 Minecraft'}`), failed: true };
+        try {
+          const result = previewFlightPlan(bot, parsed.steps, parsed.budgetMs);
+          return { text: this.toolLog('mc_flight_plan', args,
+            `整段飞行试算（未施法、未移动；后续起点是假定上一段到达，实际执行重验；估时仅含所列移动，每段含500毫秒余量）：${JSON.stringify(result)}`),
+          ...(!result.complete || result.fitsBudget === false ? { failed: true } : {}) };
+        } catch (error) {
+          if (!(error instanceof SkillBlocked)) throw error;
+          return { text: this.toolLog('mc_flight_plan', args, `[mc_flight_plan 失败] ${error.message}`), failed: true };
+        }
+      },
       mc_visual: async (args, ctx) => this.visualObservation(args, ctx),
       mc_policy: async (args) => this.toolLog('mc_policy', args, this.setPolicy(args)),
       mc_goal: async (args) => this.toolLog('mc_goal', args, this.setGoal(args)),
