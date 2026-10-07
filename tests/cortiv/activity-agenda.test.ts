@@ -288,6 +288,88 @@ describe('persistent Persona activity agenda', () => {
       { operation: 'focus', id: 'missing' }]) expect(agenda.operate(args)).toContain('错误');
     expect(agenda.state()).toEqual(before);
   });
+  it('reads an unadopted candidate by id without expanding unrelated goals or old planning background', () => {
+    const { agenda } = rig(); adopt(agenda);
+    const candidate = { ...plan(), summary: '旧库存背景不能当作当前读数', items: [
+      { ...plan().items[0], id: 'delivery', title: '交付铜料' },
+      { ...plan().items[1], id: 'unrelated', title: '不相关的远行安排' },
+    ] };
+    agenda.propose(JSON.stringify(candidate), agenda.revision(), stamp);
+    const before = agenda.state();
+    const result = agenda.operate({ operation: 'read', id: 'delivery' });
+    const reading = JSON.parse(result);
+    expect(reading.items).toEqual([]);
+    expect(reading.proposal).toMatchObject({ baseRevision: agenda.revision(), capturedAt: stamp, items: [candidate.items[0]] });
+    expect(result).not.toContain('不相关的远行安排');
+    expect(result).not.toContain('改善入口');
+    expect(result).not.toContain(candidate.summary);
+    const receipt = agenda.operate({ operation: 'update', id: 'delivery', status: 'done', note: '服务端已交付' });
+    expect(receipt).toContain('尚未采用');
+    expect(receipt).toContain('adopt');
+    expect(receipt).toContain('delivery');
+    expect(agenda.state()).toEqual(before);
+    agenda.operate({ operation: 'adopt', id: 'delivery' });
+    agenda.operate({ operation: 'update', id: 'delivery', status: 'done', note: '服务端已交付' });
+    expect(agenda.state().items.find(item => item.id === 'delivery')).toMatchObject({ status: 'done', note: '服务端已交付' });
+  });
+  it('explicit cancellation releases capacity and restores its dated reason without claiming completion', () => {
+    const { dir, agenda } = rig();
+    adopt(agenda, { ...plan(), items: Array.from({ length: AGENDA_MAX_ITEMS }, (_, index) => ({ ...plan().items[0], id: String(index) })) });
+    agenda.operate({ operation: 'focus', id: '0' });
+    const before = agenda.state();
+    expect(agenda.operate({ operation: 'update', id: '0', status: 'cancelled' })).toContain('错误');
+    expect(agenda.state()).toEqual(before);
+    agenda.operate({ operation: 'update', id: '0', status: 'cancelled', note: '用户已撤销旧委托，未完成也不再等待' });
+    agenda.propose(JSON.stringify({ ...plan(), items: [plan().items[1]] }), agenda.revision(), stamp);
+    agenda.operate({ operation: 'adopt', id: 'river' });
+    const restored = new ActivityAgenda(dir, now);
+    expect(restored.state().items.filter(item => item.status === 'active')).toEqual([]);
+    expect(restored.state().items.find(item => item.id === '0')).toMatchObject({ status: 'cancelled', updatedAt: stamp });
+    expect(restored.summary()).toContain('已撤销');
+    expect(restored.summary()).not.toContain('已结案 id="0"');
+    const reading = JSON.parse(restored.operate({ operation: 'read' }));
+    expect(reading.items).toHaveLength(AGENDA_MAX_ITEMS);
+    expect(reading.completedCount).toBe(0);
+    expect(reading.cancelledCount).toBe(1);
+    expect(JSON.parse(restored.operate({ operation: 'read', id: '0' })).items[0].note).toContain('用户已撤销');
+    const history = JSON.parse(restored.operate({ operation: 'read', includeClosed: true, limit: 1 }));
+    expect(history.items[0].status).toBe('cancelled');
+    expect(JSON.parse(restored.planningReadout()).items.find((item: { id: string }) => item.id === '0').status).toBe('cancelled');
+  });
+  it('a cancelled goal cannot be reopened or rewritten by focus, update or a later proposal', () => {
+    const { dir, agenda } = rig(); adopt(agenda);
+    agenda.operate({ operation: 'update', id: 'river', status: 'cancelled', note: '决定不再推进这次行程' });
+    const evidence = agenda.state().items.find(item => item.id === 'river');
+    expect(agenda.operate({ operation: 'focus', id: 'river' })).toContain('已撤销');
+    expect(agenda.operate({ operation: 'update', id: 'river', status: 'done', note: '旧建议又要求出发' })).toContain('已撤销');
+    adopt(agenda);
+    expect(agenda.state().items.find(item => item.id === 'river')).toEqual(evidence);
+    agenda.propose(JSON.stringify(plan()), agenda.revision(), stamp);
+    expect(agenda.operate({ operation: 'adopt', id: 'river' })).toContain('已撤销');
+    const changed = plan(); changed.items[1].doneWhen = '另一个新目的';
+    agenda.propose(JSON.stringify(changed), agenda.revision(), stamp);
+    const before = agenda.state();
+    expect(agenda.operate({ operation: 'adopt' })).toContain('不能改成新目标');
+    expect(agenda.state()).toEqual(before);
+    expect(new ActivityAgenda(dir, now).state()).toEqual(before);
+  });
+  it('whole adoption retains omitted goals until an explicit cancellation, including across restart', () => {
+    const { dir, agenda } = rig(); adopt(agenda);
+    agenda.operate({ operation: 'focus', id: 'finish-home' });
+    const existing = agenda.state().items;
+    const candidate = { ...plan(), items: [{ ...plan().items[1], id: 'new-trip' }] };
+    adopt(agenda, candidate);
+    expect(agenda.state().items.filter(item => existing.some(old => old.id === item.id))).toEqual(existing);
+    expect(new ActivityAgenda(dir, now).state().items.map(item => item.id)).toEqual(['finish-home', 'river', 'new-trip']);
+  });
+  it('whole adoption cannot silently drop open goals to make room at capacity', () => {
+    const { agenda } = rig();
+    adopt(agenda, { ...plan(), items: Array.from({ length: AGENDA_MAX_ITEMS }, (_, index) => ({ ...plan().items[0], id: String(index) })) });
+    agenda.propose(JSON.stringify(plan()), agenda.revision(), stamp);
+    const before = agenda.state();
+    expect(agenda.operate({ operation: 'adopt' })).toContain('上限');
+    expect(agenda.state()).toEqual(before);
+  });
   it('the per-call summary is bounded while full details remain readable', () => {
     const { agenda } = rig();
     const value = plan(); value.items = Array.from({ length: 8 }, (_, index) => ({ ...value.items[0],
@@ -315,6 +397,23 @@ describe('persistent Persona activity agenda', () => {
     expect(view!.map(record => itemText(record.item)).join('\n')).toContain('沿河探索');
     expect((persona as unknown as { writeGuard: (operation: 'write', path: string, role: string) => string | null })
       .writeGuard('write', AGENDA_FILE, 'main')).toContain('activity_plan');
+  });
+  it('restored Persona tools retain cancellation evidence in the request without putting the goal back in the open list', async () => {
+    const { dir, agenda } = rig(); adopt(agenda);
+    const persona = new CortiV({ memoryDir: dir, tickDelayMs: () => null,
+      foreground: () => ({ ...FOREGROUND_CONTEXT_DEFAULTS, enabled: true }) });
+    persona.attach(makeFakeHarnessApi());
+    const tool = persona.declareSessions().find(session => session.id === 'main')!.tools().find(tool => tool.name === 'activity_plan')!;
+    await tool.handler({ operation: 'update', id: 'river', status: 'cancelled', note: '用户已撤回这次行程' }, { role: 'main', log: nullLogger() });
+    const restored = new CortiV({ memoryDir: dir, tickDelayMs: () => null,
+      foreground: () => ({ ...FOREGROUND_CONTEXT_DEFAULTS, enabled: true }) });
+    restored.attach(makeFakeHarnessApi());
+    const request = restored.prepareRequest({ sessionId: 'main', round: 1, messages: [message('user', '继续自己的生活')] })!;
+    const summary = request.map(record => itemText(record.item)).find(text => text.startsWith('[活动日程'))!;
+    expect(summary).toContain('已撤销 id="river"');
+    expect(summary).toContain('用户已撤回这次行程');
+    expect(summary).not.toContain('候选 id="river"');
+    expect(new ActivityAgenda(dir, now).state().items.find(item => item.id === 'river')?.status).toBe('cancelled');
   });
   it('short foreground requests retain a deferred goal and its resumption evidence after Persona restoration', () => {
     const { dir, agenda } = rig(); adopt(agenda);

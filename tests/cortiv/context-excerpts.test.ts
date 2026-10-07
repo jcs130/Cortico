@@ -29,6 +29,30 @@ const refText = (record: ContextRecord, index: number): string => {
 };
 
 describe('请求副本的旧交接笔记节选', () => {
+  it('excerpts only historical snapshots covered by complete current World facts and preserves adjacent chat and media', () => {
+    const original = mixed();
+    const refs = original.context.frame!.events;
+    refs[0].source = 'game'; refs[0].type = 'game.state'; refs[0].tags = ['snapshot'];
+    refs[2].source = 'other'; refs[2].type = 'game.state'; refs[2].tags = ['snapshot'];
+    original.context.blobs = [{ handle: 'mem:scene.png', mime: 'image/png', fallbackText: '历史画面' }];
+    const before = structuredClone(original);
+    const options = { coveredSnapshots: [{ source: 'game', type: 'game.state' }] };
+    const result = excerptHandoffRecords([original, later()], selected, options)[0];
+    expect(refText(result, 0)).toContain('历史 game/game.state 快照');
+    expect(refText(result, 0)).toContain('事件#10');
+    expect(refText(result, 0)).toContain('2026-01-01T09:31:00+08:00');
+    expect(refText(result, 0)).toContain('expand_context');
+    expect(refText(result, 2)).toBe(refText(original, 2));
+    expect(refText(result, 1)).toBe(refText(original, 1));
+    expect(refText(result, 3)).toBe(refText(original, 3));
+    expect(result.context.blobs).toBe(original.context.blobs);
+    expect(itemText(result.item).length).toBeLessThan(itemText(original.item).length / 2 + 200);
+    expect(original).toEqual(before);
+    expect(excerptHandoffRecords([original], selected, options)[0]).toBe(original);
+    expect(excerptHandoffRecords([original, later()], selected, { ...options, protectedRecords: [original] })[0]).toBe(original);
+    refs[0].tags = undefined;
+    expect(excerptHandoffRecords([original, later()], selected, options)[0]).toBe(original);
+  });
   it('replaces a historical Persona checkpoint inside a mixed frame while keeping outside speech, media and source ranges', () => {
     const original = mixed();
     original.context.frame!.events[0].type = 'activity_plan';

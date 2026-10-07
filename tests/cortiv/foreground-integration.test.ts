@@ -29,6 +29,36 @@ function rig(worlds: World[] = []) {
 }
 
 describe('CortiV foreground request context', () => {
+  it('keeps an older action receipt and adjacent chat while replacing its covered obsolete snapshot body with a source pointer', () => {
+    const world: World = { id: 'game', envPromptVars: () => ({}), tools: () => [],
+      start: async () => {}, stop: async () => {}, requestFacts: () => ({
+        text: 'Observed at 2026-01-01T00:01:00Z: bread 12, queue idle.', snapshotTypes: ['game.state'],
+      }) };
+    const { persona } = rig([world]);
+    const stale = 'Old observation: bread 0, queue running. '.repeat(300);
+    const chat = 'A player asks to meet at the bridge.';
+    const old = functionResult('build', stale + '\n' + chat + '\nBridge support placed and verified.', { frame: { events: [
+      { source: 'game', type: 'game.state', tags: ['snapshot'], cursor: 1,
+        ts: '2026-01-01T00:00:00Z', start: 0, chars: stale.length },
+      { source: 'game', type: 'game.chat', cursor: 2,
+        ts: '2026-01-01T00:00:00Z', start: stale.length + 1, chars: chat.length },
+    ] } });
+    const records = [message('system', 'Contract'), functionCall('build', 'game_build', '{}', { responseId: 'r1' }),
+      old, message('user', 'A new request.', {
+        frame: { events: [{ source: 'game', type: 'game.chat', cursor: 3,
+          ts: '2026-01-01T00:02:00Z', start: 0, chars: 'A new request.'.length }] },
+      })];
+    const before = structuredClone(records);
+    const view = persona.prepareRequest({ sessionId: 'main', round: 1, messages: records })!;
+    const body = view.find(row => row.item.id === old.item.id)!;
+    expect(itemText(body.item)).not.toContain(stale);
+    expect(itemText(body.item)).toContain(chat);
+    expect(itemText(body.item)).toContain('事件#1');
+    expect(view.some(row => itemText(row.item).includes('Bridge support placed and verified.'))).toBe(true);
+    expect(view.some(row => itemText(row.item).includes('bread 12, queue idle.'))).toBe(true);
+    expect(validatePairing(view)).toEqual([]);
+    expect(records).toEqual(before);
+  });
   it('current agenda state supersedes old agenda prose embedded alongside a protected handoff', () => {
     const { persona, config } = rig(); persona.attach(makeFakeHarnessApi());
     config.maxHistoryTokens = 1;

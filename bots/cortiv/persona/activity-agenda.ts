@@ -16,7 +16,7 @@ export interface AgendaItem {
   references: string[];
 }
 export interface AgendaPlan { summary: string; items: AgendaItem[]; }
-type AgendaStatus = 'queued' | 'active' | 'deferred' | 'done';
+type AgendaStatus = 'queued' | 'active' | 'deferred' | 'done' | 'cancelled';
 interface AcceptedItem extends AgendaItem { status: AgendaStatus; note: string; updatedAt: string; }
 interface Proposal extends AgendaPlan { baseRevision: number; capturedAt: string; }
 interface Ledger {
@@ -48,9 +48,11 @@ function validPlan(value: unknown): value is AgendaPlan {
     && value.items.every(validItem) && new Set(value.items.map(item => item.id)).size === value.items.length;
 }
 function validAccepted(value: unknown): value is AcceptedItem {
-  return validItem(value) && object(value) && ['queued', 'active', 'deferred', 'done'].includes(String(value.status))
+  return validItem(value) && object(value) && ['queued', 'active', 'deferred', 'done', 'cancelled'].includes(String(value.status))
     && text(value.note, 400, true) && timestamp(value.updatedAt);
 }
+function closed(item: AcceptedItem): boolean { return item.status === 'done' || item.status === 'cancelled'; }
+function closedLabel(item: AcceptedItem): string { return item.status === 'cancelled' ? '已撤销' : '已完成'; }
 function cleanItem(item: AgendaItem): AgendaItem {
   return { id: item.id, title: item.title, why: item.why, doneWhen: item.doneWhen,
     when: item.when, ifBlocked: item.ifBlocked, references: [...item.references] };
@@ -82,7 +84,7 @@ export class ActivityAgenda {
     const saved: unknown = JSON.parse(readFileSync(this.file, 'utf8'));
     if (!object(saved) || saved.version !== 1 || !Number.isSafeInteger(saved.revision) || Number(saved.revision) < 0
       || !text(saved.summary, 300, true) || !Array.isArray(saved.items) || !saved.items.every(validAccepted)
-      || saved.items.filter(item => item.status !== 'done').length > AGENDA_MAX_ITEMS
+      || saved.items.filter(item => !closed(item)).length > AGENDA_MAX_ITEMS
       || saved.items.filter(item => item.status === 'active').length > 1
       || new Set(saved.items.map(item => item.id)).size !== saved.items.length
       || !(saved.proposal === null || (validPlan(saved.proposal) && object(saved.proposal)
@@ -107,18 +109,26 @@ export class ActivityAgenda {
     return this.summary();
   }
   operate(args: Record<string, unknown>): string {
-    if (Object.keys(args).some(key => !['operation', 'id', 'status', 'note', 'offset', 'limit', 'includeCompleted'].includes(key))) return '[日程输入错误] 含有未知参数。';
+    if (Object.keys(args).some(key => !['operation', 'id', 'status', 'note', 'offset', 'limit', 'includeCompleted', 'includeClosed'].includes(key))) return '[日程输入错误] 含有未知参数。';
     if (args.operation === 'read') {
       const offset = args.offset ?? 0, limit = args.limit ?? AGENDA_MAX_ITEMS;
       if (!Number.isSafeInteger(offset) || Number(offset) < 0 || !Number.isSafeInteger(limit)
         || Number(limit) < 1 || Number(limit) > AGENDA_MAX_ITEMS
-        || (args.includeCompleted !== undefined && typeof args.includeCompleted !== 'boolean')) return '[日程输入错误] read 的 offset 为非负整数，limit 为 1 至 8，includeCompleted 为布尔值。';
+        || (args.id !== undefined && !text(args.id, 80))
+        || [args.includeCompleted, args.includeClosed].some(flag => flag !== undefined && typeof flag !== 'boolean')) return '[日程输入错误] read 的 id 为有效字符串，offset 为非负整数，limit 为 1 至 8，includeCompleted/includeClosed 为布尔值。';
       const selected = this.ledger.items.filter(item => args.id !== undefined
-        ? item.id === args.id : args.includeCompleted || item.status !== 'done');
+        ? item.id === args.id : args.includeClosed || !closed(item) || (args.includeCompleted && item.status === 'done'));
+      const draft = this.ledger.proposal;
+      const candidate = draft?.items.find(item => item.id === args.id);
+      if (args.id !== undefined && !selected.length && !candidate) return this.missingItem(args.id);
+      // A targeted read must not reintroduce unrelated goals or historical planning background.
+      const detail = args.id === undefined ? this.ledger : { version: this.ledger.version, revision: this.ledger.revision,
+        proposal: draft && candidate ? { baseRevision: draft.baseRevision, capturedAt: draft.capturedAt, items: [candidate] } : null };
       const end = Number(offset) + Number(limit);
-      return JSON.stringify({ ...this.ledger, items: selected.slice(Number(offset), end),
+      return JSON.stringify({ ...detail, items: selected.slice(Number(offset), end),
         interpretation: 'summary、why、when 是制定计划时的背景与意图，不是当前现场读数；实际进展见 status、note 及其 updatedAt，并与最新观察对账。',
         completedCount: this.ledger.items.filter(item => item.status === 'done').length,
+        cancelledCount: this.ledger.items.filter(item => item.status === 'cancelled').length,
         page: { offset, limit, total: selected.length, nextOffset: end < selected.length ? end : null } });
     }
     if (args.operation === 'adopt') {
@@ -127,22 +137,24 @@ export class ActivityAgenda {
       if (args.id !== undefined) return this.adoptItem(args.id, draft);
       if (draft.baseRevision !== this.ledger.revision) return '[日程] 候选生成期间已有新进展，不能覆盖；先请求重新规划。';
       const reused = draft.items.find(item => this.ledger.items.some(previous => previous.id === item.id
-        && previous.status === 'done' && (previous.title !== item.title || previous.doneWhen !== item.doneWhen)));
-      if (reused) return `[日程] 已完成的 id=${JSON.stringify(reused.id)} 不能改成新目标；完成证据保留，新目的使用新的 id。`;
+        && (previous.title !== item.title || previous.doneWhen !== item.doneWhen)));
+      if (reused) return `[日程] 已记录的 id=${JSON.stringify(reused.id)} 不能改成新目标；原进展与关闭依据保留，新目的使用新的 id。`;
       const items = draft.items.map(item => {
         const old = this.ledger.items.find(previous => previous.id === item.id
           && previous.title === item.title && previous.doneWhen === item.doneWhen);
         return { ...cleanItem(item), status: old?.status ?? 'queued' as AgendaStatus,
           note: old?.note ?? '', updatedAt: old?.updatedAt ?? this.stamp() };
       });
-      const retained = this.ledger.items.filter(item => item.status === 'done' && !items.some(next => next.id === item.id));
+      // Omission from a generated proposal is not a foreground cancellation decision.
+      const retained = this.ledger.items.filter(item => !items.some(next => next.id === item.id));
+      if ([...retained, ...items].filter(item => !closed(item)).length > AGENDA_MAX_ITEMS) return this.capacityError();
       this.save({ ...this.ledger, revision: this.ledger.revision + 1, summary: draft.summary, items: [...retained, ...items], proposal: null });
       return this.summary();
     }
     const item = this.ledger.items.find(entry => entry.id === args.id);
-    if (!item) return '[日程输入错误] 提供当前日程的有效 id；用 read 查看完整日程。';
+    if (!item) return this.missingItem(args.id);
     if (args.operation === 'focus') {
-      if (item.status === 'done') return '[日程] 此阶段已完成。新的目的需要重新规划，不能重放旧阶段。';
+      if (closed(item)) return `[日程] 此阶段${closedLabel(item)}。新的目的需要重新规划，不能重放旧阶段。`;
       if (item.status === 'active') return this.summary();
       const items = this.ledger.items.map(entry => entry.id === item.id
         ? { ...entry, status: 'active' as const, updatedAt: this.stamp() }
@@ -151,10 +163,10 @@ export class ActivityAgenda {
       return this.summary();
     }
     if (args.operation !== 'update' || !text(args.note, 400)
-      || (args.status !== undefined && !['queued', 'deferred', 'done'].includes(String(args.status)))) {
-      return '[日程输入错误] update 需要 note 记录实际进展或受阻依据；status 可为 queued/deferred/done。';
+      || (args.status !== undefined && !['queued', 'deferred', 'done', 'cancelled'].includes(String(args.status)))) {
+      return '[日程输入错误] update 需要 note 记录实际进展、受阻依据或明确撤销原因；status 可为 queued/deferred/done/cancelled。';
     }
-    if (item.status === 'done') return '[日程] 已完成记录保留；新的目的请重新规划。';
+    if (closed(item)) return `[日程] ${closedLabel(item)}记录保留；新的目的请重新规划。`;
     const items = this.ledger.items.map(entry => entry.id === item.id
       ? { ...entry, status: (args.status ?? entry.status) as AgendaStatus, note: args.note as string, updatedAt: this.stamp() }
       : entry);
@@ -168,14 +180,16 @@ export class ActivityAgenda {
       .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
     const completed = this.ledger.items.filter(item => item.status === 'done')
       .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+    const cancelled = this.ledger.items.filter(item => item.status === 'cancelled')
+      .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
     const draft = this.ledger.proposal;
     const lines = ['[活动日程；意图与执行结果分别记录]',
-      `已完成 ${completed.length} 项，排队 ${next.length} 项，挂起 ${deferred.length} 项；规划时的背景说明仅在 read 中保留，现场以当前观察为准。`,
+      `已完成 ${completed.length} 项，排队 ${next.length} 项，挂起 ${deferred.length} 项，已撤销 ${cancelled.length} 项；规划时的背景说明仅在 read 中保留，现场以当前观察为准。`,
       active ? `当前 id=${JSON.stringify(active.id)} ${clip(active.title, 48)}；阶段记录更新于 ${active.updatedAt}，记录时间不证明世界已变化。`
         : next.length || deferred.length ? '当前阶段尚未选择；结合现场自行选下一项。'
           : '当前没有未完成阶段；完成记录是历史。结合长期目标和现场选择新阶段，可 review 异步请求候选，期间独立行动可以继续。',
-      ...(draft ? [`后台候选采样于 ${draft.capturedAt}，共 ${draft.items.length} 项，${draft.baseRevision === this.ledger.revision ? '待核验采用' : '整份已落后于当前进展'}；activity_plan read 核验全部候选与前提后可 adopt 指定一项，不改现有进展；整份过期则 review。`] : [])];
-    const footer = '阶段变化用 activity_plan update 留证据；详情和资料用 activity_plan read；日程不阻止交流、应急和新的选择。';
+      ...(draft ? [`后台候选采样于 ${draft.capturedAt}，共 ${draft.items.length} 项，${draft.baseRevision === this.ledger.revision ? '待核验采用' : '整份已落后于当前进展'}；activity_plan read 带 id 定向核验候选与前提，adopt 指定一项不改现有进展；整份过期则 review。`] : [])];
+    const footer = '阶段变化用 activity_plan update 留证据；明确放弃用 cancelled 加原因，不能假记完成；read 带 id 查详情；日程不阻止交流、应急和新的选择。';
     const sections = [
       ...(active ? [[`够了就收尾：${clip(active.doneWhen, 160)}`,
         `条件：${clip(active.when, 100)}；受阻：${clip(active.ifBlocked, 100)}`,
@@ -185,34 +199,44 @@ export class ActivityAgenda {
       draft?.items.map(item => `后台候选 id=${JSON.stringify(item.id)} ${clip(item.title, 36)}`) ?? [],
       completed.slice(0, AGENDA_RECENT_COMPLETIONS).map(item =>
         `已结案 id=${JSON.stringify(item.id)} ${clip(item.title, 24)}；${item.updatedAt} 记录（外部生效仍以实际回执为准）：${clip(item.note, 64)}`),
+      cancelled.slice(0, AGENDA_RECENT_COMPLETIONS).map(item =>
+        `已撤销 id=${JSON.stringify(item.id)} ${clip(item.title, 24)}；${item.updatedAt} 原因：${clip(item.note, 64)}；不表示完成。`),
     ].filter(part => part.length);
     const remaining = AGENDA_SUMMARY_MAX_CHARS - [...lines, footer].join('\n').length - sections.length;
     const budget = sections.length ? Math.max(0, Math.floor(remaining / sections.length)) : 0;
     return [...lines, ...sections.map(part => section(part, budget)), footer].join('\n');
   }
-  /** Background planning reads open objectives and a bounded window of completion evidence. */
+  /** Background planning reads open objectives and bounded, separately labelled closure evidence. */
   planningReadout(): string {
-    const completed = this.ledger.items.filter(item => item.status === 'done')
+    const history = this.ledger.items.filter(closed)
       .sort((a, b) => Date.parse(a.updatedAt) - Date.parse(b.updatedAt));
     return JSON.stringify({ revision: this.ledger.revision,
-      items: [...this.ledger.items.filter(item => item.status !== 'done'), ...completed.slice(-AGENDA_MAX_ITEMS)],
-      completedCount: completed.length,
-      history: '较早完成记录未展开；主意识可用 activity_plan read includeCompleted:true 分页或按 id 查询。' });
+      items: [...this.ledger.items.filter(item => !closed(item)), ...history.slice(-AGENDA_MAX_ITEMS)],
+      completedCount: history.filter(item => item.status === 'done').length,
+      cancelledCount: history.filter(item => item.status === 'cancelled').length,
+      history: 'done 是完成记录，cancelled 是明确撤销，不应重放。较早关闭记录未展开；activity_plan read includeClosed:true 分页或按 id 查询。' });
   }
   /** Accept one explicitly selected new objective without replacing concurrent progress. */
   private adoptItem(id: unknown, draft: Proposal): string {
     const item = draft.items.find(entry => entry.id === id);
     if (!item) return '[日程输入错误] adopt 的 id 必须来自当前候选；用 read 核验候选与现场前提。';
     const current = this.ledger.items.find(entry => entry.id === id);
-    if (current) return current.status === 'done'
-      ? '[日程] 此 id 已完成，完成证据保留；新的目的需要单独规划。'
+    if (current) return closed(current)
+      ? `[日程] 此 id ${closedLabel(current)}，原记录保留；新的目的需要单独规划。`
       : '[日程] 此 id 已在现有日程中，进展保留；用 focus/update 选择或记录，不覆盖。';
-    if (this.ledger.items.filter(entry => entry.status !== 'done').length >= AGENDA_MAX_ITEMS) return '[日程] 未完成阶段已达到上限；read 对账后 review 生成精简候选，再核验整份采用。';
+    if (this.ledger.items.filter(entry => !closed(entry)).length >= AGENDA_MAX_ITEMS) return this.capacityError();
     const remaining = draft.items.filter(entry => entry.id !== id);
     this.save({ ...this.ledger, revision: this.ledger.revision + 1,
       items: [...this.ledger.items, { ...cleanItem(item), status: 'queued', note: '', updatedAt: this.stamp() }],
       proposal: remaining.length ? { ...draft, items: remaining } : null });
     return this.summary();
+  }
+  private missingItem(id: unknown): string {
+    if (this.ledger.proposal?.items.some(item => item.id === id)) return `[日程输入错误] id=${JSON.stringify(id)} 是后台候选，尚未采用；read 带此 id 定向核验，adopt 带此 id 明确采用后才能 focus/update。本次未保存进展。`;
+    return `[日程输入错误] 未找到已采用阶段 id=${JSON.stringify(id) ?? 'null'}。当前阶段 id：${JSON.stringify(this.ledger.items.filter(item => !closed(item)).map(item => item.id))}；后台候选 id：${JSON.stringify(this.ledger.proposal?.items.map(item => item.id) ?? [])}。read 带目标 id 定向查询。`;
+  }
+  private capacityError(): string {
+    return '[日程] 未完成阶段已达到上限；先按实际依据 update 完成、或以 cancelled 明确撤销不再推进的阶段。挂起仍是未完成，不能通过省略候选删除旧目标。';
   }
   private stamp(): string { return new Date(this.now()).toISOString(); }
   private save(next: Ledger): void {

@@ -448,6 +448,8 @@ export class CortiV extends Cormini {
   private readonly referenceRouting: ReferenceRouting;
   private readonly fastReferenceConfig: () => FastReferenceConfig;
   private deliveredReferenceNote = '';
+  private deliveredRecentNote = '';
+  private hadRecentMemoryNote = false;
   private pendingWork: PendingWork | null = null;
   private readonly planningConfig: () => PlanningConfig;
   private readonly dreamConfig: () => DreamConfig;
@@ -469,6 +471,7 @@ export class CortiV extends Cormini {
     const reading = excerptHandoffRecords(records, excerptRecent, {
       protectedRecords: pins, currentHandoffs: this.foregroundCurrentHandoffs,
       coveredCheckpoints: options.coveredCheckpoints,
+      coveredSnapshots: options.coveredSnapshots,
     });
     const replacements = new Map(records.map((record, index) => [record, reading[index]]));
     return projectForeground(reading, options, pins.map((pin) => replacements.get(pin) ?? pin));
@@ -574,12 +577,18 @@ export class CortiV extends Cormini {
     this.deliveredPendingNote = '';
     this.deliveredAgendaNote = '';
     this.deliveredReferenceNote = '';
+    this.deliveredRecentNote = '';
   }
 
   /** Changed facts append at delivery boundaries so earlier request content remains cacheable. */
   private deliverMemoryChanges(): void {
     const core = this.core;
     if (!core) return;
+    const recent = this.recentMemoryNote();
+    if (!this.foregroundConfig().enabled && recent !== this.deliveredRecentNote) {
+      core.injectInternal(recent || '[续做笔记] 当前没有短笺。', 'recent_memory');
+      this.deliveredRecentNote = recent;
+    }
     const speech = this.recentSpeech.note();
     if (speech !== this.deliveredSpeechNote) {
       core.injectInternal(speech || '[memory] 近 30 分钟没有近期台词记录。', 'recent_speech');
@@ -656,22 +665,23 @@ export class CortiV extends Cormini {
     }, {
       name: 'activity_plan',
       description: 'Read a persistent flexible activity agenda; review requests asynchronous planning and returns immediately. '
-        + 'read pages open stages by default; includeCompleted:true pages history, or id reads one stage. Completed evidence does not occupy open-stage capacity. '
+        + 'read pages open stages by default; includeCompleted:true adds completed history, includeClosed:true adds completed and cancelled history; id reads only that stage or candidate with its dated metadata. Closed evidence does not occupy open-stage capacity. '
         + 'Read and verify a background proposal before adopt. adopt with id adds that new candidate while preserving '
-        + 'existing progress; omit id to replace the agenda only when its revision is current. focus selects a current stage. update records actual progress '
-        + 'or marks a stage done/deferred/queued with evidence in note. Plans do not execute World actions; '
+        + 'existing progress; omit id to merge the whole proposal only when its revision is current, retaining omitted goals and evidence. focus selects a current stage. update records actual progress '
+        + 'or marks a stage done/deferred/queued/cancelled with evidence or an explicit cancellation reason in note. Cancelled is not completed; neither closed status can be reopened by an old proposal. Plans do not execute World actions; '
         + 'completion is never inferred from time or task acceptance. Details and references are loaded only when needed.',
       tags: ['write'],
       parameters: {
         type: 'object', additionalProperties: false,
         properties: {
           operation: { type: 'string', enum: ['read', 'review', 'adopt', 'focus', 'update'] },
-          id: { type: 'string', minLength: 1, maxLength: 80, description: 'Exact item id for focus/update; read: one stage including completed evidence; adopt: one verified new candidate id, even if other stages changed.' },
+          id: { type: 'string', minLength: 1, maxLength: 80, description: 'Exact adopted item id for focus/update; read: one stage or unadopted candidate, including closed evidence; adopt: one verified new candidate id, even if other stages changed.' },
           offset: { type: 'integer', minimum: 0, description: 'read: pagination offset, default 0.' },
           limit: { type: 'integer', minimum: 1, maximum: AGENDA_MAX_ITEMS, description: 'read: page size, default 8.' },
           includeCompleted: { type: 'boolean', description: 'read: include completed history, default false.' },
-          status: { type: 'string', enum: ['queued', 'deferred', 'done'], description: 'update: omit to retain the current stage status.' },
-          note: { type: 'string', minLength: 1, maxLength: 400, description: 'update: actual evidence, progress or reason for deferral.' },
+          includeClosed: { type: 'boolean', description: 'read: include completed and explicitly cancelled history, default false.' },
+          status: { type: 'string', enum: ['queued', 'deferred', 'done', 'cancelled'], description: 'update: cancelled explicitly abandons a goal without claiming completion; omit to retain the current stage status.' },
+          note: { type: 'string', minLength: 1, maxLength: 400, description: 'update: actual evidence, progress, blocker or explicit reason for cancellation.' },
         }, required: ['operation'],
       },
       handler: async (args) => args.operation === 'review'
@@ -717,14 +727,16 @@ export class CortiV extends Cormini {
       this.fullContextBaseline = null;
     }
     const facts = this.requestWorldFacts();
+    const recentMemory = this.recentMemoryNote();
     const recentSpeech = this.recentSpeech.note();
     const pending = this.pendingWork?.summary() || '[待办] 当前没有等待中或待复核的事项。';
     const agenda = this.activityAgenda?.summary() ?? '';
     const coveredCheckpoints = [
+      ...(recentMemory ? ['recent_memory'] : []),
       ...(recentSpeech ? ['recent_speech'] : []), ...(this.pendingWork ? ['pending_work'] : []),
       ...(agenda ? ['activity_plan', ...(this.planningConfig().agendaEnabled ? ['planning'] : [])] : []),
     ];
-    const pins = [...facts.pins, ...[recentSpeech, this.actionEvidence(ctx.messages), pending, agenda, this.viewerRecallContext.text(), this.referenceLibrary.context()].filter(Boolean)
+    const pins = [...(recentMemory ? [message('user', recentMemory)] : []), ...facts.pins, ...[recentSpeech, this.actionEvidence(ctx.messages), pending, agenda, this.viewerRecallContext.text(), this.referenceLibrary.context()].filter(Boolean)
       .map((text) => message('user', text))];
     const handoffSources = new Map<string, { digest: string; original: boolean }>();
     this.foregroundCurrentHandoffs = ctx.messages.flatMap((record) => {
@@ -1956,6 +1968,15 @@ export class CortiV extends Cormini {
     } catch {
       return '';
     }
+  }
+
+  private recentMemoryNote(): string {
+    const recent = this.readRecent();
+    if (!recent) return this.hadRecentMemoryNote ? '[续做笔记] 当前没有短笺；需要历史线索时按需检索工作区。' : '';
+    this.hadRecentMemoryNote = true;
+    return `[续做笔记 · ${RECENT_FILE}；意图与历史线索，当前读数及完成状态须与较新的 World 事实和回执核对。]\n`
+      + `${new MemoryNoteProvenance(this.memory).describe(RECENT_FILE)}\n${excerptRecent(recent)}\n`
+      + `需要未展示的细节时用 read_file 读取 ${RECENT_FILE}。重要意图或结论改变时再更新笔记，现场快照由 World 持续提供。`;
   }
 
   private dreamPrompt(config: DreamConfig): string {
