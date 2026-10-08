@@ -20,8 +20,9 @@ describe('Minecraft room occlusion', () => {
   it('keeps the dungeon cut above the avatar and the third-person cut above the floor', () => {
     expect(roomCutoffWorldY(64.3, true)).toBe(65.95);
     expect(roomCutoffWorldY(64.3, false)).toBe(64.35);
-    expect(roomOcclusionMode(true)).toBe('cutaway');
-    expect(roomOcclusionMode(false)).toBe('translucent');
+    expect(roomOcclusionMode(true, true)).toBe('cutaway');
+    expect(roomOcclusionMode(false, true)).toBe('translucent');
+    expect(roomOcclusionMode(true, false)).toBe('translucent');
   });
 
   it('treats thick overhead stone as a mine roof and a thin house roof as room cover', () => {
@@ -41,10 +42,11 @@ describe('Minecraft room occlusion', () => {
   it.skipIf(!existsSync(clientFile))('cuts the dungeon roof and keeps third-person room dither', () => {
     const client = patchRoomOcclusion(readFileSync(clientFile, 'utf8'));
     expect(client).toContain('function installDungeonOcclusion() {\n  if (!usesWorldAvatar) return;');
-    expect(client).toContain('isDungeonView || deepRoof || trace.occluded || roomCeiling,');
-    expect(client).toContain('(!isDungeonView && typeof collisionCache?.isSolidBlock !== "function")');
+    expect(client).toContain('deepRoof || trace.occluded || roomCeiling,');
+    expect(client).not.toContain('isDungeonView || deepRoof');
+    expect(client).toContain('typeof collisionCache?.isSolidBlock !== "function"');
     expect(client).toContain('cutoffWorldY: roomCutoffWorldY(avatar.y, hardCutaway),');
-    expect(client).toContain('getUpperCutawayY: () => isDungeonView ? (resolveObserverTargetPosition()?.position?.y ?? latestPosition?.pos?.y ?? null) : null');
+    expect(client).toContain('getUpperCutawayY: () => dungeonUpperCutawayY');
     expect(client).toContain('lanternAlongRaw <= 1.0');
     expect(client).toContain('lanternCutawayRegion = lanternBeyondFirstHit && lanternInSightCorridor');
     expect(client).not.toContain('    record.mode = "plane";');
@@ -68,7 +70,7 @@ describe('Minecraft room occlusion', () => {
     for (const along of [-2, 0, 0.5, 1, 3]) {
       const clipped = (y: number) => runInNewContext(upperLayer!, {
         u_lanternCutawayEnabled: 2, u_lanternCutawayY: 65.95,
-        v_lanternCutawayPosition: { y }, lanternCutawayRegion: false, lanternAlongRaw: along,
+        v_lanternCutawayPosition: { y }, lanternHardCutawayRegion: true, lanternAlongRaw: along,
       });
       expect(clipped(66)).toBe(true);
       expect(clipped(65.9)).toBe(false);
