@@ -96,7 +96,7 @@ import {
   type BodyOwnerKind,
 } from './body-lease.ts';
 import {
-  bearing, canSeeEntity, classifyEntity, dayNightTransition, hazardTouch, isRaining,
+  bearing, biomeAt, canSeeEntity, classifyEntity, dayNightTransition, hazardTouch, isRaining,
   droppedStackOf, narrateWorld, narrateWorldSegments, scanMatureCrops, snapshotFingerprint, snapshotFromBot,
   standCellsAround, worldDelta, DIRECTION_ZH, WATER_BLOCKS,
   type BlockReader, type ItemStack, type WorldSnapshot,
@@ -4358,6 +4358,7 @@ export class MinecraftWorld implements World {
       const description = [
         `[mc_visual] ${capture.capturedAt} 网页实景截图，${capture.mode} 视角，${capture.width}×${capture.height}，`
           + `${dimension}，截图完成后玩家位置 (${location})。`,
+        `维度：${dimension}；生物群系：${biomeAt(bot, after)}。生物群系与维度不是同一字段，不能据群系名称判断是否已经出洞或到达地表。`,
         `[现场读数 ${observedAt}] 脚部格 ${feet?.name ?? '未加载，未知'}；头部格 ${head?.name ?? '未加载，未知'}；${waterState}${oxygen}。`,
         `脚底下方格 ${ground?.name ?? '未加载，未知'}；物理接地：${contact}。头脚所在格描述身体空间，空气不表示脚下悬空。`,
         focus ? `这次想看：${focus}。` : '',
