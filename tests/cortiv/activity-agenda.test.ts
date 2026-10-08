@@ -83,21 +83,40 @@ describe('persistent Persona activity agenda', () => {
     expect(agenda.operate({ ...input, expected_revision: agenda.revision() })).toContain('错误');
     expect(readFileSync(join(dir, AGENDA_FILE), 'utf8')).toBe(reopened);
   });
-  it('reopening observes open-stage capacity without discarding another goal or its evidence', () => {
+  it('corrects a completion at capacity, restores it after restart and still limits newly adopted goals', () => {
     const { agenda, dir } = rig();
     adopt(agenda, { ...plan(), items: Array.from({ length: AGENDA_MAX_ITEMS }, (_, index) => ({ ...plan().items[0], id: `stage-${index}` })) });
     agenda.operate({ operation: 'update', id: 'stage-0', status: 'done', note: '原完成记录' });
     agenda.propose(JSON.stringify({ ...plan(), items: [plan().items[1]] }), agenda.revision(), stamp);
     agenda.operate({ operation: 'adopt', id: 'river' });
-    const before = readFileSync(join(dir, AGENDA_FILE), 'utf8');
-    expect(agenda.operate({ operation: 'reopen', id: 'stage-0', expected_revision: agenda.revision(), note: '复核发现未完成' })).toContain('上限');
-    expect(readFileSync(join(dir, AGENDA_FILE), 'utf8')).toBe(before);
-    agenda.operate({ operation: 'update', id: 'river', status: 'cancelled', note: '用户撤销本次探索' });
-    const cancelled = agenda.state().items.find(item => item.id === 'river');
+    agenda.operate({ operation: 'focus', id: 'river' });
+    const retained = agenda.state().items.filter(item => item.id !== 'stage-0');
     agenda.operate({ operation: 'reopen', id: 'stage-0', expected_revision: agenda.revision(), note: '复核发现未完成' });
-    expect(agenda.state().items.filter(item => !['done', 'cancelled'].includes(item.status))).toHaveLength(AGENDA_MAX_ITEMS);
-    expect(agenda.state().items.find(item => item.id === 'river')).toEqual(cancelled);
-    expect(new ActivityAgenda(dir, now).state().items[0]).toMatchObject({ status: 'queued', note: '复核发现未完成' });
+    expect(agenda.state().items.filter(item => !['done', 'cancelled'].includes(item.status))).toHaveLength(AGENDA_MAX_ITEMS + 1);
+    expect(agenda.state().items.filter(item => item.id !== 'stage-0')).toEqual(retained);
+    const restored = new ActivityAgenda(dir, now);
+    expect(restored.state()).toEqual(agenda.state());
+    expect(restored.state().items[0]).toMatchObject({ status: 'queued', note: '复核发现未完成', corrections: [{ status: 'done', note: '原完成记录' }] });
+    expect(JSON.parse(restored.operate({ operation: 'read' })).page.nextOffset).toBe(AGENDA_MAX_ITEMS);
+    expect(restored.summary().length).toBeLessThanOrEqual(AGENDA_SUMMARY_MAX_CHARS);
+    restored.propose(JSON.stringify({ ...plan(), items: [{ ...plan().items[1], id: 'new-goal' }] }), restored.revision(), stamp);
+    const pending = readFileSync(join(dir, AGENDA_FILE), 'utf8');
+    expect(restored.operate({ operation: 'adopt', id: 'new-goal' })).toContain('上限');
+    expect(readFileSync(join(dir, AGENDA_FILE), 'utf8')).toBe(pending);
+    restored.operate({ operation: 'update', id: 'stage-0', status: 'cancelled', note: '未达到原条件，决定不继续本次目标' });
+    expect(restored.operate({ operation: 'adopt', id: 'new-goal' })).toContain('上限');
+    restored.operate({ operation: 'update', id: 'stage-1', status: 'done', note: '该阶段实际验收通过' });
+    restored.operate({ operation: 'adopt', id: 'new-goal' });
+    expect(restored.state().items.find(item => item.id === 'new-goal')).toMatchObject({ status: 'queued' });
+    expect(new ActivityAgenda(dir, now).state()).toEqual(restored.state());
+  });
+  it('rejects over-capacity persisted goals that have no completion correction evidence', () => {
+    const { agenda, dir } = rig();
+    adopt(agenda, { ...plan(), items: Array.from({ length: AGENDA_MAX_ITEMS }, (_, index) => ({ ...plan().items[0], id: `stage-${index}` })) });
+    const malformed = agenda.state(); malformed.items.push({ ...malformed.items[0], id: 'extra' });
+    const text = JSON.stringify(malformed); writeFileSync(join(dir, AGENDA_FILE), text);
+    expect(() => new ActivityAgenda(dir, now)).toThrow('格式无效');
+    expect(readFileSync(join(dir, AGENDA_FILE), 'utf8')).toBe(text);
   });
   it('a background proposal cannot undo a reopened completion or replace its correction evidence', () => {
     const { agenda } = rig(); adopt(agenda);
