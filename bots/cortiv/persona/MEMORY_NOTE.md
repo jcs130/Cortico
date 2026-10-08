@@ -2,7 +2,7 @@
 
 * 知识按领域分目录保存;各领域要记什么，见对应提示词段;目录内文件自定。
 * 当前结论用 `memory_record` 管理：先 read 查稳定对象/属性的 key 与 revision，再 evidence 查实际观察，set 带 expected_revision、evidence_id 和结论。旧版本和旧证据不能覆盖新记录；临时读数注明 expires_at，错误结论用 retire 留下撤回依据。结论是对观察的解释，原始回执里也可能是失败，不能把有证据编号当作已完成。
-* `sessions/_recent.md` 保存带观察时间的经历与详情入口。短笺、session/handoff 归档及已配置的状态笔记默认返回当前记忆视图，历史正文用 `read_file` 或 `grep_files` 带 history:true 按需读取。重写这些正文不会更新当前结论；后台整理与交接也不会把正文直接当作当前状态。位置、生命、饥饿、背包和队列仍由 World 提供。
+* `sessions/_recent.md` 保存带观察时间的经历与详情入口。短笺、session/handoff 归档及已配置的状态笔记默认返回当前记忆视图；回执开头给出历史入口，此时行号和分页只对应视图。查原始经历、坐标或回执，用 `grep_files` 带 history:true 定位，再用 `read_file` 带 history:true 按原文行号读取。重写这些正文不会更新当前结论；后台整理与交接也不会把正文直接当作当前状态。位置、生命、饥饿、背包和队列仍由 World 提供。
 * 一件事实只存一处。
 * 已配置的长期记忆索引提供历史入口；当前意图、阶段和完成状态由 activity_plan 与 pending_work 维护。历史项目中的意向可以核验后采用；归档被改写、删除或没有展开均不证明目标完成或取消。身份和长期原则保留在常驻人格文件中。
 * `pending-work.json` 由 `pending_work` 工具维护，保存等待条件、复核线索和结清结果；

@@ -1112,11 +1112,19 @@ export class CortiV extends Cormini {
     const reader = (tool: ToolDef): ToolDef => ({ ...tool,
       parameters: { ...tool.parameters, properties: { ...tool.parameters.properties as Record<string, unknown>,
         history: { type: 'boolean', description: 'Explicitly read historical prose; it cannot update current state by being copied into a new note.' } } },
-      description: tool.description + ' Current-state notes return a managed view by default; history:true reads historical prose.',
+      description: tool.description + ' Current-state notes return a managed view by default; its offsets refer to that view. Use history:true to find original experiences, coordinates or receipts in historical prose.',
       handler: async (args, ctx) => {
         const base = args.history === true ? historyTools.find(entry => entry.name === tool.name)! : tool;
         const result = await provenance.readTool(base).handler(args, ctx);
-        return args.history === true && typeof result === 'string' ? '[历史原文；事实时间取原始观察，文件写入时间不使其成为当前状态。]\n' + result : result;
+        if (typeof result !== 'string') return result;
+        if (args.history === true) return '[历史原文；事实时间取原始观察，文件写入时间不使其成为当前状态。]\n' + result;
+        if (tool.name === 'read_file' && typeof args.path === 'string' && this.isStateNote(args.path)) {
+          return '[当前记忆视图；原笔记正文未展开，下方行号和分页只对应此视图。查原始经历、坐标或回执：read_file '
+            + JSON.stringify({ path: args.path, history: true })
+            + '；可先用 grep_files 带 history:true 定位。历史线索须核对当前 World。]\n' + result;
+        }
+        if (tool.name === 'grep_files') return '[检索范围：默认省略状态笔记的历史正文；查原始经历、坐标或回执，原参数加 history:true，再用 read_file 带 history:true 读命中段落。]\n' + result;
+        return result;
       } });
     return [
       ...super.tools().map((t) => (

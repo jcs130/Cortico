@@ -127,6 +127,33 @@ describe('versioned current memory', () => {
 });
 
 describe('current memory across Persona read surfaces', () => {
+  it('discloses the current view before pagination and retrieves original coordinates through explicit history', async () => {
+    const { dir, memory } = rig();
+    const journal = [...Array.from({ length: 60 }, (_, index) => `旧经历 ${index + 1}`),
+      '2026-08-01T10:00:00Z 取材回执：箱子 (-10,64,20) 存入原木2个'].join('\n');
+    memory.writeFileAtomic(RECENT_FILE, journal);
+    memory.writeFileAtomic('methods/example.md', '普通方法说明');
+    const persona = new CortiV({ memoryDir: dir, dream: () => ({ ...DREAM_DEFAULTS, enabled: false }) });
+    personas.push(persona); persona.attach(makeFakeHarnessApi());
+    const tools = persona.declareSessions().find(session => session.id === 'main')!.tools();
+    const reader = tools.find(tool => tool.name === 'read_file')!;
+    const view = await reader.handler({ path: RECENT_FILE, offset: -1, limit: 1, max_chars: 1 }, ctx) as string;
+    expect(view.startsWith('[当前记忆视图；')).toBe(true);
+    expect(view).toContain('行号和分页只对应此视图');
+    expect(view).toContain(JSON.stringify({ path: RECENT_FILE, history: true }));
+    expect(view).not.toContain('(-10,64,20)');
+    const history = await reader.handler({ path: RECENT_FILE, offset: -1, limit: 1, history: true }, ctx) as string;
+    expect(history).toContain('第 61-61 行,共 61 行');
+    expect(history).toContain('2026-08-01T10:00:00Z 取材回执：箱子 (-10,64,20) 存入原木2个');
+    const grep = tools.find(tool => tool.name === 'grep_files')!;
+    const search = await grep.handler({ pattern: '取材回执' }, ctx) as string;
+    expect(search.startsWith('[检索范围：')).toBe(true);
+    expect(search).toContain('原参数加 history:true'); expect(search).not.toContain('(-10,64,20)');
+    expect(await grep.handler({ pattern: '取材回执', history: true }, ctx)).toContain(`${RECENT_FILE}:61:`);
+    expect(await reader.handler({ path: 'methods/example.md' }, ctx)).not.toContain('[当前记忆视图；');
+    expect(memory.readFile(RECENT_FILE)).toBe(journal);
+  });
+
   it('keeps legacy text out of default reads, search, planning and handoff while allowing explicit history', async () => {
     const { dir, memory } = rig();
     writeFileSync(join(dir, 'CONSTITUTION.md'), '保留身份与原则');
