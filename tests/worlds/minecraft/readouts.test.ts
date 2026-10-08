@@ -113,6 +113,40 @@ describe('背包读数(mc_bag)', () => {
     expect(text).toContain('上次见到×8');
   });
 
+  it('finds exact custom names across carried items, cursor, open window and historical stock', () => {
+    const s = snap({ inventory: [
+      { name: 'diamond_pickaxe', displayName: '矿工镐', count: 1 },
+      { name: 'diamond_pickaxe', displayName: '备用矿工镐', count: 2 },
+      { name: 'diamond_pickaxe', count: 3 },
+    ], cursorItem: { name: 'diamond_pickaxe', displayName: '矿工镐', count: 1 } });
+    const records = [{ x: 1, y: 64, z: 0, dimension: 'overworld', usedSlots: 3, slots: 27,
+      items: [{ name: 'diamond_pickaxe', displayName: '矿工镐', count: 4 },
+        { name: 'diamond_pickaxe', displayName: '备用矿工镐', count: 8 },
+        { name: 'diamond_pickaxe', count: 16 }] }];
+    const open = { title: '箱子', items: [
+      { name: 'diamond_pickaxe', displayName: '矿工镐', count: 5 },
+      { name: 'diamond_pickaxe', displayName: '备用矿工镐', count: 10 },
+    ] };
+    const text = renderStoredItemReadout(s, records, '矿工镐', open);
+    expect(text).toContain('随身矿工镐×1');
+    expect(text).toContain('工具物品名:diamond_pickaxe');
+    expect(text).toContain('鼠标光标：矿工镐×1');
+    expect(text).toContain('箱子」里矿工镐×5（现读）');
+    expect(text).toContain('上次见到×4');
+    const byId = renderStoredItemReadout(s, records, 'minecraft:diamond_pickaxe', open);
+    expect(byId).toContain('随身钻石镐×6');
+    expect(byId).toContain('箱子」里钻石镐×15（现读）');
+    expect(byId).toContain('上次见到×28');
+  });
+
+  it('accepts printable custom-name symbols without treating a partial name as an exact match', () => {
+    const s = snap({ inventory: [{ name: 'player_head', count: 1, displayName: '✦ 旅行背包' }] });
+    expect(renderStoredItemReadout(s, [], ' ✦  旅行背包 ')).toContain('随身✦  旅行背包×1');
+    expect(renderStoredItemReadout(s, [], '旅行背包')).toContain('随身旅行背包×0');
+    expect(renderStoredItemReadout(s, [], '✦\n旅行背包')).toContain('物品名格式不对');
+    expect(renderStoredItemReadout(s, [], '✦\u200b 旅行背包')).toContain('物品名格式不对');
+  });
+
   it('背包把同种备用装备的耐久分别报出，供点名存物', () => {
     const text = renderBagReadout(snap({ inventory: [
       { name: 'diamond_sword', count: 1, durability: { left: 1550, max: 1561 } },
