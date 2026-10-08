@@ -31,6 +31,45 @@ function adopt(agenda: ActivityAgenda, value = plan()) {
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
 describe('persistent Persona activity agenda', () => {
+  it('retains the sampled source time through delayed adoption, progress and restart', () => {
+    const { dir } = rig(); let at = now();
+    const agenda = new ActivityAgenda(dir, () => at);
+    agenda.propose(JSON.stringify(plan()), agenda.revision(), stamp);
+    at += 45 * 60_000;
+    agenda.operate({ operation: 'adopt', id: 'river' });
+    agenda.operate({ operation: 'focus', id: 'river' });
+    at += 60_000;
+    agenda.operate({ operation: 'update', id: 'river', note: '最新观察改变了补给条件', when: '按新库存安排返程' });
+    const restored = new ActivityAgenda(dir, () => at);
+    const item = JSON.parse(restored.operate({ operation: 'read', id: 'river' })).items[0];
+    expect(item).toMatchObject({ sourceCapturedAt: stamp, updatedAt: new Date(at).toISOString(), when: '按新库存安排返程' });
+    const summary = restored.summary();
+    expect(summary).toContain(`规划来源采样于 ${stamp}`);
+    expect(summary).toContain(`阶段记录更新于 ${item.updatedAt}`);
+    expect(summary).toContain('最新观察改变了补给条件');
+    agenda.operate({ operation: 'update', id: 'river', status: 'done', note: '实际发现并记录了新地点' });
+    at += 60_000;
+    const freshStamp = new Date(at).toISOString();
+    agenda.propose(JSON.stringify(plan()), agenda.revision(), freshStamp);
+    agenda.operate({ operation: 'adopt' });
+    expect(agenda.state().items.find(entry => entry.id === 'river')?.sourceCapturedAt).toBe(stamp);
+    expect(agenda.state().items.find(entry => entry.id === 'finish-home')?.sourceCapturedAt).toBe(freshStamp);
+  });
+  it('keeps legacy source time unknown and rejects malformed new source timestamps without rewriting evidence', () => {
+    const { agenda, dir } = rig(); adopt(agenda);
+    agenda.operate({ operation: 'focus', id: 'river' });
+    const legacy = agenda.state();
+    legacy.items.forEach(item => { delete item.sourceCapturedAt; });
+    writeFileSync(join(dir, AGENDA_FILE), JSON.stringify(legacy));
+    const restored = new ActivityAgenda(dir, now);
+    expect(restored.summary()).toContain('规划来源采样于 未记录');
+    expect(restored.state()).toEqual(legacy);
+    const malformed = { ...legacy, items: legacy.items.map(item => ({ ...item, sourceCapturedAt: 'yesterday' })) };
+    const saved = JSON.stringify(malformed);
+    writeFileSync(join(dir, AGENDA_FILE), saved);
+    expect(() => new ActivityAgenda(dir, now)).toThrow('格式无效');
+    expect(readFileSync(join(dir, AGENDA_FILE), 'utf8')).toBe(saved);
+  });
   it('corrects closed evidence by revision without reopening the stage or erasing the earlier note', () => {
     const { agenda, dir } = rig(); adopt(agenda);
     agenda.operate({ operation: 'update', id: 'river', status: 'done', note: '最初记录的奖励数量有误' });

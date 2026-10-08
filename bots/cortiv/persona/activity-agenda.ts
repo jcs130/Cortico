@@ -18,6 +18,7 @@ export interface AgendaItem {
 export interface AgendaPlan { summary: string; items: AgendaItem[]; }
 type AgendaStatus = 'queued' | 'active' | 'deferred' | 'done' | 'cancelled';
 interface AcceptedItem extends AgendaItem { status: AgendaStatus; note: string; updatedAt: string;
+  sourceCapturedAt?: string;
   corrections?: Array<{ note: string; updatedAt: string; status?: AgendaStatus }>; }
 interface Proposal extends AgendaPlan { baseRevision: number; capturedAt: string; }
 interface Ledger {
@@ -51,6 +52,7 @@ function validPlan(value: unknown): value is AgendaPlan {
 function validAccepted(value: unknown): value is AcceptedItem {
   return validItem(value) && object(value) && ['queued', 'active', 'deferred', 'done', 'cancelled'].includes(String(value.status))
     && text(value.note, 400, true) && timestamp(value.updatedAt)
+    && (value.sourceCapturedAt === undefined || timestamp(value.sourceCapturedAt))
     && (value.corrections === undefined || (Array.isArray(value.corrections) && value.corrections.every(entry =>
       object(entry) && text(entry.note, 400, true) && timestamp(entry.updatedAt)
       && (entry.status === undefined || ['queued', 'active', 'deferred', 'done', 'cancelled'].includes(String(entry.status))))));
@@ -135,7 +137,7 @@ export class ActivityAgenda {
         proposal: draft && candidate ? { baseRevision: draft.baseRevision, capturedAt: draft.capturedAt, items: [candidate] } : null };
       const end = Number(offset) + Number(limit);
       return JSON.stringify({ ...detail, items: selected.slice(Number(offset), end),
-        interpretation: 'summary、why、when 是制定计划时的背景与意图，不是当前现场读数；实际进展见 status、note 及其 updatedAt，并与最新观察对账。',
+        interpretation: 'summary、why、when、doneWhen 来自 sourceCapturedAt 对应的规划采样，不是当前现场读数；旧记录未保存来源时间时不能用 updatedAt 推定。实际进展见 status、note 及其 updatedAt，并与最新观察对账。',
         completedCount: this.ledger.items.filter(item => item.status === 'done').length,
         cancelledCount: this.ledger.items.filter(item => item.status === 'cancelled').length,
         page: { offset, limit, total: selected.length, nextOffset: end < selected.length ? end : null } });
@@ -151,7 +153,7 @@ export class ActivityAgenda {
       const items = draft.items.map(item => {
         const old = this.ledger.items.find(previous => previous.id === item.id
           && previous.title === item.title && previous.doneWhen === item.doneWhen);
-        return old ? { ...old } : { ...cleanItem(item), status: 'queued' as AgendaStatus,
+        return old ? { ...old } : { ...cleanItem(item), sourceCapturedAt: draft.capturedAt, status: 'queued' as AgendaStatus,
           note: '', updatedAt: this.stamp() };
       });
       // Omission from a generated proposal is not a foreground cancellation decision.
@@ -217,7 +219,7 @@ export class ActivityAgenda {
     const draft = this.ledger.proposal;
     const lines = ['[活动日程；意图与执行结果分别记录]',
       `已完成 ${completed.length} 项，排队 ${next.length} 项，挂起 ${deferred.length} 项，已撤销 ${cancelled.length} 项；规划时的背景说明仅在 read 中保留，现场以当前观察为准。`,
-      active ? `当前 id=${JSON.stringify(active.id)} ${clip(active.title, 48)}；阶段记录更新于 ${active.updatedAt}，记录时间不证明世界已变化。`
+      active ? `当前 id=${JSON.stringify(active.id)} ${clip(active.title, 48)}；规划来源采样于 ${active.sourceCapturedAt ?? '未记录'}；阶段记录更新于 ${active.updatedAt}，记录时间不证明世界已变化。`
         : next.length || deferred.length ? '当前阶段尚未选择；结合现场自行选下一项。'
           : '当前没有未完成阶段；完成记录是历史。结合长期目标和现场选择新阶段，可 review 异步请求候选，期间独立行动可以继续。',
       ...(draft ? [`后台候选采样于 ${draft.capturedAt}，共 ${draft.items.length} 项，${draft.baseRevision === this.ledger.revision ? '待核验采用' : '整份已落后于当前进展'}；activity_plan read 带 id 定向核验候选与前提，adopt 指定一项不改现有进展；整份过期则 review。`] : [])];
@@ -261,7 +263,8 @@ export class ActivityAgenda {
     if (this.ledger.items.filter(entry => !closed(entry)).length >= AGENDA_MAX_ITEMS) return this.capacityError();
     const remaining = draft.items.filter(entry => entry.id !== id);
     this.save({ ...this.ledger, revision: this.ledger.revision + 1,
-      items: [...this.ledger.items, { ...cleanItem(item), status: 'queued', note: '', updatedAt: this.stamp() }],
+      items: [...this.ledger.items, { ...cleanItem(item), sourceCapturedAt: draft.capturedAt,
+        status: 'queued', note: '', updatedAt: this.stamp() }],
       proposal: remaining.length ? { ...draft, items: remaining } : null });
     return this.summary();
   }
