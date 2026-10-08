@@ -58,18 +58,25 @@ export function renderStoredItemReadout(
 ): string {
   if (!s.invSynced) return '[物资查询] 物品栏还在从服务器同步。';
   const item = query.trim().toLowerCase().replace(/^minecraft:/, '');
-  if (!/^[\p{L}\p{N}_ -]{1,64}$/u.test(item)) return '[物资查询] 物品名格式不对。';
-  const matches = (name: string) => matchItemName(item, name, registry) || zhName(name) === item;
-  const carried = s.inventory.filter((stack) => matches(stack.name))
+  if (!/^[^\p{Cc}\p{Cf}]{1,64}$/u.test(item)) return '[物资查询] 物品名格式不对。';
+  const normalize = (name: string) => name.trim().toLowerCase().replace(/\s+/gu, ' ');
+  const displayMatch = (stack: ItemStack) => stack.displayName !== undefined
+    && normalize(stack.displayName) === normalize(item);
+  const matches = (stack: ItemStack) => matchItemName(item, stack.name, registry)
+    || zhName(stack.name) === item || displayMatch(stack);
+  const carried = s.inventory.filter(matches)
     .reduce((total, stack) => total + stack.count, 0);
-  const cursor = s.cursorItem && matches(s.cursorItem.name) ? narrateCursor(s) : '';
+  const cursor = s.cursorItem && matches(s.cursorItem) ? narrateCursor(s) : '';
   const label = zhName(item);
   const currentWindow = openWindow
-    ? `当前打开的「${openWindow.title}」里${label}×${openWindow.items.filter((stack) => matches(stack.name))
+    ? `当前打开的「${openWindow.title}」里${label}×${openWindow.items.filter(matches)
       .reduce((total, stack) => total + stack.count, 0)}（现读）；`
     : '虚拟大背包等未开窗容器未计入；';
+  const ids = [...new Set([...s.inventory, ...(s.cursorItem ? [s.cursorItem] : []), ...(openWindow?.items ?? [])]
+    .filter(displayMatch).map((stack) => stack.name))];
+  const names = ids.length ? `当前匹配名称的工具物品名:${ids.join('、')}。` : '';
   const found = records.flatMap((record) => {
-    const count = record.items.filter((stack) => matches(stack.name))
+    const count = record.items.filter(matches)
       .reduce((total, stack) => total + stack.count, 0);
     return count > 0 ? [{ record, count }] : [];
   }).sort((a, b) => (b.record.observedAt ?? 0) - (a.record.observedAt ?? 0)
@@ -81,7 +88,7 @@ export function renderStoredItemReadout(
       : '旧档无时间';
     return `(${record.x},${record.y},${record.z}) 上次见到×${count}（${when}）`;
   });
-  return `[物资查询] 随身${label}×${carried}。${cursor}${currentWindow}${locations.length
+  return `[物资查询] 随身${label}×${carried}。${names}${cursor}${currentWindow}${locations.length
     ? `本维度容器历史记录：${locations.join('；')}。到场开窗重查后再取；这些不是随身数量。`
     : `本维度容器账本没记到${label}；不等于其他容器里没有。`}`;
 }

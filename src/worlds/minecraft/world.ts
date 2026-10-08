@@ -2526,12 +2526,12 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
       'Read your inventory right now: how many of the 36 slots are used, what is in them, '
       + 'what is in your hand, and what armour you are wearing. Read-only and instant — '
       + 'it never moves you, never touches the world and never touches the work queue. '
-      + 'Set item to locate one material in your inventory, the currently open container, and last observed chest records; '
+      + 'Set item to a material ID, Chinese material name, or exact custom display name to locate it in your inventory, the currently open container, and last observed chest records; '
       + 'closed virtual backpacks are not included, and chest records are historical until reopened. '
       + 'Ask this instead of re-submitting a task to find out what you are carrying. '
       + 'Once per turn: asking again in the same turn returns a one-line pointer to the answer above.',
     parameters: { type: 'object', properties: {
-      item: { type: 'string', description: 'Optional focused stock lookup, e.g. emerald or 绿宝石.' },
+      item: { type: 'string', description: 'Optional focused stock lookup by material ID, Chinese material name, or exact custom display name.' },
     }, required: [] },
   },
   {
