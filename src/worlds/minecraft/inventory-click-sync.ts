@@ -201,13 +201,22 @@ export function installInventoryClickSync(bot: Bot, diag?: MinecraftLog): void {
     }
     if (pending && seq <= pending.sentSeq) return;
     if (pending && target === pending.window) {
-      const match = [...pending.expectedSlots].every(([slot, key]) => stackKey(items[slot]) === key)
-        && stackKey(packet.carriedItem) === pending.expectedCursor;
+      const mismatchedSlots = [...pending.expectedSlots].filter(([slot, key]) => stackKey(items[slot]) !== key)
+        .map(([slot]) => slot);
+      const cursorMatches = stackKey(packet.carriedItem) === pending.expectedCursor;
+      if (mismatchedSlots.length > 0 || !cursorMatches) {
+        // A previous click can send more than one full snapshot. Arrival after
+        // this click was sent does not identify which click produced the frame.
+        record(state, 'click-snapshot-mismatch', { packetSeq: seq, sentSeq: pending.sentSeq,
+          windowId: window.id, windowSerial: windowSerial(state, window), slot: pending.slot,
+          stateId: packet.stateId, mismatchedSlots, cursorMatches });
+        return;
+      }
       state.phase = 'ready'; state.reason = undefined; state.pending = null;
-      record(state, match ? 'click-confirmed' : 'click-rollback', {
+      record(state, 'click-confirmed', {
         packetSeq: seq, sentSeq: pending.sentSeq, windowId: window.id,
         windowSerial: windowSerial(state, window), slot: pending.slot, stateId: packet.stateId });
-      pending.complete(match ? undefined : new InventoryClickSyncError('服务端完整同步未接受该次点击，已按真实窗口和游标停止合成', 'rollback'));
+      pending.complete();
     } else if (state.phase === 'quarantined') {
       state.phase = 'ready'; state.reason = undefined; state.pending = null;
       record(state, 'click-recovered', { packetSeq: seq, windowId: window.id, windowSerial: windowSerial(state, window) });
