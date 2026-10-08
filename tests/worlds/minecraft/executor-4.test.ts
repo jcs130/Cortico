@@ -1867,8 +1867,15 @@ describe('Executor 编排', () => {
 describe('equip:盔甲穿身上,不是全塞主手', () => {
   function wardrobeBot() {
     const equips: Array<[string, string]> = [];
-    // equip 到主手要跟着改 heldItem:真 mineflayer 就是这么做的,而推导出来的
-    // {holding} 判据读的正是它
+    const bag = [
+      { name: 'iron_leggings', type: 1, count: 1, slot: 9 },
+      { name: 'shield', type: 2, count: 1, slot: 10 },
+      { name: 'stone_sword', type: 3, count: 1, slot: 11 },
+      { name: 'totem_of_undying', type: 4, count: 1, slot: 12 },
+    ];
+    const slots: Array<(typeof bag)[number] | null> = Array(46).fill(null);
+    bag.forEach(item => { slots[item.slot] = item; });
+    const getEquipmentDestSlot = (dest: string) => ({ head: 5, torso: 6, legs: 7, feet: 8, 'off-hand': 45, hand: 36 })[dest]!;
     const bot = {
       equips,
       entity: { id: 9, position: new V(0.5, 64, 0.5) },
@@ -1877,15 +1884,18 @@ describe('equip:盔甲穿身上,不是全塞主手', () => {
       players: {},
       heldItem: null as { name: string } | null,
       inventory: {
-        items: () => [
-          { name: 'iron_leggings', type: 1, count: 1 },
-          { name: 'shield', type: 2, count: 1 },
-          { name: 'stone_sword', type: 3, count: 1 },
-          { name: 'totem_of_undying', type: 4, count: 1 },
-        ],
+        slots,
+        items: () => slots.slice(9, 45).filter((item): item is (typeof bag)[number] => !!item),
       },
-      equip: async (it: { name: string }, dest: string) => {
+      getEquipmentDestSlot,
+      equip: async (it: (typeof bag)[number], dest: string) => {
         equips.push([it.name, dest]);
+        const target = getEquipmentDestSlot(dest);
+        const source = it.slot;
+        const previous = slots[target];
+        slots[source] = previous;
+        if (previous) previous.slot = source;
+        slots[target] = it; it.slot = target;
         if (dest === 'hand') bot.heldItem = it;
       },
       pathfinder: { stop() {}, setGoal() {}, goto: async () => {} },
@@ -1896,6 +1906,8 @@ describe('equip:盔甲穿身上,不是全塞主手', () => {
   it('受理刻试算在 equip 开工前读取背包', async () => {
     const helmet = { name: 'iron_helmet', type: 100, count: 1 };
     const bag = [helmet];
+    const slots: Array<typeof helmet | null> = Array(46).fill(null);
+    slots[9] = helmet;
     let equipped = false;
     const bot = {
       entity: { id: 9, position: new V(0.5, 64, 0.5), onGround: true },
@@ -1907,10 +1919,12 @@ describe('equip:盔甲穿身上,不是全塞主手', () => {
         items: { 100: { name: 'iron_helmet' } },
         itemsByName: { iron_helmet: { id: 100, equipmentSlot: 'head' } },
       },
-      inventory: { items: () => bag },
+      inventory: { items: () => bag, slots },
+      getEquipmentDestSlot: () => 5,
       equip: async () => {
         equipped = true;
         bag.splice(0, 1);
+        slots[9] = null; slots[5] = helmet;
       },
       pathfinder: { stop() {}, setGoal() {}, goto: async () => {} },
     };
@@ -1921,6 +1935,7 @@ describe('equip:盔甲穿身上,不是全塞主手', () => {
     await waitUntil(() => reports.length === 1);
     expect(equipped).toBe(true);
     expect(reports[0].kind).toBe('done');
+    expect(slots[5]).toBe(helmet);
   });
 
   it('护腿进腿槽、盾牌与图腾挂副手、剑拿主手,回执按槽位说话', async () => {
@@ -1940,6 +1955,8 @@ describe('equip:盔甲穿身上,不是全塞主手', () => {
     expect(reports[0].text).toContain('盾牌挂上了副手');
     expect(reports[0].text).toContain('不死图腾挂上了副手');
     expect(reports[0].text).toContain('手里拿起了石剑');
+    expect(bot.inventory.slots[7]?.name).toBe('iron_leggings');
+    expect(bot.inventory.slots[45]?.name).toBe('totem_of_undying');
   });
 
   /** 副手槽在 mineflayer 的窗口里是 45;offHand 非空时就挂在那一格 */
@@ -1961,6 +1978,7 @@ describe('equip:盔甲穿身上,不是全塞主手', () => {
         // 从副手拿到主手:落进快捷栏的空格,副手空出来
         if (dest === 'hand' && slots[45] === it) slots[45] = null;
         if (dest === 'hand') bot.heldItem = it;
+        else slots[45] = it;
       },
       unequip: async (dest: string) => { equips.push(['(unequip)', dest]); },
       pathfinder: { stop() {}, setGoal() {}, goto: async () => {} },

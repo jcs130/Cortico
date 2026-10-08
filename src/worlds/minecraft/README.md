@@ -1,4 +1,4 @@
-<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/flight.ts, src/worlds/minecraft/flight-preview.ts, src/worlds/minecraft/terrain.ts, src/worlds/minecraft/executor.ts, src/worlds/minecraft/skills.ts, src/worlds/minecraft/skills-control.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts, src/worlds/minecraft/chests.ts, src/worlds/minecraft/inventory.ts, src/worlds/minecraft/inventory-click-sync.ts, src/worlds/minecraft/check.ts -->
+<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/flight.ts, src/worlds/minecraft/flight-preview.ts, src/worlds/minecraft/terrain.ts, src/worlds/minecraft/executor.ts, src/worlds/minecraft/skills.ts, src/worlds/minecraft/skills-control.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts, src/worlds/minecraft/chests.ts, src/worlds/minecraft/inventory.ts, src/worlds/minecraft/inventory-click-sync.ts, src/worlds/minecraft/equipment.ts, src/worlds/minecraft/check.ts -->
 
 # worlds/minecraft
 
@@ -501,6 +501,8 @@ agent 可以在同一轮发出多次调用以提交已确定的后续任务。
 `use.times` 对每种右键操作生效，最多 16 次。回执报告已完成的右键次数与请求次数；物品用完或单次操作失败时停止，并注明中止位置。已完成至少一次时保留部分结果；次数本身不证明未核验的效果已发生。
 
 `equip` 省略 `item` 或写 `air` 表示清空主手；`use` 省略 `item` 则沿用当前手持物。解析归一化进入受理回执。背包已满时，Mineflayer 的 `equipEmpty` 可能通过 `tossStack` 将主手物品扔到地上，回执需报告实际掉落。`hand:"off"` 腾副手时，包里既没空格也没有能并入的同种未满一摞就不腾，受阻说明物品还挂在副手。
+
+`equipment.ts` 对装备槽和腾副手逐次确认取出、放入与归还光标。使用 stateId 的协议以服务端完整库存快照确认每次点击；服务端回滚或确认超时时返回受阻及当前槽位、光标，不报换装成功，也不发后续点击。旧协议保留原生换装并检查目标槽位。换装需先关闭容器窗口；腾副手只向随身库存归还物品。
 
 `equip` 点名的物品也在副手里找（同一档名字下包里优先）；从副手换到主手时，回执写出快捷栏那格原来的东西是否换进了副手。挖掘选工具同样认副手：`tool` 指定工具名时主手那把优先，其次包里，副手最后；按类别选时，副手那件只在包里没有能挖出掉落的同类工具时动用。工具回执按附魔全标签念出实际用的那一把。
 
