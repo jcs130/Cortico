@@ -5063,10 +5063,12 @@ export class Executor {
      */
     const stepLabel = (i: number): string =>
       `${task.steps.length > 1 ? `第 ${i + 1} 步 ` : ''}${JSON.stringify(receiptStep(task.steps[i]))}`;
+    const trialOrigins = new Map<number, string>();
     const stepHead = (i: number, stepStart: number): string =>
       (task.steps.length > 1
         ? `${stepLabel(i)} 用时 ${fmtDur(Date.now() - stepStart)}`
-        : stepLabel(i));
+        : stepLabel(i))
+      + (trialOrigins.has(i) ? ` [只读试算，未执行；真实起点 ${trialOrigins.get(i)}；不继承前步假定位置或材料]` : '');
     /** 多步分行列,单步就跟在冒号后面 */
     const listOf = (entries: string[]): string =>
       entries.length > 1 ? `\n${entries.join('\n')}` : ` ${entries.join('')}`;
@@ -5213,6 +5215,7 @@ export class Executor {
     try {
       for (let i = 0; i < steps.length; i++) {
         const call = steps[i];
+        if ('dryRun' in call && call.dryRun) trialOrigins.set(i, cellText(bot.entity.position));
         if (ctx.aborted()) return;
         // 环境冻结在步骤边界生效：当前自救步骤可完成，后续步骤等待 resumeAfterEnvironment。
         const heldBefore = this.holdReason();
@@ -5805,16 +5808,19 @@ export class Executor {
     }
     // 终态四分。没做成 > 做了一部分 > 完成:一单里最重的那个结局说了算。
     // 无事可做不影响终态——一单全是「附近没有掉落物」,那一单就是做完了。
+    const hasTrials = steps.some(step => 'dryRun' in step && step.dryRun === true);
+    const onlyTrials = hasTrials && steps.every(step => step.skill === 'probe' || 'dryRun' in step && step.dryRun === true);
     if (blockedSteps.length === 0 && partialSteps.length === 0) {
       this.finish(flag, {
         kind: 'done',
-        text: `${span()}${label()}完成:${listOf(results)}${nothingToDo}${scene}`,
+        text: `${span()}${label()}${onlyTrials ? '试算结束（没有执行移动、施法、放置或挖掘）' : '完成'}:${listOf(results)}${nothingToDo}${scene}`,
         taskId: id,
         ...(repeatFailure ? { repeatFailure } : {}),
       });
       return;
     }
-    const doneSoFar = results.length > 0 ? `\n做成的:${listOf(results)}` : '';
+    const doneSoFar = results.length > 0
+      ? `\n${onlyTrials ? '已返回的试算' : hasTrials ? '已返回的步骤结果' : '做成的'}:${listOf(results)}` : '';
     if (blockedSteps.length === 0) {
       this.finish(flag, {
         kind: 'partial',

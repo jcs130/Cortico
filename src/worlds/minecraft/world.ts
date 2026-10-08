@@ -2214,7 +2214,7 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
     name: 'mc_scout',
     tags: ['read'],
     description:
-      'Queue a read-only trial of the same skills as mc_do: probe, plus goto/flight/build/excavate/tunnel (always dry-run). Flight checks current loaded geometry and estimates one segment before permission is granted; it does not simulate future steps or grant permission. Same queue and task events; does not change the world.',
+      'Queue read-only observations and independent trials: probe, plus goto/flight/build/excavate/tunnel (always dry-run). Each trial uses the actual current position and world, without projecting an earlier trial destination or materials. needs gates on prior trial outcomes only, not hypothetical execution. Flight checks one segment before permission is granted; use mc_flight_plan for a projected multi-leg flight. Same queue and task events; does not change the world.',
     parameters: {
       type: 'object',
       properties: {

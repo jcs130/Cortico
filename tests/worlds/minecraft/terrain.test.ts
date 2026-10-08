@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { Vec3 } from 'vec3';
+import { EventEmitter } from 'node:events';
+import type { Bot } from 'mineflayer';
+import { watchFlightAbilities } from '../../../src/worlds/minecraft/flight.ts';
 import {
   bearing, bodyInWater, canSeeBlockAt, classifyEntity, cropAgeAt, dayNightTransition, droppedStackOf, facingDegrees,
   facingOf, farmlandMoistureAt, findBankCell, isNight, isBackground, isRaining, narrateWorld, narrateWorldSegments,
@@ -227,6 +230,40 @@ describe('snapshotFromBot 的现实时刻', () => {
 
   it('不指定时区就按东八区报', () => {
     expect(snapshotFromBot(bareBot()).realTime).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+08:00$/);
+  });
+
+  it('reports unknown, granted and revoked flight from real ability packets without time-only snapshot churn', () => {
+    const client = new EventEmitter();
+    const bot = Object.assign(new EventEmitter(), bareBot(), { _client: client });
+    const stop = watchFlightAbilities(bot as unknown as Bot);
+    try {
+      expect(narrateWorld(snapshotFromBot(bot))).toContain('飞行权限尚未从服务端核实');
+      client.emit('abilities', { flags: 4 });
+      const granted = snapshotFromBot(bot);
+      expect(granted.flight).toMatchObject({ allowed: true, controlActive: false, serverFlying: false });
+      expect(narrateWorld(granted)).toContain('飞行权限：允许');
+      expect(narrateWorld(granted)).toContain('许可期限：服务端未提供');
+      expect(snapshotFingerprint({ ...granted, flight: { ...granted.flight!, observedAtMs: Date.now() + 1000 } }))
+        .toBe(snapshotFingerprint(granted));
+      client.emit('abilities', { flags: 6 });
+      const flying = snapshotFromBot(bot);
+      expect(narrateWorld(flying)).toContain('最近服务端飞行标志：开启');
+      expect(snapshotFingerprint(flying)).not.toBe(snapshotFingerprint(granted));
+      client.emit('abilities', { flags: 0 });
+      const revoked = snapshotFromBot(bot);
+      expect(narrateWorld(revoked)).toContain('飞行权限：未授予');
+      expect(snapshotFingerprint(revoked)).not.toBe(snapshotFingerprint(flying));
+    } finally { stop(); }
+  });
+
+  it('retains the observed hover termination reason and explicit deadline in world facts', () => {
+    const s = snap({ flight: { allowed: false, flying: false, controlActive: false, serverFlying: false,
+      observedAtMs: 1000, expiresAtMs: 4000, lastStop: { reason: '服务端已收回飞行权限', atMs: 4000 } } });
+    const text = narrateWorld(s);
+    expect(text).toContain('客户端悬停控制：未运行');
+    expect(text).toContain('上次停止飞行：服务端已收回飞行权限');
+    expect(text).toContain('1970-01-01T00:00:04.000Z');
+    expect(snapshotFingerprint(s)).not.toBe(snapshotFingerprint(snap({ flight: { ...s.flight!, lastStop: undefined } })));
   });
 
   it('指定了就按指定的那个时区报', () => {
@@ -921,7 +958,7 @@ describe('narrateWorldSegments(分段去重的数据源)', () => {
     const segs = narrateWorldSegments(s);
     expect(segs.map((g) => g.key))
       .toEqual([
-        'place', 'clock', 'realclock', 'body', 'gear', 'equip', 'life', 'structure', 'terrain', 'players',
+        'place', 'flight', 'clock', 'realclock', 'body', 'gear', 'equip', 'life', 'structure', 'terrain', 'players',
       ]);
     expect(segs.map((g) => g.text).filter(Boolean).join('\n')).toBe(narrateWorld(s));
   });

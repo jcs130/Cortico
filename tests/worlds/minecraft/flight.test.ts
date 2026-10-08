@@ -58,6 +58,23 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2025-01-01T00:
 afterEach(() => { releases.splice(0).forEach(release => release()); vi.useRealTimers(); });
 
 describe('server-granted flight movement', () => {
+  it('keeps the reason for a completed hover ending until the next real takeoff', async () => {
+    const { bot, client } = flightBot();
+    client.emit('abilities', { flags: 4 });
+    await finish(flyToPosition(bot, { x: 0.5, y: 66, z: 0.5 }, () => false));
+    expect(flightState(bot)).toMatchObject({ controlActive: true, flying: true });
+    client.emit('abilities', { flags: 0 });
+    expect(flightState(bot)).toMatchObject({ allowed: false, controlActive: false, flying: false,
+      lastStop: { reason: '服务端已收回飞行权限', atMs: Date.now() } });
+    expect(bot.physicsEnabled).toBe(true);
+    client.emit('abilities', { flags: 4 });
+    expect(flightState(bot).lastStop?.reason).toBe('服务端已收回飞行权限');
+    await finish(flyToPosition(bot, { x: 0.5, y: 67, z: 0.5 }, () => false));
+    expect(flightState(bot)).toMatchObject({ controlActive: true, lastStop: undefined });
+    bot.emit('forcedMove');
+    expect(flightState(bot)).toMatchObject({ controlActive: false,
+      lastStop: { reason: '服务端修正了位置，已停止飞行移动' } });
+  });
   it('projects every relative leg and rejects an over-budget whole route before casting', () => {
     const { bot, client, positions } = flightBot();
     client.emit('abilities', { flags: 0, flyingSpeed: 0.035 });
@@ -200,6 +217,37 @@ describe('server-granted flight movement', () => {
     expect(reports).toHaveLength(1);
     expect(JSON.stringify(reports[0])).toContain('estimatedDurationMs');
     expect(JSON.stringify(reports[0])).toContain('未移动、未施法');
+    expect(positions).toHaveLength(0);
+    expect(client.write.mock.calls).toHaveLength(0);
+    expect(reports[0].text).toContain('试算结束（没有执行移动、施法、放置或挖掘）');
+    expect(reports[0].text).toContain('真实起点 (0.5, 64, 0.5)');
+  });
+
+  it('reports independent preview origins even when a later flight needs an earlier route trial', async () => {
+    const { bot, client, positions, set } = flightBot();
+    Object.assign(bot, { inventory: { items: () => [] }, pathfinder: { stop() {}, setGoal() {} } });
+    for (let x = 0; x <= 5; x++) set(new Vec3(x, 66, 0), block('stone'));
+    const reports: TaskReport[] = [];
+    const exec = new Executor({ getBot: () => bot, log, nextId: nextTaskId(), precheck: () => false,
+      probeRoutes: () => [{ profile: 'walk', status: 'complete', steps: 3, place: 0, breaks: 0, endDist: 0 }],
+      report: report => reports.push(report) });
+    releases.push(() => exec.shutdown());
+    for (const x of [3, 5]) {
+      const parsed = parseScoutSteps([{ skill: 'goto', at: [x, 64, 0] },
+        { skill: 'flight', at: [x, 68, 0], land: false, needs: [1] }]);
+      if (!('steps' in parsed)) throw new Error(parsed.error);
+      exec.submit(parsed.steps);
+      await vi.advanceTimersByTimeAsync(500);
+    }
+    expect(reports).toHaveLength(2);
+    for (const report of reports) {
+      expect(report.kind).toBe('blocked');
+      expect(report.text).toContain('飞行路径有碰撞方块');
+      expect(report.text.match(/真实起点 \(0\.5, 64, 0\.5\)/g)).toHaveLength(2);
+      expect(report.text).toContain('不继承前步假定位置或材料');
+      expect(report.text).toContain('已返回的试算:');
+      expect(report.text).not.toContain('做成的:');
+    }
     expect(positions).toHaveLength(0);
     expect(client.write.mock.calls).toHaveLength(0);
   });

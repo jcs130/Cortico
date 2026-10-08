@@ -1,4 +1,4 @@
-<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/flight.ts, src/worlds/minecraft/flight-preview.ts, src/worlds/minecraft/executor.ts, src/worlds/minecraft/skills.ts, src/worlds/minecraft/skills-control.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts, src/worlds/minecraft/chests.ts, src/worlds/minecraft/inventory.ts -->
+<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/flight.ts, src/worlds/minecraft/flight-preview.ts, src/worlds/minecraft/terrain.ts, src/worlds/minecraft/executor.ts, src/worlds/minecraft/skills.ts, src/worlds/minecraft/skills-control.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts, src/worlds/minecraft/chests.ts, src/worlds/minecraft/inventory.ts -->
 
 # worlds/minecraft
 
@@ -28,6 +28,7 @@
 
 视线、移动与目标方位共用北为 −Z、东为 +X 的坐标约定。`terrain.ts` 按 Mineflayer 的角度转换文字事实：`yaw=0` 朝北，水平视线为 `(-sin(yaw), -cos(yaw))`，`pitch` 为正时抬头。罗盘度数从北顺时针递增；不能直接套用原版网络协议的角度正负号。方向回归测试安装真实 Mineflayer 转头插件，核对 `lookAt` 目标与快照方位一致。
 快照与请求事实分别报告饱食度和随身口粮储备。储备按当前注册表分类并合并堆叠，列出常规、风险或特殊副作用、特殊食物；未同步物品栏与不可用注册表表示未知，不推定库存为零。统计不计仓库或食物原料，不自动决定制作、施法或采购。
+快照的 `flight` 段分别报告服务端飞行许可、最近飞行标志、客户端悬停控制、已声明期限和最近停止原因。未收能力包表示未知；未提供期限不推定永久许可。停止原因保留至下一次实际起飞，状态改变进入差分，重复收包时间不触发更新。
 容器开窗期间，同一 ID 与槽位布局的标题更新不改变目标身份；执行器只在收到当前对象的新完整槽位同步后认领。已认领窗口被替换或关闭后，后续存取停止，不借用新窗口或缓存库存确认结果。
 
 物品选择以当前连接的注册表为准：已注册 ID 只匹配自身，`golden_apple` 不会取出或存入 `enchanted_golden_apple`。未注册的类别词（如 `log`、`sword`）保留后缀查询；装备的显示名查询只用于非注册 ID。存取、抛出、装备、前置检查、仓储查询、容量估算与 `expect.has/holding` 使用同一身份判据。注册表不可用时只保留旧的类别查询能力；不引入全局版本表，也不更改历史容器记录。
@@ -423,7 +424,7 @@ agent 可以在同一轮发出多次调用以提交已确定的后续任务。
 `flight dryRun:true` 与 `mc_scout` 的飞行步骤共用实际移动的路线检查，无需已有飞行许可。
 回执给出当前起点、目标、三维距离、预计单段毫秒、速度来源、许可与已知剩余时间；
 预计耗时含 500 毫秒余量。尚未观察速度时注明使用默认值，未获准或期限未知时不判断时间足够。
-试算不发送能力包、不移动，也不模拟前序步骤的未来位置；执行时按实际位置、速度、地形重新检查。
+试算不发送能力包、不移动，也不模拟前序步骤的未来位置或材料；`needs` 仅按前步试算结果放行。每步回执标明只读试算及当时真实起点，纯试算任务的结局写“试算结束”，成功部分写“已返回的试算”。执行时按实际位置、速度、地形重新检查。
 
 `mc_flight_plan` 依次用上一段假定终点解析下一段坐标，复用实际飞行的几何与速度计算。
 每段估时含500毫秒余量，累计估时只包含列出的移动；返程和落地须显式列入。
