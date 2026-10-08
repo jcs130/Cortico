@@ -43,6 +43,97 @@ describe('persistent Persona activity agenda', () => {
     expect(agenda.operate({ operation: 'amend', id: 'river', expected_revision: agenda.revision(), note: '复活阶段', status: 'queued' })).toContain('错误');
     expect(agenda.state().items.find(item => item.id === 'river')!.note).toBe(item.note);
   });
+  it('reopens a mistaken completion with its dated closure preserved across restart and the current stage unchanged', () => {
+    const { dir } = rig(); let at = now();
+    const agenda = new ActivityAgenda(dir, () => at); adopt(agenda);
+    agenda.operate({ operation: 'focus', id: 'river' });
+    agenda.operate({ operation: 'update', id: 'finish-home', status: 'done', note: '原记录认为入口全部通行' });
+    const before = agenda.state();
+    const read = JSON.parse(agenda.operate({ operation: 'read', id: 'finish-home' }));
+    at += 60_000;
+    const reply = JSON.parse(agenda.operate({ operation: 'reopen', id: 'finish-home', expected_revision: read.revision,
+      note: '新通行回执确认入口仍有一处阻挡，尚未完成' }));
+    expect(reply.revision).toBe(read.revision + 1);
+    expect(reply.completedCount).toBe(0);
+    expect(reply.items[0]).toEqual({ ...before.items[0], status: 'queued',
+      note: '新通行回执确认入口仍有一处阻挡，尚未完成', updatedAt: new Date(at).toISOString(),
+      corrections: [{ status: 'done', note: before.items[0].note, updatedAt: before.items[0].updatedAt }] });
+    expect(agenda.state().items[1]).toEqual(before.items[1]);
+    const restored = new ActivityAgenda(dir, () => at);
+    expect(restored.state()).toEqual(agenda.state());
+    expect(restored.summary()).toContain('候选 id="finish-home"');
+    expect(restored.summary()).not.toContain('已结案 id="finish-home"');
+    expect(JSON.parse(restored.planningReadout()).items[0]).toMatchObject({ status: 'queued' });
+  });
+  it('rejected reopening leaves both persisted evidence and current state unchanged', () => {
+    const { agenda, dir } = rig(); adopt(agenda);
+    agenda.operate({ operation: 'update', id: 'finish-home', status: 'done', note: '原完成证据' });
+    agenda.operate({ operation: 'update', id: 'river', status: 'cancelled', note: '用户明确撤销行程' });
+    const before = readFileSync(join(dir, AGENDA_FILE), 'utf8'), state = agenda.state();
+    const input = { operation: 'reopen', id: 'finish-home', expected_revision: agenda.revision(), note: '新的反例回执' };
+    for (const change of [{ expected_revision: undefined }, { expected_revision: agenda.revision() - 1 },
+      { expected_revision: 1.5 }, { note: undefined }, { note: '' }, { note: '   ' }, { note: '字'.repeat(401) },
+      { id: 'river' }, { id: 'absent' }, { status: 'queued' }, { when: '同时偷改条件' }, { ifBlocked: '同时偷改策略' }]) {
+      expect(agenda.operate({ ...input, ...change })).toContain('错误');
+      expect(agenda.state()).toEqual(state);
+      expect(readFileSync(join(dir, AGENDA_FILE), 'utf8')).toBe(before);
+    }
+    agenda.operate(input);
+    const reopened = readFileSync(join(dir, AGENDA_FILE), 'utf8');
+    expect(agenda.operate({ ...input, expected_revision: agenda.revision() })).toContain('错误');
+    expect(readFileSync(join(dir, AGENDA_FILE), 'utf8')).toBe(reopened);
+  });
+  it('reopening observes open-stage capacity without discarding another goal or its evidence', () => {
+    const { agenda, dir } = rig();
+    adopt(agenda, { ...plan(), items: Array.from({ length: AGENDA_MAX_ITEMS }, (_, index) => ({ ...plan().items[0], id: `stage-${index}` })) });
+    agenda.operate({ operation: 'update', id: 'stage-0', status: 'done', note: '原完成记录' });
+    agenda.propose(JSON.stringify({ ...plan(), items: [plan().items[1]] }), agenda.revision(), stamp);
+    agenda.operate({ operation: 'adopt', id: 'river' });
+    const before = readFileSync(join(dir, AGENDA_FILE), 'utf8');
+    expect(agenda.operate({ operation: 'reopen', id: 'stage-0', expected_revision: agenda.revision(), note: '复核发现未完成' })).toContain('上限');
+    expect(readFileSync(join(dir, AGENDA_FILE), 'utf8')).toBe(before);
+    agenda.operate({ operation: 'update', id: 'river', status: 'cancelled', note: '用户撤销本次探索' });
+    const cancelled = agenda.state().items.find(item => item.id === 'river');
+    agenda.operate({ operation: 'reopen', id: 'stage-0', expected_revision: agenda.revision(), note: '复核发现未完成' });
+    expect(agenda.state().items.filter(item => !['done', 'cancelled'].includes(item.status))).toHaveLength(AGENDA_MAX_ITEMS);
+    expect(agenda.state().items.find(item => item.id === 'river')).toEqual(cancelled);
+    expect(new ActivityAgenda(dir, now).state().items[0]).toMatchObject({ status: 'queued', note: '复核发现未完成' });
+  });
+  it('a background proposal cannot undo a reopened completion or replace its correction evidence', () => {
+    const { agenda } = rig(); adopt(agenda);
+    agenda.operate({ operation: 'update', id: 'finish-home', status: 'done', note: '原完成记录' });
+    const captured = agenda.revision();
+    agenda.propose(JSON.stringify(plan()), captured, stamp);
+    agenda.operate({ operation: 'reopen', id: 'finish-home', expected_revision: captured, note: '新回执否定原判断' });
+    const corrected = agenda.state().items;
+    expect(agenda.operate({ operation: 'adopt' })).toContain('不能覆盖');
+    expect(agenda.operate({ operation: 'adopt', id: 'finish-home' })).toContain('进展保留');
+    adopt(agenda);
+    expect(agenda.state().items).toEqual(corrected);
+  });
+  it('restored Persona exposes the reopening tool and projects the corrected stage and evidence into the next request', async () => {
+    const { dir, agenda } = rig(); adopt(agenda);
+    agenda.operate({ operation: 'update', id: 'finish-home', status: 'done', note: '原完成记录' });
+    const persona = new CortiV({ memoryDir: dir, tickDelayMs: () => null,
+      foreground: () => ({ ...FOREGROUND_CONTEXT_DEFAULTS, enabled: true }) });
+    persona.attach(makeFakeHarnessApi());
+    const tool = persona.declareSessions().find(session => session.id === 'main')!.tools().find(tool => tool.name === 'activity_plan')!;
+    const read = JSON.parse(String(await tool.handler({ operation: 'read', id: 'finish-home' }, { role: 'main', log: nullLogger() })));
+    const reopened = JSON.parse(String(await tool.handler({ operation: 'reopen', id: 'finish-home', expected_revision: read.revision,
+      note: '最新回执确认入口仍有阻挡' }, { role: 'main', log: nullLogger() })));
+    expect(reopened.items[0]).toMatchObject({ status: 'queued', corrections: [{ status: 'done', note: '原完成记录' }] });
+    await tool.handler({ operation: 'focus', id: 'finish-home' }, { role: 'main', log: nullLogger() });
+    const restored = new CortiV({ memoryDir: dir, tickDelayMs: () => null,
+      foreground: () => ({ ...FOREGROUND_CONTEXT_DEFAULTS, enabled: true }) });
+    restored.attach(makeFakeHarnessApi());
+    for (const instance of [persona, restored]) {
+      const request = instance.prepareRequest({ sessionId: 'main', round: 1, messages: [message('user', '继续')] })!;
+      const summary = request.map(record => itemText(record.item)).find(text => text.startsWith('[活动日程'))!;
+      expect(summary).toContain('当前 id="finish-home"');
+      expect(summary).toContain('最新回执确认入口仍有阻挡');
+      expect(summary).not.toContain('原完成记录');
+    }
+  });
   it('background proposal does not select or execute an activity; adoption and focus are separate decisions', () => {
     const { agenda } = rig();
     agenda.propose(JSON.stringify(plan()), 0, stamp);

@@ -10,7 +10,7 @@ Owner: CortiV Persona (`activity-agenda.ts`, `planning-review.ts`).
 候选保存到 Persona Memory 的 `activity-agenda.json`。主意识先用 `activity_plan read`
 核对，再 `adopt` 采用、`focus` 选择阶段；`update` 记录实际进展、完成或受阻依据。
 `update` 可同时修订 `when` 与 `ifBlocked`，各最多 240 字符，`note` 记录新观察和修订依据；
-省略字段保留原值，目标 id、标题及完成标准不变。关闭记录不能修订。
+省略字段保留原值，目标 id、标题及完成标准不变。关闭记录不能通过 update 修订。
 `adopt` 带候选 `id` 时只加入该新阶段，保留其他阶段的状态与证据；已有 id 不覆盖。
 `review` 请求同一个异步规划通道并立即返回。到期、任务受理及后台建议不代表完成。
 计划允许临时交流、应急与新的选择；等待条件交给已有 `pending_work`，不占用身体队列。
@@ -20,6 +20,9 @@ Owner: CortiV Persona (`activity-agenda.ts`, `planning-review.ts`).
 与证据、执行及受阻条件；已有条件的修订通过 update 留下依据。重启恢复账本；已完成阶段不能通过 focus/update 重新打开。
 明确不再推进的阶段用 `update status:cancelled` 并填写撤销原因；它与完成、暂时挂起不同。
 完成及撤销均释放名额，保留原记录、时间和依据；旧候选不能重开或改写关闭的 id，新目的使用新 id。
+`amend` 用 read 返回的 `expected_revision` 订正关闭阶段的 note，保留状态及原说明历史。
+新核验推翻完成判断时，`reopen` 使用原 id、当前 `expected_revision` 和 note 中的新证据恢复为 queued；
+原关闭状态、说明和时间存入 corrections，目标及其他当前阶段保持原值。它计入八项未完成名额，超限、旧 revision、缺少依据或撤销阶段均不修改账本。
 整份采用保留未列出的原阶段，后台遗漏不代表主意识已决定撤销；合并后最多八项未完成阶段，超限时先按事实结案或明确撤销。
 `read` 默认分页读取未完成阶段；`includeCompleted:true` 加入完成历史，`includeClosed:true` 加入完成与撤销历史。
 `read id` 只返回该阶段及同 id 候选的采样元数据，不夹带其他目标或整份旧背景；尚未采用的候选不能 focus/update，错误回执给出定向查询和采用入口。
