@@ -33,7 +33,7 @@ interface DirectoryObservation {
   updatedAt: string;
 }
 
-export const SKILL_ENTRY = '千灯纪有技能系统。游戏命令入口 /mycli help；法术目录 /mycli spells list 1，按 MC_SPELL_NEXT 翻页；单项 /mycli spells explain <ID>，缓存用 mymc_skills。通过 mymc_do 的 chat 步骤发送命令，施法用 mymc_cast 并带齐参数。';
+export const SKILL_ENTRY = '千灯纪有技能系统。游戏命令入口 /mycli help；法术目录 /mycli spells list 1，按 MC_SPELL_NEXT 翻页；单项 /mycli spells explain <ID>，缓存用 mymc_skills。按服务端声明选择 mymc_cast 或 mymc_do 的 chat 步骤，不把其他命令改写成 cast。';
 
 function directoryHeader(value: unknown): { page: number; pages: number; total: number } | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -52,7 +52,7 @@ function spellSummary(value: unknown): SpellSummary | null {
   const row = value as Record<string, unknown>;
   if (!/^[a-z][a-z0-9_]*$/.test(String(row.id ?? ''))
     || typeof row.name !== 'string' || typeof row.category !== 'string'
-    || typeof row.command !== 'string' || !row.command.startsWith('/mycli cast ')
+    || typeof row.command !== 'string' || !/^\/mycli [^\r\n\0]+$/.test(row.command)
     || typeof row.mana !== 'number' || !Number.isFinite(row.mana)
     || typeof row.cooldownMs !== 'number' || !Number.isFinite(row.cooldownMs)) return null;
   return {
@@ -226,10 +226,17 @@ export class SkillCatalog {
       + '\n目录说明可查询的技能；本人是否已学会、当前魔力及剩余冷却看实时状态，效果与前提按单项说明读取。';
   }
 
-  /** Only explicit required argument placeholders in an observed command imply a minimum. */
+  commandFor(id: string): string | null {
+    return this.spells.get(id.trim().toLowerCase())?.item.command ?? null;
+  }
+
+  /** Only this spell's cast command supplies parameter constraints for mymc_cast. */
   requiredArgumentCount(id: string): number | null {
-    const command = this.spells.get(id.trim().toLowerCase())?.item.command;
-    return command === undefined ? null : [...command.matchAll(/(?:^|\s)<[^<>]+>(?=\s|$)/g)].length;
+    const key = id.trim().toLowerCase();
+    const command = this.commandFor(key);
+    const prefix = `/mycli cast ${key}`;
+    if (command !== prefix && !command?.startsWith(`${prefix} `)) return null;
+    return [...command.matchAll(/(?:^|\s)<[^<>]+>(?=\s|$)/g)].length;
   }
 
   /** A finite limit requires an observed command with only single-value placeholders. */

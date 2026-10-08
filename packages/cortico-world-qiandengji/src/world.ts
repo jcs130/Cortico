@@ -301,6 +301,13 @@ export class MymcWorld implements World {
       parameters: mapSchema(tool.parameters) as Record<string, unknown>,
       handler: async (args, ctx) => {
         if (tool.name === 'mc_cast' && typeof args.spell === 'string') {
+          const id = args.spell.trim().toLowerCase();
+          const command = this.catalog.commandFor(id);
+          const prefix = `/mycli cast ${id}`;
+          if (command !== null && command !== prefix && !command.startsWith(`${prefix} `)) {
+            return { text: `[mymc_cast 未发送] 服务端为 ${id} 声明的命令是 ${command}，不属于本工具的 cast 用法。`
+              + `用 mymc_skills {"id":"${id}"} 核对说明，按实际参数填写该命令并通过 mymc_do 的 chat 步骤发送；生效以服务端回执为准。`, failed: true };
+          }
           const required = this.catalog.requiredArgumentCount(args.spell);
           const supplied = Array.isArray(args.arguments) ? args.arguments.length : 0;
           if (required !== null && supplied < required) {

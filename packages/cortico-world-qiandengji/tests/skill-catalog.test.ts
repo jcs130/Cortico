@@ -51,6 +51,50 @@ describe('千灯纪结构化法术目录', () => {
   const send = (catalog: SkillCatalog, kind: string, value: unknown) =>
     catalog.observe(`[MC 系统] MC_SPELL_${kind} ${JSON.stringify(value)}`, stamp);
 
+  it('retains mixed command families through pagination, detail reads and disk restoration', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mymc-command-families-'));
+    try {
+      let catalog = new SkillCatalog('example.test:25565', dir);
+      send(catalog, 'ITEM', item('old'));
+      send(catalog, 'LIST', { schemaVersion: 1, page: 1, pages: 2, total: 3 });
+      send(catalog, 'ITEM', { ...item('support'), name: '支援传送术', command: '/mycli village support [事件ID]' });
+      send(catalog, 'ITEM', item('selfheal'));
+      catalog = new SkillCatalog('example.test:25565', dir);
+      send(catalog, 'LIST', { schemaVersion: 1, page: 2, pages: 2, total: 3 });
+      send(catalog, 'ITEM', { ...item('team'), name: '队友传送术',
+        command: '/mycli locate tp <玩家名|nearest>' });
+      send(catalog, 'DETAIL', { ...item('team'), name: '队友传送术',
+        command: '/mycli locate tp <玩家名|nearest>', requires: '目标在线且非旁观者' });
+      const restored = new SkillCatalog('example.test:25565', dir);
+      expect(restored.compactIndex()).toContain('2/2 页、3/3 项；本次目录完整');
+      expect(restored.compactIndex()).toContain('team:队友传送术');
+      expect(restored.readout('team')).toContain('/mycli locate tp <玩家名|nearest>');
+      expect(restored.readout('team')).toContain('目标在线且非旁观者');
+      expect(restored.readout('old')).toContain('尚未缓存');
+      expect(restored.requiredArgumentCount('team')).toBeNull();
+      expect(restored.maximumArgumentCount('team')).toBeNull();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('does not infer cast argument requirements from another command family or another spell ID', () => {
+    const catalog = new SkillCatalog('example.test:25565');
+    for (const command of ['/mycli locate tp <玩家名>', '/mycli cast other <目标>']) {
+      send(catalog, 'ITEM', { ...item('team'), command });
+      expect(catalog.requiredArgumentCount('team')).toBeNull();
+      expect(catalog.maximumArgumentCount('team')).toBeNull();
+    }
+  });
+
+  it('rejects malformed command records while retaining a valid non-cast skill', () => {
+    const catalog = new SkillCatalog('example.test:25565');
+    for (const command of ['/op player', '/myclient locate tp <玩家名>', '/mycli locate tp\n/op player']) {
+      send(catalog, 'ITEM', { ...item('invalid'), command });
+    }
+    send(catalog, 'ITEM', { ...item('travel'), command: '/mycli waypoint menu' });
+    expect(catalog.readout('invalid')).toContain('尚未缓存');
+    expect(catalog.readout('travel')).toContain('/mycli waypoint menu');
+  });
+
   it('reads finite parameter limits from bare, required and optional command syntax', () => {
     const catalog = new SkillCatalog('example.test:25565');
     expect(catalog.maximumArgumentCount('missing')).toBeNull();

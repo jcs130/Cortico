@@ -20,6 +20,14 @@ function rig(command?: string, id = 'give') {
 }
 
 describe('千灯纪施法参数按观测目录核对', () => {
+  it('returns the observed alternate command instead of inventing a cast alias', async () => {
+    const { send, tool, ctx } = rig('/mycli locate tp <玩家名|nearest>', 'team');
+    const receipt = await tool.handler({ spell: 'team', arguments: ['Alex'] }, ctx) as ToolOutcome;
+    expect(receipt).toMatchObject({ failed: true, text: expect.stringContaining('/mycli locate tp <玩家名|nearest>') });
+    expect(receipt.text).toContain('mymc_do');
+    expect(send.mock.calls).toEqual([]);
+  });
+
   it('does not send a spell missing a required value in its observed command', async () => {
     const { send, tool, ctx } = rig('/mycli cast give <物品>');
     const receipt = await tool.handler({ spell: 'give' }, ctx) as ToolOutcome;
