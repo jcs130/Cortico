@@ -405,7 +405,8 @@ function grepTool(host: WorkspaceHost): ToolDef {
       let matchedFiles = 0;
       const out: string[] = [];
       let shown = 0;
-      for (const hit of host.memory.grep({ match: (l) => re.test(l), path: where, filter: globFilter })) {
+      for (const hit of host.memory.grep({ match: (l) => re.test(l), path: where, filter: globFilter,
+        read: path => host.readOverride(path) })) {
         const { path: f, lines, hits } = hit;
         matchedFiles++;
         total += hits.length;

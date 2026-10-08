@@ -6,7 +6,7 @@ import { CortiV, RECENT_FILE } from '../../bots/cortiv/persona/persona.ts';
 import { DREAM_DEFAULTS } from '../../bots/cortiv/persona/dream-context.ts';
 import type { DreamTaskState } from '../../bots/cortiv/persona/dream-task-queue.ts';
 import { GenerationError } from '../../src/core/generation.ts';
-import { message } from '../../src/protocol/open-responses/context.ts';
+import { functionCall, functionResult, message } from '../../src/protocol/open-responses/context.ts';
 import { nullLogger } from '../../src/core/util.ts';
 import { makeFakeHarnessApi } from '../core/helpers.ts';
 import type { FixtureForkOptions } from '../core/fixture-protocol.ts';
@@ -23,6 +23,32 @@ const state = async (persona: CortiV): Promise<DreamTaskState> => persona.consol
 const handoff = (persona: CortiV, text: string): Promise<unknown> => persona.onHandoff([message('user', text)], { hardTokens: null });
 
 describe('Dream runtime and real Memory tools', () => {
+  it('uses captured World evidence for versioned claims and excludes replayed prose from the background material', async () => {
+    const dir = temp();
+    const persona = new CortiV({ memoryDir: dir }); personas.push(persona);
+    let recorded: unknown;
+    persona.attach(makeFakeHarnessApi({ toolsTagged: () => new Set(['world_do']), spawnFork: async options => {
+      expect(JSON.stringify(options.messages)).not.toContain('旧笔记说门还缺材料');
+      const tool = options.tools!.find(tool => tool.name === 'memory_record')!;
+      const ctx = { role: 'dream', log: nullLogger() };
+      const evidence = JSON.parse(await tool.handler({ operation: 'evidence' }, ctx) as string);
+      expect(evidence.observations).toHaveLength(1);
+      expect(evidence.observations[0]).toMatchObject({ observedAt: '2026-08-01T11:00:00Z', reference: 'cross' });
+      recorded = await tool.handler({ operation: 'set', key: 'portal/last-crossing', value: '实际穿门已验证',
+        expected_revision: 0, evidence_id: evidence.observations[0].id }, ctx);
+      return '(nothing)';
+    } }));
+    await persona.onHandoff([
+      functionCall('note', 'read_file', JSON.stringify({ path: RECENT_FILE })), functionResult('note', '旧笔记说门还缺材料'),
+      functionCall('cross', 'world_do', '{}'), functionResult('cross', '实际穿门成功', { ts: '2026-08-01T11:00:00Z' }),
+    ], { hardTokens: null });
+    await vi.waitFor(async () => expect((await state(persona)).lastOutcome?.status).toBe('completed'), { timeout: 10_000 });
+    expect(recorded).not.toHaveProperty('failed');
+    expect(JSON.parse(readFileSync(join(dir, '.state-memory.json'), 'utf8')).claims[0]).toMatchObject({
+      value: '实际穿门已验证', observation: { source: 'tool/world_do', observedAt: '2026-08-01T11:00:00Z' },
+    });
+  });
+
   it('preserves a newer foreground recent note when a captured-history fork rereads and retries', async () => {
     const dir = temp();
     const injected: string[] = [];
@@ -67,10 +93,11 @@ describe('Dream runtime and real Memory tools', () => {
 
   it('cancels late writes and results on stop; a restarted rhythm accepts a new task', async () => {
     vi.useFakeTimers();
+    const dir = temp();
     const calls: FixtureForkOptions[] = [];
     const injected: string[] = [];
     let release!: (text: string) => void;
-    const persona = new CortiV({ memoryDir: temp() }); personas.push(persona);
+    const persona = new CortiV({ memoryDir: dir }); personas.push(persona);
     persona.attach(makeFakeHarnessApi({ injectInternal: (text, kind) => { if (kind === 'dream') injected.push(text); },
       spawnFork: async options => { calls.push(options); return calls.length === 1
         ? new Promise<string>(resolve => { release = resolve; }) : '第二次的整理结论'; } }));
@@ -85,7 +112,9 @@ describe('Dream runtime and real Memory tools', () => {
     persona.startRhythm();
     await handoff(persona, '新材料'); await vi.advanceTimersByTimeAsync(0);
     expect(injected).toHaveLength(1);
-    expect(injected[0]).toContain('第二次的整理结论');
+    expect(injected[0]).toContain('后台整理结束');
+    const resultFile = readdirSync(join(dir, 'sessions/archive')).find(file => file.startsWith('result-'))!;
+    expect(readFileSync(join(dir, 'sessions/archive', resultFile), 'utf8')).toContain('第二次的整理结论');
     expect((await state(persona)).lastOutcome?.status).toBe('completed');
   });
 

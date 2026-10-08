@@ -31,6 +31,18 @@ function adopt(agenda: ActivityAgenda, value = plan()) {
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
 describe('persistent Persona activity agenda', () => {
+  it('corrects closed evidence by revision without reopening the stage or erasing the earlier note', () => {
+    const { agenda, dir } = rig(); adopt(agenda);
+    agenda.operate({ operation: 'update', id: 'river', status: 'done', note: '最初记录的奖励数量有误' });
+    const revision = agenda.revision();
+    agenda.operate({ operation: 'amend', id: 'river', expected_revision: revision, note: '按原始回执订正奖励数量' });
+    const item = new ActivityAgenda(dir, now).state().items.find(item => item.id === 'river')!;
+    expect(item.status).toBe('done'); expect(item.note).toContain('订正');
+    expect(item.corrections).toEqual([{ note: '最初记录的奖励数量有误', updatedAt: stamp }]);
+    expect(agenda.operate({ operation: 'amend', id: 'river', expected_revision: revision, note: '旧线程覆盖' })).toContain('错误');
+    expect(agenda.operate({ operation: 'amend', id: 'river', expected_revision: agenda.revision(), note: '复活阶段', status: 'queued' })).toContain('错误');
+    expect(agenda.state().items.find(item => item.id === 'river')!.note).toBe(item.note);
+  });
   it('background proposal does not select or execute an activity; adoption and focus are separate decisions', () => {
     const { agenda } = rig();
     agenda.propose(JSON.stringify(plan()), 0, stamp);

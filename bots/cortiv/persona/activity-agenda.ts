@@ -17,7 +17,8 @@ export interface AgendaItem {
 }
 export interface AgendaPlan { summary: string; items: AgendaItem[]; }
 type AgendaStatus = 'queued' | 'active' | 'deferred' | 'done' | 'cancelled';
-interface AcceptedItem extends AgendaItem { status: AgendaStatus; note: string; updatedAt: string; }
+interface AcceptedItem extends AgendaItem { status: AgendaStatus; note: string; updatedAt: string;
+  corrections?: Array<{ note: string; updatedAt: string }>; }
 interface Proposal extends AgendaPlan { baseRevision: number; capturedAt: string; }
 interface Ledger {
   version: 1;
@@ -49,7 +50,9 @@ function validPlan(value: unknown): value is AgendaPlan {
 }
 function validAccepted(value: unknown): value is AcceptedItem {
   return validItem(value) && object(value) && ['queued', 'active', 'deferred', 'done', 'cancelled'].includes(String(value.status))
-    && text(value.note, 400, true) && timestamp(value.updatedAt);
+    && text(value.note, 400, true) && timestamp(value.updatedAt)
+    && (value.corrections === undefined || (Array.isArray(value.corrections) && value.corrections.every(entry =>
+      object(entry) && text(entry.note, 400, true) && timestamp(entry.updatedAt))));
 }
 function closed(item: AcceptedItem): boolean { return item.status === 'done' || item.status === 'cancelled'; }
 function closedLabel(item: AcceptedItem): string { return item.status === 'cancelled' ? '已撤销' : '已完成'; }
@@ -109,7 +112,8 @@ export class ActivityAgenda {
     return this.summary();
   }
   operate(args: Record<string, unknown>): string {
-    if (Object.keys(args).some(key => !['operation', 'id', 'status', 'note', 'when', 'ifBlocked', 'offset', 'limit', 'includeCompleted', 'includeClosed'].includes(key))) return '[日程输入错误] 含有未知参数。';
+    if (Object.keys(args).some(key => !['operation', 'id', 'status', 'note', 'when', 'ifBlocked', 'offset', 'limit', 'includeCompleted', 'includeClosed', 'expected_revision'].includes(key))) return '[日程输入错误] 含有未知参数。';
+    if (args.expected_revision !== undefined && args.operation !== 'amend') return '[日程输入错误] expected_revision 仅用于 amend。';
     if (args.operation !== 'update' && (args.when !== undefined || args.ifBlocked !== undefined)) {
       return '[日程输入错误] when/ifBlocked 只能通过 update 连同 note 修订。';
     }
@@ -156,6 +160,16 @@ export class ActivityAgenda {
     }
     const item = this.ledger.items.find(entry => entry.id === args.id);
     if (!item) return this.missingItem(args.id);
+    if (args.operation === 'amend') {
+      if (!closed(item) || !text(args.note, 400) || args.status !== undefined
+        || !Number.isSafeInteger(args.expected_revision) || args.expected_revision !== this.ledger.revision) {
+        return '[日程输入错误] amend 只订正已关闭阶段的 note，需 read 返回的当前 expected_revision；不能改变状态、目标或条件。';
+      }
+      const items = this.ledger.items.map(entry => entry.id === item.id ? { ...entry, note: args.note as string,
+        updatedAt: this.stamp(), corrections: [...entry.corrections ?? [], { note: entry.note, updatedAt: entry.updatedAt }] } : entry);
+      this.save({ ...this.ledger, revision: this.ledger.revision + 1, items });
+      return this.operate({ operation: 'read', id: item.id });
+    }
     if (args.operation === 'focus') {
       if (closed(item)) return `[日程] 此阶段${closedLabel(item)}。新的目的需要重新规划，不能重放旧阶段。`;
       if (item.status === 'active') return this.summary();

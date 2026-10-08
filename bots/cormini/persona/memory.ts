@@ -433,7 +433,8 @@ export class GitWorkspaceMemory {
  * 从 path（文件或目录，空值为工作区）检索，返回命中文件的行表和命中行号。
  * 跳过含 NUL 的二进制文件及原子写临时文件；按 CRLF/LF 切行。
  */
-  grep(opts: { match: (line: string) => boolean; path?: string; filter?: RegExp | null }): GrepFileHit[] {
+  grep(opts: { match: (line: string) => boolean; path?: string; filter?: RegExp | null;
+    read?: (path: string) => string | null }): GrepFileHit[] {
     const where = opts.path ?? '';
     const abs = this.insideWorkspace(where || '.');
     const files = statSync(abs).isDirectory()
@@ -443,9 +444,10 @@ export class GitWorkspaceMemory {
     for (const f of files) {
       if (opts.filter && !opts.filter.test(f)) continue;
       if (f.split('/').some((seg) => seg.includes('.tmp-'))) continue;
+      const virtual = opts.read?.(f);
       let buf: Buffer;
       try {
-        buf = readFileSync(join(this.memoryDir, f));
+        buf = virtual == null ? readFileSync(join(this.memoryDir, f)) : Buffer.from(virtual);
       } catch {
         continue;
       }
