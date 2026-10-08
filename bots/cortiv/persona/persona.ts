@@ -690,7 +690,7 @@ export class CortiV extends Cormini {
         + 'read pages open stages by default; includeCompleted:true adds completed history, includeClosed:true adds completed and cancelled history; id reads only that stage or candidate with its dated metadata. Closed evidence does not occupy open-stage capacity. '
         + 'Read and verify a background proposal before adopt. adopt with id adds that new candidate while preserving '
         + 'existing progress; omit id to merge the whole proposal only when its revision is current, retaining omitted goals and evidence. focus selects a current stage. update records actual progress '
-        + 'or marks a stage done/deferred/queued/cancelled with evidence or an explicit cancellation reason in note. update can revise when/ifBlocked with fresh evidence in note while preserving the objective and completion criteria. Adoption preserves existing stage conditions and evidence. Cancelled is not completed; neither closed status can be reopened by an old proposal. Plans do not execute World actions; '
+        + 'or marks a stage done/deferred/queued/cancelled with evidence or an explicit cancellation reason in note. update can revise when/ifBlocked with fresh evidence in note while preserving the objective and completion criteria. update with why corrects an obsolete premise using the exact expected_revision from read and evidence in note; it retains dated premise history and the original objective. Adoption preserves existing stage conditions and evidence. Cancelled is not completed; neither closed status can be reopened by an old proposal. Plans do not execute World actions; '
          + 'amend corrects the note of a closed stage using the expected_revision from read; it preserves status and prior note history. '
          + 'reopen corrects a mistaken completion using the exact expected_revision from read and fresh contradictory evidence in note. It returns that done stage to queued, preserves its prior closure and objective, and keeps the current active stage. Cancelled stages cannot reopen. '
          + 'completion is never inferred from time or task acceptance. Details and references are loaded only when needed.',
@@ -699,7 +699,7 @@ export class CortiV extends Cormini {
         type: 'object', additionalProperties: false,
         properties: {
           operation: { type: 'string', enum: ['read', 'review', 'adopt', 'focus', 'update', 'amend', 'reopen'] },
-          expected_revision: { type: 'integer', minimum: 0, description: 'amend/reopen: exact current agenda revision from read. amend preserves closed status; reopen returns a mistakenly done stage to queued and preserves its prior closure.' },
+          expected_revision: { type: 'integer', minimum: 0, description: 'Exact current agenda revision from read; required for amend/reopen and update with why. Stale premise corrections leave the agenda unchanged.' },
           question: { type: 'string', minLength: 1, maxLength: 1200,
             description: 'review: focused question about evidence, a difficult strategy or an uncertain cause; selects the reflection profile. Omit for a routine agenda proposal.' },
           publicTopic: { type: 'string', minLength: 1, maxLength: 120,
@@ -711,6 +711,7 @@ export class CortiV extends Cormini {
           includeClosed: { type: 'boolean', description: 'read: include completed and explicitly cancelled history, default false.' },
           status: { type: 'string', enum: ['queued', 'deferred', 'done', 'cancelled'], description: 'update: cancelled explicitly abandons a goal without claiming completion; omit to retain the current stage status.' },
           note: { type: 'string', minLength: 1, maxLength: 400, description: 'update: actual evidence, progress, blocker or explicit reason for cancellation; amend: corrected closure evidence; reopen: fresh evidence contradicting the completion.' },
+          why: { type: 'string', minLength: 1, maxLength: 240, description: 'update: corrected premise with verification evidence in note and the exact expected_revision from read; retains prior values and timestamps. Does not change the objective or completion criteria.' },
           when: { type: 'string', minLength: 1, maxLength: 240, description: 'update: revised execution or resumption conditions, with fresh supporting evidence in note; omit to retain existing conditions.' },
           ifBlocked: { type: 'string', minLength: 1, maxLength: 240, description: 'update: revised response to a blocker, with fresh supporting evidence in note; objective id and completion criteria stay unchanged.' },
         }, required: ['operation'],

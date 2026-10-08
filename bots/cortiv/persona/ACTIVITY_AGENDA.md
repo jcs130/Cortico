@@ -11,6 +11,8 @@ Owner: CortiV Persona (`activity-agenda.ts`, `planning-review.ts`).
 核对，再 `adopt` 采用、`focus` 选择阶段；`update` 记录实际进展、完成或受阻依据。
 `update` 可同时修订 `when` 与 `ifBlocked`，各最多 240 字符，`note` 记录新观察和修订依据；
 省略字段保留原值，目标 id、标题及完成标准不变。关闭记录不能通过 update 修订。
+已采用阶段的前提过时后，`update why` 带 `read` 返回的当前 `expected_revision` 及 `note` 中的核验证据订正；
+版本已变化则整次拒绝。当前前提记录时间为 `whyUpdatedAt`，旧前提、原来源时间、订正时间及依据保存在 `whyHistory`，通过定向 read 查阅；后台规划不自动展开旧前提历史。
 `adopt` 带候选 `id` 时只加入该新阶段，保留其他阶段的状态与证据；已有 id 不覆盖。
 `review` 请求同一个异步规划通道并立即返回。到期、任务受理及后台建议不代表完成。
 计划允许临时交流、应急与新的选择；等待条件交给已有 `pending_work`，不占用身体队列。
@@ -28,7 +30,7 @@ Owner: CortiV Persona (`activity-agenda.ts`, `planning-review.ts`).
 `read id` 只返回该阶段及同 id 候选的采样元数据，不夹带其他目标或整份旧背景；尚未采用的候选不能 focus/update，错误回执给出定向查询和采用入口。
 分页使用 `offset` 和 `limit`，每页最多八项，回执提供 `completedCount`、`cancelledCount` 和 `page.nextOffset`。
 read 的 `interpretation` 标明规划背景与进展证据的区别；旧 summary/why/when 不能作为当前现场事实。
-采用阶段时将候选采样时间保存为 `sourceCapturedAt`，focus/update、关闭及订正不刷新它；复用已有阶段也保留原来源时间。规划背景与完成条件对应这一采样时间，进展说明对应 `updatedAt`。旧记录未保存来源时间时保留缺失值，不从进展更新时间推断。
+采用阶段时将候选采样时间保存为 `sourceCapturedAt`，focus/update、关闭及订正不刷新它；复用已有阶段也保留原来源时间。未订正前提及完成条件对应这一采样时间，订正后的前提对应 `whyUpdatedAt`，进展说明对应 `updatedAt`。旧记录未保存来源时间时保留缺失值，不从进展更新时间推断。
 后台规划读取全部未完成阶段及最近八项关闭记录，明确区分完成与撤销，较早记录保留查询入口。
 日程没有固定活动配额、自动任务重放或由随机数选择活动的逻辑。
 
