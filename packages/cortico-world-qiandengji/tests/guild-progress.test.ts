@@ -5,6 +5,40 @@ import { describe, expect, it } from 'vitest';
 import { GuildProgress } from '../src/guild-progress.ts';
 
 describe('GuildProgress', () => {
+  it('updates claim progress in either direction, retaining acceptance and refusing older observations', () => {
+    const progress = new GuildProgress('example.test:25565:visitor');
+    progress.observe('[MC 系统] 已接公会委托：补充建材。交付24份材料。', '2026-01-01T12:00:00Z');
+    progress.observe('[MC 系统] 正在进行：补充建材 [0/24]', '2026-01-01T12:01:00Z');
+    progress.observe('[MC 系统] materials 补充建材 · 交付建材。 [in_progress]', '2026-01-01T12:01:01Z');
+    expect(progress.observe('[MC 系统] 还需完成「补充建材」：20/24', '2026-01-01T12:02:00Z')).toBe(true);
+    expect(progress.facts()).toContain('在办：补充建材 [20/24]');
+    expect(progress.facts()).toContain('2026-01-01T12:02:00Z');
+    expect(progress.facts()).toContain('交付24份材料。');
+    expect(progress.facts()).toContain('精确ID：materials');
+    progress.observe('[MC 系统] 还需完成「补充建材」：0/24', '2026-01-01T12:03:00Z');
+    progress.observe('[MC 系统] 还需完成「补充建材」：20/24', '2026-01-01T12:02:30Z');
+    expect(progress.facts()).toContain('在办：补充建材 [0/24]');
+    expect(progress.facts()).toContain('2026-01-01T12:03:00Z');
+    expect(progress.facts()).not.toContain('确认交付');
+  });
+
+  it('restores a claim observation without inventing acceptance or completion evidence', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'guild-claim-'));
+    try {
+      const progress = new GuildProgress('example.test:25565:visitor', dir);
+      expect(progress.observe('[MC 玩家] visitor: 还需完成「补充建材」：20/24', '2026-01-01T12:00:00Z')).toBe(false);
+      progress.observe('[MC 系统] 还需完成「补充建材」：20/24', '2026-01-01T12:01:00Z');
+      const restored = new GuildProgress('example.test:25565:visitor', dir);
+      expect(restored.facts()).toBe(progress.facts());
+      expect(restored.facts()).toContain('在办：补充建材 [20/24]');
+      expect(restored.facts()).not.toContain('验收要求原文');
+      expect(restored.facts()).not.toContain('交付成功');
+      restored.observe('[MC 系统] 委托交付成功！', '2026-01-01T12:02:00Z');
+      expect(restored.facts()).toContain('当前没有在办的委托');
+      expect(restored.facts()).toContain('服务端确认交付：补充建材');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it('preserves the server acceptance conditions through progress updates and obtains the exact ID from an in-progress board entry', () => {
     const progress = new GuildProgress('example.test:25565:visitor');
     const accepted = '[MC 系统] 已接公会委托：登高看远方 · 1/1 登高。到达高度至少 120 的地方；服务器记录实际到达。；完成后领取奖励。';

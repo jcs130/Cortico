@@ -55,7 +55,8 @@ export class GuildProgress {
     if (!text.startsWith('[MC 系统] ') || !timestamp(at)) return false;
     const line = text.slice('[MC 系统] '.length).trim();
     const accepted = /^已接公会委托：([^。；]+)[。；]/.exec(line);
-    const progress = /^正在进行：(.+?)\s*\[(\d+)\/(\d+)\]/.exec(line);
+    const progress = /^正在进行：(.+?)\s*\[(\d+)\/(\d+)\]/.exec(line)
+      ?? /^还需完成「(.+?)」[：:]\s*(\d+)\/(\d+)\s*$/.exec(line);
     const activeListing = /^(\S+)\s+(.+?)\s+·\s+.*\[in_progress\](?:\s+·.*)?$/.exec(line);
     const completed = /^\S+\s+(.+?)\s+·\s+.+\[[^\]]*今日已完成\]$/.exec(line);
     const delivered = /^委托交付成功[！!]/.test(line);
