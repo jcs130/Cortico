@@ -25,6 +25,7 @@ import { pickLabel, pickTargetOf } from './item-pick.ts';
 import { itemCustomName } from './item-display.ts';
 import { taggedCraftChoice } from './tagged-crafting.ts';
 import { isInventoryClickError, resumeInventoryCursor } from './inventory-click-sync.ts';
+import { inventoryReadConfirmed } from './inventory-window-sync.ts';
 import { clearOffHandConfirmed, equipSlotConfirmed } from './equipment.ts';
 
 /**
@@ -419,6 +420,20 @@ export async function skillEat(bot: Bot, itemName: string): Promise<string> {
   const foods = (bot.registry.foodsByName ?? {}) as Record<string, unknown>;
   if (!foods[itemName] && !DRINKABLES[itemName]) {
     throw new SkillBlocked(notFoodText(bot, itemName));
+  }
+  if (bot.currentWindow) {
+    if (!inventoryReadConfirmed(bot)) {
+      throw new SkillBlocked('进食前容器与背包尚未同步，未关窗或使用食物', [], 'server', 'inventory-click-sync');
+    }
+    try { await resumeInventoryCursor(bot); }
+    catch (err) {
+      if (!isInventoryClickError(err)) throw err;
+      throw new SkillBlocked(`进食前归还游标物品未完成: ${(err as Error).message}`, [], 'server', 'inventory-click-sync');
+    }
+    bot.closeWindow(bot.currentWindow);
+    if (bot.currentWindow || !inventoryReadConfirmed(bot)) {
+      throw new SkillBlocked('进食前容器未关闭或背包尚未同步，未使用食物', [], 'server', 'inventory-click-sync');
+    }
   }
   // eat 的 item 是完整物品 id。这里不做后缀或模糊匹配，避免把另一样食物替换进来。
   const food = bot.inventory.items().find((item) => item.name === itemName && item.count > 0);

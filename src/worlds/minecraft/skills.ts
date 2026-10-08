@@ -59,7 +59,7 @@ export const QUEUE_SCHEMA: Record<string, unknown> = {
   description:
     '这一单跟队列的关系。不写 = replace:撤掉排着的那些,接在正在做的那件后面(回执点名撤了谁);' +
     'append:排到队尾,排着的都保留;now:中断正在做的那件、插到队头立刻开做,排着的保留' +
-    '(正在逃命时不抢,排队头等它逃完);' +
+    '(低血战斗可让位给首步 eat/flee/surface;已在执行的逃命、进食或环境自保不抢);' +
     'afterCheckpoint:当前任务到安全检查点后先做这一单,再续做原任务;容器存取、交易等完整操作段结束前等待,不抢救命动作',
 };
 

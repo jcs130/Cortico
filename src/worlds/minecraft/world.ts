@@ -2189,7 +2189,7 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
     name: 'mc_do',
     tags: ['act'],
     description:
-      'Queue an ordered group of Minecraft skills and return immediately with a task id. Known next steps in one intention can be submitted together; steps and queued tasks continue in the background without another model turn. Put a timed permission chat command and its planned movement in the same group, linked by needs. Flight waits up to 2 seconds for actual server permission; sending a command alone does not prove its effect. Use queue:"append" to add work after existing tasks. Use queue:"afterCheckpoint" to do this group at a safe checkpoint of current work, then resume that work; container and transaction groups wait until their operation is complete. Each task reports completion or obstruction as a minecraft.task event; a blocked task leaves later tasks queued. A single plain chat or vanilla /msg, /tell, /w to a named player, with default queue and no needs/expect, sends immediately while movement continues. Other slash commands and chat inside a multi-step group retain queue order.',
+      'Queue an ordered group of Minecraft skills and return immediately with a task id. Known next steps in one intention can be submitted together; steps and queued tasks continue in the background without another model turn. Put a timed permission chat command and its planned movement in the same group, linked by needs. Flight waits up to 2 seconds for actual server permission; sending a command alone does not prove its effect. Use queue:"now" for immediate food or escape during combat; default submission waits for combat and replaces pending tasks. Start the group with eat, flee or surface to take control even during low-health combat. Environmental rescue still has priority. Use queue:"append" to add work after existing tasks. Use queue:"afterCheckpoint" to do this group at a safe checkpoint of current work, then resume that work; container and transaction groups wait until their operation is complete. Each task reports completion or obstruction as a minecraft.task event; a blocked task leaves later tasks queued. A single plain chat or vanilla /msg, /tell, /w to a named player, with default queue and no needs/expect, sends immediately while movement continues. Other slash commands and chat inside a multi-step group retain queue order.',
     parameters: {
       type: 'object',
       properties: {
@@ -3867,7 +3867,7 @@ export class MinecraftWorld implements World {
       // 路标表的取用面:只供回执侧的机械计算(坐标相对化、危险区陈述),不改变执行
       marks: () => this.markDesk(),
       // queue:"now" 夺手:战斗当场交还身体,不再走"腾出手就做"
-      stopCombat: () => this.combat?.standDown() ?? null,
+      stopCombat: (firstStep) => this.combat?.standDown(firstStep) ?? null,
       chests: this.chests,
       directionalSweeps: this.directionalSweeps,
       works: this.works,
@@ -3919,6 +3919,7 @@ export class MinecraftWorld implements World {
       // 仅阻止主动进场，受击仍交给 onHurtBy 判定。
       envBusy: () => (this.reflexes?.envActive ?? false) || Date.now() < this.escapeHoldUntil,
       taskEscaping: () => this.executor?.escaping ?? false,
+      taskEating: () => this.executor?.eating ?? false,
       taskFighting: () => this.executor?.attacking ?? false,
       suspendTasks: (by) => {
         this.interruptIdle('combat');

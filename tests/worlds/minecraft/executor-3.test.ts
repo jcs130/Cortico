@@ -4179,6 +4179,8 @@ describe('queue:"now" 抢占战斗', () => {
     expect(state.stoodDown).toBe(0);
     expect(r).toContain('排上了');
     expect(r).toContain('腾出手就做');
+    expect(r).toContain('本单尚未执行');
+    expect(r).toContain('queue:"now"');
   });
 
   it('救命撤退拒绝 standDown 时:now 如实说仍在排队', () => {

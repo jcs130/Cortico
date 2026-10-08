@@ -6,6 +6,8 @@ import { CombatSession, footingAhead, type CombatTuning } from '../../../src/wor
 import type { CombatRangedActions } from '../../../src/worlds/minecraft/combat.ts';
 import type { RangedTarget } from '../../../src/worlds/minecraft/ranged.ts';
 import { MinecraftLog } from '../../../src/worlds/minecraft/log.ts';
+import { Executor, type TaskReport } from '../../../src/worlds/minecraft/executor.ts';
+import { skillEat } from '../../../src/worlds/minecraft/skills-craft.ts';
 import type { Logger } from '../../../src/core/types.ts';
 
 const log = { child() { return this; }, info() {}, warn() {}, error() {}, debug() {}, trace() {}, emit() {} } as unknown as Logger;
@@ -1282,9 +1284,121 @@ describe('空手低血:挨打的默认反应改成脱离', () => {
 });
 
 /**
- * queue:"now" 可以夺回普通战斗的执行权；低血或尚未安全结束的撤退只更新后续任务意图。
+ * queue:"now" 让战斗交还身体；低血时只让位给进食和撤离首步。
  */
 describe('standDown:queue:"now" 夺手', () => {
+  it('容器游标无法归还时保留物品与窗口，不开始消费', async () => {
+    const { bot } = combatRigBot([]);
+    const apple = { name: 'golden_apple', type: 2, count: 2 };
+    const cursor = { name: 'diamond', type: 3, count: 1, stackSize: 64 };
+    const window = { id: 1, inventoryStart: 0, inventoryEnd: 0, slots: [], selectedItem: cursor };
+    Object.assign(bot, { currentWindow: window, inventory: { items: () => [apple], slots: [] },
+      closeWindow: () => { Object.assign(bot, { currentWindow: null }); },
+      consume: async () => { apple.count -= 1; } });
+    Object.assign((bot as unknown as Bot).registry, { foodsByName: { golden_apple: { foodPoints: 4 } } });
+    await expect(skillEat(bot, 'golden_apple')).rejects.toThrow('游标');
+    expect((bot as unknown as Bot).currentWindow).toBe(window);
+    expect(window.selectedItem).toBe(cursor);
+    expect(apple.count).toBe(2);
+    expect((bot as unknown as Bot).heldItem?.name).toBe('iron_sword');
+  });
+
+  it.each(['eat', 'flee', 'surface'] as const)('低血撤退可交还给即时 %s，不恢复旧任务抢跑', (skill) => {
+    const { bot, controls } = combatRigBot([foe(7, 'skeleton', 7)]);
+    (bot as unknown as { health: number }).health = 5;
+    const { session, calls } = rig(bot);
+    session.onHurtBy(7, 'skeleton');
+    session.onHurtBy(7, 'skeleton');
+    expect(session.active).toBe(true);
+    const step = skill === 'eat' ? { skill, item: 'golden_apple' } as const
+      : skill === 'flee' ? { skill, distance: 8 } as const : { skill } as const;
+    expect(session.standDown(step)).toBe('正在跟怪打');
+    expect(session.active).toBe(false);
+    expect(calls.resumed).toBe(0);
+    expect(Object.values(controls).every((pressed) => !pressed)).toBe(true);
+    session.stop();
+  });
+
+  it('环境自保持有时即使即时进食也不夺走身体', () => {
+    const { bot } = combatRigBot([foe(7, 'skeleton', 7)]);
+    const r = rig(bot);
+    r.session.onHurtBy(7, 'skeleton');
+    r.setEnvBusy(true);
+    expect(r.session.standDown({ skill: 'eat', item: 'golden_apple' })).toBeNull();
+    expect(r.session.active).toBe(true);
+    r.session.stop();
+  });
+
+  it.each([true, false])('真实执行器急救进食确认=%s：受击不换剑，保留待办并恢复控制', async (confirmed) => {
+    const { bot, attacks } = combatRigBot([foe(7, 'zombie', 2.2)]);
+    const native = bot as unknown as Bot;
+    const bag = [{ name: 'iron_sword', type: 1, count: 1 }, { name: 'golden_apple', type: 2, count: 2 }];
+    const said: string[] = [];
+    const reports: TaskReport[] = [];
+    Object.assign(bot, {
+      food: 16, game: { dimension: 'overworld' }, effects: {},
+      currentWindow: { id: 1, inventoryStart: 54, inventoryEnd: 90, selectedItem: null },
+      closeWindow: () => { Object.assign(bot, { currentWindow: null }); },
+      inventory: { items: () => bag, slots: Array(46).fill(null) },
+      equip: async (item: unknown) => { Object.assign(bot, { heldItem: item }); },
+      chat: (text: string) => { said.push(text); },
+      deactivateItem: () => {},
+      consume: async () => {
+        if (native.currentWindow) throw new Error('容器窗口仍开着，服务端未使用食物');
+        await new Promise((resolve) => setTimeout(resolve, 1_600));
+        if (native.heldItem?.name !== 'golden_apple') throw new Error('主手被换掉');
+        if (!confirmed) throw new Error('消费被服务端拒绝');
+        bag[1].count -= 1;
+        Object.assign(bot, { food: 20, health: 13, effects: { 10: { id: 10, amplifier: 1, duration: 100 } } });
+      },
+    });
+    Object.assign(native.registry, { foodsByName: { golden_apple: { foodPoints: 4 } } });
+    let id = 0;
+    let exec: Executor;
+    const session = new CombatSession({
+      getBot: () => native,
+      tuning: () => ({ enabled: true, engageRadius: 3, chaseMax: 6, maxSec: 30, space: 2.6,
+        busyRatio: 60, cooldownSec: 60, fleeHealth: 10, fight: 'auto', arena: true }),
+      envBusy: () => false,
+      taskEscaping: () => exec?.escaping ?? false,
+      taskEating: () => exec?.eating ?? false,
+      suspendTasks: (reason) => exec.suspend(reason),
+      resumeTasks: () => exec.resume(), emit: () => {}, log,
+    });
+    exec = new Executor({ getBot: () => native, report: (r) => reports.push(r), log, nextId: () => ++id,
+      busyWith: () => session.active ? '正在跟怪打' : null,
+      stopCombat: (first) => session.standDown(first) });
+    session.onHurtBy(7, 'zombie');
+    Object.assign(bot, { health: 5 });
+    exec.submit([{ skill: 'chat', text: '救急后继续的待办' }], 'append');
+    const receipt = exec.submit([{ skill: 'eat', item: 'golden_apple' }], 'now');
+    expect(receipt).toContain('已经放开手');
+    expect(receipt).not.toContain('排上了');
+    await waitUntil(() => exec.eating && native.heldItem?.name === 'golden_apple');
+    expect(native.currentWindow).toBeNull();
+    session.start();
+    for (let i = 0; i < 5; i++) {
+      session.onHurtBy(7, 'zombie');
+      native.emit('physicsTick');
+      await sleep(200);
+      expect(session.active).toBe(false);
+      expect(native.heldItem?.name).toBe('golden_apple');
+    }
+    expect(attacks).toEqual([]);
+    expect(said).toEqual([]);
+    await waitUntil(() => reports.length === 2);
+    expect(reports[0].kind).toBe(confirmed ? 'done' : 'blocked');
+    expect(reports[0].text).toContain(confirmed ? '吃了一个金苹果' : '消费被服务端拒绝');
+    expect(bag[1].count).toBe(confirmed ? 1 : 2);
+    expect(said).toEqual(['救急后继续的待办']);
+    expect(exec.eating).toBe(false);
+    await sleep(300);
+    expect(session.active).toBe(true);
+    if (confirmed) expect(native.heldItem?.name).toBe('iron_sword');
+    session.stop();
+    exec.shutdown();
+  });
+
   it('当场交还身体但不恢复旧断点，并把刚才在做什么交回给受理回执', () => {
     const diag = new MinecraftLog();
     const { bot } = combatRigBot([foe(7, 'zombie', 2.2)]);

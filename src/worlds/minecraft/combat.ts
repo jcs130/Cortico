@@ -28,6 +28,7 @@ import pathfinderPkg from 'mineflayer-pathfinder';
 import { Vec3 } from 'vec3';
 import type { Logger } from '../../core/types.ts';
 import type { MinecraftLog } from './log.ts';
+import type { SkillCall } from './skills.ts';
 import {
   HARD, blend, blur, decide, dirSlot, newMap, slotDir, write, writeSlot, type Map16,
 } from './combat-context.ts';
@@ -201,6 +202,8 @@ interface CombatSessionOptions {
    * 受击仍交给 onHurtBy 判定，战斗结束后从断点恢复任务。
    */
   taskEscaping?: () => boolean;
+  /** 已开始的进食占用主手；受击不另起战斗打断消费。 */
+  taskEating?: () => boolean;
   /** 主动 attack 已持有身体；被动三格巡检不得把同一场再接管一遍。 */
   taskFighting?: () => boolean;
   /**
@@ -471,6 +474,12 @@ export class CombatSession {
     } // 已经在撤了,别叠加;伤害历史留在同一场里,逃不掉要转身
     if (this.state === 'fighting') {
       this.provoked.add(attackerId);
+      return true;
+    }
+    if (this.opts.taskEating?.()) {
+      this.provoked.add(attackerId);
+      this.opts.diag?.write({ lane: 'combat', event: 'hurt-during-eat',
+        msg: '进食仍持有主手，受击未另起战斗', data: { attackerId, name, health: this.opts.getBot()?.health } });
       return true;
     }
     if (this.opts.envBusy()) return false;
@@ -1841,18 +1850,22 @@ export class CombatSession {
    * —— 250ms 巡检会在下一拍把刚开跑的任务重新挂起,那就等于什么都没改。挨打仍走
    * `onHurtBy`(宽限期内它退回反射的降级行为),环境反射照旧在两者之上。
    *
-   * 返回刚才在做什么(受理回执照实说一句);本来就空闲返回 null。
+   * 首步为 eat/flee/surface 时允许交还低血自保；环境危机仍由环境反射持有。
+   * 返回刚才在做什么；本来就空闲返回 null。
    */
-  standDown(): string | null {
+  standDown(firstStep?: SkillCall): string | null {
     if (this.state === 'idle') return null;
     // queue:"now" 只更新普通任务意图，不清除受击和无进展记录。
-    // 低血、绝境战斗或距上次受击不足 RETREAT_IDLE_MS 的撤退仍持有身体，急件须等待。
+    // 低血、绝境战斗或刚受击的撤退只向进食和撤离交还身体。
     const now = Date.now();
     const retreatStillSaving = this.state === 'retreating' && now - this.retreatLastHurtAt < RETREAT_IDLE_MS;
-    if (retreatStillSaving || this.desperate || (this.bot?.health ?? 0) < this.opts.tuning().fleeHealth) {
+    const survival = firstStep?.skill === 'eat' || firstStep?.skill === 'flee' || firstStep?.skill === 'surface';
+    const environment = this.opts.envBusy();
+    if (environment || (!survival
+      && (retreatStillSaving || this.desperate || (this.bot?.health ?? 0) < this.opts.tuning().fleeHealth))) {
       this.opts.diag?.write({
         lane: 'combat', event: 'stand-down-deferred',
-        msg: `queue:"now" 未夺走救命动作:${retreatStillSaving ? '撤退中刚挨过打' : `生命 ${this.hp()}/20`}`,
+        msg: `queue:"now" 未夺走救命动作:${environment ? '环境自保' : retreatStillSaving ? '撤退中刚挨过打' : `生命 ${this.hp()}/20`}`,
         data: { state: this.state, health: this.bot?.health, hits: this.retreatHits },
       });
       return null;
@@ -1862,7 +1875,7 @@ export class CombatSession {
     this.opts.diag?.write({
       lane: 'combat', event: 'stand-down',
       msg: `queue:"now" 夺手:${what},当场交还身体,${STAND_DOWN_GRACE_MS / 1000}s 内不自动进场`,
-      data: { was: this.state, graceMs: STAND_DOWN_GRACE_MS },
+      data: { was: this.state, graceMs: STAND_DOWN_GRACE_MS, firstStep, survival },
     });
     this.opts.emit('先不打了,这件事更急。', false, false);
     this.end('preempt');
