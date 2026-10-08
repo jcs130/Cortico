@@ -685,7 +685,8 @@ export class CortiV extends Cormini {
     }, {
       name: 'activity_plan',
       description: 'Read a persistent flexible activity agenda; review requests asynchronous planning and returns immediately. '
-        + 'review with question requests a focused causal check of receipts and assumptions without replacing the agenda. '
+        + 'review with question selects the configured reflection provider and context/output budgets for a focused causal or strategy review, without replacing the agenda or blocking action. '
+        + 'Use this proactively for a difficult decision or revising a method; publicTopic optionally announces an accepted review to main for a brief audience-facing progress summary, never raw reasoning. '
         + 'read pages open stages by default; includeCompleted:true adds completed history, includeClosed:true adds completed and cancelled history; id reads only that stage or candidate with its dated metadata. Closed evidence does not occupy open-stage capacity. '
         + 'Read and verify a background proposal before adopt. adopt with id adds that new candidate while preserving '
         + 'existing progress; omit id to merge the whole proposal only when its revision is current, retaining omitted goals and evidence. focus selects a current stage. update records actual progress '
@@ -700,7 +701,9 @@ export class CortiV extends Cormini {
           operation: { type: 'string', enum: ['read', 'review', 'adopt', 'focus', 'update', 'amend', 'reopen'] },
           expected_revision: { type: 'integer', minimum: 0, description: 'amend/reopen: exact current agenda revision from read. amend preserves closed status; reopen returns a mistakenly done stage to queued and preserves its prior closure.' },
           question: { type: 'string', minLength: 1, maxLength: 1200,
-            description: 'review: optional focused question about evidence, net progress or an uncertain cause; omit for a full agenda proposal.' },
+            description: 'review: focused question about evidence, a difficult strategy or an uncertain cause; selects the reflection profile. Omit for a routine agenda proposal.' },
+          publicTopic: { type: 'string', minLength: 1, maxLength: 120,
+            description: 'review with question only: short audience-facing topic to explain an accepted review once; no internal reasoning, identifiers or tool parameters. Does not send speech itself.' },
           id: { type: 'string', minLength: 1, maxLength: 80, description: 'Exact adopted item id for focus/update/amend/reopen; read: one stage or unadopted candidate, including closed evidence; adopt: one verified new candidate id, even if other stages changed.' },
           offset: { type: 'integer', minimum: 0, description: 'read: pagination offset, default 0.' },
           limit: { type: 'integer', minimum: 1, maximum: AGENDA_MAX_ITEMS, description: 'read: page size, default 8.' },
@@ -713,7 +716,8 @@ export class CortiV extends Cormini {
         }, required: ['operation'],
       },
       handler: async (args) => args.operation === 'review'
-        ? JSON.stringify(this.planningReview?.review(typeof args.question === 'string' ? args.question : '')
+        ? JSON.stringify(this.planningReview?.review(typeof args.question === 'string' ? args.question : '',
+          typeof args.publicTopic === 'string' ? args.publicTopic : '')
           ?? { accepted: false, reason: 'Persona未连接' })
         : this.activityAgenda?.operate(args) ?? '[日程 unavailable] Persona is not attached.',
     }, ...super.mainTailTools()];
@@ -950,7 +954,9 @@ export class CortiV extends Cormini {
               || typeof (request as Record<string, unknown>).question !== 'string') {
               throw new Error('review 参数须为含 question 文本的对象');
             }
-            return this.planningReview.review((request as { question: string }).question);
+            return this.planningReview.review((request as { question: string }).question,
+              typeof (request as Record<string, unknown>).publicTopic === 'string'
+                ? (request as { publicTopic: string }).publicTopic : '');
           }
           throw new Error(`未知面板方法: ${panel}.${method}`);
         }

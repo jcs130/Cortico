@@ -107,6 +107,43 @@ describe('Persona长期复盘', () => {
     expect(input).toContain('没有近期活动记录');
     expect(r.review.state().lastOutcome).toBe('completed');
   });
+
+  it('明确的问题走独立深入通道和较长预算，受理后仅发一次公开进度提示，常规规划仍用原通道', async () => {
+    const r = rig({ reflectionProvider: 'configured-reflector', reflectionMaxContextTokens: 24_000,
+      reflectionMaxOutputTokens: 2800, reflectionTimeoutMs: 180_000 });
+    let finish!: (text: string) => void;
+    r.reply(() => new Promise(resolve => { finish = resolve; }));
+    expect(r.review.review('比较群怪与单体的技能分支', '研究怎样应对包围').accepted).toBe(true);
+    expect(r.forks[0]).toMatchObject({ provider: 'configured-reflector', maxOutputTokens: 2800, tools: [] });
+    expect(r.review.state().lastRequest).toEqual({ profile: 'reflection', provider: 'configured-reflector', contextTokens: 24_000, outputTokens: 2800 });
+    expect(r.injected).toHaveLength(1);
+    expect(r.injected[0]).toMatchObject({ kind: 'reflection_status' });
+    expect(r.injected[0].text).toContain('尚未交回结论');
+    expect(r.gate).not.toHaveBeenCalled();
+    expect(r.review.review('再次复盘', '研究怎样应对包围').accepted).toBe(false);
+    expect(r.injected).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(120_001);
+    expect(r.forks[0].signal?.aborted).toBe(false);
+    finish('需要核对敌人距离与剩余魔力；近身包围与远程骚扰分别验证。');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(r.injected.at(-1)?.kind).toBe('causal_review');
+    r.reply(async () => '(nothing)');
+    expect(r.review.review().accepted).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(r.forks.at(-1)).toMatchObject({ provider: 'configured-planner', maxOutputTokens: r.cfg.maxOutputTokens });
+    expect(r.review.state().lastRequest?.profile).toBe('routine');
+  });
+
+  it('深入通道配置热改后不投递旧通道结果，未提供公开主题不额外播报', async () => {
+    const r = rig({ reflectionProvider: 'configured-reflector' });
+    let finish!: (text: string) => void;
+    r.reply(() => new Promise(resolve => { finish = resolve; }));
+    r.review.review('核对失败前提');
+    r.cfg.reflectionProvider = 'new-reflector';
+    finish('旧通道建议'); await vi.advanceTimersByTimeAsync(0);
+    expect(r.injected).toEqual([]);
+    expect(r.review.state().lastOutcome).toBe('discarded');
+  });
   it('新规划读取当前阶段证据，旧背景说明仍在账本中但不作为当前事实重复投递', async () => {
     const r = rig({ agendaEnabled: true });
     const oldSummary = '背包全满，必须先一直整理箱子才能探索';
