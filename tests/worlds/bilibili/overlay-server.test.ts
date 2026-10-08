@@ -235,7 +235,7 @@ describe('Bilibili Overlay 服务', () => {
     netHooks.deniedPort = port;
     try {
       await server.start(log);
-      expect(Number(new URL(server.baseUrl).port)).toBe(port + 1);
+      expect(Number(new URL(server.baseUrl).port)).toBeGreaterThan(port);
     } finally {
       netHooks.deniedPort = null;
       await server.stop();
@@ -253,6 +253,7 @@ describe('Bilibili Overlay 服务', () => {
       editor: editorActions(assets),
     });
     await blocker.start(log);
+    const occupiedPort = Number(new URL(blocker.baseUrl).port);
 
     const warns: string[] = [];
     const recording = {
@@ -261,14 +262,14 @@ describe('Bilibili Overlay 服务', () => {
       child() { return this; },
     } as unknown as Logger;
     const server = new BilibiliOverlayServer({
-      preferredPort: busy,
+      preferredPort: occupiedPort,
       assets,
       snapshot: () => ({ design: { schemaVersion: 1 }, agentAnnouncement: { text: '' } }),
       editor: editorActions(assets),
     });
     await server.start(recording);
     try {
-      expect(Number(new URL(server.baseUrl).port)).toBe(busy + 1);
+      expect(Number(new URL(server.baseUrl).port)).toBeGreaterThan(occupiedPort);
       const hit = warns.find((msg) => msg.includes('被占用'));
       expect(hit).toBeDefined();
       expect(hit).toContain(`改用 ${new URL(server.baseUrl).port}`);

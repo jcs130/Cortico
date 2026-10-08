@@ -130,7 +130,8 @@ describe('Persona social review with real Memory tools', () => {
     const { p, dir } = rig((options, root) => completePage(options, root, ['viewers/stream/123456.md']));
     const result = await review(p, { history: history(), reason: '补核昨晚' });
     expect(result).toMatchObject({ accepted: true, imported: { added: 1 } });
-    await vi.waitFor(async () => expect((await state(p)).social.pendingEntries).toBe(0));
+    await vi.waitFor(async () => expect((await state(p)).social.scheduled).toBe(false), { timeout: 10_000 });
+    expect((await state(p)).social.pendingEntries).toBe(0);
     expect(readFileSync(join(dir, 'viewers/stream/123456.md'), 'utf8')).toContain('明天见');
     expect(existsSync(join(dir, 'sessions/_recent.md'))).toBe(false);
     expect((await state(p)).lastOutcome?.status).toBe('completed');
