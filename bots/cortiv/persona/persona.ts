@@ -66,7 +66,7 @@ import { DreamTaskQueue, DreamTaskStoppedError, dreamAbortable, dreamDelay } fro
 import { DreamMemory, dreamWorkspaceTools } from './dream-memory.ts';
 import { MemoryNoteProvenance, NOTE_PROVENANCE_DIR } from './note-provenance.ts';
 import { memoryIndex } from './memory-index.ts';
-import { StateMemory, STATE_MEMORY_FILE, MEMORY_HISTORY_DIR } from './state-memory.ts';
+import { StateMemory, STATE_MEMORY_FILE, MEMORY_HISTORY_DIR, STATE_MEMORY_SEARCH_NOTICE } from './state-memory.ts';
 import { workspaceTools } from '../../cormini/persona/workspaceTools.ts';
 import { ToolCallRecoveryFallback, TOOL_CALL_RECOVERY_DEFAULTS, projectToolCallRecovery, type ToolCallRecoveryConfig } from './tool-call-recovery.ts';
 import { SleepReview, SLEEP_REVIEW_DEFAULTS, type SleepReviewConfig } from './sleep-review.ts';
@@ -1123,7 +1123,7 @@ export class CortiV extends Cormini {
             + JSON.stringify({ path: args.path, history: true })
             + '；可先用 grep_files 带 history:true 定位。历史线索须核对当前 World。]\n' + result;
         }
-        if (tool.name === 'grep_files') return '[检索范围：默认省略状态笔记的历史正文；查原始经历、坐标或回执，原参数加 history:true，再用 read_file 带 history:true 读命中段落。]\n' + result;
+        if (tool.name === 'grep_files') return STATE_MEMORY_SEARCH_NOTICE + result;
         return result;
       } });
     return [
