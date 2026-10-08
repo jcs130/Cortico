@@ -2,6 +2,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { CombatTactic } from './combat-spells.ts';
+import { validCombatRules } from './combat-rules.ts';
 
 export interface CombatScene {
   dimension: string | null;
@@ -31,6 +32,7 @@ export interface CombatCastAttempt {
   source: 'automatic' | 'manual' | 'support';
   tacticRevision: number;
   manaBefore: number | null;
+  ruleId?: string;
   reply?: string;
   replyAt?: string;
 }
@@ -77,6 +79,7 @@ function validReceipt(value: unknown): value is CombatReceipt {
     && r.casts.every(c => c && typeof c.spell === 'string' && c.spell.length <= 64
       && time(c.sentAt) && ['automatic', 'manual', 'support'].includes(c.source)
       && count(c.tacticRevision) && reading(c.manaBefore)
+      && (c.ruleId === undefined || (typeof c.ruleId === 'string' && /^[a-z][a-z0-9_:-]{0,63}$/.test(c.ruleId)))
       && (c.reply === undefined || (typeof c.reply === 'string' && c.reply.length <= 240))
       && (c.replyAt === undefined || time(c.replyAt)));
 }
@@ -87,7 +90,8 @@ export function validCombatTactic(value: unknown): value is CombatTactic {
   return (v.spells === null || (Array.isArray(v.spells) && v.spells.length > 0 && v.spells.length <= 8
     && v.spells.every((id) => typeof id === 'string' && /^[a-z][a-z0-9_:-]{0,63}$/.test(id) && id !== 'selfheal')
     && new Set(v.spells).size === v.spells.length))
-    && (v.healAtOrBelow === null || (Number.isInteger(v.healAtOrBelow) && v.healAtOrBelow >= 1 && v.healAtOrBelow <= 20));
+    && (v.healAtOrBelow === null || (Number.isInteger(v.healAtOrBelow) && v.healAtOrBelow >= 1 && v.healAtOrBelow <= 20))
+    && (v.rules === undefined || validCombatRules(v.rules));
 }
 
 export class CombatTacticBook {

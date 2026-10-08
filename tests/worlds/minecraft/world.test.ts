@@ -753,6 +753,22 @@ describe('MinecraftWorld World 面(未连接状态)', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
+  it('条件战术可读回、局部更新和清除，错误条件不覆盖现有编排', async () => {
+    const m = new MinecraftWorld({ cfg: cfg(), agentFriendEnabled: true });
+    const tactic = m.tools().find(tool => tool.name === 'mc_combat_tactic')!;
+    const ctx = { role: 'test', log: console as never } as never;
+    const rules = [{ id: 'crowd', spell: 'frostnova', when: { within: 7, hostilesAtLeast: 3, reserveMana: 6 } }];
+    expect(await tactic.handler({ rules, healAtOrBelow: 10 }, ctx)).toContain('已启用1项条件分支');
+    expect(await tactic.handler({ spells: ['golem'] }, ctx)).toContain('已启用1项条件分支');
+    expect(await tactic.handler({}, ctx)).toContain('"hostilesAtLeast":3');
+    expect(await tactic.handler({ rules: [...rules, ...rules] }, ctx)).toContain('未设置');
+    expect(await tactic.handler({}, ctx)).toContain('条件分支启用，共1项');
+    expect(await tactic.handler({ rules: [{ ...rules[0], when: { hostilesAtMost: 2, hostilesAtLeast: 3 } }] }, ctx)).toContain('未设置');
+    await tactic.handler({ rules: [] }, ctx);
+    expect(await tactic.handler({}, ctx)).not.toContain('条件分支启用');
+    expect(await tactic.handler({}, ctx)).toContain('当前战术：golem；');
+  });
+
   it('交战中先按战术血线自愈，间隔后再继续连招', async () => {
     const m = new MinecraftWorld({ cfg: cfg(), agentFriendEnabled: true });
     const host = new FakeHost();

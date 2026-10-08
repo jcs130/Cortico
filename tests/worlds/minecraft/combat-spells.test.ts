@@ -1,6 +1,7 @@
 import type { Bot } from 'mineflayer';
 import { describe, expect, it } from 'vitest';
 import { CombatSpells } from '../../../src/worlds/minecraft/combat-spells.ts';
+import { validCombatRules, type CombatRule } from '../../../src/worlds/minecraft/combat-rules.ts';
 
 function botWithFoes(names: string[]): Bot {
   return {
@@ -16,6 +17,55 @@ const combatNotice = '战斗咏唱：星芒箭(starbolt，自动锁敌、4 魔�
 const exploreNotice = '探索咏唱：守护傀儡(golem，12 魔力/75 秒，持续 45 秒)';
 
 describe('服务端公布的战斗法术', () => {
+  it('同一 Agent 编排随敌人数量、类型、血线与魔力改变选择，不退回违反条件的固定顺序', () => {
+    const spells = new CombatSpells();
+    spells.noteServerMessage(combatNotice); spells.noteServerMessage(exploreNotice); spells.noteMana(40);
+    const rules: CombatRule[] = [
+      { id: 'protect', spell: 'golem', when: { hostilesAtLeast: 2, healthAtOrBelow: 12, reserveMana: 6 } },
+      { id: 'crowd', spell: 'frostnova', when: { within: 7, hostilesAtLeast: 3, reserveMana: 6 } },
+      { id: 'ranged', spell: 'starbolt', when: { within: 12, enemyTypes: ['witch', 'skeleton'], reserveMana: 6 } },
+      { id: 'single', spell: 'starbolt', when: { within: 10, hostilesAtMost: 1, reserveMana: 6 } },
+    ];
+    spells.setTactic({ spells: ['golem', 'flamewave'], healAtOrBelow: 8, rules });
+    const crowd = botWithFoes(['zombie', 'husk', 'witch']);
+    expect(spells.next(crowd, true, 100_000)).toBe('frostnova');
+    crowd.health = 10;
+    expect(spells.next(crowd, true, 100_250)).toBe('golem');
+    const ranged = botWithFoes(['witch']); ranged.entities[1].position.x = 11;
+    expect(spells.next(ranged, true, 100_500)).toBe('starbolt');
+    spells.noteSent('starbolt', 100_500);
+    const receipt = spells.recordCombat({ startedAt: new Date(100_000).toISOString(), endedAt: new Date(100_501).toISOString(),
+      reason: 'clear', healthBefore: 20, healthAfter: 20, kills: {}, swings: 0, meleeLanded: 0, arrows: 0, rangedLanded: 0 });
+    expect(receipt.casts[0]).toMatchObject({ spell: 'starbolt', ruleId: 'ranged', tacticRevision: 1 });
+    spells.noteMana(9);
+    expect(spells.next(botWithFoes(['zombie']), true, 110_000)).toBeNull();
+    expect(spells.readout(undefined, 110_000, botWithFoes(['zombie']))).toContain('保留魔力不足');
+    spells.noteMana(10);
+    expect(spells.next(botWithFoes(['zombie']), true, 110_250)).toBe('starbolt');
+    rules[0].spell = 'flamewave';
+    expect(spells.getTactic()?.rules?.[0].spell).toBe('golem');
+  });
+
+  it('条件编排仍受服务端能力和冷却约束，未知的必要状态不匹配', () => {
+    const spells = new CombatSpells();
+    const bot = botWithFoes(['witch']);
+    spells.setTactic({ spells: ['golem'], healAtOrBelow: 10, rules: [
+      { id: 'wet', spell: 'starbolt', when: { dimension: 'the_nether', onGround: true, manaAtLeast: 4 } },
+    ] });
+    expect(spells.next(bot, true, 100_000)).toBeNull();
+    bot.game = { dimension: 'the_nether' } as Bot['game']; bot.entity.onGround = true;
+    spells.noteServerMessage(combatNotice);
+    expect(spells.next(bot, true, 100_250)).toBeNull();
+    spells.noteMana(8);
+    expect(spells.next(bot, true, 100_500)).toBe('starbolt'); spells.noteSent('starbolt', 100_500);
+    expect(spells.next(bot, true, 103_000)).toBeNull();
+    expect(spells.next(bot, true, 107_000)).toBe('starbolt');
+    bot.entity.onGround = false;
+    expect(spells.next(bot, true, 107_250)).toBeNull();
+    expect(validCombatRules([{ id: 'bad', spell: 'starbolt', when: { healthAtOrAbove: 15, healthAtOrBelow: 8 } }])).toBe(false);
+    expect(validCombatRules([{ id: 'bad', spell: 'starbolt', when: { unknown: true } }])).toBe(false);
+    expect(validCombatRules([{ id: 'bad', spell: 'selfheal', when: {} }])).toBe(false);
+  });
   it('默认在半血时优先考虑自愈，战术可调整血线', () => {
     const spells = new CombatSpells();
     expect(spells.wantsHeal(11)).toBe(false);
