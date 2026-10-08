@@ -22,7 +22,7 @@ Owner: CortiV Persona (`activity-agenda.ts`, `planning-review.ts`).
 完成及撤销均释放名额，保留原记录、时间和依据；旧候选不能重开或改写关闭的 id，新目的使用新 id。
 `amend` 用 read 返回的 `expected_revision` 订正关闭阶段的 note，保留状态及原说明历史。
 新核验推翻完成判断时，`reopen` 使用原 id、当前 `expected_revision` 和 note 中的新证据恢复为 queued；
-原关闭状态、说明和时间存入 corrections，目标及其他当前阶段保持原值。它计入八项未完成名额，超限、旧 revision、缺少依据或撤销阶段均不修改账本。
+原关闭状态、说明和时间存入 corrections，目标及其他当前阶段保持原值。订正已有目标允许暂时超过八项，重启按关闭历史恢复；新增目标须等未完成数量低于八项后采用。旧 revision、缺少依据或撤销阶段均不修改账本。
 整份采用保留未列出的原阶段，后台遗漏不代表主意识已决定撤销；合并后最多八项未完成阶段，超限时先按事实结案或明确撤销。
 `read` 默认分页读取未完成阶段；`includeCompleted:true` 加入完成历史，`includeClosed:true` 加入完成与撤销历史。
 `read id` 只返回该阶段及同 id 候选的采样元数据，不夹带其他目标或整份旧背景；尚未采用的候选不能 focus/update，错误回执给出定向查询和采用入口。

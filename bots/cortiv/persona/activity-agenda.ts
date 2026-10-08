@@ -56,6 +56,7 @@ function validAccepted(value: unknown): value is AcceptedItem {
       && (entry.status === undefined || ['queued', 'active', 'deferred', 'done', 'cancelled'].includes(String(entry.status))))));
 }
 function closed(item: AcceptedItem): boolean { return item.status === 'done' || item.status === 'cancelled'; }
+function restoredCompletion(item: AcceptedItem): boolean { return !!item.corrections?.some(entry => entry.status === 'done'); }
 function closedLabel(item: AcceptedItem): string { return item.status === 'cancelled' ? '已撤销' : '已完成'; }
 function cleanItem(item: AgendaItem): AgendaItem {
   return { id: item.id, title: item.title, why: item.why, doneWhen: item.doneWhen,
@@ -88,7 +89,7 @@ export class ActivityAgenda {
     const saved: unknown = JSON.parse(readFileSync(this.file, 'utf8'));
     if (!object(saved) || saved.version !== 1 || !Number.isSafeInteger(saved.revision) || Number(saved.revision) < 0
       || !text(saved.summary, 300, true) || !Array.isArray(saved.items) || !saved.items.every(validAccepted)
-      || saved.items.filter(item => !closed(item)).length > AGENDA_MAX_ITEMS
+      || saved.items.filter(item => !closed(item) && !restoredCompletion(item)).length > AGENDA_MAX_ITEMS
       || saved.items.filter(item => item.status === 'active').length > 1
       || new Set(saved.items.map(item => item.id)).size !== saved.items.length
       || !(saved.proposal === null || (validPlan(saved.proposal) && object(saved.proposal)
@@ -176,7 +177,6 @@ export class ActivityAgenda {
         || !Number.isSafeInteger(args.expected_revision) || args.expected_revision !== this.ledger.revision) {
         return '[日程输入错误] reopen 只恢复误记完成的阶段，需 read 返回的当前 expected_revision 和 note 中的新核验证据；不能改变目标、条件或重开已撤销阶段。';
       }
-      if (this.ledger.items.filter(entry => !closed(entry)).length >= AGENDA_MAX_ITEMS) return this.capacityError();
       const items = this.ledger.items.map(entry => entry.id === item.id ? { ...entry, status: 'queued' as const,
         note: args.note as string, updatedAt: this.stamp(),
         corrections: [...entry.corrections ?? [], { status: entry.status, note: entry.note, updatedAt: entry.updatedAt }] } : entry);
