@@ -8,7 +8,7 @@
  * 同一件事两处措辞不同,读起来就像两件事(README「一件事只说一遍」)。
  */
 import type { QueueStatus, BlockedRecord } from './executor.ts';
-import { matchItemName, type ChestRecord } from './chests.ts';
+import { matchItemName, type ChestRecord, type NameRegistry } from './chests.ts';
 import { renderQueue } from './executor.ts';
 import type { GearPiece, GearSlot, ItemStack, WorldSnapshot } from './terrain.ts';
 import { enchantSuffix, narrateCursor, narrateInventory } from './terrain.ts';
@@ -54,11 +54,12 @@ export function renderStoredItemReadout(
   records: readonly ChestRecord[],
   query: string,
   openWindow?: { title: string; items: readonly ItemStack[] } | null,
+  registry?: NameRegistry | null,
 ): string {
   if (!s.invSynced) return '[物资查询] 物品栏还在从服务器同步。';
   const item = query.trim().toLowerCase().replace(/^minecraft:/, '');
   if (!/^[\p{L}\p{N}_ -]{1,64}$/u.test(item)) return '[物资查询] 物品名格式不对。';
-  const matches = (name: string) => matchItemName(item, name) || zhName(name) === item;
+  const matches = (name: string) => matchItemName(item, name, registry) || zhName(name) === item;
   const carried = s.inventory.filter((stack) => matches(stack.name))
     .reduce((total, stack) => total + stack.count, 0);
   const cursor = s.cursorItem && matches(s.cursorItem.name) ? narrateCursor(s) : '';

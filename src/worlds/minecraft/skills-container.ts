@@ -77,7 +77,7 @@ export async function skillPickup(bot: Bot, ctx: SkillContext, item?: string): P
       const e = bot.entities[id];
       if (!e?.position || (e.name !== 'item' && e.name !== 'item_stack')) continue;
       const stack = droppedStackOf(e);
-      if (item && (!stack || !matchItemName(item, stack.name))) continue;
+      if (item && (!stack || !matchItemName(item, stack.name, bot?.registry))) continue;
       const d = e.position.distanceTo(me);
       if (d <= 24 && (!nearest || d < nearest.d)) nearest = { id, pos: e.position, d };
     }
@@ -263,7 +263,7 @@ export async function skillToss(
 /** 抛出后又自动捡回的同种物品，不能继续当作腾格手段。 */
 export function reacquiredTossNote(bot: Bot, item: string): string | null {
   if (typeof bot.inventory?.items !== 'function') return null;
-  const stack = bot.inventory.items().find((candidate) => matchItemName(item, candidate.name));
+  const stack = bot.inventory.items().find((candidate) => matchItemName(item, candidate.name, bot?.registry));
   if (!stack) return null;
   const prior = recentTosses.get(bot)?.get(stack.name);
   if (!prior || Date.now() - prior.at >= 120_000) return null;
@@ -286,7 +286,7 @@ function rememberToss(bot: Bot, name: string): void {
 /** 抛物按物品类型选槽；同类型有定制物品时无法保证扔的是普通那件。 */
 export function protectedTossItem(bot: Bot, item: string): string | null {
   if (typeof bot.inventory?.items !== 'function') return null;
-  const candidates = bot.inventory.items().filter((stack) => matchItemName(item, stack.name));
+  const candidates = bot.inventory.items().filter((stack) => matchItemName(item, stack.name, bot?.registry));
   const special = candidates.find((stack) => itemCustomName(stack)
     || itemProfileSkinHash(stack as unknown as Parameters<typeof itemProfileSkinHash>[0]));
   if (!special) return null;
@@ -437,7 +437,7 @@ async function stowIntoOne(
         stepIndex: p.stepIndex, item: p.item, count: p.count, pick: p.pick, pred, picked: [],
         invBefore: invCount(bot, pred), deposited: 0, failure: null,
         chestBefore: containerStacks(chest, bot.registry as never).items
-          .filter((stack) => matchItemName(p.item, stack.name)).reduce((sum, stack) => sum + stack.count, 0),
+          .filter((stack) => matchItemName(p.item, stack.name, bot?.registry)).reduce((sum, stack) => sum + stack.count, 0),
         chestDelta: 0,
         snap: { items: [], usedSlots: 0, slots: 27 },
       };
@@ -478,7 +478,7 @@ async function stowIntoOne(
       // 每样各存一份关窗时刻的箱内容:三条回执同刻送达,各说各那一步做完时箱里有什么
       e.snap = rememberChest(ctx, bot, target, chest);
       e.chestDelta = Math.max(0, e.snap.items
-        .filter((stack) => matchItemName(p.item, stack.name)).reduce((sum, stack) => sum + stack.count, 0)
+        .filter((stack) => matchItemName(p.item, stack.name, bot?.registry)).reduce((sum, stack) => sum + stack.count, 0)
         - e.chestBefore);
       if (aborted) break;
     }
@@ -512,7 +512,7 @@ async function stowIntoOne(
     });
     // 同物品的拆堆和并窗数量累计到整个窗口，再与窗口库存变化比较。
     const windowTotal = entries
-      .filter((x) => matchItemName(e.item, x.item) || matchItemName(x.item, e.item))
+      .filter((x) => matchItemName(e.item, x.item, bot?.registry) || matchItemName(x.item, e.item, bot?.registry))
       .reduce((n, x) => n + x.deposited, 0);
     const r = stowReceipt(where, e, conf, windowTotal);
     if (r.ok && conf?.status === 'confirmed') clearStorageWriteFailure(bot, target, e.item);
@@ -721,7 +721,7 @@ export async function stowIntoOpenWindow(
     for (let i = batch.index + 1; i < batch.steps.length; i++) {
       const next = batch.steps[i];
       if (next.skill !== 'stow' || next.into !== 'open' || next.needs !== undefined || next.expect !== undefined) break;
-      if (names.some((name) => matchItemName(name, next.item) || matchItemName(next.item, name))) break;
+      if (names.some((name) => matchItemName(name, next.item, bot?.registry) || matchItemName(next.item, name, bot?.registry))) break;
       plan.push({ stepIndex: i, call: next });
       names.push(next.item);
     }
@@ -1057,7 +1057,7 @@ export async function takeFromOpenWindow(
     for (let i = batch.index + 1; i < batch.steps.length; i++) {
       const next = batch.steps[i];
       if (next.skill !== 'take' || next.from !== 'open' || next.needs !== undefined || next.expect !== undefined) break;
-      if (names.some((name) => matchItemName(name, next.item!) || matchItemName(next.item!, name))) break;
+      if (names.some((name) => matchItemName(name, next.item!, bot?.registry) || matchItemName(next.item!, name, bot?.registry))) break;
       plan.push({ stepIndex: i, call: next });
       names.push(next.item!);
     }
@@ -1306,7 +1306,7 @@ export async function skillTake(bot: Bot, call: Extract<SkillCall, { skill: 'tak
 
     if (empty) {
       // 有同 id 的几件而挑选词一件没中:摆出箱里那几件各自是什么,别只说「没有」
-      const same = beforeOpen!.items.filter((i) => matchItemName(item, i.name));
+      const same = beforeOpen!.items.filter((i) => matchItemName(item, i.name, bot?.registry));
       notes.push(call.pick && same.length > 0
         ? pickMissText(`${at} `, item, call.pick, same)
         : `${at} 没有${zhName(item)}`);

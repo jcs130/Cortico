@@ -101,6 +101,18 @@ describe('背包读数(mc_bag)', () => {
     expect(renderStoredItemReadout(snap(), [], 'diamond')).toContain('不等于其他容器里没有');
   });
 
+  it('keeps registered variants separate across carried, open-window and historical stock', () => {
+    const registry = { itemsByName: { golden_apple: {}, enchanted_golden_apple: {} } };
+    const text = renderStoredItemReadout(snap({ inventory: [
+      { name: 'golden_apple', count: 2 }, { name: 'enchanted_golden_apple', count: 5 },
+    ] }), [{ x: 1, y: 64, z: 0, dimension: 'overworld', usedSlots: 2, slots: 27,
+      items: [{ name: 'golden_apple', count: 8 }, { name: 'enchanted_golden_apple', count: 13 }] }],
+    'golden_apple', { title: '箱子', items: [{ name: 'enchanted_golden_apple', count: 5 }] }, registry);
+    expect(text).toContain('随身金苹果×2');
+    expect(text).toContain('箱子」里金苹果×0');
+    expect(text).toContain('上次见到×8');
+  });
+
   it('背包把同种备用装备的耐久分别报出，供点名存物', () => {
     const text = renderBagReadout(snap({ inventory: [
       { name: 'diamond_sword', count: 1, durability: { left: 1550, max: 1561 } },

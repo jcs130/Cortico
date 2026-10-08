@@ -70,6 +70,16 @@ describe('ChestBook', () => {
     expect(hasItem(full, 'coal')).toBe(false);
   });
 
+  it('does not invent stock or merge room from another registered ID', () => {
+    const reg = { itemsByName: { golden_apple: {}, enchanted_golden_apple: {} } };
+    const rec = { x: 0, y: 64, z: 0, dimension: 'overworld', usedSlots: 27, slots: 27,
+      items: [{ name: 'enchanted_golden_apple', count: 5 }] };
+    expect(hasItem(rec, 'golden_apple', reg)).toBe(false);
+    expect(hasRoom(rec, 'golden_apple', 64, reg)).toBe(false);
+    expect(hasItem(rec, 'enchanted_golden_apple', reg)).toBe(true);
+    expect(hasRoom(rec, 'enchanted_golden_apple', 64, reg)).toBe(true);
+  });
+
   // 堆叠上限是物品自带的属性,不是所有东西都堆到 64。写死 64 的时候一整叠 16 个
   // 鸡蛋算出 16 % 64 = 16 被判成"还有空位",堆叠上限 1 的每一格都判成没满。
   it('hasRoom 按物品自己的堆叠上限判满栈,不是一律 64', () => {

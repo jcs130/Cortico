@@ -58,9 +58,9 @@ export function chestBlockName(rec: ChestRecord): string {
   return rec.name ?? 'chest';
 }
 
-/** 类别名按整词或 `_query` 后缀匹配，与 collect 共用此规则。 */
-export function matchItemName(query: string, name: string): boolean {
-  return name === query || name.endsWith(`_${query}`);
+/** 已注册 ID 只匹配自身；未注册的类别名按 `_query` 后缀匹配。 */
+export function matchItemName(query: string, name: string, reg?: NameRegistry | null): boolean {
+  return matchMaterialName(reg, query, name);
 }
 
 /** 物品和方块名字的注册表接口；缺失时回退到后缀匹配。 */
@@ -94,13 +94,13 @@ function chestKey(dimension: string, p: { x: number; y: number; z: number }): st
 }
 
 /** 容量包括空槽和同种物品的未满栈；stackMax 必须取自物品注册表。 */
-export function hasRoom(rec: ChestRecord, item: string, stackMax: number): boolean {
+export function hasRoom(rec: ChestRecord, item: string, stackMax: number, reg?: NameRegistry | null): boolean {
   if (rec.usedSlots < rec.slots) return true;
-  return rec.items.some((i) => matchItemName(item, i.name) && i.count % stackMax !== 0);
+  return rec.items.some((i) => matchItemName(item, i.name, reg) && i.count % stackMax !== 0);
 }
 
-export function hasItem(rec: ChestRecord, item: string): boolean {
-  return rec.items.some((i) => matchItemName(item, i.name) && i.count > 0);
+export function hasItem(rec: ChestRecord, item: string, reg?: NameRegistry | null): boolean {
+  return rec.items.some((i) => matchItemName(item, i.name, reg) && i.count > 0);
 }
 
 export class ChestBook {

@@ -221,7 +221,7 @@ import {
  */
 function evaluateExpect(bot: Bot, e: Expectation, gainBase?: number): ExpectVerdict {
   if ('has' in e) {
-    const n = invCountIn(playerInvIn(bot, bot.currentWindow), (name) => matchItemName(e.has.item, name));
+    const n = invCountIn(playerInvIn(bot, bot.currentWindow), (name) => matchItemName(e.has.item, name, bot?.registry));
     if (gainBase !== undefined) {
       const got = n - gainBase;
       return {
@@ -236,7 +236,7 @@ function evaluateExpect(bot: Bot, e: Expectation, gainBase?: number): ExpectVerd
   if ('holding' in e) {
     const held = bot.heldItem?.name ?? null;
     return {
-      met: held !== null && matchItemName(e.holding.item, held),
+      met: held !== null && matchItemName(e.holding.item, held, bot?.registry),
       actual: held ? `手上是${zhName(held)}` : '手上是空的',
       measured: held ? zhName(held) : '空手',
     };
@@ -332,7 +332,7 @@ function collectDropNamesAll(bot: Bot, block: string): string[] {
   if (def) return [...new Set(dropsOf(def))];
   const names = new Set<string>();
   for (const d of Object.values(byName)) {
-    if (d?.name && matchItemName(block, d.name)) for (const n of dropsOf(d)) names.add(n);
+    if (d?.name && matchItemName(block, d.name, bot?.registry)) for (const n of dropsOf(d)) names.add(n);
   }
   return [...names];
 }
@@ -353,7 +353,7 @@ export function causalNeeds(
     const prev = steps[j];
     const produces = prev.skill === 'collect' && bot ? collectDropNamesAll(bot, prev.block) : skillProduces(prev, bot);
     const meet = [...new Set(needs.filter((n) =>
-      produces.some((p) => matchItemName(n, p) || matchItemName(p, n))))];
+      produces.some((p) => matchItemName(n, p, bot?.registry) || matchItemName(p, n, bot?.registry))))];
     if (meet.length > 0) out.push({ step: j + 1, items: meet });
   }
   return out;
@@ -384,11 +384,11 @@ function collectDropName(bot: Bot, block: string): string | null {
   const def = byName[block];
   if (def) return soleDrop(def);
   const members = Object.values(byName)
-    .filter((d): d is { name: string; drops?: unknown[] } => !!d?.name && matchItemName(block, d.name));
+    .filter((d): d is { name: string; drops?: unknown[] } => !!d?.name && matchItemName(block, d.name, bot?.registry));
   if (members.length === 0) return null;
   return members.every((m) => {
     const name = soleDrop(m);
-    return name !== null && matchItemName(block, name);
+    return name !== null && matchItemName(block, name, bot?.registry);
   }) ? block : null;
 }
 
@@ -482,7 +482,7 @@ function stepTargetCell(bot: Bot, call: SkillCall): Cell | null {
 function collectGainBase(bot: Bot, call: SkillCall): number | null {
   if (call.skill !== 'collect' || call.expect !== undefined) return null;
   const e = deriveExpect(bot, call);
-  return e && 'has' in e ? invCount(bot, (name) => matchItemName(e.has.item, name)) : null;
+  return e && 'has' in e ? invCount(bot, (name) => matchItemName(e.has.item, name, bot?.registry)) : null;
 }
 
 /**
@@ -2667,7 +2667,7 @@ export class Executor {
       }
       if (!step.item) continue;
       const rec = this.opts.chests?.get(dimensionOf(bot), target);
-      if (!rec?.observedAt || now - rec.observedAt > 30_000 || hasItem(rec, step.item)) continue;
+      if (!rec?.observedAt || now - rec.observedAt > 30_000 || hasItem(rec, step.item, bot?.registry)) continue;
       return { text: `容器 (${target.x},${target.y},${target.z}) 最近开窗确认没有${zhName(step.item)}。先查看其他容器或重新核验内容；本单不入队，原队列保留`,
         retryAfterMs: 8_000, step, proof: 'missing-item' };
     }
@@ -2715,7 +2715,7 @@ export class Executor {
     const name = itemCustomName(portable) ?? zhName(portable.name);
     const opener = steps[0];
     if (opener?.skill === 'use' && opener.item && !opener.at
-      && matchItemName(opener.item, portable.name)) {
+      && matchItemName(opener.item, portable.name, bot?.registry)) {
       for (const step of steps.slice(1)) {
         if (step.skill !== 'stow' || step.into !== 'open') continue;
         const held = invCount(bot, itemPredOf(bot, step.item, step.pick));
@@ -2725,10 +2725,10 @@ export class Executor {
       }
     }
     for (const step of steps) {
-      if (step.skill === 'stow' && matchItemName(step.item, portable.name)) {
+      if (step.skill === 'stow' && matchItemName(step.item, portable.name, bot?.registry)) {
         return `${name}是随身容器，不要把它当普通玩家头存入箱子。要整理内容，先在同一单执行 use item:${portable.name} + take from:"open"，把物品取到随身栏；再另起一单 stow 到地面箱。窗口在每单结束时自动关闭；原队列保留`;
       }
-      if (step.skill === 'use' && step.item && matchItemName(step.item, portable.name) && step.at) {
+      if (step.skill === 'use' && step.item && matchItemName(step.item, portable.name, bot?.registry) && step.at) {
         try {
           const target = resolveAt(bot, step.at);
           const block = bot.blockAt?.(new Vec3(target.x, target.y, target.z));
@@ -2763,7 +2763,7 @@ export class Executor {
         || (step.skill === 'stow' && step.into === 'open')) from = openedAt;
       if (!from || from.x !== target.x || from.y !== target.y || from.z !== target.z) continue;
       if (step.skill === 'take' && step.item) {
-        const total = rec.items.filter((stack) => matchItemName(step.item!, stack.name))
+        const total = rec.items.filter((stack) => matchItemName(step.item!, stack.name, bot?.registry))
           .reduce((sum, stack) => sum + stack.count, 0);
         if (total <= 0) continue;
         const stackMax = bot.registry.itemsByName?.[step.item]?.stackSize ?? 64;
@@ -2792,13 +2792,13 @@ export class Executor {
     // that stack out when a recent destination snapshot proves the requested
     // amount cannot fit, even if a smaller partial merge would still succeed.
     const transfer = earlierSteps.some((step) => step.skill === 'take'
-      && !!step.item && matchItemName(step.item, item));
+      && !!step.item && matchItemName(step.item, item, bot?.registry));
     if (transfer && this.plannedFreeSlots(bot, target, earlierSteps) <= 0) {
       const stackMax = bot.registry.itemsByName?.[item]?.stackSize ?? 64;
-      const otherMinSlots = rec.items.filter((stack) => !matchItemName(item, stack.name))
+      const otherMinSlots = rec.items.filter((stack) => !matchItemName(item, stack.name, bot?.registry))
         .reduce((slots, stack) => slots + Math.ceil(stack.count
           / (bot.registry.itemsByName?.[stack.name]?.stackSize ?? 64)), 0);
-      const itemCount = rec.items.filter((stack) => matchItemName(item, stack.name))
+      const itemCount = rec.items.filter((stack) => matchItemName(item, stack.name, bot?.registry))
         .reduce((sum, stack) => sum + stack.count, 0);
       // Merged records may hide several partial stacks. This is an upper bound
       // on possible room, so rejecting below it cannot mistake a usable box for full.
@@ -2810,7 +2810,7 @@ export class Executor {
     if (rec.usedSlots < rec.slots) return null;
     // 同名物品可能有可并堆的槽；无法确认 NBT 相同时保守放行，执行时再核对。
     const stackMax = bot.registry.itemsByName?.[item]?.stackSize ?? 64;
-    if (hasRoom(rec, item, stackMax)) return null;
+    if (hasRoom(rec, item, stackMax, bot?.registry)) return null;
     const free = this.plannedFreeSlots(bot, target, earlierSteps);
     const needed = Math.ceil(count / stackMax);
     if (free >= needed) return null;
@@ -3160,7 +3160,7 @@ export class Executor {
         const evidence = entry.admissionRule ? this.takeEvidenceNote(steps, now) : null;
         if ((evidence && entry.admissionRule !== `take.${evidence.proof}`)
           || (entry.takeProof === 'not-container' && isContainer)
-          || (rec?.observedAt && rec.observedAt >= entry.at && hasItem(rec, take.item))) {
+          || (rec?.observedAt && rec.observedAt >= entry.at && hasItem(rec, take.item, bot?.registry))) {
           this.exactFailures.delete(key);
           return null;
         }
@@ -5347,7 +5347,7 @@ export class Executor {
         // 因果边的入料包里本来就有时不拦:闸拦的是「注定落空」,料在手上这一步就不是
         const inBag = (items: string[]): boolean => items.every((n) =>
           playerInvIn(bot, bot.currentWindow).items().some((it) => it.count > 0
-            && (matchItemName(n, it.name) || matchItemName(it.name, n))));
+            && (matchItemName(n, it.name, bot?.registry) || matchItemName(it.name, n, bot?.registry))));
         const upstreamFailed = (n: number): boolean => outcomes[n - 1] !== 'ok' && outcomes[n - 1] !== 'partial';
         const unmet = needs.find((n) =>
           upstreamFailed(n) && !causal?.some((c) => c.step === n && inBag(c.items)));

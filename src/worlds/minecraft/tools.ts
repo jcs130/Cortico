@@ -366,7 +366,7 @@ export function equippedAlready(
   const dest = hand === 'off' ? 'off-hand' : hand === 'main' ? 'hand' : equipDestOf(item, bot.registry);
   if (dest === 'hand') return null;
   const slot = bot.inventory?.slots?.[bot.getEquipmentDestSlot(dest)];
-  if (!slot || !namedLike(item, slot.name) || !itemMatchesPick(pick, slot, bot.registry as never)) return null;
+  if (!slot || !namedLike(item, slot.name, bot?.registry) || !itemMatchesPick(pick, slot, bot.registry as never)) return null;
   return { name: slot.name, where: dest === 'off-hand' ? '挂在副手' : '穿在身上' };
 }
 
