@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CortiV } from '../../bots/cortiv/persona/persona.ts';
-import { ToolCallRecoveryFallback, TOOL_CALL_RECOVERY_DEFAULTS, withoutInputEchoes } from '../../bots/cortiv/persona/tool-call-recovery.ts';
+import { ToolCallRecoveryFallback, TOOL_CALL_RECOVERY_DEFAULTS, withoutInputEchoes, projectToolCallRecovery } from '../../bots/cortiv/persona/tool-call-recovery.ts';
 import { PLANNING_DEFAULTS } from '../../bots/cortiv/persona/planning-review.ts';
 import { Core } from '../../src/core/core.ts';
 import type { EventEnvelope, World } from '../../src/core/types.ts';
@@ -15,6 +15,31 @@ const delivery = (body: string, type = 'handoff'): ContextRecord => message('use
 ] } });
 
 describe('tool interface recovery fallback', () => {
+  it('reports a transcript-shaped reply as unexecuted, without believing or running its written receipt', () => {
+    const text = '[历史工具请求] game_move {"target":[1,2,3]}\n[历史回执] Arrived.';
+    const reply = message('assistant', text, { responseId: 'transcript' });
+    const evidence = message('user', 'Player is still at the original position.');
+    const records = [evidence, reply];
+    const saved = structuredClone(records);
+    const recovery = new ToolCallRecoveryFallback();
+    expect(recovery.notice(records, available)).toContain('没有对应本轮执行记录');
+    expect(projectToolCallRecovery(records, available)).toEqual([evidence]);
+    expect(records).toEqual(saved);
+    expect(recovery.notice([...records, message('assistant', text, { responseId: 'again' })], available)).toBeNull();
+  });
+
+  it('retains quoted transcripts, unknown interfaces and actual executed response groups', () => {
+    const text = '[历史工具请求] game_move {}\n[历史回执] Arrived.';
+    const records = [
+      message('assistant', '```text\n'+text+'\n```'), message('assistant', text.replaceAll('game_move', 'unknown_tool')),
+      message('assistant', '> '+text.replace('\n', '\n> ')),
+      message('assistant', text, { responseId: 'real' }), functionCall('actual', 'game_move', '{}', { responseId: 'real' }),
+      functionResult('actual', 'Blocked by the current wall.'),
+    ];
+    expect(projectToolCallRecovery(records, available)).toEqual(records);
+    expect(new ToolCallRecoveryFallback().notice(records, available)).toBeNull();
+  });
+
   it('corrects an exact typed delivery echo once and excludes it only from future requests', () => {
     const recovery = new ToolCallRecoveryFallback();
     const input = delivery('Internal handoff instructions.');
@@ -164,6 +189,17 @@ describe('CortiV tool interface recovery', () => {
     expect(retry).toBeDefined();
     expect(retry.messages.filter(message => message.role === 'assistant').some(message => message.content === notice)).toBe(false);
     expect(retry.messages.some(message => message.role !== 'assistant' && message.content?.includes(notice))).toBe(true);
+  });
+
+  it('recovers from written historical receipts with the original record retained and the selected native action executed', async () => {
+    const text = '[历史工具请求] game_move {}\n[历史回执] Arrived.';
+    const { core, llm, actions } = await rig([textReply(text), toolReply([{ name: 'game_move', id: 'real-after-transcript' }]), textReply('Done.')]);
+    await vi.waitFor(() => expect(actions()).toBe(1));
+    const retry = llm.calls.find(call => call.messages.some(message => message.content?.includes('没有对应本轮执行记录')))!;
+    expect(retry).toBeDefined();
+    expect(retry.messages.filter(message => message.role === 'assistant').some(message => message.content === text)).toBe(false);
+    expect(JSON.stringify(core.session.records)).toContain('Arrived.');
+    expect(core.session.records.some(record => record.item.type === 'function_call' && record.item.call_id === 'real-after-transcript')).toBe(true);
   });
 
   it('does not retry when the fallback is disabled', async () => {

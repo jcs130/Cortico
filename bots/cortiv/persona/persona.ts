@@ -68,7 +68,7 @@ import { MemoryNoteProvenance, NOTE_PROVENANCE_DIR } from './note-provenance.ts'
 import { memoryIndex } from './memory-index.ts';
 import { StateMemory, STATE_MEMORY_FILE, MEMORY_HISTORY_DIR } from './state-memory.ts';
 import { workspaceTools } from '../../cormini/persona/workspaceTools.ts';
-import { ToolCallRecoveryFallback, TOOL_CALL_RECOVERY_DEFAULTS, withoutInputEchoes, type ToolCallRecoveryConfig } from './tool-call-recovery.ts';
+import { ToolCallRecoveryFallback, TOOL_CALL_RECOVERY_DEFAULTS, projectToolCallRecovery, type ToolCallRecoveryConfig } from './tool-call-recovery.ts';
 import { SleepReview, SLEEP_REVIEW_DEFAULTS, type SleepReviewConfig } from './sleep-review.ts';
 import { SocialMemoryReview, socialReviewPrompt, verifySocialReviewProof } from './social-memory-review.ts';
 import { ViewerConversationRecall, VIEWER_CONVERSATION_RECALL_LIMITS } from './viewer-conversation-recall.ts';
@@ -723,9 +723,7 @@ export class CortiV extends Cormini {
     this.captureRecentSpeech(snapshot);
     this.planningReview?.noteSnapshot(snapshot);
     if (this.core && this.toolCallRecoveryConfig().enabled) {
-      const available = new Set(['read', 'write', 'speak', 'act', 'flow', 'snapshot'].flatMap(tag =>
-        [...this.core!.toolsTagged(tag as import('cortico/core/types.ts').ToolTag)]));
-      const notice = this.toolCallRecovery.notice(snapshot, available);
+      const notice = this.toolCallRecovery.notice(snapshot, this.recoveryTools());
       if (notice) {
         this.core.injectInternal(notice, 'tool-call-recovery');
         this.core.log.emit('warn', '助手正文未形成原生工具调用，已提示一次接口核验', { event: 'tool-call-recovery' });
@@ -744,7 +742,8 @@ export class CortiV extends Cormini {
 
   prepareRequest(ctx: { sessionId: string; round: number; messages: readonly ContextRecord[] }): ContextRecord[] | null {
     const original = ctx.messages;
-    if (this.toolCallRecoveryConfig().enabled) ctx = { ...ctx, messages: withoutInputEchoes(ctx.messages) };
+    if (ctx.sessionId === MAIN && this.toolCallRecoveryConfig().enabled)
+      ctx = { ...ctx, messages: projectToolCallRecovery(ctx.messages, this.recoveryTools()) };
     this.stateMemory.observeRecords(ctx.messages, this.stateEvidenceTools());
     const checkpointViews: Record<string, string> = { recent_memory: this.recentMemoryNote(), memory_index: this.longTermMemoryIndex() };
     const staleCheckpoints = [...new Set(ctx.messages.flatMap(record => (record.context.frame?.events ?? []).flatMap(ref => {
@@ -814,6 +813,11 @@ export class CortiV extends Cormini {
       coveredCheckpoints,
     } });
     return view.messages;
+  }
+
+  private recoveryTools(): Set<string> {
+    return new Set(['read', 'write', 'speak', 'act', 'flow', 'snapshot'].flatMap(tag =>
+      [...this.core?.toolsTagged(tag as import('cortico/core/types.ts').ToolTag) ?? []]));
   }
 
   private stateEvidenceTools(): Set<string> {
