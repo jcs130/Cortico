@@ -173,6 +173,15 @@ World 的重复任务事实保留现场变化与整单终态的区别。即使�
 关闭记录释放阶段名额，旧方案不能重开。整份采用保留后台未列出的原目标，避免无声丢失。
 `amend` 按当前 revision 订正关闭记录的说明；`reopen` 按当前 revision 和新核验证据将误记完成的原阶段恢复为排队，保留关闭历史及其他当前阶段。订正已有目标允许暂时超出容量，新增目标仍需等待名额；重启保留该订正。撤销阶段不能重开。
 见 [`ACTIVITY_AGENDA.md`](persona/ACTIVITY_AGENDA.md)。
+
+`activity_plan review` 带明确 `question` 时使用 `planning.reflectionProvider`（留空继承
+`planning.provider`）及独立的 `reflectionMaxContextTokens`、`reflectionMaxOutputTokens`、
+`reflectionTimeoutMs`。缺省保持原定向复核预算12000/1600 token、120秒；周期日程仍用常规预算。
+连接引用和阅读预算每次受理时绑定，前台provider不改变。思考参数由选中provider实际映射，
+不能只依据连接名称或界面档位断言云端已采用；`planning-context`与`planning/state.lastRequest`
+记录实际路由、材料估算和预算。显式给 `publicTopic` 时仅在受理后投递一次
+`reflection_status`，由主意识决定是否口播研究主题；忙碌拒收、周期任务和无主题的自动复核不播报。
+观众只接收目标、进度和已核验决策摘要，原始推理增量不进入演出。失败、过期和未执行建议不当作完成。
 玩法资料的 `detail` 可以只传唯一的 `activity_id`；跨主题重名时需用 `topic_key`
 消歧，不根据上次展开的主题猜测。`guides` 仍需要主题编号，资料读取不代表学会或执行。
 World 请托的后台构思用 `cognition.maxHistoryTokens` 选择近期材料及任务说明。

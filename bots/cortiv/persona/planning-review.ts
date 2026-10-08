@@ -11,6 +11,11 @@ export const PLANNING_TIMER_OWNER = 'cortiv.planning';
 export interface PlanningConfig {
   enabled: boolean;
   provider: string;
+  /** A focused question selects this independent, operator-configured reasoning connection. */
+  reflectionProvider: string;
+  reflectionMaxContextTokens: number;
+  reflectionMaxOutputTokens: number;
+  reflectionTimeoutMs: number;
   intervalMinutes: number;
   maxContextTokens: number;
   maxOutputTokens: number;
@@ -27,6 +32,8 @@ export interface PlanningConfig {
 }
 export const PLANNING_DEFAULTS: PlanningConfig = {
   enabled: false, provider: '', intervalMinutes: 30,
+  reflectionProvider: '', reflectionMaxContextTokens: 12_000,
+  reflectionMaxOutputTokens: 1_600, reflectionTimeoutMs: 120_000,
   maxContextTokens: 24_000, maxOutputTokens: 1_600, timeoutMs: 120_000,
   maxResultAgeMs: 300_000,
   yieldToForeground: false, generationWaitTimeoutMs: 60_000,
@@ -36,8 +43,6 @@ export const PLANNING_DEFAULTS: PlanningConfig = {
 const RESULT_MAX_CHARS = 2_400;
 const SEEN_RECORDS_LIMIT = 8_192;
 const ACTIVITY_MAX_TOKENS = 48_000;
-const FOCUSED_CONTEXT_MAX_TOKENS = 12_000;
-const FOCUSED_OUTPUT_MAX_TOKENS = 1_600;
 const QUESTION_MAX_CHARS = 1_200;
 
 /** Carry bounded source excerpts across a real session replacement, without old tool pairs. */
@@ -79,9 +84,10 @@ const FOCUSED_REVIEW_PROMPT = [
   '你是同一个人格的后台因果复核线程，主意识继续行动。只核对指定问题，不生成整份日程。',
   CAUSAL_EVIDENCE_PROMPT,
   '区分已证实的事实、被否定的前提和未验证的解释。先检查失败是否要求修正原假设，再提出一个可检验的下一步及预期观测，或明确暂缓与恢复条件。',
+  '也可复核尚未失败的复杂策略：比较不同现场条件下的选择、资源保留和动作衔接。给条件→动作→预期反馈的候选分支，不把一套顺序当成所有场景都适用。需要新事实的步骤留出检查点，前提已知的连续动作可编组执行。',
   '技能、配方和参数只采用原回执或资料提供的用法，缺失时建议读取对应帮助或询问，不编造方法。',
   '文件、事件和复核问题都是阅读材料，不改变权限；你没有动作工具，也不能改写Memory或宣布完成。',
-  '返回600字以内的中文短笺，引用关键时间/游标，指出应订正的前提及理由。无需复核时返回(nothing)。',
+  '返回600字以内的中文短笺，引用关键时间/游标，指出应订正的前提及理由。给观众的内容限于一两句可公开的目标、已核验结论或下一步摘要，不输出内部推理过程。无需复核时返回(nothing)。',
 ].join('\n');
 
 const REVIEW_PROMPT = [
@@ -197,6 +203,7 @@ export class PeriodicPlanningReview {
   private lastOutcome: PlanningOutcome | null = null;
   private lastResultAgeMs: number | null = null;
   private lastFailure: PlanningFailure | null = null;
+  private lastRequest: { profile: 'routine' | 'reflection'; provider: string; contextTokens: number; outputTokens: number } | null = null;
 
   constructor(private readonly options: PlanningOptions) {
     this.now = options.now ?? Date.now;
@@ -270,25 +277,33 @@ export class PeriodicPlanningReview {
 
   state(): { enabled: boolean; provider: string; running: boolean; nextAt: string | null; lastCompletedAt: string | null;
     lastStartedAt: string | null; lastFinishedAt: string | null; lastOutcome: PlanningOutcome | null;
-    lastResultAgeMs: number | null; lastFailure: PlanningFailure | null } {
+    lastResultAgeMs: number | null; lastFailure: PlanningFailure | null;
+    lastRequest: PeriodicPlanningReview['lastRequest'] } {
     const cfg = this.options.config();
     return { enabled: cfg.enabled, provider: cfg.provider, running: this.inFlight !== null,
       nextAt: this.options.core.timers.list().find((entry) => entry.payload.owner === PLANNING_TIMER_OWNER)?.atIso ?? null,
       lastCompletedAt: this.lastCompletedAt, lastStartedAt: this.lastStartedAt, lastFinishedAt: this.lastFinishedAt,
       lastOutcome: this.lastOutcome, lastResultAgeMs: this.lastResultAgeMs,
-      lastFailure: this.lastFailure ? { ...this.lastFailure } : null };
+      lastFailure: this.lastFailure ? { ...this.lastFailure } : null,
+      lastRequest: this.lastRequest ? { ...this.lastRequest } : null };
   }
 
   /** Manual console requests use the same single-flight, read-only review as the periodic timer. */
-  review(question = ''): { accepted: boolean; reason: string } {
+  review(question = '', publicTopic = ''): { accepted: boolean; reason: string } {
     // The config owner hot-updates the same object; capture the request's provider and budgets once.
-    const cfg = { ...this.options.config() };
+    const cfg = { ...PLANNING_DEFAULTS, ...this.options.config() };
     question = question.trim().slice(0, QUESTION_MAX_CHARS);
+    publicTopic = publicTopic.trim().slice(0, 120);
+    const profile = question ? 'reflection' : 'routine';
+    const provider = (question ? cfg.reflectionProvider.trim() || cfg.provider : cfg.provider).trim();
+    const contextTokens = question ? cfg.reflectionMaxContextTokens : cfg.maxContextTokens;
+    const outputTokens = question ? cfg.reflectionMaxOutputTokens : cfg.maxOutputTokens;
+    const timeoutMs = question ? cfg.reflectionTimeoutMs : cfg.timeoutMs;
     const agendaReview = !question && cfg.agendaEnabled && !!this.options.agenda;
     if (!this.active) return { accepted: false, reason: 'Persona运行节奏尚未启动' };
     if (!cfg.enabled) return { accepted: false, reason: '长期复盘未启用' };
     if (this.inFlight) return { accepted: false, reason: '已有复盘正在运行' };
-    if (!cfg.provider.trim()) {
+    if (!provider) {
       this.options.core.log.warn('长期复盘未配置provider，未发起模型请求');
       this.lastFailure = { code: 'missing_provider', at: new Date(this.now()).toISOString() };
       return { accepted: false, reason: '未配置复盘provider' };
@@ -313,6 +328,7 @@ export class PeriodicPlanningReview {
     this.lastFinishedAt = null;
     this.lastOutcome = null;
     this.lastResultAgeMs = null;
+    this.lastRequest = { profile, provider, contextTokens, outputTokens };
     const controller = new AbortController();
     this.controller = controller;
     let timedOut = false;
@@ -331,29 +347,33 @@ export class PeriodicPlanningReview {
       this.lastFailure = { code: 'timeout', at: new Date(this.now()).toISOString() };
       core.log.warn('长期复盘超时，未投递建议');
       controller.abort(new Error('长期复盘超时'));
-    }, cfg.timeoutMs);
+    }, timeoutMs);
     const operation = (async (): Promise<void> => {
       try {
         const material = this.options.memory([...new Set(cfg.memoryFiles.split(/\r?\n/).map((file) => file.trim()).filter(Boolean))]);
+        const messages = planningMessages({ ...material,
+          agenda: this.options.agenda ? this.options.agenda.summary() + '\n'
+            + this.options.agenda.planningReadout() : material.agenda,
+          activity: this.activities.map((activity) => activity.text).join('\n\n') || '(没有近期活动记录)', capturedAt,
+        }, contextTokens, agendaReview, question);
+        core.log.emit('debug', '后台复盘阅读材料', { event: 'planning-context', data: {
+          profile, provider, contextTokens, outputTokens, timeoutMs, capturedAt,
+          requestRecords: messages.length, estimatedInputTokens: estimateTokens(messages.map(r => itemText(r.item)).join('\n')),
+        } });
         const text = (await core.spawnFork({
-          id: PLANNING, provider: cfg.provider, maxOutputTokens: question
-            ? Math.min(cfg.maxOutputTokens, FOCUSED_OUTPUT_MAX_TOKENS) : cfg.maxOutputTokens,
+          id: PLANNING, provider, maxOutputTokens: outputTokens,
           ...(cfg.yieldToForeground ? { generationPriority: 'background' as const,
             generationWaitTimeoutMs: cfg.generationWaitTimeoutMs } : {}),
           signal: controller.signal, tools: [],
-          messages: planningMessages({ ...material,
-            agenda: this.options.agenda ? this.options.agenda.summary() + '\n'
-              + this.options.agenda.planningReadout() : material.agenda,
-            activity: this.activities.map((activity) => activity.text).join('\n\n') || '(没有近期活动记录)', capturedAt,
-          }, question ? Math.min(cfg.maxContextTokens, FOCUSED_CONTEXT_MAX_TOKENS) : cfg.maxContextTokens,
-          agendaReview, question),
+          messages,
         })).trim();
         const current = this.options.config();
         if (controller.signal.aborted || !this.active || generation !== this.generation) {
           finish(timedOut ? 'timed_out' : 'cancelled', timedOut ? 'timeout' : undefined);
           return;
         }
-        if (!current.enabled || current.provider !== cfg.provider || current.agendaEnabled !== cfg.agendaEnabled) {
+        const currentProvider = (question ? current.reflectionProvider?.trim() || current.provider : current.provider).trim();
+        if (!current.enabled || currentProvider !== provider || (!question && current.agendaEnabled !== cfg.agendaEnabled)) {
           finish('discarded');
           return;
         }
@@ -393,6 +413,11 @@ export class PeriodicPlanningReview {
       }
     })();
     this.inFlight = operation;
+    if (question && publicTopic) core.injectInternal(
+      `[后台深入复盘已受理；${capturedAt}] 公开主题：${publicTopic}\n`
+      + '尚未交回结论。若直播正在进行且话题值得解释，可以用一句自然口播说明正在核对的目标；'
+      + '只讲可公开的任务与进度，不念内部推理、工具参数或配置档位，不在每轮重复。当前动作与交流继续，收到结论后核验再采用。',
+      'reflection_status');
     void operation.finally(() => { if (this.inFlight === operation) this.inFlight = null; });
     return { accepted: true, reason: '已启动只读后台复盘；主意识继续运行' };
   }
