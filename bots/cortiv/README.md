@@ -29,6 +29,11 @@ pnpm start cortiv
 
 默认将外部事件正文放入合成的 `external_event_frame` 工具回执，user 消息用于内部系统文本。
 
+## 活动与恢复
+
+`persona/ORIENTATION.md` 要求按自己的现场状态判断恢复需要与结束条件，恢复够用后接回行动。
+同伴的休息安排保留发言人归属；技能冷却和等人只挂起相关步骤。日常休闲由人格结合兴趣选择。
+
 ## 按需参考资料
 
 `references.indexFiles` 配置工作区中的资料索引；`references.enabled` 开启后，主会话与长期复盘可见有界主题目录。
