@@ -177,6 +177,18 @@ describe('renderHandoffNote', () => {
     expect(note.entries).toBe(1);
   });
 
+  it('expires typed handoff instructions while retaining adjacent observations and another source with the same type', () => {
+    const note = oneNote(frameMsg('mixed', [
+      { source: 'persona', type: 'handoff', text: 'Previous session delivery instructions.' },
+      { source: 'game', type: 'handoff', text: 'The player handed over a key.' },
+      { text: 'The task failed because its path was blocked.' },
+    ]));
+    expect(note.text).not.toContain('Previous session delivery instructions.');
+    expect(note.text).toContain('The player handed over a key.');
+    expect(note.text).toContain('The task failed because its path was blocked.');
+    expect(note.entries).toBe(2);
+  });
+
   it('逐字相同的条目只留最后一次,并注明重复了几次', () => {
     const snapshot: ChatMessage[] = [
       ...frameMsg('evf_1', [

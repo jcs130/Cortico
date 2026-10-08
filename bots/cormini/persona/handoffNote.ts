@@ -123,7 +123,8 @@ function deliveryEntries(m: ContextRecord, skipHeader: boolean): Entry[] {
     if (head.trim()) out.push({ body: head, ts: m.context.ts });
   }
   for (const r of refs) {
-    if (r.type === HANDOFF_NOTE_TYPE) continue;
+    // A previous handoff's delivery instructions expire with that session; they are not experience.
+    if (r.source === 'persona' && (r.type === HANDOFF_NOTE_TYPE || r.type === 'handoff')) continue;
     const text = textOf(m).slice(r.start, r.start + r.chars);
     if (!text.trim()) continue;
     const entry: Entry = { body: text, ts: r.ts, speech: r.tags?.includes('speak') };

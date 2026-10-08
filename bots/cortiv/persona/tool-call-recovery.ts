@@ -1,10 +1,42 @@
-/** ToolCallRecoveryFallback: bounded advice for text that imitates an available native tool call. */
+/** ToolCallRecoveryFallback: bounded advice for pseudo calls or exact delivery-frame echoes. */
 import type { EventEnvelope } from 'cortico/core/types.ts';
 import type { ContextRecord } from 'cortico/protocol/open-responses/context.ts';
 import { hasRole, textOf } from 'cortico/protocol/open-responses/context-helpers.ts';
 
 export interface ToolCallRecoveryConfig { enabled: boolean; }
 export const TOOL_CALL_RECOVERY_DEFAULTS: ToolCallRecoveryConfig = { enabled: false };
+
+/** Exact copies of typed delivery inputs are not new observations or executed actions. */
+function inputEcho(text: string, inputs: readonly ContextRecord[]): boolean {
+  const body = text.trim();
+  if (!body) return false;
+  return inputs.some(record => {
+    const refs = record.context.frame?.events;
+    if (!refs?.length || !(hasRole(record, 'user') || record.item.type === 'function_call_output')) return false;
+    const source = textOf(record);
+    if (body === source.trim()) return true;
+    return refs.some(ref => ref.source === 'persona' && ref.type === 'handoff'
+      && body === source.slice(ref.start, ref.start + ref.chars).trim());
+  });
+}
+
+/** Request-only repair: keep the ledger intact, but do not teach the model to repeat its inputs. */
+export function withoutInputEchoes(records: readonly ContextRecord[]): ContextRecord[] {
+  const echoed = new Set<ContextRecord>();
+  for (let index = 0; index < records.length; index++) {
+    const entry = records[index];
+    if (entry.context.head || !hasRole(entry, 'assistant')) continue;
+    const output = entry.context.responseId
+      ? records.filter(record => !record.context.head && record.context.responseId === entry.context.responseId)
+      : [entry];
+    if (output.some(record => record.item.type === 'function_call')) continue;
+    const text = output.filter(record => hasRole(record, 'assistant')).map(textOf).join('\n');
+    if (inputEcho(text, records.slice(0, index))) {
+      for (const record of output) if (hasRole(record, 'assistant') || record.item.type === 'reasoning') echoed.add(record);
+    }
+  }
+  return records.filter(record => !echoed.has(record));
+}
 
 export class ToolCallRecoveryFallback {
   private lastResponse: string | null = null;
@@ -37,6 +69,10 @@ export class ToolCallRecoveryFallback {
     }
     if (this.advised) return null;
     const text = output.filter(record => hasRole(record, 'assistant')).map(textOf).join('\n');
+    if (inputEcho(text, records.slice(0, latest))) {
+      this.advised = true;
+      return '[工具接口核验] 刚才回复原样复制了已经收到的事件帧或交接通知，没有原生工具调用，也没有执行行动。原始事件和实际回执仍在；请根据当前现场与目标重新选择行动，通过当前原生工具接口执行。需要等待时可以结束本轮。不必复述内部通知。';
+    }
     const names = new Set<string>();
     let fenced = false;
     for (const line of text.split(/\r?\n/)) {

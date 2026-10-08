@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CortiV } from '../../bots/cortiv/persona/persona.ts';
-import { ToolCallRecoveryFallback, TOOL_CALL_RECOVERY_DEFAULTS } from '../../bots/cortiv/persona/tool-call-recovery.ts';
+import { ToolCallRecoveryFallback, TOOL_CALL_RECOVERY_DEFAULTS, withoutInputEchoes } from '../../bots/cortiv/persona/tool-call-recovery.ts';
 import { PLANNING_DEFAULTS } from '../../bots/cortiv/persona/planning-review.ts';
 import { Core } from '../../src/core/core.ts';
 import type { EventEnvelope, World } from '../../src/core/types.ts';
@@ -10,8 +10,48 @@ import { FakeLLM, makeCfg, makeLoaded, makeTmpDir, textReply, toolReply } from '
 const available = new Set(['game_move', 'game_observe']);
 const fake = (id: string, tool = 'game_move'): ContextRecord[] => [message('assistant', `[调用] ${tool} {"target":[1,2,3]}`, { responseId: id })];
 const event = (patch: Partial<EventEnvelope>): EventEnvelope => ({ cursor: 1, ts: new Date().toISOString(), type: 'tick', source: 'persona', origin: 'internal', text: 'Input.', ...patch });
+const delivery = (body: string, type = 'handoff'): ContextRecord => message('user', body, { frame: { events: [
+  { cursor: 1, ts: '2026-01-01T00:00:00Z', source: 'persona', type, start: 0, chars: body.length },
+] } });
 
 describe('tool interface recovery fallback', () => {
+  it('corrects an exact typed delivery echo once and excludes it only from future requests', () => {
+    const recovery = new ToolCallRecoveryFallback();
+    const input = delivery('Internal handoff instructions.');
+    const echo = message('assistant', 'Internal handoff instructions.', { responseId: 'echo' });
+    const records = [input, echo];
+    const saved = structuredClone(records);
+    expect(recovery.notice(records, available)).toContain('原样复制');
+    expect(recovery.notice([...records, message('assistant', 'Internal handoff instructions.', { responseId: 'repeat' })], available)).toBeNull();
+    expect(withoutInputEchoes(records)).toEqual([input]);
+    expect(records).toEqual(saved);
+  });
+
+  it('recognizes a handoff event within a mixed frame and a full synthetic event receipt', () => {
+    const internal = 'Internal handoff instructions.';
+    const input = delivery(internal);
+    input.item = { ...input.item, content: 'Header\n' + internal + '\nWorld observations.' } as typeof input.item;
+    input.context.frame!.events[0].start = 'Header\n'.length;
+    expect(withoutInputEchoes([input, message('assistant', internal)])).toEqual([input]);
+    const receipt = functionResult('frame', 'Observed delivery frame.', { frame: { events: [
+      { cursor: 2, ts: '2026-01-01T00:00:01Z', source: 'game', type: 'game.task', start: 0, chars: 24 },
+    ] } });
+    const call = functionCall('frame', 'external_event_frame', '{}');
+    expect(withoutInputEchoes([call, receipt, message('assistant', 'Observed delivery frame.')])).toEqual([call, receipt]);
+  });
+
+  it('retains discussion, untyped user quotes, native-action responses and observations received later', () => {
+    const body = 'Internal handoff instructions.';
+    const input = delivery(body);
+    const records = [
+      message('user', 'An ordinary human quote.'), message('assistant', 'An ordinary human quote.'),
+      message('assistant', body), input, message('assistant', 'I read: ' + body),
+      message('assistant', body, { responseId: 'native' }), functionCall('real', 'game_move', '{}', { responseId: 'native' }),
+      functionResult('real', 'Executed.'),
+    ];
+    expect(withoutInputEchoes(records)).toEqual(records);
+  });
+
   it('reports only the verified absence of a native call and never parses text arguments', () => {
     const recovery = new ToolCallRecoveryFallback();
     const records = fake('first');
@@ -109,6 +149,21 @@ describe('CortiV tool interface recovery', () => {
     await vi.waitFor(() => expect(llm.calls).toHaveLength(3));
     expect(actions()).toBe(1);
     expect(core.session.records).toContainEqual(expect.objectContaining({ item: expect.objectContaining({ type: 'function_call', call_id: 'native', arguments: '{"target":[8,9,10]}' }) }));
+  });
+
+  it('recovers from a real internal delivery echo without replaying it as an assistant example', async () => {
+    const { core, llm, actions } = await rig([textReply('Initialized.')]);
+    await vi.waitFor(() => expect(core.loop.getStatus().batchesHandled).toBe(1));
+    const notice = 'Internal handoff delivery instructions.';
+    llm.script(textReply(notice), toolReply([{ name: 'game_move', id: 'after-echo' }]), textReply('Done.'));
+    core.loop.injectInternal(notice, 'handoff');
+    await vi.waitFor(() => expect(actions()).toBe(1));
+    expect(core.session.records).toContainEqual(expect.objectContaining({ item: expect.objectContaining({ role: 'assistant',
+      content: expect.arrayContaining([expect.objectContaining({ text: notice })]) }) }));
+    const retry = llm.calls.find(call => call.messages.some(message => message.content?.includes('原样复制')))!;
+    expect(retry).toBeDefined();
+    expect(retry.messages.filter(message => message.role === 'assistant').some(message => message.content === notice)).toBe(false);
+    expect(retry.messages.some(message => message.role !== 'assistant' && message.content?.includes(notice))).toBe(true);
   });
 
   it('does not retry when the fallback is disabled', async () => {

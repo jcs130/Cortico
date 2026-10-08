@@ -21,6 +21,9 @@ Open `http://127.0.0.1:7788/` and talk to it in the terminal view.
 
 ## What it does
 
+Handoff notes retain observations and tool receipts. Typed Persona handoff delivery instructions
+expire with their session and are excluded from the next note.
+
 - **The workspace is the memory.** `workspace/` is the whole of it. The bot works on it
   with the standard file toolset: `read_file` (short files whole; pages default to 200 lines
   and 6000 Unicode characters, with `offset` and `column` for continuation; explicit
