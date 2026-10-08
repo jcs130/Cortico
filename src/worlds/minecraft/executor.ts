@@ -5555,7 +5555,8 @@ export class Executor {
           if (ctx.aborted()) return;
           promoteTemporaryScaffold(bot, intended);
           if (i === steps.length - 1 && !bot.currentWindow && !flightState(bot).flying
-            && ['goto', 'find', 'surface', 'build', 'collect', 'look', 'land'].includes(call.skill)
+            && ['goto', 'find', 'surface', 'build', 'collect', 'land'].includes(call.skill)
+            && !(call.skill === 'goto' && call.walkOnly)
             && !steps.some((step) => 'dryRun' in step && step.dryRun)) {
             try {
               skillResult += await reclaimPendingTemporaryScaffold(bot, ctx);

@@ -9,6 +9,7 @@ import { installMineflayerFixes } from '../../../src/worlds/minecraft/mineflayer
 import { armTemporaryScaffoldPlacement, beginTemporaryScaffold, closeTemporaryScaffold, prepareTemporaryScaffoldPlacement,
   recordTemporaryScaffold, reclaimTemporaryScaffold, reclaimPendingTemporaryScaffold,
   pendingTemporaryScaffolds, promoteTemporaryScaffold } from '../../../src/worlds/minecraft/temporary-scaffold.ts';
+import { makeExecutorOn, waitUntil } from './executor-harness.ts';
 
 const require = createRequire(import.meta.url);
 const dependency = createRequire(require.resolve('mineflayer'));
@@ -342,6 +343,57 @@ describe('strict deferred temporary supports', () => {
     expect(await reclaimPendingTemporaryScaffold(r.bot, r.ctx)).toContain('仍在实体脚下');
     expect(await reclaimPendingTemporaryScaffold(r.bot, r.ctx)).toBe('');
     expect(r.dug).toEqual([]); expect(r.reports).toHaveLength(5);
+  });
+});
+
+describe('deferred cleanup through the executor', () => {
+  it.each(['look', 'walkOnly'] as const)('preserves the %s contract with an old reachable temporary support', async (action) => {
+    vi.useFakeTimers();
+    try {
+      const r = rig();
+      r.place();
+      Object.assign(r.bot.entity, { height: 1.62, yaw: 0, pitch: 0 });
+      Object.assign(r.bot, {
+        health: 20, food: 20, players: {},
+        waitForTicks: async () => undefined,
+        clearControlStates: () => undefined, setControlState: () => undefined,
+        pathfinder: { stop: () => undefined, setGoal: () => undefined,
+          movements: { canDig: true, scafoldingBlocks: [] },
+          goto: async (goal: { x?: number; y?: number; z?: number }) => {
+            const p = r.bot.entity.position;
+            r.bot.entity.position = new Vec3(goal.x ?? p.x, goal.y ?? p.y, goal.z ?? p.z);
+          } },
+        lookAt: async (point: Vec3) => {
+          const delta = point.minus(r.bot.entity.position.offset(0, 1.62, 0));
+          r.bot.entity.yaw = Math.atan2(-delta.x, -delta.z);
+          r.bot.entity.pitch = Math.atan2(delta.y, Math.hypot(delta.x, delta.z));
+        },
+      });
+      const nativeDig = r.bot.dig.bind(r.bot);
+      r.bot.dig = async (block: Block) => {
+        await r.bot.lookAt(block.position.offset(.5, .5, .5), true);
+        await nativeDig(block);
+      };
+      const { exec, reports } = makeExecutorOn(r.bot);
+      const before = r.bot.entity.position.clone();
+      exec.submit([action === 'look' ? { skill: 'look', at: [0, 68, -5] }
+        : { skill: 'goto', at: [1, 64, 0], exact: true, walkOnly: true }]);
+      await waitUntil(() => reports.length === 1);
+      expect(reports[0].kind).toBe('done');
+      expect(r.dug).toEqual([]);
+      expect(r.bot.blockAt(r.at())!.name).toBe('oak_planks');
+      expect(pendingTemporaryScaffolds(r.bot)).toHaveLength(1);
+      if (action === 'look') {
+        expect(r.bot.entity.position).toEqual(before);
+        expect(r.bot.entity.yaw).toBeCloseTo(0);
+        expect(r.bot.entity.pitch).toBeGreaterThan(0);
+      }
+      exec.submit([{ skill: 'goto', at: [4, 64, 0], exact: true }]);
+      await waitUntil(() => reports.length === 2);
+      expect(reports[1].kind).toBe('done');
+      expect(r.dug).toEqual([r.at().toString()]);
+      expect(pendingTemporaryScaffolds(r.bot)).toEqual([]);
+    } finally { vi.useRealTimers(); }
   });
 });
 
