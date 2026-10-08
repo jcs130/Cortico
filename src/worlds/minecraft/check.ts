@@ -578,12 +578,15 @@ export function blueprintCheckText(site: CheckSite | null, key: string, world: C
   if (diff.missing === 0 && conflicts === 0 && diff.unknown === 0) {
     return { verdict: 'ok', text: `${head},整张图都到位了` };
   }
-  const bits: string[] = [];
+  const bits: string[] = ['尚未通过完整核验'];
   if (diff.missing > 0) {
     const samples = missingSamples(site, anchor, world, CHECK_SAMPLE_CAP);
     bits.push(`缺 ${diff.missing} 格${samples.length > 0 ? `(${samples.join('、')}${diff.missing > samples.length ? ' 等' : ''})` : ''}`);
   }
-  if (conflicts > 0) bits.push(`冲突 ${conflicts} 格`);
+  if (conflicts > 0) {
+    const samples = diff.conflicts.map((conflict) => `${posText(conflict.pos)} 该是${zhName(conflict.expect)},现在是${zhName(conflict.actual)}`);
+    bits.push(`冲突 ${conflicts} 格(${samples.join('、')}${conflicts > samples.length ? ' 等' : ''})`);
+  }
   if (diff.unknown > 0) bits.push(`${diff.unknown} 格没加载,没对全(这些格的现状未知)`);
   return {
     verdict: diff.missing > 0 || conflicts > 0 ? 'bad' : 'unknown',
