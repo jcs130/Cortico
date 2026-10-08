@@ -382,7 +382,7 @@ export async function reclaimTemporaryScaffold(bot: Bot, ctx: SkillContext, scop
     })) },
   });
   // Keep every audit entry, but do not repeatedly inject an unchanged retained
-  // scene into the model's context on each later movement/look completion.
+  // scene into the model's context on each later cleanup-eligible completion.
   const notice = JSON.stringify({ retained: retained.map(({ record, reason }) => ({
     seq: record.seq, dimension: record.dimension, x: record.x, y: record.y, z: record.z, reason,
   })), inventory: [...invSnapshot(bot)].sort(([a], [b]) => a.localeCompare(b)) });
