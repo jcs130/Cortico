@@ -20,6 +20,7 @@ import { dropGoal, findEntity, gotoGoal, levelTravelGoal, walkOnlyPath } from '.
 import { zhEntity } from './names.ts';
 import { chooseHybridWeapon, type HybridWeapon } from './ranged.ts';
 import { zhErrorText } from './receipt.ts';
+import { itemsInReach } from './inventory.ts';
 
 const { goals } = pathfinderPkg;
 
@@ -83,7 +84,7 @@ export function weaponScore(name: string): number {
 export function bestWeapon(bot: Bot) {
   let best: ReturnType<Bot['inventory']['items']>[number] | null = null;
   let score = -1;
-  for (const item of bot.inventory.items()) {
+  for (const item of itemsInReach(bot)) {
     const s = weaponScore(item.name);
     if (s > score) { score = s; best = item; }
   }

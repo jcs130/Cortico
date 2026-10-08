@@ -207,6 +207,41 @@ describe('战斗补给', () => {
     session.stop();
   });
 
+  it('战斗空档能吃副手口粮，满包交换后恢复武器且不丢物品', async () => {
+    const { bot, attacks } = combatRigBot([foe(7, 'zombie', 9)]);
+    const sword = { name: 'iron_sword', type: 1, count: 1 };
+    const bread = { name: 'bread', type: 2, count: 2 };
+    const bag = [sword, ...Array.from({ length: 35 }, () => ({ name: 'cobblestone', type: 3, count: 64 }))];
+    const slots = Array(46).fill(null);
+    slots[45] = bread;
+    Object.assign(bot, { food: 12, health: 15, heldItem: sword, inventory: { items: () => bag, slots } });
+    (bot as any).registry.foodsByName = { bread: { foodPoints: 5 } };
+    (bot as any).equip = async (item: typeof sword) => {
+      if (item === slots[45]) {
+        slots[45] = bag[0];
+        bag[0] = item;
+      }
+      (bot as any).heldItem = item;
+    };
+    (bot as any).consume = async () => {
+      await sleep(1_600);
+      bread.count -= 1;
+      (bot as any).food = 17;
+    };
+    (bot as any).deactivateItem = () => {};
+    const { session, events } = rig(bot);
+    session.onHurtBy(7, 'zombie');
+    await drive(bot, 4_500);
+    expect(bread.count).toBe(1);
+    expect((bot as any).heldItem.name).toBe('iron_sword');
+    expect(slots[45]).toBe(bread);
+    expect(bag).toHaveLength(36);
+    expect(bag.filter(item => item.name === 'cobblestone')).toHaveLength(35);
+    expect(events.some(event => event.text.includes('吃了一个面包'))).toBe(true);
+    expect(attacks).toHaveLength(0);
+    session.stop();
+  });
+
   it('副手持盾时面对远程敌人会举盾', async () => {
     const { bot } = combatRigBot([foe(7, 'skeleton', 6)]);
     (bot as any).inventory.slots[45] = { name: 'shield' };

@@ -111,7 +111,7 @@ import {
 import { ChestBook } from './chests.ts';
 import { DirectionalSweepBook } from './directional-sweeps.ts';
 import { containerStacks } from './containers.ts';
-import { invItemNamed } from './inventory.ts';
+import { invItemNamed, itemsInReach } from './inventory.ts';
 import { selectionMenuTitle } from './window-semantics.ts';
 import { readEnchants } from './item-facts.ts';
 import { ItemBreakDecoder, type ItemBreakFact } from './item-break.ts';
@@ -7267,7 +7267,7 @@ export class MinecraftWorld implements World {
       || !this.executor || !bot.entity?.onGround) return;
     if (this.executor.hasPendingEat() || this.executor.status().hold) return;
     const foods = (bot.registry?.foodsByName ?? {}) as Record<string, { foodPoints?: number; saturation?: number }>;
-    const item = chooseRoutineFood(bot.food ?? 20, bot.inventory?.items() ?? [], foods);
+    const item = chooseRoutineFood(bot.food ?? 20, itemsInReach(bot), foods);
     if (!item) return;
     if (hazardTouch(bot).touching) return;
     this.lastAutoEatAttemptAt = now;
@@ -8184,7 +8184,10 @@ export class MinecraftWorld implements World {
     const goals = goalSnapshotLine(this.goals().list, (k) => this.blueprints.noteOf(k));
     const marks = mapSnapshotLine(this.markTable().list);
     const blueprints = this.blueprints.siteFacts();
-    const foodReserve = renderFoodReserveReadout(snap.inventory,
+    const offhand = snap.equipment.find(piece => piece.slot === 'offhand');
+    const foodStacks = [...snap.inventory,
+      ...(offhand?.count === undefined ? [] : [{ name: offhand.name, count: offhand.count }])];
+    const foodReserve = renderFoodReserveReadout(foodStacks,
       this.bridge?.bot?.registry?.foodsByName ?? {}, snap.invSynced === true, zhName);
     const spawn = this.personalSpawn;
     const respawn = spawn

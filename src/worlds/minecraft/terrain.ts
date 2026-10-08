@@ -119,6 +119,7 @@ export type GearSlot = 'head' | 'chest' | 'legs' | 'feet' | 'offhand';
 export interface GearPiece {
   slot: GearSlot;
   name: string;
+  count?: number;
   /** 不带耐久的物品(南瓜头)、或损耗读不到时为 null */
   durability: Durability | null;
   enchantments: ItemEnchant[];
@@ -352,7 +353,7 @@ export function snapshotFingerprint(s: WorldSnapshot): string {
     narrateCursor(s),
     // 穿着什么、身上有什么效果:一件盔甲耗尽消失、中毒开始与抗火到期都不是她下的令,
     // 快照不报她就无从知道。耐久与剩余秒不进(每秒都在动,进了这道闸就等于没有)
-    s.equipment.map((p) => `${p.slot}:${p.name}`).sort().join(','),
+    s.equipment.map((p) => `${p.slot}:${p.name}x${p.count ?? '?'}`).sort().join(','),
     s.effects.map((e) => `${e.name}${e.level}`).sort().join(','),
     s.standingOn ?? 'air', s.biome,
     `hostile${hostiles.length}${nearest ? `@${nearest.direction ?? '-'}${distBucket(nearest.distance)}` : ''}`,
@@ -1693,6 +1694,7 @@ function readEquipment(bot: any): GearPiece[] {
     if (!it?.name) continue;
     out.push({
       slot, name: it.name, durability: readDurability(it), enchantments: readEnchants(it, bot.registry),
+      ...(typeof it.count === 'number' && Number.isInteger(it.count) && it.count > 0 ? { count: it.count } : {}),
     });
   }
   return out;

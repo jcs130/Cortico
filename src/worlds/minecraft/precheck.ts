@@ -126,7 +126,7 @@ function precheckEat(
   if (!foods[call.item] && !DRINKABLES[call.item]) {
     return { level: 'hard', text: notFoodText(bot, call.item), rule: 'eat.notFood' };
   }
-  if (!bot.inventory.items().some((i) => i.name === call.item && i.count > 0)) {
+  if (!itemsInReach(bot).some((i) => i.name === call.item && i.count > 0)) {
     const edible = edibleInBag(bot);
     return edible
       ? { level: 'hard', text: `包里没有点名的${zhName(call.item)};${edible}`, rule: 'eat.noStock' }
@@ -135,7 +135,7 @@ function precheckEat(
   // 吃饱了是这一步的正常结局,执行器不会调用 consume()。
   if (bot.food >= 20) return null;
   if (RISKY_FOODS.has(call.item)) {
-    const safer = bot.inventory.items().find((item) => item.count > 0 && foods[item.name]
+    const safer = itemsInReach(bot).find((item) => item.count > 0 && foods[item.name]
       && !RISKY_FOODS.has(item.name) && item.name !== 'golden_apple'
       && item.name !== 'enchanted_golden_apple');
     if (safer) return { level: 'soft', rule: 'eat.riskyWithSafe',
@@ -144,15 +144,18 @@ function precheckEat(
   return null;
 }
 
-/** 返回背包可食物清单，空清单返回 null；用于点名食物缺失后的受阻说明。 */
+/** 分别报告背包与副手的可食物，空清单返回 null。 */
 export function edibleInBag(bot: Bot): string | null {
   const foods = (bot.registry?.foodsByName ?? {}) as Record<string, unknown>;
   const counts = new Map<string, number>();
   for (const it of bot.inventory.items()) {
     if (it.count > 0 && foods[it.name]) counts.set(it.name, (counts.get(it.name) ?? 0) + it.count);
   }
-  if (counts.size === 0) return null;
-  return `包里能吃的有:${[...counts].map(([n, c]) => `${zhName(n)}×${c}`).join('、')}`;
+  const parts = counts.size > 0
+    ? [`包里能吃的有:${[...counts].map(([n, c]) => `${zhName(n)}×${c}`).join('、')}`] : [];
+  const off = offHandItem(bot);
+  if (off && off.count > 0 && foods[off.name]) parts.push(`副手能吃的有:${zhName(off.name)}×${off.count}`);
+  return parts.length > 0 ? parts.join(';') : null;
 }
 
 /** 未知物品 id 的受阻说明，同时列出背包内词根相同的候选。 */

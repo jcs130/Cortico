@@ -206,6 +206,27 @@ describe('前置试算 · 判死的必须真的做不成', () => {
     expect(precheckStep(bot, call({ skill: 'eat', item: 'cooked_beef' }), makeDeps(bot))?.level).toBe('hard');
   });
 
+  it('eat 副手食物可用，缺少其他食物时明确报告副手储备', () => {
+    const bot = fakeBot({ bag: [], food: 10 });
+    (bot as unknown as { inventory: { slots?: unknown[] } }).inventory.slots = Object.assign([], {
+      45: { name: 'golden_apple', count: 2, type: 7 },
+    });
+    expect(precheckStep(bot, call({ skill: 'eat', item: 'golden_apple' }), makeDeps(bot))).toBeNull();
+    const missing = precheckStep(bot, call({ skill: 'eat', item: 'cooked_beef' }), makeDeps(bot));
+    expect(missing?.rule).toBe('eat.noStock');
+    expect(missing?.text).toContain('副手能吃的有:金苹果×2');
+    expect(missing?.text).not.toContain('没有任何食物');
+  });
+
+  it('eat 腐肉风险提醒包含副手的安全食物', () => {
+    const bot = fakeBot({ bag: [['rotten_flesh', 1]], food: 12 });
+    (bot as unknown as { inventory: { slots?: unknown[] } }).inventory.slots = Object.assign([], {
+      45: { name: 'cooked_beef', count: 1, type: 6 },
+    });
+    expect(precheckStep(bot, call({ skill: 'eat', item: 'rotten_flesh' }), makeDeps(bot)))
+      .toMatchObject({ level: 'soft', rule: 'eat.riskyWithSafe' });
+  });
+
   it('eat 包里只有别的食物:点名食物缺货就判死', () => {
     const bot = fakeBot({ bag: [['golden_apple', 1]], food: 10 });
     const n = precheckStep(bot, call({ skill: 'eat', item: 'cooked_beef' }), makeDeps(bot));

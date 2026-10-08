@@ -41,6 +41,7 @@ import { zhErrorText } from './receipt.ts';
 import { BURNING_BLOCKS, SCORCHING_FLOOR, bodyInWater, canSeeEntity, findBankCell, headInWater } from './terrain.ts';
 import { piglinIsHostile } from './piglin.ts';
 import { consumeHeldFood } from './skills-craft.ts';
+import { itemsInReach } from './inventory.ts';
 import { RISKY_FOODS } from './nutrition.ts';
 import {
   RANGED_EXIT_RANGE,
@@ -1432,7 +1433,7 @@ export class CombatSession {
   }
 
   private combatFood(bot: Bot): ReturnType<Bot['inventory']['items']>[number] | null {
-    const items = bot.inventory.items();
+    const items = itemsInReach(bot);
     if ((bot.health ?? 20) <= 10) {
       const apple = items.find((item) => item.name === 'golden_apple' && item.count > 0);
       if (apple) return apple;
