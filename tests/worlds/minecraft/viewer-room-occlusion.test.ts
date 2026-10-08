@@ -41,6 +41,13 @@ describe('Minecraft room occlusion', () => {
 
   it.skipIf(!existsSync(clientFile))('cuts the dungeon roof and keeps third-person room dither', () => {
     const client = patchRoomOcclusion(readFileSync(clientFile, 'utf8'));
+    if (client.includes('from "./room-visibility.js"')) {
+      expect(patchRoomOcclusion(client)).toBe(client);
+      expect(client).toContain('patchCutawayMaterial(material, dungeonVisibilityUniforms)');
+      expect(client).toContain('installDungeonObserverControls({');
+      expect(client).not.toContain('record.mode = "plane"');
+      return;
+    }
     expect(client).toContain('function installDungeonOcclusion() {\n  if (!usesWorldAvatar) return;');
     expect(client).toContain('deepRoof || trace.occluded || roomCeiling,');
     expect(client).not.toContain('isDungeonView || deepRoof');
