@@ -15,8 +15,8 @@ const delivery = (body: string, type = 'handoff'): ContextRecord => message('use
 ] } });
 
 describe('tool interface recovery fallback', () => {
-  it('reports a transcript-shaped reply as unexecuted, without believing or running its written receipt', () => {
-    const text = '[历史工具请求] game_move {"target":[1,2,3]}\n[历史回执] Arrived.';
+  it.each(['', '\n[历史回执] Arrived.'])('reports a written historical request as unexecuted with receipt %j', (receipt) => {
+    const text = '[历史工具请求] game_move {"target":[1,2,3]}'+receipt;
     const reply = message('assistant', text, { responseId: 'transcript' });
     const evidence = message('user', 'Player is still at the original position.');
     const records = [evidence, reply];
@@ -93,7 +93,7 @@ describe('tool interface recovery fallback', () => {
     '这是引用：[调用] game_move {"target":[1,2,3]}',
     '> [调用] game_move {"target":[1,2,3]}',
     '```text\n[调用] game_move {"target":[1,2,3]}\n```',
-    '[历史工具请求] game_move {"target":[1,2,3]}',
+    '> [历史工具请求] game_move {"target":[1,2,3]}',
     '[调用] unavailable_tool {"target":[1,2,3]}',
   ])('leaves normal discussion, examples, history or unavailable tools alone: %s', text => {
     expect(new ToolCallRecoveryFallback().notice([message('assistant', text)], available)).toBeNull();
