@@ -32,7 +32,7 @@ import { FLIGHT_PLAN_MAX_POINTS, parseFlightPlan, previewFlightPlan } from './fl
 import { createDecisionAdviser, type DecisionAdvice } from './decision-adviser.ts';
 import { IdleBehaviorController, type IdleBehaviorScene } from './idle-behavior.ts';
 import { sampleIdleActions, executeIdleAction } from './idle-actions.ts';
-import { RejectedRouteLedger } from './rejected-route-ledger.ts';
+import { RejectedRouteLedger, sameRejectedRouteOrigin, type RejectedRouteScope } from './rejected-route-ledger.ts';
 import { classifyBossBarTitle } from './boss-bar.ts';
 import { minecraftTextComponent } from './text-component.ts';
 import {
@@ -4526,7 +4526,7 @@ export class MinecraftWorld implements World {
   /** 一轮一答闸的账(见 round.ts);三个只读原语共用一本,各占一格 */
   private readonly readGate = new RoundOnceGate();
   private queueReadBurst: { stamp: string; atMs: number; count: number } | null = null;
-  private rejectedTravelBurst: { key: string; atMs: number; count: number } | null = null;
+  private rejectedTravelBurst: { key: string; scope: RejectedRouteScope; atMs: number; count: number } | null = null;
   private lastRejectedTravelEscapeAt = 0;
   private readonly rejectedRoutes: RejectedRouteLedger;
 
@@ -5996,10 +5996,15 @@ export class MinecraftWorld implements World {
     }
     // 解析结果与她写的不一致就明说:被静默吃掉的参数是这条链上最贵的一类失败
     const notes = parsed.notes?.map(parseNoteText) ?? [];
-    const heldRoute = this.rejectedRoutes.match(parsed.steps);
+    const routeOrigin = this.bridge?.bot?.entity?.position;
+    const routeScope: RejectedRouteScope | null = routeOrigin ? {
+      realm: this.realmKey(), dimension: normalizeDimension(this.bridge?.bot?.game?.dimension),
+      origin: [routeOrigin.x, routeOrigin.y, routeOrigin.z],
+    } : null;
+    const heldRoute = this.rejectedRoutes.match(parsed.steps, routeScope);
     if (heldRoute && name === 'mc_do') {
       return { text: this.toolLog(name, args,
-        `[${name} 暂缓] 这条路线曾连续失败并触发自动脱困(${heldRoute})。本轮停止该目标，核对当前位置并换任务；15 分钟后可重新评估现场。`),
+        `[${name} 暂缓] 当前出发地的这条路线或途经的液体井筒曾连续失败并触发自动脱困(${heldRoute})。核对前次回执，改变出发位置或路线后重新评估；限制只保留 15 分钟，不取消原目标。`),
         failed: true, endsTurn: true };
     }
     const repeatedSuccess = name === 'mc_do'
@@ -6030,19 +6035,20 @@ export class MinecraftWorld implements World {
       && /钉在原地|这条通道会经过|这片井筒刚在/.test(accepted);
     const rejectedShaft = firstRejectedSkill === 'tunnel'
       && /这片井筒刚在|同一整单已经连续失败|这条通道会经过/.test(accepted);
-    if (!admitted && name === 'mc_do' && (rejectedTravel || rejectedShaft)) {
+    if (!admitted && name === 'mc_do' && routeScope && (rejectedTravel || rejectedShaft)) {
       const now = Date.now();
       const liquidCell = /这片井筒刚在 \((-?\d+),(-?\d+),(-?\d+)\) 遇到(水|岩浆)/.exec(accepted);
       const supportCell = /这条通道会经过 \((-?\d+),(-?\d+),(-?\d+)\)/.exec(accepted);
       const key = liquidCell ? `shaft-liquid:${liquidCell.slice(1).join(':')}`
         : supportCell ? `tunnel-support:${supportCell.slice(1).join(':')}` : JSON.stringify(parsed.steps);
       const previous = this.rejectedTravelBurst;
-      const count = previous?.key === key && now - previous.atMs < 90_000 ? previous.count + 1 : 1;
-      this.rejectedTravelBurst = { key, atMs: now, count };
+      const count = previous?.key === key && sameRejectedRouteOrigin(previous.scope, routeScope)
+        && now - previous.atMs < 90_000 ? previous.count + 1 : 1;
+      this.rejectedTravelBurst = { key, scope: routeScope, atMs: now, count };
       if (count >= 3 && now - this.lastRejectedTravelEscapeAt > 180_000) {
         this.lastRejectedTravelEscapeAt = now;
         this.rejectedTravelBurst = null;
-        this.rejectedRoutes.record(key, parsed.steps, now);
+        this.rejectedRoutes.record(key, parsed.steps, routeScope, now);
         this.diag.write({ lane: 'task', event: 'rejected-route-escape', incident: true,
           msg: '同一条已拒收的无进展路线仍被连续提交，启动已有安全落点逃逸',
           data: { steps: parsed.steps, count, position: this.bridge?.bot?.entity?.position } });
@@ -6055,7 +6061,7 @@ export class MinecraftWorld implements World {
           this.emit('minecraft.task', `[自动脱困] 没成功:${String(error)}`, true);
         });
         return { text: this.toolLog(name, args,
-          `${accepted}\n[自动脱困] 同一无进展路线已连续拒收，正在尝试已登记的安全落点。旧路线本轮作废；先核对新位置并换目标。`),
+          `${accepted}\n[自动脱困] 同一出发地的无进展路线已连续拒收，正在尝试已登记的安全落点。原目标保留；先核对新位置，再选择新的路线。`),
           failed: true, endsTurn: true };
       }
     }

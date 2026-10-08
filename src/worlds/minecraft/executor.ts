@@ -959,6 +959,8 @@ interface StepLanding {
   outcome: StepOutcome;
   /** 一句原因(截短);做成的那几步没有 */
   why: string | null;
+  /** 技能给出的确定原因；资源许可拒绝不作为空间放置失败。 */
+  code?: SkillBlocked['code'];
   /**
    * 结局回执里这一步那一行,完整。断点续做的单靠它把断点之前的步原样摆回 finish()
    * 的回执 —— 那几步没在别处报过,续做后的结局回执是它们唯一的出口。
@@ -3568,7 +3570,7 @@ export class Executor {
       if (landing.outcome === 'ok') {
         this.localBuildFailures = this.localBuildFailures.filter((entry) => entry.material !== step.material
           || entry.from.dimension !== dimensionOf(bot));
-      } else if (landing.outcome === 'fail') {
+      } else if (landing.outcome === 'fail' && landing.code !== 'resource-unavailable') {
         this.localBuildFailures.push({ material: step.material, at: now,
           why: maskCoords(landing.why ?? '没说清为什么').slice(0, 180),
           from: { x: pos.x, y: pos.y, z: pos.z, dimension: dimensionOf(bot) } });
@@ -5195,10 +5197,11 @@ export class Executor {
      * 两处必须同一刻写,否则被叫停时那本账与实际跑到哪一步对不上号。
      * `line` 是这一步进结局回执的那一行,断点续做时原样摆回去。
      */
-    const land = (i: number, outcome: StepOutcome, why: string | null, line: string): void => {
+    const land = (i: number, outcome: StepOutcome, why: string | null, line: string, code?: SkillBlocked['code']): void => {
       outcomes.push(outcome);
       task.stepLog.push({
         step: i + 1, what: describeSkill(steps[i]), outcome, why: shortWhy(why), line,
+        ...(code ? { code } : {}),
       });
       if (outcome === 'ok') this.noteSuccessfulIntent(steps[i], Date.now());
     };
@@ -5716,12 +5719,13 @@ export class Executor {
               msg: `${describeSkill(call)}受阻: ${(err as Error).message}`,
               data: {
                 call, error: (err as Error).message, source: blockedSourceOf(err),
+                ...(blocked?.code ? { code: blocked.code } : {}),
                 ...(verdict ? { actual: verdict.actual } : {}),
               },
             });
             const line = `${stepHead(i, startedAt)}: `
               + `${blockedText(call, reason, expect, verdict, bot.heldItem?.name ?? null, readAt)}${toolAndReserve()}${carriedNote}`;
-            land(i, 'fail', reason, line);
+            land(i, 'fail', reason, line, blocked?.code);
             firstWhy ??= reason;
             this.noteBlockedReason(reason, Date.now(), {
               task: label(),

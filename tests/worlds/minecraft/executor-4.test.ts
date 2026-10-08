@@ -5504,6 +5504,50 @@ describe('差分为空就是受阻', () => {
     expect(exec.submit([{ skill: 'build', material: 'torch', anchors: [[21, 64, 0]] } as never])).toContain('收下了');
   });
 
+  it.each([
+    { name: '同一整单两次', targets: [1, 1] },
+    { name: '附近三个落点', targets: [1, 2, 3] },
+  ])('材料许可修正后立即恢复施工：$name 资源拒绝不产生空间冷却', async ({ targets }) => {
+    const bot = cellBot({ '1,63,0': 'stone', '2,63,0': 'stone', '3,63,0': 'stone' },
+      [{ name: 'torch', count: 8 }]);
+    let permitted = false;
+    const reports: TaskReport[] = [];
+    const exec = new Executor({
+      getBot: () => withBotEvents(bot) as never, nextId: nextTaskId(), log,
+      report: (report) => reports.push(report),
+      permitResourcePlacement: () => permitted ? { ok: true, finish: () => {} }
+        : { ok: false, reason: 'torch 的蓝图 reserve 是 8,随身只有 8;先申请材料许可' },
+    });
+    for (const [index, x] of targets.entries()) {
+      expect(exec.submit([{ skill: 'build', material: 'torch', anchors: [[x, 64, 0]] }])).toContain('收下了');
+      await waitUntil(() => reports.length === index + 1, 8000);
+      expect(reports.at(-1)?.kind).toBe('blocked');
+      expect(bot.cells.get(`${x},64,0`)).toBeUndefined();
+    }
+    permitted = true;
+    const x = targets.at(-1)!;
+    expect(exec.submit([{ skill: 'build', material: 'torch', anchors: [[x, 64, 0]] }])).toContain('收下了');
+    await waitUntil(() => reports.length === targets.length + 1, 8000);
+    expect(reports.at(-1)?.kind).toBe('done');
+    expect(bot.cells.get(`${x},64,0`)).toBe('torch');
+  });
+
+  it('材料补齐后立即恢复施工，不把无材料当成落点失败', async () => {
+    const bag: Array<{ name: string; count: number }> = [];
+    const bot = cellBot({ '1,63,0': 'stone', '2,63,0': 'stone', '3,63,0': 'stone' }, bag);
+    const { exec, reports } = makeExecutorOn(bot);
+    for (let x = 1; x <= 3; x++) {
+      expect(exec.submit([{ skill: 'build', material: 'torch', anchors: [[x, 64, 0]] }])).toContain('收下了');
+      await waitUntil(() => reports.length === x, 8000);
+      expect(reports.at(-1)?.kind).toBe('blocked');
+    }
+    bag.push({ name: 'torch', count: 8 });
+    expect(exec.submit([{ skill: 'build', material: 'torch', anchors: [[3, 64, 0]] }])).toContain('收下了');
+    await waitUntil(() => reports.length === 4, 8000);
+    expect(reports.at(-1)?.kind).toBe('done');
+    expect(bot.cells.get('3,64,0')).toBe('torch');
+  });
+
   it('goto 后的放置落点已被占或无支撑时，受理刻拒收且保留队列', () => {
     const bot = cellBot({ '1,64,0': 'stone' }, [{ name: 'torch', count: 4 }]);
     const { exec, reports } = makeExecutorOn(bot);

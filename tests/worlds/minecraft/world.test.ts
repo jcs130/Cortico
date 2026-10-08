@@ -1780,6 +1780,7 @@ describe('队列的全部入口:排进去、试算、清空', () => {
   it('身体确实钉在原地的重复拒单仍可触发安全逃逸', async () => {
     const { m, call } = await started();
     try {
+      vi.spyOn((m as any).bridge, 'bot', 'get').mockReturnValue(idleBot());
       vi.spyOn((m as any).executor, 'submit').mockImplementation(
         (...params: unknown[]) => {
           (params[3] as (accepted: boolean) => void)(false);
@@ -1792,6 +1793,55 @@ describe('队列的全部入口:排进去、试算、清空', () => {
       await call('mc_do', args);
       const third = await call('mc_do', args) as unknown as { text: string };
       expect(third.text).toContain('正在尝试已登记的安全落点');
+      expect(escape).toHaveBeenCalledTimes(1);
+    } finally {
+      await m.stop();
+    }
+  });
+
+  it('换出发地后相同目的地重新受理，旧地点仍保留路线限制', async () => {
+    const { m, call } = await started();
+    try {
+      const bot = idleBot() as { entity: { position: Pos }; game: { dimension: string } };
+      vi.spyOn((m as any).bridge, 'bot', 'get').mockReturnValue(bot);
+      const steps = [{ skill: 'goto', at: [10, 64, 10] }];
+      (m as any).rejectedRoutes.record('stalled-route', steps, {
+        realm: (m as any).realmKey(), dimension: 'minecraft:overworld',
+        origin: [bot.entity.position.x, bot.entity.position.y, bot.entity.position.z],
+      });
+      const held = await call('mc_do', { steps }) as unknown as { failed: boolean; text: string };
+      expect(held.failed).toBe(true);
+      expect(held.text).toContain('不取消原目标');
+      expect((m as any).executor.status().running).toBeNull();
+      bot.entity.position = pos(-593, 91, -313);
+      const fresh = await call('mc_do', { steps });
+      expect(fresh).toContain('任务#1');
+      expect((m as any).executor.status().running).not.toBeNull();
+    } finally {
+      await m.stop();
+    }
+  });
+
+  it('不同出发地的拒收不会合并成自动脱困，回到同一地点重复才计数', async () => {
+    const { m, call } = await started();
+    try {
+      vi.spyOn((m as any).executor, 'submit').mockImplementation((...params: unknown[]) => {
+        (params[3] as (accepted: boolean) => void)(false);
+        return '[21:00:00] 这一单我没接:连续寻路仍钉在原地';
+      });
+      const bot = idleBot() as { entity: { position: Pos }; game: { dimension: string } };
+      vi.spyOn((m as any).bridge, 'bot', 'get').mockReturnValue(bot);
+      const escape = vi.spyOn(m as any, 'doEscape').mockResolvedValue('已回安全落点');
+      const args = { steps: [{ skill: 'goto', at: [10, 64, 10] }] };
+      await call('mc_do', args);
+      bot.entity.position = pos(8, 64, 0);
+      await call('mc_do', args);
+      bot.game.dimension = 'the_nether';
+      await call('mc_do', args);
+      expect(escape).not.toHaveBeenCalled();
+      await call('mc_do', args);
+      const third = await call('mc_do', args) as unknown as { text: string };
+      expect(third.text).toContain('原目标保留');
       expect(escape).toHaveBeenCalledTimes(1);
     } finally {
       await m.stop();
@@ -1826,6 +1876,7 @@ describe('队列的全部入口:排进去、试算、清空', () => {
   it('同一水层竖井只改目标深度仍连续拒收时触发安全逃逸', async () => {
     const { m, call } = await started();
     try {
+      vi.spyOn((m as any).bridge, 'bot', 'get').mockReturnValue(idleBot());
       vi.spyOn((m as any).executor, 'submit').mockImplementation(
         (...params: unknown[]) => {
           (params[3] as (accepted: boolean) => void)(false);
@@ -1847,6 +1898,7 @@ describe('队列的全部入口:排进去、试算、清空', () => {
   it('goto 加下行挖掘的整单撞到同一水层也触发安全逃逸', async () => {
     const { m, call } = await started();
     try {
+      vi.spyOn((m as any).bridge, 'bot', 'get').mockReturnValue(idleBot());
       vi.spyOn((m as any).executor, 'submit').mockImplementation(
         (...params: unknown[]) => {
           (params[3] as (accepted: boolean) => void)(false);
@@ -1887,6 +1939,7 @@ describe('队列的全部入口:排进去、试算、清空', () => {
   it('同一悬空通道连续拒收后即使改写整单也触发安全逃逸', async () => {
     const { m, call } = await started();
     try {
+      vi.spyOn((m as any).bridge, 'bot', 'get').mockReturnValue(idleBot());
       vi.spyOn((m as any).executor, 'submit').mockImplementation(
         (...params: unknown[]) => {
           (params[3] as (accepted: boolean) => void)(false);

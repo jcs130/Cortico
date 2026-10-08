@@ -226,7 +226,7 @@ export async function skillBuild(bot: Bot, call: PlaceCall, ctx: SkillContext): 
         ? [...blockers, ...singlePlaceScene(bot, cells[0], call.material)] : blockers,
     );
   }
-  if (stock() === 0) throw new SkillBlocked(`包里没有${label}`);
+  if (stock() === 0) throw new SkillBlocked(`包里没有${label}`, [], 'local', 'resource-unavailable');
 
   // 本单落点登记在案:这一趟寻路垫在落点之外的那些块是耗材,由执行器照报
   for (const c of cells) ctx.intended?.add(cellKeyOf(c));
@@ -239,11 +239,12 @@ export async function skillBuild(bot: Bot, call: PlaceCall, ctx: SkillContext): 
   let placed = 0;
   /** 收不了工时的原因;空串 = 全放完了 */
   let halt = '';
+  let haltCode: SkillBlocked['code'];
   while (remaining.size > 0) {
     checkAbort(ctx);
     const item = bot.inventory.items()
       .find((i) => matchMaterialName(bot.registry, call.material, i.name));
-    if (!item) { halt = `${label}用完了`; break; }
+    if (!item) { halt = `${label}用完了`; haltCode = 'resource-unavailable'; break; }
     await bot.equip(item, 'hand');
     const me = bot.entity.position;
     let feet = feetOf(bot);
@@ -293,9 +294,9 @@ export async function skillBuild(bot: Bot, call: PlaceCall, ctx: SkillContext): 
         if (c.y === feet.y + 1) { headOnly++; continue; }
         if (s.face === null || s.face === 'up') {
           // 挪不开的脚下格才跳起来垫;贴的永远是脚下那一块的上面,指名了别的面时这条路不适用
-          if (!(await ensureHolding(bot, call.material))) { halt = `${label}用完了`; break; }
+          if (!(await ensureHolding(bot, call.material))) { halt = `${label}用完了`; haltCode = 'resource-unavailable'; break; }
           const permit = permitPlacement(ctx, bot.heldItem?.name ?? item.name, false, c);
-          if (!permit.ok) { halt = permit.reason; break; }
+          if (!permit.ok) { halt = permit.reason; haltCode = 'resource-unavailable'; break; }
           let landed = false;
           try {
             landed = await jumpPlaceBelow(bot, ctx, call.material);
@@ -318,9 +319,9 @@ export async function skillBuild(bot: Bot, call: PlaceCall, ctx: SkillContext): 
       // 对占身位的材料，中心格外的碰撞箱擦边也须避开；gotoPlaceable 只保证可及距离。
       if (materialCollides(bot, call.material) && hitboxBlocks(bot, c)
         && !(await stepOffCell(bot, ctx, c))) { tried.add(key); continue; }
-      if (!(await ensureHolding(bot, call.material))) { halt = `${label}用完了`; break; }
+      if (!(await ensureHolding(bot, call.material))) { halt = `${label}用完了`; haltCode = 'resource-unavailable'; break; }
       const permit = permitPlacement(ctx, bot.heldItem?.name ?? item.name, false, c);
-      if (!permit.ok) { halt = permit.reason; break; }
+      if (!permit.ok) { halt = permit.reason; haltCode = 'resource-unavailable'; break; }
       tried.add(key);
       let landed: BlockFace | null = null;
       try {
@@ -384,7 +385,8 @@ export async function skillBuild(bot: Bot, call: PlaceCall, ctx: SkillContext): 
     // 床/门这类占两格的:她从快照里看不到"哪儿有连续两格空位",把附近够用的位置报出来
     const fp = footprintOf(bot, call.material);
     const scene = fp === 'single' ? [] : footprintScene(bot, first.todo[0].cell, call.material, fp);
-    throw new SkillBlocked(`一块都没放上:${halt}${tail}`, [...spotLines, ...scene], 'server');
+    throw new SkillBlocked(`一块都没放上:${halt}${tail}`, [...spotLines, ...scene],
+      haltCode === 'resource-unavailable' ? 'local' : 'server', haltCode);
   }
   // 缺口以 remaining 中计划放置但未完成的格计；原已存在的目标方块不计缺口。
   const gap = [...remaining.values()].map((s) => cellText(s.cell));
