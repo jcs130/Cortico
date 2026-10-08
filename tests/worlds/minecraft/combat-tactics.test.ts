@@ -21,7 +21,8 @@ describe('World-scoped combat tactic persistence', () => {
     const path = file();
     const first = new CombatSpells(new CombatTacticBook(path));
     first.useRealm('world-a');
-    first.setTactic({ spells: ['golem', 'frostnova'], healAtOrBelow: 12 });
+    first.setTactic({ spells: ['golem', 'frostnova'], healAtOrBelow: 12,
+      rules: [{ id: 'crowd', spell: 'frostnova', when: { hostilesAtLeast: 3, reserveMana: 6 } }] });
     first.noteServerMessage('探索咏唱：守护傀儡(golem，12 魔力/75 秒)', 100_000);
     first.noteManualCast('golem', 100_000);
     const receipt = first.recordCombat(result(99_000));

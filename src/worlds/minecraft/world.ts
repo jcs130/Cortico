@@ -119,6 +119,7 @@ import { WorksBook } from './works.ts';
 import { CombatSession } from './combat.ts';
 import { CombatSpells, type CombatSpell } from './combat-spells.ts';
 import { CombatTacticBook } from './combat-tactics.ts';
+import { COMBAT_RULES_SCHEMA, validCombatRules, type CombatRule } from './combat-rules.ts';
 import { chooseRoutineFood, renderFoodReserveReadout } from './nutrition.ts';
 import { publishViewerCastCommand } from './viewer-cast.ts';
 import { parseSkillsPayload, VIEWER_STATE_CHANNEL } from './viewer-state.ts';
@@ -2173,6 +2174,7 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
       'Read or update the immediate combat spell tactic. {} reads it; omitted fields keep their current values; '
       + '{enabled:false} clears it. A spell list of server-listed combat spell IDs sets priority order while fighting; '
       + 'healAtOrBelow casts selfheal at that health or lower before another attack. '
+      + 'Nonempty rules replace the unconditional spell priority: ordered observed conditions are rechecked each combat tick and the first ready match wins; no match means no automatic offensive cast. rules:[] restores spells/default priority. '
       + 'The World checks observed spell availability, mana, targets and announced cooldowns; '
       + 'server replies still decide success. Settings and the last five observed combat receipts persist per world across restarts. '
       + '{} also reads current capability constraints and recent receipt IDs; {report:id} expands one receipt. '
@@ -2184,6 +2186,7 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
         spells: { type: 'array', minItems: 1, maxItems: 8, uniqueItems: true,
           items: { type: 'string', pattern: '^[a-z][a-z0-9_:-]{0,63}$' } },
         healAtOrBelow: { type: 'integer', minimum: 1, maximum: 20 },
+        rules: COMBAT_RULES_SCHEMA,
         report: { type: 'integer', minimum: 1, description: 'Read one observed combat receipt by its returned ID; do not combine with setting fields.' },
       },
       required: [],
@@ -4457,7 +4460,8 @@ export class MinecraftWorld implements World {
         ? `当前战术：${tactic.spells?.join(' → ') ?? '默认法术顺序'}；`
           + `生命线 ${tactic.healAtOrBelow ?? '未设置'}/20。`
         : '当前使用默认即时战斗法术；低血撤退时尝试圣愈术。')
-        + '\n' + this.combatSpells.readout());
+        + (tactic?.rules?.length ? `\n条件分支启用，共${tactic.rules.length}项；上述法术列表仅为停用分支后的备用顺序。` : '')
+        + '\n' + this.combatSpells.readout(undefined, Date.now(), this.bridge?.bot ?? undefined));
     }
     if (args.enabled === false) {
       this.combatSpells.setTactic(null);
@@ -4465,8 +4469,9 @@ export class MinecraftWorld implements World {
     }
     const rawSpells = args.spells;
     const rawHeal = args.healAtOrBelow;
-    if (rawSpells === undefined && rawHeal === undefined) {
-      return this.toolLog(tool, args, '未设置：请给 spells 或 healAtOrBelow；用 enabled:false 清除。');
+    const rawRules = args.rules;
+    if (rawSpells === undefined && rawHeal === undefined && rawRules === undefined) {
+      return this.toolLog(tool, args, '未设置：请给 spells、rules 或 healAtOrBelow；用 enabled:false 清除。');
     }
     if (rawSpells !== undefined && (!Array.isArray(rawSpells) || rawSpells.length < 1
       || rawSpells.length > 8 || rawSpells.some((spell) => typeof spell !== 'string'
@@ -4478,16 +4483,21 @@ export class MinecraftWorld implements World {
       || (rawHeal as number) > 20)) {
       return this.toolLog(tool, args, '未设置：healAtOrBelow 必须是 1–20 的整数。');
     }
+    if (rawRules !== undefined && !validCombatRules(rawRules)) {
+      return this.toolLog(tool, args, '未设置：rules 最多16项，id须唯一；每项给 id、spell、when，条件须符合工具定义且上下界相容。selfheal 用 healAtOrBelow。');
+    }
     const previous = this.combatSpells.getTactic();
     const spells = rawSpells as CombatSpell[] | undefined ?? previous?.spells ?? null;
     const healAtOrBelow = rawHeal as number | undefined ?? previous?.healAtOrBelow ?? null;
-    this.combatSpells.setTactic({ spells, healAtOrBelow });
+    const rules = rawRules as CombatRule[] | undefined ?? previous?.rules;
+    this.combatSpells.setTactic({ spells, healAtOrBelow, ...(rules !== undefined ? { rules } : {}) });
     return this.toolLog(tool, args,
       `已设置战术：${spells?.join(' → ') ?? '默认法术顺序'}；`
       + (healAtOrBelow === null ? '治疗血线未设置。'
         : `生命 ≤${healAtOrBelow}/20 时先尝试圣愈术。`)
+      + (rules?.length ? `已启用${rules.length}项条件分支；法术列表仅作分支停用后的备用，未命中不自动进攻施法。` : '')
       + '已按当前世界保存，重载后继续使用；只在交战时按目标、魔力和冷却尝试，效果以服务端回执为准。'
-      + '\n' + this.combatSpells.readout());
+      + '\n' + this.combatSpells.readout(undefined, Date.now(), this.bridge?.bot ?? undefined));
   }
 
   private onLowHealth(bot: Bot): void {
