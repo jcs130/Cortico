@@ -135,7 +135,7 @@ interface ProbePath {
   status: string;
   /** A* closed set 大小;=1 表示只展开了起点 */
   visitedNodes?: number;
-  path: Array<{ x: number; y: number; z: number; toBreak?: unknown[]; toPlace?: unknown[] }>;
+  path: Array<{ x: number; y: number; z: number; toBreak?: unknown[]; toPlace?: Array<{ useOne?: boolean }> }>;
 }
 
 /** 最后一次检测到水后禁用疾跑的物理 tick 数；20 tick 约一秒。 */
@@ -901,7 +901,7 @@ export class Bridge {
         this.opts.log.warn(`路线试算失败(${profile}): ${(err as Error).message}`);
       }
       if (!result) {
-        out.push({ profile, status: 'noPath', steps: 0, place: 0, breaks: 0, endDist: startDist });
+        out.push({ profile, status: 'noPath', steps: 0, place: 0, interact: 0, breaks: 0, endDist: startDist });
         continue;
       }
       const path = result.path ?? [];
@@ -912,9 +912,14 @@ export class Bridge {
           : Math.hypot(last.x - target.x, last.y - target.y, last.z - target.z)
         : startDist;
       let place = 0;
+      let interact = 0;
       let breaks = 0;
       for (const mv of path) {
-        place += mv.toPlace?.length ?? 0;
+        // Pathfinder also stores door/gate clicks in toPlace; they consume no scaffold blocks.
+        for (const action of mv.toPlace ?? []) {
+          if (action.useOne === true) interact += 1;
+          else place += 1;
+        }
         breaks += mv.toBreak?.length ?? 0;
       }
       const status = result.status === 'success' ? 'complete'
@@ -922,7 +927,7 @@ export class Bridge {
           ? result.status as RouteProbe['status']
           : 'noPath';
       out.push({
-        profile, status, steps: path.length, place, breaks,
+        profile, status, steps: path.length, place, interact, breaks,
         endDist: Math.round(endDist * 10) / 10,
         ...(typeof result.visitedNodes === 'number' ? { visited: result.visitedNodes } : {}),
       });
