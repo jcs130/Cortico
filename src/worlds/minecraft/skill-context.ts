@@ -28,6 +28,8 @@ export interface RouteProbe {
   steps: number;
   /** 要垫的方块数 */
   place: number;
+  /** 开门、开栅栏门等右键动作次数，不消耗垫脚方块。 */
+  interact?: number;
   /** 要挖的方块数 */
   breaks: number;
   /** 这条路(或部分路)尽头离目标还有几格 */

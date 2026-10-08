@@ -215,6 +215,7 @@ export function renderRouteMenu(
         const bits = [`走 ${p.steps} 步`];
         if (p.place > 0) bits.push(`垫 ${p.place} 块`);
         if (p.breaks > 0) bits.push(`挖 ${p.breaks} 块`);
+        if (p.interact) bits.push(`交互 ${p.interact} 次（开门等）`);
         return label + bits.join(',');
       }
       case 'partial': return label + `只有部分路,能推进到离目标 ${fmtDist(p.endDist)} 格`;
