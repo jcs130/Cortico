@@ -726,9 +726,14 @@ describe('data/ 缓存与两层世界性', () => {
     expect(book.binding('home-v2')).toMatchObject({
       dimension: 'minecraft:overworld', anchor: [10, 64, 10], cursor: 1,
     });
+    expect(book.siteFacts()).toContain(`版本=${book.get('home-v2')!.versionId}`);
+    expect(book.siteFacts()).toContain('原点 (10, 64, 10)');
+    expect(book.siteFacts()).toContain('截至上次施工');
+    const overworldFacts = book.siteFacts();
 
     book.useRealm('realm-a', 'the_nether');
     expect(book.binding('home-v2')).toBeUndefined();
+    expect(book.siteFacts()).not.toContain('(10, 64, 10)');
     expect(book.noteOf('home-v2')).toContain('还没开工');
     book.bind('home-v2', [-3, 70, 1], 2000);
     expect(book.binding('home-v2')).toMatchObject({
@@ -738,8 +743,11 @@ describe('data/ 缓存与两层世界性', () => {
     const restored = new BlueprintBook(file);
     restored.useRealm('realm-a', 'overworld');
     expect(restored.binding('home-v2')).toMatchObject({ anchor: [10, 64, 10], cursor: 1 });
+    expect(restored.siteFacts()).toBe(overworldFacts);
     restored.useRealm('realm-a', 'minecraft:the_nether');
     expect(restored.binding('home-v2')).toMatchObject({ anchor: [-3, 70, 1], cursor: 0 });
+    expect(restored.siteFacts()).toContain('原点 (-3, 70, 1)');
+    expect(restored.siteFacts()).not.toContain('(10, 64, 10)');
   });
 
   it('「清除所有数据」清得掉缓存文件', async () => {
