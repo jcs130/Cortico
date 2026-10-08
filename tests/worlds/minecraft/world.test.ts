@@ -4829,6 +4829,32 @@ describe('地点相对化(回执侧、事实措辞)', () => {
     expect(render()).toContain('包里有：橡木原木×3、面包×2。');
   });
 
+  it('当前事实持续保留绑定设计的版本与坐标，并在设计更换后撤掉旧绑定', () => {
+    const m = new MinecraftWorld({ cfg: cfg({ port: 1 }) });
+    stub(m, { host: new FakeHost(), bridge: { connected: true, bot: idleBot(), invSynced: true, retune() {} } });
+    const render = () => { (m as any).lastSnapshotRenderAt = 0; return (m as any).renderSnapshotEvent(); };
+    render();
+    const book = (m as any).blueprints as import('../../../src/worlds/minecraft/world.ts').BlueprintBook;
+    const accepted = acceptBlueprint({ site_mode: 'new', size_xyz: [2, 2, 1], axis_order: 'YZX',
+      palette: ['minecraft:stone_bricks'], layers: [[[0, 0]], [[0, 0]]] });
+    const design = book.save({ key: 'work-site', name: null }, {
+      blueprint: accepted.blueprint!, plan: accepted.plan!, metrics: accepted.metrics!,
+    });
+    book.bind('work-site', [20, 70, -30], Date.now());
+    expect(render()).toContain('设计方块范围 (20, 70, -30)–(21, 71, -30)');
+    const part = m.requestFacts()!.parts!.find(p => p.key === 'blueprints')!;
+    expect(part.text).toContain(`版本=${design.versionId}`);
+    expect(part.text).toContain('checks:[{blueprint:对应key}]');
+    expect(render()).toBeNull();
+    expect(m.requestFacts()!.parts!.find(p => p.key === 'blueprints')).toEqual(part);
+    book.save({ key: 'work-site', name: null }, {
+      blueprint: accepted.blueprint!, plan: accepted.plan!, metrics: accepted.metrics!,
+    });
+    expect(render()).toContain('当前维度没有已绑定');
+    expect(m.requestFacts()!.text).not.toContain(design.versionId);
+    expect(m.requestFacts()!.text).not.toContain('(20, 70, -30)');
+  });
+
   it('重生点三种状态进入当前事实，变化时更新快照且不丢失未核实状态', () => {
     const m = new MinecraftWorld({ cfg: cfg({ port: 1 }) });
     const bot = idleBot();

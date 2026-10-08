@@ -1587,6 +1587,20 @@ export class BlueprintBook {
     this.persist();
   }
 
+  siteFacts(): string {
+    const lines = this.list().flatMap(design => {
+      const bound = this.binding(design.key);
+      if (!bound) return [];
+      const far = bound.anchor.map((n, axis) => n + design.blueprint.size_xyz[axis] - 1);
+      return [`key=${JSON.stringify(design.key)} 版本=${design.versionId}，原点 (${bound.anchor.join(', ')})，` +
+        `设计方块范围 (${bound.anchor.join(', ')})–(${far.join(', ')})，` +
+        `施工游标 ${bound.cursor}/${design.plan.steps.length}（${CURSOR_AS_OF}）`];
+    });
+    return lines.length
+      ? `当前维度的已绑定蓝图设计记录：\n${lines.join('\n')}\n现场缺口用 checks:[{blueprint:对应key}] 对账；设计范围与施工游标各有来源，现场完成须核验。`
+      : '当前维度没有已绑定的蓝图设计记录。';
+  }
+
   /** 目标行尾巴那一句(goalLine 的 BlueprintNote);没装载返回 null */
   noteOf(key: string): string | null {
     const design = this.designs.get(key);
@@ -8131,6 +8145,7 @@ export class MinecraftWorld implements World {
     // 同一个待遇,由持有它们的 World 自己拼进段表与比对键
     const goals = goalSnapshotLine(this.goals().list, (k) => this.blueprints.noteOf(k));
     const marks = mapSnapshotLine(this.markTable().list);
+    const blueprints = this.blueprints.siteFacts();
     const foodReserve = renderFoodReserveReadout(snap.inventory,
       this.bridge?.bot?.registry?.foodsByName ?? {}, snap.invSynced === true, zhName);
     const spawn = this.personalSpawn;
@@ -8150,6 +8165,7 @@ export class MinecraftWorld implements World {
       { key: 'queue' as const, text: queue, cmp: queue },
       { key: 'goals' as const, text: goals, cmp: goals },
       { key: 'marks' as const, text: marks, cmp: marks },
+      { key: 'blueprints' as const, text: blueprints, cmp: blueprints },
       { key: 'foodReserve' as const, text: foodReserve, cmp: foodReserve },
     ];
     // 请求用事实必须自足：增量背包仅属于事件，不能拿来替换历史快照。
@@ -8158,7 +8174,7 @@ export class MinecraftWorld implements World {
       ...narrateWorldSegments(snap, near, null),
       ...segs.filter((segment) => segment.key === 'queue'
         || segment.key === 'goals' || segment.key === 'marks' || segment.key === 'foodReserve'
-        || segment.key === 'respawn'),
+        || segment.key === 'respawn' || segment.key === 'blueprints'),
     ];
     const parts = [{ key: 'sample', text: `[Minecraft 当前读数；采样 ${snap.realTime}]` },
       ...fullSegments.map(({ key, text }) => ({ key, text })),
@@ -8174,7 +8190,7 @@ export class MinecraftWorld implements World {
     const quietKey = `${snapshotFingerprint(snap)}|${queue}` +
       `|spawn:${this.personalSpawn ? `${this.personalSpawn.x},${this.personalSpawn.y},${this.personalSpawn.z}` : this.personalSpawn === null ? 'none' : 'unknown'}` +
       // 两张暂态表也进比对键:表变了就是实质变化,那一拍该发
-      `|goals:${goals}|marks:${marks}|foodReserve:${foodReserve}`;
+      `|goals:${goals}|marks:${marks}|foodReserve:${foodReserve}|blueprints:${blueprints}`;
     const prev = this.snapshotQuiet;
     const moved = prev
       ? Math.hypot(snap.position.x - prev.pos.x, snap.position.y - prev.pos.y, snap.position.z - prev.pos.z)
