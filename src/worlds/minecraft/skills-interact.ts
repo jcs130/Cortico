@@ -392,6 +392,13 @@ function desiredOpenProbe(bot: Bot, cell: Cell, target: string, open: boolean): 
   return probe;
 }
 
+function satisfiedOpenNote(cell: Cell, target: string, open: boolean, probe: UseProbe): string | null {
+  const result = probe.read();
+  return result.met
+    ? `${cellText(cell)} 的${zhName(target)}已经${open ? '打开' : '关闭'}，保持状态，未点击；${result.actual}`
+    : null;
+}
+
 /**
  * 按物品与目标确定右键效果的观测位置：床读 sleeping，种子读耕地上方。
  * 无法确定时返回 null，仅报告事实并记 debug。
@@ -913,6 +920,12 @@ export async function useOnce(bot: Bot, call: Extract<SkillCall, { skill: 'use' 
         + '只有带~才是脚下偏移，例如Y分量"~-1"表示脚下1格',
       );
     }
+    if (beforeTravel && call.open !== undefined) {
+      checkAbort(ctx);
+      const satisfied = satisfiedOpenNote(cell, beforeTravel.name, call.open,
+        desiredOpenProbe(bot, cell, beforeTravel.name, call.open));
+      if (satisfied) return satisfied;
+    }
     await reachCell(bot, cell, ctx);
     checkAbort(ctx);
     // 路上寻路器垫方块会把主手换成垫脚块;点名的东西不在手上就再拿一次,不然右键的是圆石
@@ -920,8 +933,9 @@ export async function useOnce(bot: Bot, call: Extract<SkillCall, { skill: 'use' 
     const target = blockAtCell(bot, cell);
     if (!target) throw new SkillBlocked(`${cellText(cell)} 所在区块没加载`);
     const desiredProbe = call.open !== undefined ? desiredOpenProbe(bot, cell, target.name, call.open) : null;
-    if (desiredProbe?.read().met) {
-      return `${cellText(cell)} 的${zhName(target.name)}已经${call.open ? '打开' : '关闭'}，保持状态，未点击；${desiredProbe.read().actual}`;
+    if (desiredProbe && call.open !== undefined) {
+      const satisfied = satisfiedOpenNote(cell, target.name, call.open, desiredProbe);
+      if (satisfied) return satisfied;
     }
     // 「开门→赶路」是通行意图。门已经打开时再次 use 会把它关上，
     // 下一步寻路便在门框处撞住；保留开门事实并直接走下一步。
