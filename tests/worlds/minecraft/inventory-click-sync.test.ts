@@ -12,7 +12,8 @@ const require = createRequire(import.meta.url);
 const dependency = (name: string) => require(require.resolve(name, { paths: [require.resolve('mineflayer')] }));
 const log = { child() { return this; }, info() {}, warn() {}, error() {}, debug() {}, trace() {}, emit() {} } as unknown as Logger;
 
-function inventoryServer(options: { delay?: number; deny?: boolean; silent?: boolean; version?: string } = {}) {
+function inventoryServer(options: { delay?: number; deny?: boolean; silent?: boolean; version?: string;
+  duplicateResultSnapshot?: boolean } = {}) {
   const registry = require('minecraft-data')(options.version ?? '1.20.6');
   const Item = dependency('prismarine-item')(registry);
   const windows = dependency('prismarine-windows')(registry.version.minecraftVersion);
@@ -26,9 +27,11 @@ function inventoryServer(options: { delay?: number; deny?: boolean; silent?: boo
     clickWindow: async (_slot: number, _button: number, _mode: number) => {},
   }) as unknown as Bot;
   const sent: Array<Record<string, any>> = [];
-  const full = () => client.emit('window_items', { windowId: 0, stateId: ++stateId,
+  const snapshot = () => ({ windowId: 0, stateId: ++stateId,
     items: server.slots.map((item: unknown) => Item.toNotch(item)), carriedItem: Item.toNotch(server.selectedItem) });
+  const full = () => client.emit('window_items', snapshot());
   let stateId = 70;
+  let resultSnapshot: ReturnType<typeof snapshot> | null = null;
   client.on('window_items', (packet) => {
     const target = bot.currentWindow ?? bot.inventory;
     if (packet.windowId !== target.id) return;
@@ -37,13 +40,19 @@ function inventoryServer(options: { delay?: number; deny?: boolean; silent?: boo
   client.write = (name, packet) => {
     if (name !== 'window_click') return;
     sent.push(structuredClone(packet));
+    if (resultSnapshot) {
+      const previous = resultSnapshot;
+      resultSnapshot = null;
+      setTimeout(() => client.emit('window_items', previous), 1);
+    }
     if (!options.deny) {
       server.acceptClick({ slot: packet.slot, mode: packet.mode, mouseButton: packet.mouseButton,
         item: server.slots[packet.slot] });
       if (packet.slot === 0) for (let slot = 1; slot <= 4; slot++) server.updateSlot(slot, null);
       const material = server.slots[1];
-      server.updateSlot(0, material?.type === registry.itemsByName.cherry_log?.id
+      server.updateSlot(0, material && material.type === registry.itemsByName.cherry_log?.id
         ? new Item(registry.itemsByName.cherry_planks.id, 4) : null);
+      if (options.duplicateResultSnapshot && packet.slot === 0) resultSnapshot = snapshot();
     }
     if (!options.silent) setTimeout(full, options.delay ?? 5);
   };
@@ -102,17 +111,22 @@ describe('server inventory click snapshots', () => {
     await click;
   });
 
-  it('a complete rollback updates the cursor and rejects the operation instead of accepting existing inventory', async () => {
+  it('unmatched full snapshots preserve server contents and time out without confirming a denied click', async () => {
     vi.useFakeTimers();
     const rig = inventoryServer({ deny: true });
     rig.seed(18, 'cherry_log', 64);
     const click = clickInventoryConfirmed(rig.bot, 18, 0, 0);
-    const rejected = expect(click).rejects.toMatchObject({ code: 'inventory-click-sync', reason: 'rollback' });
+    const rejected = expect(click).rejects.toMatchObject({ code: 'inventory-click-sync', reason: 'quarantined' });
+    await vi.advanceTimersByTimeAsync(5);
+    expect(inventoryClickState(rig.bot).phase).toBe('pending');
     await vi.runAllTimersAsync();
     await rejected;
     expect(rig.inventory.selectedItem).toBeNull();
     expect(rig.inventory.slots[18].count).toBe(64);
-    expect(inventoryClickState(rig.bot).phase).toBe('ready');
+    expect(inventoryClickState(rig.bot).phase).toBe('quarantined');
+    expect(inventoryReadConfirmed(rig.bot)).toBe(false);
+    await expect(clickInventoryConfirmed(rig.bot, 18, 0, 0)).rejects.toBeInstanceOf(InventoryClickSyncError);
+    expect(rig.sent).toHaveLength(1);
   });
 
   it('timeout quarantines every outgoing inventory click until a complete authoritative read restores it', async () => {
@@ -175,14 +189,15 @@ describe('server inventory click snapshots', () => {
     expect(inventoryClickState(rig.bot).phase).toBe('ready');
   });
 
-  it('an NBT-format rollback with the same quantity but another item is rejected', async () => {
+  it('an NBT-format snapshot with the same quantity but another item cannot confirm the click', async () => {
     vi.useFakeTimers();
     const rig = inventoryServer({ silent: true, version: '1.17.1' });
     rig.seed(18, 'oak_log', 2);
     const click = clickInventoryConfirmed(rig.bot, 18, 0, 0);
     rig.server.selectedItem = new rig.Item(rig.registry.itemsByName.birch_log.id, 2);
-    const rejected = expect(click).rejects.toMatchObject({ reason: 'rollback' });
-    rig.full(); await rejected;
+    const rejected = expect(click).rejects.toMatchObject({ reason: 'quarantined' });
+    rig.full();
+    await vi.runAllTimersAsync(); await rejected;
   });
 
   it('craft uses real server products after delayed snapshots and leaves no cursor or crafting material', async () => {
@@ -198,6 +213,24 @@ describe('server inventory click snapshots', () => {
     expect(rig.server.slots.filter((item: any) => item?.name === 'cherry_log').reduce((sum: number, item: any) => sum + item.count, 0)).toBe(62);
     expect(rig.server.selectedItem).toBeNull();
     expect(rig.server.slots.slice(1, 5).filter(Boolean)).toHaveLength(0);
+  });
+
+  it('a duplicate result snapshot arriving during product storage does not fail or repeat two craft rounds', async () => {
+    vi.useFakeTimers();
+    const rig = inventoryServer({ delay: 927, duplicateResultSnapshot: true });
+    rig.seed(18, 'cherry_log', 64);
+    installMineflayerFixes(rig.bot, log);
+    const craft = rig.bot.craft({ ingredients: [{ id: rig.registry.itemsByName.cherry_log.id }],
+      result: { id: rig.registry.itemsByName.cherry_planks.id, count: 4 }, requiresTable: false } as never, 2);
+    await Promise.all([craft, vi.runAllTimersAsync()]);
+    expect(rig.sent.filter(packet => packet.slot === 0)).toHaveLength(2);
+    expect(rig.server.slots.filter((item: any) => item?.name === 'cherry_planks')
+      .reduce((sum: number, item: any) => sum + item.count, 0)).toBe(8);
+    expect(rig.server.slots.filter((item: any) => item?.name === 'cherry_log')
+      .reduce((sum: number, item: any) => sum + item.count, 0)).toBe(62);
+    expect(rig.server.selectedItem).toBeNull();
+    expect(rig.inventory.selectedItem).toBeNull();
+    expect(inventoryClickState(rig.bot).phase).toBe('ready');
   });
 
   it('unconfirmed pickup does not send finally cleanup or start the next craft attempt', async () => {

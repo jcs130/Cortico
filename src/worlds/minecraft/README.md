@@ -1,4 +1,4 @@
-<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/flight.ts, src/worlds/minecraft/flight-preview.ts, src/worlds/minecraft/terrain.ts, src/worlds/minecraft/executor.ts, src/worlds/minecraft/skills.ts, src/worlds/minecraft/skills-control.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts, src/worlds/minecraft/chests.ts, src/worlds/minecraft/inventory.ts -->
+<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/flight.ts, src/worlds/minecraft/flight-preview.ts, src/worlds/minecraft/terrain.ts, src/worlds/minecraft/executor.ts, src/worlds/minecraft/skills.ts, src/worlds/minecraft/skills-control.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts, src/worlds/minecraft/chests.ts, src/worlds/minecraft/inventory.ts, src/worlds/minecraft/inventory-click-sync.ts -->
 
 # worlds/minecraft
 
@@ -31,6 +31,7 @@
 快照的 `flight` 段分别报告服务端飞行许可、最近飞行标志、客户端悬停控制、已声明期限和最近停止原因。未收能力包表示未知；未提供期限不推定永久许可。停止原因保留至下一次实际起飞，状态改变进入差分，重复收包时间不触发更新。
 `blueprints` 段提供当前维度已绑定设计的 key、版本、原点、方块范围和上次施工游标，并给出蓝图现场对账入口。它随设计及绑定变化更新，不展开矩阵、材料表或旧维度记录。游标仅表示上次施工位置，完成仍由现场核验。
 容器开窗期间，同一 ID 与槽位布局的标题更新不改变目标身份；执行器只在收到当前对象的新完整槽位同步后认领。已认领窗口被替换或关闭后，后续存取停止，不借用新窗口或缓存库存确认结果。
+库存点击以服务端完整回包中的目标槽位和游标共同确认。非匹配回包可能属于上一笔点击，只更新现场读数并继续等待；超时暂停后续库存点击，保留窗口和游标，直到匹配回包或新窗口的完整同步到达。
 
 物品选择以当前连接的注册表为准：已注册 ID 只匹配自身，`golden_apple` 不会取出或存入 `enchanted_golden_apple`。未注册的类别词（如 `log`、`sword`）保留后缀查询；装备的显示名查询只用于非注册 ID。存取、抛出、装备、前置检查、仓储查询、容量估算与 `expect.has/holding` 使用同一身份判据。注册表不可用时只保留旧的类别查询能力；不引入全局版本表，也不更改历史容器记录。
 
