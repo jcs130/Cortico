@@ -360,7 +360,7 @@ export function orderForStow(
   for (const s of found) {
     if (storageSkipReason(bot, s, item)) continue;
     const rec = ctx.chests?.get(dim, s);
-    if (rec && !hasRoom(rec, item, stackMax)) full.push(s);
+    if (rec && !hasRoom(rec, item, stackMax, bot?.registry)) full.push(s);
     else if (s.d <= 8) (rec ? nearWithRoom : nearUnseen).push(s);
     else (rec ? farWithRoom : farUnseen).push(s);
   }
@@ -481,7 +481,7 @@ export function orderForTake(
   for (const s of found) {
     if (storageSkipReason(bot, s)) continue;
     const rec = ctx.chests?.get(dim, s);
-    if (rec && hasItem(rec, item)) (s.d <= 8 ? nearbyStocked : fartherStocked).push(s);
+    if (rec && hasItem(rec, item, bot?.registry)) (s.d <= 8 ? nearbyStocked : fartherStocked).push(s);
     else if (!rec) (s.d <= 8 ? nearbyUnseen : fartherUnseen).push(s);
     else knownEmpty.push(s);
   }

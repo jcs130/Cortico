@@ -1,4 +1,4 @@
-<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/flight.ts, src/worlds/minecraft/flight-preview.ts, src/worlds/minecraft/executor.ts, src/worlds/minecraft/skills.ts, src/worlds/minecraft/skills-control.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts -->
+<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/flight.ts, src/worlds/minecraft/flight-preview.ts, src/worlds/minecraft/executor.ts, src/worlds/minecraft/skills.ts, src/worlds/minecraft/skills-control.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts, src/worlds/minecraft/chests.ts, src/worlds/minecraft/inventory.ts -->
 
 # worlds/minecraft
 
@@ -29,6 +29,8 @@
 视线、移动与目标方位共用北为 −Z、东为 +X 的坐标约定。`terrain.ts` 按 Mineflayer 的角度转换文字事实：`yaw=0` 朝北，水平视线为 `(-sin(yaw), -cos(yaw))`，`pitch` 为正时抬头。罗盘度数从北顺时针递增；不能直接套用原版网络协议的角度正负号。方向回归测试安装真实 Mineflayer 转头插件，核对 `lookAt` 目标与快照方位一致。
 快照与请求事实分别报告饱食度和随身口粮储备。储备按当前注册表分类并合并堆叠，列出常规、风险或特殊副作用、特殊食物；未同步物品栏与不可用注册表表示未知，不推定库存为零。统计不计仓库或食物原料，不自动决定制作、施法或采购。
 容器开窗期间，同一 ID 与槽位布局的标题更新不改变目标身份；执行器只在收到当前对象的新完整槽位同步后认领。已认领窗口被替换或关闭后，后续存取停止，不借用新窗口或缓存库存确认结果。
+
+物品选择以当前连接的注册表为准：已注册 ID 只匹配自身，`golden_apple` 不会取出或存入 `enchanted_golden_apple`。未注册的类别词（如 `log`、`sword`）保留后缀查询；装备的显示名查询只用于非注册 ID。存取、抛出、装备、前置检查、仓储查询、容量估算与 `expect.has/holding` 使用同一身份判据。注册表不可用时只保留旧的类别查询能力；不引入全局版本表，也不更改历史容器记录。
 
 空闲小动作由 `idle-actions.ts` 提供协议动作和可见目标，由 `idle-behavior.ts` 持有可取消的执行权。`idle.enabled` 默认关闭；启用后可选随机轮换或 `state/questions` 选择服务，后者失败会在诊断中记录并回退随机。`idle.decisionPolicy` 可使用模型首选 `choice`，也可按模型概率选择 `sample`，静止同样参与选择。连续空闲达到 `minIdleMs` 后开始，完成后等待 `minIntervalMs` 到 `maxIntervalMs`；最近三个动作避免重复。可选的 `idle.afterArrival` 在成功导航且队列清空后立即随机选择一次转头观察，不等待空闲门槛与动作间隔；其余安全检查和取消契约相同。任务、战斗、环境自救、聊天与真实窗口可同步撤销执行权，迟到的选择结果和镜头复位无效。
 

@@ -41,7 +41,7 @@ interface PrecheckNote {
 function hasItem(bot: Bot, name: string, pick?: string): number {
   let n = 0;
   for (const it of bot.inventory.items()) {
-    if ((matchItemName(name, it.name) || zhName(it.name) === name)
+    if ((matchItemName(name, it.name, bot?.registry) || zhName(it.name) === name)
       && itemMatchesPick(pick, it, bot.registry as never)) n += it.count;
   }
   return n;
@@ -50,7 +50,7 @@ function hasItem(bot: Bot, name: string, pick?: string): number {
 /** 副手挂着的那件合不合这个名字与挑选词;equip 能把它换到主手 */
 function offHandHas(bot: Bot, name: string, pick?: string): boolean {
   const off = offHandItem(bot);
-  return !!off && (matchItemName(name, off.name) || zhName(off.name) === name)
+  return !!off && (matchItemName(name, off.name, bot?.registry) || zhName(off.name) === name)
     && itemMatchesPick(pick, off, bot.registry as never);
 }
 
@@ -204,7 +204,7 @@ function slotsNeeded(bot: Bot, name: string, count: number): number {
   const stackMax = stackMaxOf(bot, name);
   let room = 0;
   for (const it of bot.inventory.items()) {
-    if (matchItemName(name, it.name)) room += Math.max(0, stackMax - it.count);
+    if (matchItemName(name, it.name, bot?.registry)) room += Math.max(0, stackMax - it.count);
   }
   return Math.ceil(Math.max(0, count - room) / stackMax);
 }
@@ -236,7 +236,7 @@ function precheckSlots(bot: Bot, call: SkillCall): PrecheckNote | null {
 
 /**
  * 背包里有没有这件东西:equip / use item / stow / toss 共用。
- * 名字口径与执行器的 invItemNamed 逐条同源(精确 → _后缀 → 前缀_),
+ * 已注册 ID 不替代成其他 ID；类别或显示名按执行器的同一选择口径查询。
  * 提示语也照抄技能的模糊命中那一句 —— 同一件事只有一个说法。
  */
 function precheckHasItem(
@@ -247,7 +247,7 @@ function precheckHasItem(
   // 有同 id 的几件而挑选词一件没中:那几件各自是什么,当场摆出来
   if (pick && hasItem(bot, item) > 0) {
     const same = bot.inventory.items()
-      .filter((i) => matchItemName(item, i.name))
+      .filter((i) => matchItemName(item, i.name, bot?.registry))
       .map((i) => pickTargetOf(i, bot.registry as never));
     return { level: 'hard', text: pickMissText('包里', item, pick, same), rule };
   }
@@ -293,7 +293,7 @@ function precheckUseItemAt(
   if (!item || invItemNamed(bot, item)) return null;
   const cell = call.at === undefined ? null : deps.resolve(call.at);
   const b = (cell ? deps.blockAt(cell) : null) as BlockLike;
-  if (b && cell && matchItemName(item, b.name)) {
+  if (b && cell && matchItemName(item, b.name, bot?.registry)) {
     return {
       level: 'hard',
       text: `包里没有${zhName(item)};不过 (${cell.x},${cell.y},${cell.z}) 那一格本身就是${zhName(b.name)}——要右键它不用带 item`,
@@ -603,7 +603,7 @@ function precheckStow(bot: Bot, call: Extract<SkillCall, { skill: 'stow' }>, dep
   const cell = deps.resolve(call.at);
   if (!cell) return null;
   const rec = deps.chests.get(dimensionOf(bot), cell);
-  if (!rec || rec.usedSlots < rec.slots || rec.items.some((it) => matchItemName(call.item, it.name))) return null;
+  if (!rec || rec.usedSlots < rec.slots || rec.items.some((it) => matchItemName(call.item, it.name, bot?.registry))) return null;
   return {
     level: 'soft', rule: 'stow.lastSeenFull',
     text: `指定箱子 (${cell.x},${cell.y},${cell.z}) 上次开窗已占满 ${rec.usedSlots}/${rec.slots} 格，且没有${zhName(call.item)}可并堆；出发前考虑别的仓库，到场仍以重新开箱为准`,
@@ -769,7 +769,7 @@ export function precheckSteps(bot: Bot, steps: SkillCall[], deps: PrecheckDeps):
       && steps.slice(0, i).some((earlier) =>
         (earlier.skill === 'take' || earlier.skill === 'pickup' || earlier.skill === 'craft')
         && 'item' in earlier && typeof earlier.item === 'string'
-        && (matchItemName(neededItem, earlier.item) || matchItemName(earlier.item, neededItem)))) continue;
+        && (matchItemName(neededItem, earlier.item, bot?.registry) || matchItemName(earlier.item, neededItem, bot?.registry)))) continue;
     // 同单先锄后种时，受理刻看见的是锄地前的草方块；种子的执行刻会重读耕地。
     // 相对落点前面若还有 goto，也不能把当前站位误当作将来的目标格。
     if (current.skill === 'use' && ['use.seedWrongBlock', 'use.seedFlooded', 'use.hoeWrongBlock', 'use.hoeCovered', 'use.soilCell'].includes(note.rule)

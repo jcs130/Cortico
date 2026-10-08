@@ -4631,7 +4631,7 @@ export class MinecraftWorld implements World {
         ? { title: minecraftTextComponent(win.title) || '容器',
             items: containerStacks(win, bot.registry as never).items }
         : null;
-      const text = renderStoredItemReadout(snap, records, item, opened);
+      const text = renderStoredItemReadout(snap, records, item, opened, bot?.registry);
       return { stamp: `${bagStamp(snap)}|stock:${item}|${text}`, text };
     }
     const storage = renderStorageReadout(snap, records);

@@ -13,6 +13,7 @@ import { precheckStep, precheckSteps, renderPrecheckNotes, type PrecheckDeps } f
 import { parseSteps, type SkillCall } from '../../../src/worlds/minecraft/executor.ts';
 import { resolveAnchors, type Anchor } from '../../../src/worlds/minecraft/geometry.ts';
 import { ChestBook } from '../../../src/worlds/minecraft/chests.ts';
+import { invItemNamed } from '../../../src/worlds/minecraft/inventory.ts';
 
 interface FakeItem { type: number; count: number; name: string }
 
@@ -96,6 +97,23 @@ function fakeBot(opts: {
     },
   } as never;
 }
+
+describe('registered item identity in precheck and equipment selection', () => {
+  it.each(['use', 'equip', 'stow', 'toss'] as const)('does not accept another registered variant for %s', (skill) => {
+    const bot = fakeBot({ bag: [['enchanted_golden_apple', 2]] });
+    const call = { skill, item: 'golden_apple', count: 1 } as SkillCall;
+    const note = precheckStep(bot, call, makeDeps(bot));
+    expect(note?.level).toBe('hard');
+    expect(note?.rule).toBe(`${skill}.noStock`);
+    expect(invItemNamed(bot, 'golden_apple')).toBeUndefined();
+  });
+
+  it('keeps a category query usable for equipment', () => {
+    const bot = fakeBot({ bag: [['iron_pickaxe', 1]] });
+    expect(invItemNamed(bot, 'pickaxe')?.name).toBe('iron_pickaxe');
+    expect(precheckStep(bot, { skill: 'equip', item: 'pickaxe' }, makeDeps(bot))).toBeNull();
+  });
+});
 
 /**
  * deps 必须绑到具体 bot —— `blockAt` 是执行器传进来的 blockAtCell(真机内部 new Vec3)。

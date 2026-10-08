@@ -266,7 +266,7 @@ export function permittedStockFor(
   const items = bot.inventory.items();
   let denied = '';
   for (const name of names) {
-    const item = items.find((candidate) => matchItemName(name, candidate.name));
+    const item = items.find((candidate) => matchItemName(name, candidate.name, bot?.registry));
     if (!item) continue;
     const permit = permitPlacement(ctx, item.name, preview);
     if (permit.ok) return { item, permit };

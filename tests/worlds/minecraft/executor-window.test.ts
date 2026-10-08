@@ -101,6 +101,53 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
 describe('container item labels and registry IDs', () => {
+  it('takes the exact registered ID even when a suffixed ID occurs first', async () => {
+    const r = rig({ box: { enchanted_golden_apple: 5, golden_apple: 8 } });
+    const { exec, reports } = makeExecutorOn(r.bot);
+    exec.submit([{ skill: 'use', item: 'compass' },
+      { skill: 'take', item: 'golden_apple', count: 2, from: 'open' }]);
+    await waitUntil(() => reports.length === 1, 8000);
+    expect(reports[0].kind).toBe('done');
+    expect(r.inventory.items().find(item => item.name === 'golden_apple')?.count).toBe(2);
+    expect(r.inventory.items().some(item => item.name === 'enchanted_golden_apple')).toBe(false);
+    expect(r.win.slots[0]?.count).toBe(5);
+    expect(r.win.slots[1]?.count).toBe(6);
+  });
+
+  it('does not substitute a suffixed ID when the registered take target is absent', async () => {
+    const r = rig({ box: { enchanted_golden_apple: 5 } });
+    const { exec, reports } = makeExecutorOn(r.bot);
+    exec.submit([{ skill: 'use', item: 'compass' },
+      { skill: 'take', item: 'golden_apple', count: 2, from: 'open' }]);
+    await waitUntil(() => reports.length === 1, 8000);
+    expect(reports[0].kind).toBe('blocked');
+    expect(r.transfers).toEqual([]);
+    expect(r.win.slots[0]?.count).toBe(5);
+  });
+
+  it('stows only the requested registered ID and leaves the other variant in the bag', async () => {
+    const r = rig({ bag: { compass: 1, enchanted_golden_apple: 5, golden_apple: 8 } });
+    const { exec, reports } = makeExecutorOn(r.bot);
+    exec.submit([{ skill: 'use', item: 'compass' },
+      { skill: 'stow', item: 'golden_apple', count: 2, into: 'open' }]);
+    await waitUntil(() => reports.length === 1, 8000);
+    expect(reports[0].kind).toBe('done');
+    expect(r.inventory.items().find(item => item.name === 'enchanted_golden_apple')?.count).toBe(5);
+    expect(r.inventory.items().find(item => item.name === 'golden_apple')?.count).toBe(6);
+    expect(r.win.slots[0]?.name).toBe('golden_apple');
+  });
+
+  it('does not satisfy an inventory expectation with a different registered ID', async () => {
+    const r = rig({ bag: { compass: 1, enchanted_golden_apple: 2 }, box: { bread: 4 } });
+    const { exec, reports } = makeExecutorOn(r.bot);
+    exec.submit([{ skill: 'use', item: 'compass', expect: { has: { item: 'golden_apple', count: 1 } } },
+      { skill: 'take', item: 'bread', count: 1, from: 'open', needs: [1] }]);
+    await waitUntil(() => reports.length === 1, 8000);
+    expect(reports[0].kind).toBe('blocked');
+    expect(reports[0].text).toContain('核验:落空');
+    expect(r.transfers).toEqual([]);
+  });
+
   it.each(['牛排', 'Steak', 'steak'])('returns the real ID for %s and accepts a subsequent explicit take', async (label) => {
     const r = rig({ box: { cooked_beef: 48 } });
     const { exec, reports } = makeExecutorOn(r.bot);

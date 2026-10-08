@@ -495,7 +495,7 @@ export async function skillEquip(bot: Bot, call: Extract<SkillCall, { skill: 'eq
   const worn = item && !fromOffHand ? null : equippedAlready(bot, want, call.hand, call.pick);
   if (worn) return `${zhName(worn.name)}本来就${worn.where}`;
   if (!item) {
-    const same = items.filter((i) => namedLike(want, i.name));
+    const same = items.filter((i) => namedLike(want, i.name, bot?.registry));
     if (call.pick && same.length > 0) throw noSuchItem(bot, want, call.pick, same);
     const near = items.filter((i) => i.name.includes(want)).map((i) => zhName(i.name));
     throw new SkillBlocked(

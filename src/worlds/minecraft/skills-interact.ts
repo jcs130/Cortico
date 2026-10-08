@@ -799,7 +799,7 @@ export async function useOnce(bot: Bot, call: Extract<SkillCall, { skill: 'use' 
       if (err instanceof SkillBlocked && call.at) {
         const cell = resolveAt(bot, call.at);
         const b = blockAtCell(bot, cell);
-        if (b && matchItemName(call.item, b.name)) {
+        if (b && matchItemName(call.item, b.name, bot?.registry)) {
           throw new SkillBlocked(
             `${err.message};不过 ${cellText(cell)} 那一格本身就是${zhName(b.name)}——` +
             `要右键它不用带 item,写 {"skill":"use","at":[${cell.x},${cell.y},${cell.z}]} 空手点它就行`,
