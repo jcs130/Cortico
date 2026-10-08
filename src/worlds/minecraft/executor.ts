@@ -1784,9 +1784,9 @@ interface ExecutorOptions {
   marks?: () => MarkDesk;
   /**
    * `queue:"now"` 夺手时让战斗会话当场交还身体(CombatSession.standDown)。
-   * 返回刚才在做什么;本来就没在打返回 null。不接 = 没有战斗层(台架)。
+   * 首步交给战斗层判断是否为进食或撤离；返回刚才在做什么。
    */
-  stopCombat?: () => string | null;
+  stopCombat?: (firstStep: SkillCall) => string | null;
   /** Search cache namespace. A realm or connection-generation change invalidates all sightings. */
   searchContext?: () => { connectionGeneration: number; realm: string };
 }
@@ -2184,7 +2184,7 @@ export class Executor {
     // queue:"now" = 手上的事全放下,战斗也一样。先让战斗交还身体(挂起的那件会被
     // resume 放回队头),再 interrupt 掐掉手上这件,最后这一单插到队头 —— 顺序反了
     // 就会是"刚解冻的旧任务排在急件前面"。
-    const combatCut = mode === 'now' ? this.opts.stopCombat?.() ?? null : null;
+    const combatCut = mode === 'now' ? this.opts.stopCombat?.(task.steps[0]) ?? null : null;
     const cut = mode === 'now' ? this.interrupt() : null;
     if (mode === 'afterCheckpoint') {
       const owner = this.task ?? this.frozen;
@@ -2210,7 +2210,7 @@ export class Executor {
     for (const d of dropped) this.reportCancelled(d, `新任务#${id} 顶替`, Executor.frozenProgress(d));
     this.pump();
     // 身体被战斗占着时如实说"排上了":此刻队列闸着,说"已开始"就是说假话。
-    // queue:"now" 可以打断普通交战，但低血或尚未安全结束的撤退仍会持有身体。
+    // 普通急件不能夺走低血自保；即时进食或撤离可由战斗层交还身体。
     // 交还动作之后重读 busyWith，避免把实际仍在排队的急件说成已经开跑。
     const hold = this.holdReason() ?? this.opts.busyWith?.() ?? null;
     /* 受理回执只说明收下或排队状态，不宣称完成，也不估计无依据的任务时长。 */
@@ -2229,6 +2229,9 @@ export class Executor {
       this.dangerNote(task.steps),
       // 战斗被这一单打断了:照实说一句,别让"怎么突然不打了"成为她要自己解释的事
       combatCut ? `战斗被这单打断了(刚才${combatCut},已经放开手)` : null,
+      mode !== 'now' && !this.holdReason() && this.opts.busyWith?.()
+        ? '本单尚未执行。立即进食或撤离可用 queue:"now" 插队；默认 replace 会撤销排队中的旧任务，append 则继续等待'
+        : null,
       cut,
       dropped.length > 0
         ? `撤掉了排在后面的 ${dropped.map((d) => `任务#${d.id}「${labelOf(d)}」`
@@ -4865,6 +4868,11 @@ export class Executor {
     if (!t) return false;
     // eat 属于回血自救，低血反射不得抢占。
     return t.escape.active || t.steps[t.stepIndex]?.skill === 'eat';
+  }
+
+  /** 进食占用主手直到消费回执或失败，战斗不能中途换武器。 */
+  get eating(): boolean {
+    return this.task?.steps[this.task.stepIndex]?.skill === 'eat';
   }
 
   /**
