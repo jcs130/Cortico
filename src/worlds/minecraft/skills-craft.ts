@@ -25,6 +25,7 @@ import { pickLabel, pickTargetOf } from './item-pick.ts';
 import { itemCustomName } from './item-display.ts';
 import { taggedCraftChoice } from './tagged-crafting.ts';
 import { isInventoryClickError, resumeInventoryCursor } from './inventory-click-sync.ts';
+import { clearOffHandConfirmed, equipSlotConfirmed } from './equipment.ts';
 
 /**
  * `bot.craft` 吃的配方数据面(见 mineflayer-fixes 的覆写版):
@@ -475,7 +476,7 @@ async function emptyOffHand(bot: Bot): Promise<string> {
     );
   }
   const before = invCount(bot, (n) => n === held.name);
-  await bot.unequip('off-hand');
+  await clearOffHandConfirmed(bot);
   const left = invCount(bot, (n) => n === held.name);
   if (left < before + held.count) {
     return `副手腾空了;包是满的,${zhName(held.name)}×${before + held.count - left}被扔在了脚下`;
@@ -503,7 +504,8 @@ export async function skillEquip(bot: Bot, call: Extract<SkillCall, { skill: 'eq
     );
   }
   const dest = call.hand === 'off' ? 'off-hand' : call.hand === 'main' ? 'hand' : equipDestOf(item.name, bot.registry);
-  await bot.equip(item, dest);
+  if (dest === 'hand') await bot.equip(item, dest);
+  else await equipSlotConfirmed(bot, item, dest);
   // 点名拿的时候回执念全标签:「拿起了弓」答不了「拿的是无限那把吗」
   const what = call.pick ? pickLabel(pickTargetOf(item, bot.registry as never)) : itemCustomName(item) ?? zhName(item.name);
   if (dest === 'hand' && fromOffHand) {
