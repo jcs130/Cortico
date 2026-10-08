@@ -68,7 +68,7 @@ import { MemoryNoteProvenance, NOTE_PROVENANCE_DIR } from './note-provenance.ts'
 import { memoryIndex } from './memory-index.ts';
 import { StateMemory, STATE_MEMORY_FILE, MEMORY_HISTORY_DIR } from './state-memory.ts';
 import { workspaceTools } from '../../cormini/persona/workspaceTools.ts';
-import { ToolCallRecoveryFallback, TOOL_CALL_RECOVERY_DEFAULTS, type ToolCallRecoveryConfig } from './tool-call-recovery.ts';
+import { ToolCallRecoveryFallback, TOOL_CALL_RECOVERY_DEFAULTS, withoutInputEchoes, type ToolCallRecoveryConfig } from './tool-call-recovery.ts';
 import { SleepReview, SLEEP_REVIEW_DEFAULTS, type SleepReviewConfig } from './sleep-review.ts';
 import { SocialMemoryReview, socialReviewPrompt, verifySocialReviewProof } from './social-memory-review.ts';
 import { ViewerConversationRecall, VIEWER_CONVERSATION_RECALL_LIMITS } from './viewer-conversation-recall.ts';
@@ -744,6 +744,7 @@ export class CortiV extends Cormini {
 
   prepareRequest(ctx: { sessionId: string; round: number; messages: readonly ContextRecord[] }): ContextRecord[] | null {
     const original = ctx.messages;
+    if (this.toolCallRecoveryConfig().enabled) ctx = { ...ctx, messages: withoutInputEchoes(ctx.messages) };
     this.stateMemory.observeRecords(ctx.messages, this.stateEvidenceTools());
     const checkpointViews: Record<string, string> = { recent_memory: this.recentMemoryNote(), memory_index: this.longTermMemoryIndex() };
     const staleCheckpoints = [...new Set(ctx.messages.flatMap(record => (record.context.frame?.events ?? []).flatMap(ref => {
@@ -752,7 +753,7 @@ export class CortiV extends Cormini {
     })))];
     const current = excerptHandoffRecords(this.stateMemory.project(ctx.messages, path => this.isStateNote(path)), text => text,
       { coveredCheckpoints: staleCheckpoints, replaceCurrentState: true });
-    const refreshed = current.some((record, index) => record !== original[index]);
+    const refreshed = current.length !== original.length || current.some((record, index) => record !== original[index]);
     const complete = (): ContextRecord[] | null => refreshed || this.stateMemory.hasClaims()
       ? [...current, message('user', this.stateMemory.summary())] : null;
     ctx = { ...ctx, messages: current };
