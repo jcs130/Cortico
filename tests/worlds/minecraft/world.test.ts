@@ -745,6 +745,32 @@ describe('MinecraftWorld World 面(未连接状态)', () => {
     expect(await tactic.handler({ enabled: false }, ctx as never)).toContain('恢复默认');
   });
 
+  it('战术工具保存并在新 World 实例恢复设置，局部修改保留另一字段，回执按需读取', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'world-tactic-'));
+    const ctx = { role: 'test', log: console as never } as never;
+    try {
+      const first = new MinecraftWorld({ cfg: cfg(), dataDir: dir, agentFriendEnabled: true });
+      const tool = first.tools().find(t => t.name === 'mc_combat_tactic')!;
+      await tool.handler({ spells: ['golem', 'frostnova'], healAtOrBelow: 12 }, ctx);
+      await tool.handler({ spells: ['starbolt'] }, ctx);
+      expect(await tool.handler({}, ctx)).toContain('生命线 12/20');
+      (first as any).combatSpells.recordCombat({ startedAt: '2026-10-08T12:00:00Z',
+        endedAt: '2026-10-08T12:00:05Z', reason: 'death', healthBefore: 20, healthAfter: 0,
+        kills: { zombie: 1 }, swings: 3, meleeLanded: 2, arrows: 0, rangedLanded: 0 });
+      const next = new MinecraftWorld({ cfg: cfg(), dataDir: dir, agentFriendEnabled: true });
+      const read = next.tools().find(t => t.name === 'mc_combat_tactic')!;
+      const state = await read.handler({}, ctx);
+      expect(state).toContain('starbolt');
+      expect(state).toContain('生命线 12/20');
+      expect(state).toContain('本连接尚未确认该能力');
+      expect(state).toContain('"reason":"death"');
+      expect(await read.handler({ report: 1 }, ctx)).toContain('"meleeLanded":2');
+      expect(await read.handler({ report: 1, spells: ['golem'] }, ctx)).toContain('不能与战术设置混用');
+      expect(await read.handler({}, ctx)).toContain('当前战术：starbolt；');
+      expect(await read.handler({ report: 999 }, ctx)).toContain('未找到战斗回执');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it('交战中先按战术血线自愈，间隔后再继续连招', async () => {
     const m = new MinecraftWorld({ cfg: cfg(), agentFriendEnabled: true });
     const host = new FakeHost();
@@ -803,7 +829,7 @@ describe('MinecraftWorld World 面(未连接状态)', () => {
     expect(bot.chat).toHaveBeenCalledTimes(1);
   });
 
-  it('最终层入口收到服务端通知后立刻召唤傀儡', () => {
+  it('进入最终层只更新现场，不绕过 Agent 战术强制开场召唤', () => {
     const m = new MinecraftWorld({ cfg: cfg(), agentFriendEnabled: true });
     const host = new FakeHost();
     const bot = Object.assign(new EventEmitter(), idleBot(), { chat: vi.fn() });
@@ -811,11 +837,11 @@ describe('MinecraftWorld World 面(未连接状态)', () => {
     (m as any).hookBotEvents(bot);
     bot.emit('message', { toString: () => '探索咏唱：守护傀儡(golem，12 魔力/75 秒)' }, 'system');
     bot.emit('message', { toString: () => '附近 1 人进入第 6/6 层：深层宝库；生命已补满。' }, 'system');
-    expect(bot.chat).toHaveBeenCalledWith('/mycli cast golem');
+    expect(bot.chat).not.toHaveBeenCalled();
   });
 
-  it('重连恢复较早楼层时识别楼层并保留魔力', () => {
-    const m = new MinecraftWorld({ cfg: cfg() });
+  it('较早楼层也依据敌人和能力使用默认战术，不因楼层隐藏禁用', () => {
+    const m = new MinecraftWorld({ cfg: cfg(), agentFriendEnabled: true });
     const host = new FakeHost();
     const bot = Object.assign(new EventEmitter(), idleBot(), { chat: vi.fn() });
     (bot as any).entities = Object.fromEntries(['zombie', 'zombie', 'zombie'].map((name, i) => [i + 1, {
@@ -826,7 +852,7 @@ describe('MinecraftWorld World 面(未连接状态)', () => {
     bot.emit('message', { toString: () => '探索咏唱：守护傀儡(golem，12 魔力/75 秒)' }, 'system');
     bot.emit('message', { toString: () => '已恢复第 1/6 层试炼。当前层怪物会重新出现' }, 'system');
     bot.emit('physicsTick');
-    expect(bot.chat).not.toHaveBeenCalled();
+    expect(bot.chat).toHaveBeenCalledWith('/mycli cast golem');
   });
 
   it('queue 写了个不认识的值:当场退回,不猜她想说哪一个', async () => {

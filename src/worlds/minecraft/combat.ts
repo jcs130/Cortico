@@ -29,6 +29,7 @@ import { Vec3 } from 'vec3';
 import type { Logger } from '../../core/types.ts';
 import type { MinecraftLog } from './log.ts';
 import type { SkillCall } from './skills.ts';
+import type { CombatResult, CombatScene } from './combat-tactics.ts';
 import {
   HARD, blend, blur, decide, dirSlot, newMap, slotDir, write, writeSlot, type Map16,
 } from './combat-context.ts';
@@ -220,6 +221,8 @@ interface CombatSessionOptions {
   emit: (text: string, urgent: boolean, hurt?: boolean) => void;
   /** 进入低血撤退前可尝试不占用身体的服务端防护技能。 */
   onLowHealth?: (bot: Bot) => void;
+  /** Observed encounter terminal state, including interruptions; no causal conclusion. */
+  report?: (result: CombatResult) => void;
   ranged?: CombatRangedActions;
   diag?: MinecraftLog;
   log: Logger;
@@ -284,6 +287,8 @@ export class CombatSession {
   private bot: Bot | null = null;
   private releaseWalkOnly: (() => void) | null = null;
   private startedAt = 0;
+  private healthBefore: number | null = null;
+  private sceneBefore: CombatScene | undefined;
   /** 会话级总_cap 起点:仅 idle→engage 时重置,内部 fight/retreat 振荡不重置 */
   private sessionStartedAt = 0;
   /** 总_cap 触发后的被动再进场冷却;受击自卫(hurt=true)不受此限 */
@@ -591,6 +596,8 @@ export class CombatSession {
     this.state = 'fighting';
     const now = Date.now();
     this.startedAt = now;
+    this.healthBefore = bot.health ?? null;
+    this.sceneBefore = this.observeScene(bot);
     this.sessionStartedAt = now;
     this.deadlineAt = now + this.opts.tuning().maxSec * 1000;
     this.lastStatusAt = now;
@@ -1614,8 +1621,13 @@ export class CombatSession {
     // 否则 end() 会把上一场的开始时刻算成本场时长
     if (this.state === 'idle') {
       this.startedAt = Date.now();
+      this.healthBefore = bot.health ?? null;
+      this.sceneBefore = this.observeScene(bot);
       this.sessionStartedAt = this.startedAt;
       this.deadIds.clear();
+      this.kills.clear();
+      this.killsPending.clear();
+      this.swings = this.landed = this.arrows = this.rangedLanded = 0;
     }
     this.state = 'retreating';
     this.retreatWhy = why;
@@ -1913,6 +1925,21 @@ export class CombatSession {
     return busy / BUSY_WINDOW_MS;
   }
 
+  private observeScene(bot: Bot): CombatScene {
+    const p = bot.entity.position;
+    const nearbyHostiles: Record<string, number> = {};
+    for (const e of Object.values(bot.entities ?? {})) {
+      if (!e?.position || e.isValid === false || !HOSTILE.has(e.name ?? '')
+        || Math.hypot(e.position.x - p.x, e.position.y - p.y, e.position.z - p.z) > 16) continue;
+      nearbyHostiles[e.name!] = (nearbyHostiles[e.name!] ?? 0) + 1;
+    }
+    return { dimension: bot.game?.dimension ?? null, position: { x: p.x, y: p.y, z: p.z },
+      hostileRadius: 16, nearbyHostiles, equipment: { mainHand: bot.heldItem?.name ?? null,
+        offHand: bot.inventory?.slots?.[45]?.name ?? null,
+        helmet: bot.inventory?.slots?.[5]?.name ?? null, chestplate: bot.inventory?.slots?.[6]?.name ?? null,
+        leggings: bot.inventory?.slots?.[7]?.name ?? null, boots: bot.inventory?.slots?.[8]?.name ?? null } };
+  }
+
   private end(reason: EndReason): void {
     if (this.state === 'idle') return;
     this.cancelRanged();
@@ -1946,6 +1973,12 @@ export class CombatSession {
         rangedLanded: this.rangedLanded, landed: this.landed,
       },
     });
+    this.opts.report?.({ startedAt: new Date(this.startedAt).toISOString(),
+      endedAt: new Date(Date.now()).toISOString(), reason,
+      healthBefore: this.healthBefore, healthAfter: bot?.health ?? null,
+      sceneBefore: this.sceneBefore,
+      kills: Object.fromEntries(this.kills), swings: this.swings,
+      meleeLanded: this.meleeLanded(), arrows: this.arrows, rangedLanded: this.rangedLanded });
     // 只有正常战斗收尾解冻断点。断线、环境夺权、外部抢占与死亡各自由其终态边界
     // 处理冻结队列；在这里泵回会让任务进入已断线或正在交权的执行器。
     const resumable = reason === 'clear' || reason === 'flee' || reason === 'timeout' ||

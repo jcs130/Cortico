@@ -8,6 +8,7 @@ import type { RangedTarget } from '../../../src/worlds/minecraft/ranged.ts';
 import { MinecraftLog } from '../../../src/worlds/minecraft/log.ts';
 import { Executor, type TaskReport } from '../../../src/worlds/minecraft/executor.ts';
 import { skillEat } from '../../../src/worlds/minecraft/skills-craft.ts';
+import type { CombatResult } from '../../../src/worlds/minecraft/combat-tactics.ts';
 import type { Logger } from '../../../src/core/types.ts';
 
 const log = { child() { return this; }, info() {}, warn() {}, error() {}, debug() {}, trace() {}, emit() {} } as unknown as Logger;
@@ -80,6 +81,7 @@ function rig(
   onLowHealth?: (bot: Bot) => void,
 ) {
   const events: Array<{ text: string; urgent: boolean }> = [];
+  const combatReports: CombatResult[] = [];
   const calls = { suspended: 0, resumed: 0, suspendedBy: [] as string[] };
   let envBusy = false;
   let taskEscaping = false;
@@ -98,11 +100,12 @@ function rig(
     resumeTasks: () => { calls.resumed++; return '刚才做到一半的任务#1 接着做(第 1 步:去坐标)'; },
     emit: (text, urgent) => events.push({ text, urgent }),
     onLowHealth,
+    report: result => combatReports.push(result),
     ranged,
     log,
   });
   return {
-    session, events, calls,
+    session, events, calls, combatReports,
     setEnvBusy: (v: boolean) => { envBusy = v; },
     setTaskEscaping: (v: boolean) => { taskEscaping = v; },
     setTaskFighting: (v: boolean) => { taskFighting = v; },
@@ -419,17 +422,26 @@ describe('战斗会话:进入(夺手不夺嘴)', () => {
     session.stop();
   });
 
-  it('死亡是终态:释放战斗但不恢复被冻结的旧任务', () => {
+  it('死亡是终态:释放战斗并报告实际血量和时间，不恢复被冻结的旧任务', async () => {
     const { bot } = combatRigBot([foe(7, 'zombie', 2.5)]);
-    const { session, calls } = rig(bot);
+    const { session, calls, combatReports } = rig(bot);
+    const startedAt = new Date(Date.now()).toISOString();
     session.onHurtBy(7, 'zombie');
     expect(session.active).toBe(true);
 
+    await sleep(2000);
+    Object.assign(bot, { health: 0 });
     (bot as unknown as EventEmitter).emit('death');
 
     expect(session.active).toBe(false);
     expect(calls.resumed).toBe(0);
+    expect(combatReports).toHaveLength(1);
+    expect(combatReports[0]).toMatchObject({ startedAt, endedAt: new Date(Date.now()).toISOString(),
+      reason: 'death', healthBefore: 20, healthAfter: 0, kills: {},
+      sceneBefore: { position: { x: 0.5, y: 64, z: 0.5 }, nearbyHostiles: { zombie: 1 },
+        equipment: { mainHand: 'iron_sword', offHand: null } } });
     session.stop();
+    expect(combatReports).toHaveLength(1);
   });
 
   /**
@@ -1306,7 +1318,7 @@ describe('standDown:queue:"now" 夺手', () => {
   it.each(['eat', 'flee', 'surface'] as const)('低血撤退可交还给即时 %s，不恢复旧任务抢跑', (skill) => {
     const { bot, controls } = combatRigBot([foe(7, 'skeleton', 7)]);
     (bot as unknown as { health: number }).health = 5;
-    const { session, calls } = rig(bot);
+    const { session, calls, combatReports } = rig(bot);
     session.onHurtBy(7, 'skeleton');
     session.onHurtBy(7, 'skeleton');
     expect(session.active).toBe(true);
@@ -1315,6 +1327,8 @@ describe('standDown:queue:"now" 夺手', () => {
     expect(session.standDown(step)).toBe('正在跟怪打');
     expect(session.active).toBe(false);
     expect(calls.resumed).toBe(0);
+    expect(combatReports).toHaveLength(1);
+    expect(combatReports[0]).toMatchObject({ reason: 'preempt', healthBefore: 5, healthAfter: 5 });
     expect(Object.values(controls).every((pressed) => !pressed)).toBe(true);
     session.stop();
   });
