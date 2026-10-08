@@ -41,13 +41,11 @@ export function withoutInputEchoes(records: readonly ContextRecord[]): ContextRe
 function transcriptTools(text: string, availableTools: ReadonlySet<string>): string[] {
   const names = new Set<string>();
   let fenced = false;
-  let request: string | null = null;
   for (const line of text.split(/\r?\n/)) {
     if (/^\s*(```|~~~)/.test(line)) { fenced = !fenced; continue; }
     if (fenced) continue;
     const match = /^\s*\[历史工具请求\]\s+([A-Za-z_][\w]*)(?:\s|$)/.exec(line);
-    if (match) request = availableTools.has(match[1]) ? match[1] : null;
-    else if (request && /^\s*\[历史回执\]/.test(line)) { names.add(request); request = null; }
+    if (match && availableTools.has(match[1])) names.add(match[1]);
   }
   return [...names];
 }
@@ -108,7 +106,7 @@ export class ToolCallRecoveryFallback {
     const transcripts = transcriptTools(text, availableTools);
     if (transcripts.length) {
       this.advised = true;
-      return `[工具接口核验] 刚才的正文为 ${transcripts.join('、')} 写了历史请求和回执样式，但本轮没有原生工具调用，这些行没有对应本轮执行记录。回顾过去请核验原始账本；需要新的行动或观察时使用当前原生工具接口，等待实际回执。不要模拟工具回执。也可以选择结束本轮。`;
+      return `[工具接口核验] 刚才的正文为 ${transcripts.join('、')} 写了历史工具请求样式，但本轮没有原生工具调用，这些行没有对应本轮执行记录。回顾过去请核验原始账本；需要新的行动或观察时使用当前原生工具接口，等待实际回执。不要模拟工具回执。也可以选择结束本轮。`;
     }
     const names = new Set<string>();
     let fenced = false;

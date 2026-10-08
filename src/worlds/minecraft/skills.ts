@@ -1759,7 +1759,7 @@ export function readSkillHelp(args: Record<string, unknown>): { text: string } |
 
 /** 试算目录只列支持的技能；完整动作说明由 mc_help 读取。 */
 export const SCOUT_SKILL_DOC = [
-  '一步一个对象,按顺序试算,不动世界。',
+  '一步一个对象,按顺序读取真实现场并试算,不动世界。每步从当时真实位置开始，不推进假定位置或材料；needs 只判断前步试算结果，不表示前步已执行。',
   `收 ${SCOUT_SKILLS.map((s) => s.name).join(' / ')} 这几个技能,写法与参数跟 mc_do 的 steps 完全一样`,
   '完整示例和条件用 mc_help 按技能查询;一律按试算跑,不用自己写 dryRun。',
 ].join('');
