@@ -348,6 +348,25 @@ describe('pathfinder 性能补丁', () => {
     expect(after.cost).toBeLessThan(before.cost);
   });
 
+  it('挖掘成本重读时区块已卸载，排除该边且下一次搜索可重新挖掘', () => {
+    installPathfinderPerf();
+    const bot = makeBot(makeWorld());
+    const blockAt = bot.blockAt as (position: unknown) => { type: number } | null;
+    // 搜索特征仍读得到墙，物化完整 Block 时客户端已丢掉对应区块。
+    bot.blockAt = (position: unknown) => {
+      const block = blockAt(position);
+      return block?.type === registry.blocksByName.stone.id ? null : block;
+    };
+    const missing = search(bot, [0, 64, 0], [14, 64, 0]);
+    expect(missing.breaks.some((position) => position.x === 8)).toBe(false);
+    expect(Number.isFinite(missing.cost)).toBe(true);
+
+    bot.blockAt = blockAt;
+    const restored = search(bot, [0, 64, 0], [14, 64, 0]);
+    expect(restored.status).toBe('success');
+    expect(restored.breaks.some((position) => position.x === 8)).toBe(true);
+  });
+
   it('compute 之外 getBlock 不走缓存,读到的是新鲜世界', () => {
     const world = makeWorld();
     const bot = makeBot(world);

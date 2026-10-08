@@ -488,7 +488,6 @@ export function installPathfinderPerf(log?: Logger): void {
     cost += this.getNumEntitiesAt(block.position, 0, 0, 0) * this.entityCost;
     if (block.safe) return cost;
     if (!this.safeToBreak(block)) return 100;
-    toBreak.push(block.position);
     if (block.physical) cost += this.getNumEntitiesAt(block.position, 0, 1, 0) * this.entityCost;
 
     const cache = this.__sliceCache;
@@ -498,12 +497,15 @@ export function installPathfinderPerf(log?: Logger): void {
       const real = (typeof block.digTime === 'function'
         ? block
         : origGetBlock.call(this, block.position as { x: number; y: number; z: number }, 0, 0, 0)) as BlockLike;
+      // 区块可能在特征采样后卸载，缺块占位对象没有挖掘成本，也不能进入破坏清单。
+      if (typeof real.digTime !== 'function') return 100;
       const tool = this.bot.pathfinder.bestHarvestTool(real);
       const enchants = (tool && tool.nbt) ? nbt.simplify(tool.nbt).Enchantments : [];
       const digTime = real.digTime!(tool ? tool.type : null, false, false, false, enchants, this.bot.entity.effects);
       labor = (1 + 3 * digTime / 1000) * this.digCost;
       cache?.labor.set(block.type, labor);
     }
+    toBreak.push(block.position);
     cost += labor;
     return cost;
   };
