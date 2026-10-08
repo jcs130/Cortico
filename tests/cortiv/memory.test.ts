@@ -425,7 +425,7 @@ describe('CortiV 观众档案唤起', () => {
     const listing = await tools.find(tool => tool.name === 'list_files')!.handler({ dir: 'sessions/archive' }, ctx);
     expect(String(listing)).toContain(source);
     expect(String(listing)).toContain('reading-149.jsonl');
-    const read = await tools.find(tool => tool.name === 'read_file')!.handler({ path: source }, ctx);
+    const read = await tools.find(tool => tool.name === 'read_file')!.handler({ path: source, history: true }, ctx);
     expect(typeof read === 'string' ? read : read.text).toContain(body.trim());
     expect(readFileSync(join(dir, source), 'utf8')).toBe(body);
   });
@@ -613,7 +613,7 @@ describe('CortiV 并行梦', () => {
     expect(dream.tools().map((t) => t.name).sort())
       .toEqual([
         'append_file', 'delete_file', 'edit_file', 'git_log', 'git_show', 'glob_files', 'grep_files',
-        'list_files', 'read_file', 'recall_viewer', 'save_blob', 'write_file',
+        'list_files', 'memory_record', 'read_file', 'recall_viewer', 'save_blob', 'write_file',
       ]);
   });
 
@@ -805,14 +805,14 @@ describe('CortiV 并行梦', () => {
     }
   });
 
-  it('梦写了交接笔记就推回主 session;没写就不推', async () => {
+  it('梦写了经历笔记后只推当前记录与归档入口;没写就不推', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     // 没写:只有 (nothing),不打扰
     await p.onHandoff(records([{ role: 'user', content: 'x' }]), HANDOFF_CTX);
     await vi.advanceTimersByTimeAsync(0);
     expect(injected.filter((i) => i.text.includes('最近在说的事'))).toHaveLength(0);
 
-    // 写了:整份原样送到她面前
+    // 归档的自然语言不获得当前状态的资格。
     forkResult = async (opts) => {
       await opts.tools!.find(tool => tool.name === 'write_file')!.handler(
         { path: RECENT_FILE, content: '还差两只羊做床,云那个梗还挂着。' }, { role: 'dream', log: nullLogger() });
@@ -820,14 +820,15 @@ describe('CortiV 并行梦', () => {
     };
     await p.onHandoff(records([{ role: 'user', content: 'y' }]), HANDOFF_CTX);
     await vi.advanceTimersByTimeAsync(0);
-    await vi.waitFor(() => expect(injected.filter(i => i.text.includes('最近在说的事'))).toHaveLength(1));
-    const notes = injected.filter((i) => i.text.includes('最近在说的事'));
+    await vi.waitFor(() => expect(injected.filter(i => i.text.includes('本次经历已归档'))).toHaveLength(1));
+    const notes = injected.filter((i) => i.text.includes('本次经历已归档'));
     expect(notes).toHaveLength(1);
     expect(notes[0].kind).toBe('dream');
-    expect(notes[0].text).toContain('还差两只羊做床');
+    expect(notes[0].text).not.toContain('还差两只羊做床');
+    expect(readFileSync(join(dir, RECENT_FILE), 'utf8')).toContain('还差两只羊做床');
   });
 
-  it('超长结构化短笺保留现场、未完目标与清单后的完结证据', async () => {
+  it('超长结构化经历完整归档，互相矛盾的旧结论不回灌当前状态', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const recent = [
       '# 最近在说的事',
@@ -850,20 +851,16 @@ describe('CortiV 并行梦', () => {
 
     await p.onHandoff(records([{ role: 'user', content: '本场记录' }]), HANDOFF_CTX);
     await vi.advanceTimersByTimeAsync(0);
-    await vi.waitFor(() => expect(injected.filter(i => i.kind === 'dream' && i.text.includes('最近在说的事'))).toHaveLength(1));
-    const notes = injected.filter((i) => i.kind === 'dream' && i.text.includes('最近在说的事'));
+    await vi.waitFor(() => expect(injected.filter(i => i.kind === 'dream' && i.text.includes('本次经历已归档'))).toHaveLength(1));
+    const notes = injected.filter((i) => i.kind === 'dream' && i.text.includes('本次经历已归档'));
     expect(notes).toHaveLength(1);
-    const excerpt = notes[0].text.split('】\n').slice(1).join('】\n');
-    expect(excerpt.length).toBeLessThanOrEqual(900);
-    expect(excerpt).toContain('我在河边等队友回信');
-    expect(excerpt).toContain('还差两竿');
-    expect(excerpt).toContain('旧计划列作未完成');
-    expect(excerpt).toContain('服务端完成回执');
-    expect(excerpt).toContain('若有冲突');
+    expect(notes[0].text).toContain('memory_record');
+    expect(notes[0].text).not.toContain('旧计划列作未完成');
+    expect(notes[0].text).not.toContain('我在河边等队友回信');
     expect(readFileSync(join(dir, RECENT_FILE), 'utf8')).toBe(recent);
   });
 
-  it('无可识别标题的超长短笺保留首尾原文', async () => {
+  it('无标题的超长经历不自动成为当前记录', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const recent = `开头现场：我在等雨停。\n${'途中的琐事。'.repeat(220)}\n末尾确认：约定的灯已经点亮。`;
     forkResult = async (opts) => {
@@ -874,14 +871,12 @@ describe('CortiV 并行梦', () => {
 
     await p.onHandoff(records([{ role: 'user', content: '本场记录' }]), HANDOFF_CTX);
     await vi.advanceTimersByTimeAsync(0);
-    await vi.waitFor(() => expect(injected.filter(i => i.kind === 'dream' && i.text.includes('最近在说的事'))).toHaveLength(1));
-    const notes = injected.filter((i) => i.kind === 'dream' && i.text.includes('最近在说的事'));
+    await vi.waitFor(() => expect(injected.filter(i => i.kind === 'dream' && i.text.includes('本次经历已归档'))).toHaveLength(1));
+    const notes = injected.filter((i) => i.kind === 'dream' && i.text.includes('本次经历已归档'));
     expect(notes).toHaveLength(1);
-    const excerpt = notes[0].text.split('】\n').slice(1).join('】\n');
-    expect(excerpt.length).toBeLessThanOrEqual(900);
-    expect(excerpt).toContain('开头现场');
-    expect(excerpt).toContain('末尾确认');
-    expect(excerpt).toContain('灯已经点亮');
+    expect(notes[0].text).not.toContain('开头现场');
+    expect(notes[0].text).not.toContain('灯已经点亮');
+    expect(readFileSync(join(dir, RECENT_FILE), 'utf8')).toBe(recent);
   });
 
   it('上一场留下的旧交接笔记不冒充这一场的', async () => {
@@ -904,7 +899,9 @@ describe('CortiV 并行梦', () => {
     await vi.advanceTimersByTimeAsync(0);
     const dreams = injected.filter((i) => i.kind === 'dream');
     expect(dreams).toHaveLength(1);
-    expect(dreams[0].text).toContain('老王托我明天提醒他交房租');
+    expect(dreams[0].text).not.toContain('老王托我明天提醒他交房租');
+    const resultFile = readdirSync(join(dir, 'sessions/archive')).find(file => file.startsWith('result-'))!;
+    expect(readFileSync(join(dir, 'sessions/archive', resultFile), 'utf8')).toContain('老王托我明天提醒他交房租');
   });
 
   it('单实例排队:上一场梦没结束,下一场快照排队等', async () => {
@@ -955,7 +952,7 @@ describe('CortiV 并行梦', () => {
       expect(note.text).not.toContain('观察截止 2026-10-04T00:31:00');
       expect(note.text).not.toContain('2026-10-04T02:00:00');
     }
-    expect(notes.find(note => note.text.includes('最近在说的事'))!.text)
+    expect(notes.find(note => note.text.includes('本次经历已归档'))!.text)
       .toContain('整理写入于 2026-10-04T00:31:00.000Z');
     expect(forks[0].messages.find((item) => item.role === 'user')!.content).toContain('旧会话观察截止 2026-10-04T00:29:57Z');
     expect(readFileSync(join(dir, RECENT_FILE), 'utf8')).toBe('任务还在执行，等它结束。');

@@ -7,7 +7,7 @@ import { MemoryNoteProvenance, type NoteObservation } from './note-provenance.ts
 
 const FILE_WRITES = new Set(['write_file', 'edit_file', 'append_file', 'delete_file', 'save_blob']);
 export function dreamWorkspaceTools(tools: readonly ToolDef[]): ToolDef[] {
-  return tools.filter(tool => FILE_WRITES.has(tool.name) || (tool.tags.includes('read')
+  return tools.filter(tool => tool.name === 'memory_record' || FILE_WRITES.has(tool.name) || (tool.tags.includes('read')
     && !tool.tags.some(tag => tag === 'write' || tag === 'flow' || tag === 'act' || tag === 'speak')));
 }
 
@@ -67,6 +67,11 @@ export class DreamMemory {
       this.signal.throwIfAborted();
       const read = tool.name === 'read_file';
       const write = tool.tags.includes('write');
+      if (tool.name === 'memory_record') {
+        const result = await tool.handler(args, ctx);
+        if (['set', 'retire'].includes(String(args.operation)) && typeof result === 'string') this.mutated = true;
+        return result;
+      }
       if (!read && !write) return tool.handler(args, ctx);
       let file: string;
       let before: string | null;

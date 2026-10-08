@@ -27,7 +27,7 @@ import { hasRole, textOf } from 'cortico/protocol/open-responses/context-helpers
  */
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import type {
 
   CognitionContext,
@@ -66,6 +66,8 @@ import { DreamTaskQueue, DreamTaskStoppedError, dreamAbortable, dreamDelay } fro
 import { DreamMemory, dreamWorkspaceTools } from './dream-memory.ts';
 import { MemoryNoteProvenance, NOTE_PROVENANCE_DIR } from './note-provenance.ts';
 import { memoryIndex } from './memory-index.ts';
+import { StateMemory, STATE_MEMORY_FILE, MEMORY_HISTORY_DIR } from './state-memory.ts';
+import { workspaceTools } from '../../cormini/persona/workspaceTools.ts';
 import { ToolCallRecoveryFallback, TOOL_CALL_RECOVERY_DEFAULTS, type ToolCallRecoveryConfig } from './tool-call-recovery.ts';
 import { SleepReview, SLEEP_REVIEW_DEFAULTS, type SleepReviewConfig } from './sleep-review.ts';
 import { SocialMemoryReview, socialReviewPrompt, verifySocialReviewProof } from './social-memory-review.ts';
@@ -458,6 +460,8 @@ export class CortiV extends Cormini {
   private readonly dreamConfig: () => DreamConfig;
   private readonly sleepReviewConfig: () => SleepReviewConfig;
   private sleepReview: SleepReview | null = null;
+  private readonly stateMemory: StateMemory;
+  private foregroundMemoryState = '';
   private planningReview: PeriodicPlanningReview | null = null;
   private readonly foregroundConfig: () => ForegroundContextConfig;
   private readonly toolCallRecoveryConfig: () => ToolCallRecoveryConfig;
@@ -487,6 +491,7 @@ export class CortiV extends Cormini {
 
   constructor(opts: CortiVOptions) {
     super(opts);
+    this.stateMemory = new StateMemory(this.memory);
     this.planningConfig = opts.planning ?? (() => PLANNING_DEFAULTS);
     this.dreamConfig = opts.dream ?? (() => DREAM_DEFAULTS);
     this.sleepReviewConfig = opts.sleepReview ?? (() => SLEEP_REVIEW_DEFAULTS);
@@ -516,16 +521,17 @@ export class CortiV extends Cormini {
     this.sleepReview = new SleepReview(core, this.sleepReviewConfig);
     this.pendingWork = new PendingWork(core, this.memoryDir, this.timezone);
     this.activityAgenda = new ActivityAgenda(this.memoryDir);
+    this.stateMemory.migrate(this.stateNotePaths());
     this.planningReview = new PeriodicPlanningReview({
       core, config: this.planningConfig, agenda: this.activityAgenda,
       memory: (files) => ({
         constitution: this.memory.readFile('CONSTITUTION.md'),
         memories: [...(this.referenceLibrary.catalog() ? [{ file: 'reference_guide/catalog', text: this.referenceLibrary.catalog() }] : []), ...files.map((file) => {
-          try { return { file, text: new MemoryNoteProvenance(this.memory).readFile(file) }; }
+          try { return { file, text: this.readOverride(file) ?? new MemoryNoteProvenance(this.memory).readFile(file) }; }
           catch (error) { return { file, text: `[读取失败: ${String(error)}]` }; }
         })],
         pending: this.pendingWork?.summary() ?? '',
-        observations: this.requestWorldFacts().pins.map(record => itemText(record.item)).join('\n\n'),
+        observations: [this.stateMemory.summary(), ...this.requestWorldFacts().pins.map(record => itemText(record.item))].join('\n\n'),
       }),
     });
     core.timers.onDue((entry) => {
@@ -684,12 +690,14 @@ export class CortiV extends Cormini {
         + 'Read and verify a background proposal before adopt. adopt with id adds that new candidate while preserving '
         + 'existing progress; omit id to merge the whole proposal only when its revision is current, retaining omitted goals and evidence. focus selects a current stage. update records actual progress '
         + 'or marks a stage done/deferred/queued/cancelled with evidence or an explicit cancellation reason in note. update can revise when/ifBlocked with fresh evidence in note while preserving the objective and completion criteria. Adoption preserves existing stage conditions and evidence. Cancelled is not completed; neither closed status can be reopened by an old proposal. Plans do not execute World actions; '
-        + 'completion is never inferred from time or task acceptance. Details and references are loaded only when needed.',
+         + 'amend corrects the note of a closed stage using the expected_revision from read; it preserves status and prior note history. '
+         + 'completion is never inferred from time or task acceptance. Details and references are loaded only when needed.',
       tags: ['write'],
       parameters: {
         type: 'object', additionalProperties: false,
         properties: {
-          operation: { type: 'string', enum: ['read', 'review', 'adopt', 'focus', 'update'] },
+          operation: { type: 'string', enum: ['read', 'review', 'adopt', 'focus', 'update', 'amend'] },
+          expected_revision: { type: 'integer', minimum: 0, description: 'amend: exact current agenda revision from read; correction preserves the closed status and previous note.' },
           question: { type: 'string', minLength: 1, maxLength: 1200,
             description: 'review: optional focused question about evidence, net progress or an uncertain cause; omit for a full agenda proposal.' },
           id: { type: 'string', minLength: 1, maxLength: 80, description: 'Exact adopted item id for focus/update; read: one stage or unadopted candidate, including closed evidence; adopt: one verified new candidate id, even if other stages changed.' },
@@ -735,19 +743,36 @@ export class CortiV extends Cormini {
   }
 
   prepareRequest(ctx: { sessionId: string; round: number; messages: readonly ContextRecord[] }): ContextRecord[] | null {
+    const original = ctx.messages;
+    this.stateMemory.observeRecords(ctx.messages, this.stateEvidenceTools());
+    const checkpointViews: Record<string, string> = { recent_memory: this.recentMemoryNote(), memory_index: this.longTermMemoryIndex() };
+    const staleCheckpoints = [...new Set(ctx.messages.flatMap(record => (record.context.frame?.events ?? []).flatMap(ref => {
+      if (ref.source !== 'persona' || !Object.hasOwn(checkpointViews, ref.type)) return [];
+      return itemText(record.item).slice(ref.start, ref.start + ref.chars).includes(checkpointViews[ref.type]) ? [] : [ref.type];
+    })))];
+    const current = excerptHandoffRecords(this.stateMemory.project(ctx.messages, path => this.isStateNote(path)), text => text,
+      { coveredCheckpoints: staleCheckpoints, replaceCurrentState: true });
+    const refreshed = current.some((record, index) => record !== original[index]);
+    const complete = (): ContextRecord[] | null => refreshed || this.stateMemory.hasClaims()
+      ? [...current, message('user', this.stateMemory.summary())] : null;
+    ctx = { ...ctx, messages: current };
     const cfg = this.foregroundConfig();
-    if (ctx.sessionId !== MAIN) return null;
-    if (!cfg.enabled) { this.foregroundEpoch.reset(); return null; }
+    if (ctx.sessionId !== MAIN) return refreshed ? current : null;
+    if (!cfg.enabled) { this.foregroundEpoch.reset(); return complete(); }
     if (this.fullContextRequested) {
       this.foregroundEpoch.reset();
       const latest = this.latestModelRecord(ctx.messages);
       if (this.fullContextBaseline === null) this.fullContextBaseline = { marker: latest };
-      if (latest === this.fullContextBaseline.marker) return null;
+      if (latest === this.fullContextBaseline.marker) return complete();
       this.fullContextRequested = false;
       this.fullContextBaseline = null;
     }
     const facts = this.requestWorldFacts();
     const recentMemory = this.recentMemoryNote();
+    if (recentMemory !== this.foregroundMemoryState) {
+      this.foregroundEpoch.reset();
+      this.foregroundMemoryState = recentMemory;
+    }
     const index = this.longTermMemoryIndex();
     const recentSpeech = this.recentSpeech.note();
     const pending = this.pendingWork?.summary() || '[待办] 当前没有等待中或待复核的事项。';
@@ -788,6 +813,12 @@ export class CortiV extends Cormini {
       coveredCheckpoints,
     } });
     return view.messages;
+  }
+
+  private stateEvidenceTools(): Set<string> {
+    const memoryTools = new Set(this.tools().map(tool => tool.name));
+    return new Set([...this.core?.toolsTagged('act') ?? [], ...this.core?.toolsTagged('read') ?? []]
+      .filter(name => !memoryTools.has(name)));
   }
 
   private latestModelRecord(records: readonly ContextRecord[]): string | null {
@@ -1067,9 +1098,24 @@ export class CortiV extends Cormini {
   /** 写类工具成功后尝试提交工作区；Git 失败不撤销文件写入。另提供版本历史与观众档案读取工具。 */
   protected override tools(): ToolDef[] {
     const provenance = new MemoryNoteProvenance(this.memory);
+    const historyTools = workspaceTools({ memory: this.memory, writeGuard: (op, path, role) => this.writeGuard(op, path, role),
+      readOverride: path => super.readOverride(path), prefixResidentFiles: () => this.prefixResidentFiles() });
+    const currentSearch = workspaceTools({ memory: this.memory, writeGuard: (op, path, role) => this.writeGuard(op, path, role),
+      readOverride: path => this.isStateNote(path) ? this.stateMemory.historicalSource(path) : super.readOverride(path),
+      prefixResidentFiles: () => this.prefixResidentFiles() }).find(tool => tool.name === 'grep_files')!;
+    const reader = (tool: ToolDef): ToolDef => ({ ...tool,
+      parameters: { ...tool.parameters, properties: { ...tool.parameters.properties as Record<string, unknown>,
+        history: { type: 'boolean', description: 'Explicitly read historical prose; it cannot update current state by being copied into a new note.' } } },
+      description: tool.description + ' Current-state notes return a managed view by default; history:true reads historical prose.',
+      handler: async (args, ctx) => {
+        const base = args.history === true ? historyTools.find(entry => entry.name === tool.name)! : tool;
+        const result = await provenance.readTool(base).handler(args, ctx);
+        return args.history === true && typeof result === 'string' ? '[历史原文；事实时间取原始观察，文件写入时间不使其成为当前状态。]\n' + result : result;
+      } });
     return [
       ...super.tools().map((t) => (
-        t.name === 'read_file' ? provenance.readTool(t)
+        t.name === 'read_file' ? reader(t)
+          : t.name === 'grep_files' ? reader(currentSearch)
           : t.name === 'write_file' ? this.committedWrite(t)
           : t.name === 'edit_file' ? this.committed(t, 'edit', '[edited] ')
             : t.name === 'delete_file' ? this.committed(t, 'delete', '[deleted] ')
@@ -1077,6 +1123,7 @@ export class CortiV extends Cormini {
                 : t.name === 'save_blob' ? this.committed(t, 'save', '[saved] ')
                   : t)),
       ...this.historyTools(),
+      this.stateMemory.tool(),
       this.recallTool(),
       ...(this.referenceConfig().enabled ? [this.referenceTool()] : []),
     ];
@@ -1130,8 +1177,14 @@ export class CortiV extends Cormini {
   }
 
   protected override writeGuard(op: 'write' | 'append' | 'rename' | 'delete', path: string, role: string): string | null {
-    const normalized = this.memory.normalize(path);
+    let normalized: string;
+    try { normalized = relative(this.memoryDir, this.memory.insideWorkspace(path)).replace(/\\/g, '/'); }
+    catch { return '路径不在 Memory 工作区内。'; }
     const provenancePath = process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+    if (provenancePath === STATE_MEMORY_FILE || provenancePath === `${STATE_MEMORY_FILE}.lock`
+      || provenancePath === MEMORY_HISTORY_DIR || provenancePath.startsWith(`${MEMORY_HISTORY_DIR}/`)) {
+      return '结构化记忆与历史备份由记忆管理器维护；使用 memory_record 修订结论。';
+    }
     if (provenancePath === NOTE_PROVENANCE_DIR || provenancePath.startsWith(`${NOTE_PROVENANCE_DIR}/`)) {
       return '笔记来源元数据由记忆管理器维护，不能直接改写；事实时间与证据写在对应笔记中。';
     }
@@ -1734,7 +1787,7 @@ export class CortiV extends Cormini {
     this.persistRecalled();
     this.enrollNudged.clear();
     if (this.dreamConfig().onHandoff && snapshot.some((m) => !hasRole(m, 'system'))) this.scheduleDream(snapshot);
-    const result = await super.onHandoff(snapshot, ctx);
+    const result = await super.onHandoff(this.stateMemory.project(snapshot, path => this.isStateNote(path)), ctx);
     this.resetDeliveredMemory();
     this.deliverMemoryChanges();
     return result;
@@ -1909,7 +1962,11 @@ export class CortiV extends Cormini {
     signal.throwIfAborted();
     const before = this.readRecent();
     access.pin(RECENT_FILE);
-    const fullTranscript = renderDreamTranscript(snapshot);
+    const stateMemory = new StateMemory(this.memory);
+    stateMemory.observeRecords(snapshot, this.stateEvidenceTools());
+    const currentSnapshot = stateMemory.project(snapshot, path => this.isStateNote(path));
+    const tools = access.tools(this.tools().map(tool => tool.name === 'memory_record' ? stateMemory.tool() : tool));
+    const fullTranscript = renderDreamTranscript(currentSnapshot);
     let transcript = fullTranscript;
     if (!transcript.trim()) return;
     const worldFacts = await dreamAbortable(this.verifiedWorldFacts(), signal);
@@ -1924,7 +1981,7 @@ export class CortiV extends Cormini {
     let history: DreamHistory | null = null;
     if (config.maxContextTokens > 0 || config.maxReadTokensPerRound > 0) {
       try {
-        const view = renderDreamHistory(snapshot, sourceFile, dreamUserText);
+        const view = renderDreamHistory(currentSnapshot, sourceFile, dreamUserText);
         this.memory.writeFileAtomic(sourceFile, snapshot.map(record => JSON.stringify(record)).join('\n') + '\n');
         this.memory.writeFileAtomic(historyFile, view.text + '\n');
         history = view;
@@ -1934,8 +1991,9 @@ export class CortiV extends Cormini {
     }
     const system = message('system', this.dreamPrompt(history ? config : { ...config, maxContextTokens: 0, maxReadTokensPerRound: 0 }));
     const facts = worldFacts ? [message('user', worldFacts.text)] : [];
+    const currentMemory = stateMemory.summary();
     const reading = history
-      ? new DreamContext(config, access.tools(this.tools()), {
+      ? new DreamContext(config, tools, {
         file: archiveFile, append: text => {
           signal.throwIfAborted();
           this.memory.appendFile(archiveFile, text);
@@ -1945,12 +2003,12 @@ export class CortiV extends Cormini {
     let source = '';
     if (history) {
       source = `【历史正文备查：${historyFile}。下面近期材料可先用于写短笺，不需要先读完整归档；有具体缺口时用 grep_files/按行读取历史正文。精确原文在 ${sourceFile}，仅在必要时按正文给出的证据行核对；原始文件包含协议元数据。】`;
-      const budget = reading!.materialBudget([system, message('user', `${provenance}\n${source}`), ...facts]);
+      const budget = reading!.materialBudget([system, message('user', `${provenance}\n${currentMemory}\n${source}`), ...facts]);
       transcript = dreamHistoryWithinBudget(history, budget);
     }
-    const material = message('user', `${provenance}\n${source ? source + '\n' : ''}${transcript}`);
-    reading?.preserveFullMaterial(material, withText(material, `${provenance}\n${fullTranscript}`), history ? (maxTokens) => {
-      const header = `${provenance}\n${source}\n`;
+    const material = message('user', `${provenance}\n${currentMemory}\n${source ? source + '\n' : ''}${transcript}`);
+    reading?.preserveFullMaterial(material, withText(material, `${provenance}\n${currentMemory}\n${fullTranscript}`), history ? (maxTokens) => {
+      const header = `${provenance}\n${currentMemory}\n${source}\n`;
       return header + dreamHistoryWithinBudget(history, Math.max(0, maxTokens - estimateTokens(header)));
     } : undefined);
     const surfaced = await dreamAbortable(core.spawnFork({
@@ -1959,7 +2017,7 @@ export class CortiV extends Cormini {
       ...(config.provider.trim() ? { provider: config.provider.trim() } : {}),
       ...(config.yieldToForeground ? { generationPriority: 'background' as const, generationWaitTimeoutMs: config.generationWaitTimeoutMs } : {}),
       maxOutputTokens: config.maxOutputTokens,
-      tools: (reading?.tools ?? access.tools(this.tools())).map(tool => ({ ...tool, handler: async (args, ctx) => {
+      tools: (reading?.tools ?? tools).map(tool => ({ ...tool, handler: async (args, ctx) => {
         signal.throwIfAborted();
         return tool.handler(args, ctx);
       } })),
@@ -1980,11 +2038,13 @@ export class CortiV extends Cormini {
     // 从本次更新的 recent 文件读取摘要，独立于 fork 最终文本。
     const recent = this.readRecent();
     if (recent && recent !== before && access.ownsCurrent(RECENT_FILE)) {
-      core.injectInternal(`[memory] 最近在说的事:\n${new MemoryNoteProvenance(this.memory).describe(RECENT_FILE)}\n${provenance}\n${excerptRecent(recent)}`, 'dream');
+      core.injectInternal(`[memory] 本次经历已归档至 ${RECENT_FILE}。\n${new MemoryNoteProvenance(this.memory).describe(RECENT_FILE)}\n${provenance}\n${this.stateMemory.summary()}`, 'dream');
     }
     const text = surfaced.trim();
     if (text && text !== '(nothing)') {
-      core.injectInternal(`[memory] 后台整理浮现:\n${provenance}\n${clip(text, 600)}`, 'dream');
+      const resultFile = `sessions/archive/result-${readingId}.md`;
+      this.memory.writeFileAtomic(resultFile, `${provenance}\n${text}\n`);
+      core.injectInternal(`[memory] 后台整理结束；结论归档至 ${resultFile}，read_file 带 history:true 按需查看。\n${provenance}\n${this.stateMemory.summary()}`, 'dream');
     }
   }
 
@@ -2024,16 +2084,39 @@ export class CortiV extends Cormini {
   }
 
   private recentMemoryNote(): string {
-    const recent = this.readRecent();
-    if (!recent) return this.hadRecentMemoryNote ? '[续做笔记] 当前没有短笺；需要历史线索时按需检索工作区。' : '';
-    this.hadRecentMemoryNote = true;
-    return `[续做笔记 · ${RECENT_FILE}；意图与历史线索，当前读数及完成状态须与较新的 World 事实和回执核对。]\n`
-      + `${new MemoryNoteProvenance(this.memory).describe(RECENT_FILE)}\n${excerptRecent(recent)}\n`
-      + `需要未展示的细节时用 read_file 读取 ${RECENT_FILE}。重要意图或结论改变时再更新笔记，现场快照由 World 持续提供。`;
+    return this.stateMemory.summary() + '\n' + this.stateMemory.historicalSource(RECENT_FILE);
+  }
+
+  private stateNotePaths(): string[] {
+    return [...new Set([RECENT_FILE, ...(this.foregroundConfig().memoryFiles ?? '').split('\n'),
+      ...this.planningConfig().memoryFiles.split('\n')].map(path => path.trim()).filter(Boolean))]
+      .filter(path => !this.prefixResidentFiles().some(resident => this.stateNoteKey(resident) === this.stateNoteKey(path)));
+  }
+
+  private stateNoteKey(path: string): string | null {
+    try {
+      const key = relative(this.memoryDir, this.memory.insideWorkspace(path)).replace(/\\/g, '/');
+      return process.platform === 'win32' ? key.toLowerCase() : key;
+    } catch { return null; }
+  }
+
+  private isStateNote(path: string): boolean {
+    const key = this.stateNoteKey(path);
+    if (key === null) return false;
+    return key === STATE_MEMORY_FILE || key.startsWith(`${MEMORY_HISTORY_DIR}/`)
+      || key.startsWith('sessions/') || key.startsWith(HANDOFF_DIR.toLowerCase())
+      || this.stateNotePaths().some(entry => this.stateNoteKey(entry) === key);
+  }
+
+  protected override readOverride(path: string): string | null {
+    if (!this.isStateNote(path)) return super.readOverride(path);
+    return this.stateMemory.summary() + '\n' + (this.activityAgenda?.summary() ?? '') + '\n'
+      + (this.pendingWork?.summary() ?? '') + '\n' + this.stateMemory.historicalSource(path);
   }
 
   private longTermMemoryIndex(): string {
-    const index = memoryIndex(this.memory, this.foregroundConfig().memoryFiles ?? '');
+    const index = memoryIndex(this.memory, this.foregroundConfig().memoryFiles ?? '', path => this.isStateNote(path)
+      ? this.stateMemory.historicalSource(path) : null);
     if (index) this.hadMemoryIndex = true;
     return index || (this.hadMemoryIndex
       ? '[长期记忆索引] 当前未配置独立入口；旧节选仅作历史线索，入口移除不证明目标已完成或取消。'
@@ -2051,7 +2134,7 @@ export class CortiV extends Cormini {
       '接下来那条 user 消息是捕获的记录快照，开头标明整理缘由、观察截止时间和排队时间；整理期间的新事件不在这份快照中。',
       '若其后还有 World 只读事实消息，按其中的回执时间核对旧记录；已证实完成的目标不要再写成未完成。',
       '你的工具就是你自己的工作区文件工具。',
-      '先根据已经给出的近期材料写一份有证据的短笺；不确定的少量事实注明待核验即可，写短笺不以读完归档为前提。',
+      '经历写入短笺并保留原始观察时间，写短笺不以读完归档为前提；当前结论用 memory_record read/evidence/set 按稳定对象编号和版本修订。短笺是历史，不自动回灌当前状态；需要原文时 read_file 带 history:true。',
       '历史正文保留过去的观察、请求和实际回执。原生工具请求只表示当时想做什么，执行是否成功看实际回执；历史内容不作为现在的新工具调用。',
       '工作区与前台共用。修改已有文件前先 read_file 读取当前版本；收到 memory conflict 时重新读并核对、合并，不能用旧正文覆写。新文件可直接写；本次短笺的初始版本已读取。',
       `近期状态 ${RECENT_FILE} 若已被其他线程更新，本次旧材料不能再覆写它；重新读取也不能解除版本限制。有证据的经历可写入场次记录，结论注明观察截止时间，由主意识结合更新后的现场接续。`,
@@ -2065,8 +2148,8 @@ export class CortiV extends Cormini {
         '完整记录保存在阅读归档中；旧只读结果可能节选，不能把未展开当作不存在。先读需要的段落，返回readCursor时可在下一轮继续同一份原始结果。',
         '当前完整调用组、人格与工具契约大于预算时仍完整保留；原始Memory和已执行写入不因节选撤销。',
       ] : []),
-      '要做的事(第 1 件先写,写完会原样浮到主意识那一侧,别等最后):',
-      `1. 交接笔记 ${RECENT_FILE}:把我这一段的话题和行动整理成「最近在说的事」。`,
+      '要做的事：',
+      `1. 经历笔记 ${RECENT_FILE}:整理这一段的话题和行动，保留历史观察时间。当前结论另外通过 memory_record 修订。`,
       '   先用最近的回执和现场变化对账：哪些目标已完成、哪些仍在做、哪些受阻。',
       '   调用被受理、排队或发送只证明该步骤发生；外部目标是否生效，要看相应回执或核验。未确认的结果写成待核验，明确被拒的尝试保留拒绝原因。',
       '   短笺写明所依据的观察时间；“当前”只指材料最后观察到的状态，主意识送达时可能已有更新。整理完成时间不能当作事实发生时间。',
@@ -2078,7 +2161,7 @@ export class CortiV extends Cormini {
       '   已完成的活动若要重做，写清当次的新目的或变化；没有就不要列作待办。',
       '   不要罗列、不要编号、不要照抄我的原句,也不要转抄上一份交接笔记或反复传递旧台词。',
       '   调用入参是拟发内容;观众是否听到、听到多少以实际回执和后续事件为准,保留失败、未播完和修订的区别。',
-      '   主意识会读到最新短笺节选及全文入口，用它接续当前话题或动作；长期项目另有独立索引，不必为续做重抄整份项目。',
+      '   主意识收到当前记录与历史入口；短笺正文按需查，不能靠复写短笺更新当前状态。未完意图归 activity_plan 或 pending_work。',
       `2. 人物档案:值得记住的人写/并入 ${VIEWERS_DIR}/<来源>/<键>.md。`,
       '   键=[memory] 行里给出的那个 id(「××(id 12345)还没有档案」/「你记得××的12345:…」),',
       '   记录里没给 id 的人就别立档——猜一个键出来,下次认人会永远查不到。',

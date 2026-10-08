@@ -272,7 +272,7 @@ describe('dream request reading budget', () => {
     expect(readFileSync(join(dir, viewFile), 'utf8')).toContain(`原始证据 ${file} 第 100 行`);
     const originalBytes = readFileSync(join(dir, file));
     options.prepareRequest({ round: 1, messages: [message('user', '后台已完成的新输入')] });
-    await options.tools.find((tool: ToolDef) => tool.name === 'read_file').handler({ path: viewFile, offset: 1, limit: 1 }, ctx);
+    await options.tools.find((tool: ToolDef) => tool.name === 'read_file').handler({ path: viewFile, offset: 1, limit: 1, history: true }, ctx);
     options.prepareRequest({ round: 2, messages: [message('user', '后台继续观察')] });
     expect(readFileSync(join(dir, file))).toEqual(originalBytes);
     const readArchive = file.replace('source-', 'reading-');

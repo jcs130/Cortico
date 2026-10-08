@@ -34,7 +34,8 @@ function outline(body: string, maxChars: number): string {
   return clip(selected.map(entry => clip(entry, cap)).join('\n') + notice, maxChars);
 }
 
-export function memoryIndex(memory: GitWorkspaceMemory, configuredFiles: string): string {
+export function memoryIndex(memory: GitWorkspaceMemory, configuredFiles: string,
+  read?: (path: string) => string | null): string {
   const paths = [...new Set(configuredFiles.split('\n').map(path => path.trim()).filter(Boolean))];
   if (!paths.length) return '';
   const files = paths.slice(0, MEMORY_INDEX_MAX_FILES);
@@ -45,7 +46,7 @@ export function memoryIndex(memory: GitWorkspaceMemory, configuredFiles: string)
   const excerpts = files.map(path => {
     const title = `【${clip(path, 240)}；read_file 读取全文】\n`;
     try {
-      const body = memory.readFile(path);
+      const body = read?.(path) ?? memory.readFile(path);
       const source = clip(provenance.describe(path), Math.min(260, budget - title.length - 80));
       return title + source + '\n' + outline(body, budget - title.length - source.length - 1);
     } catch {
