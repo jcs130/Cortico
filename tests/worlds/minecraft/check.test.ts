@@ -358,13 +358,15 @@ describe('mc_check · 蓝图 {blueprint}', () => {
   it('非空格全匹配但空气位被占用时报告未通过及冲突位置', () => {
     const accepted = acceptBlueprint({ site_mode: 'new', size_xyz: [3, 1, 1],
       palette: ['minecraft:oak_planks', 'minecraft:air'], layers: [[[0, 0, 1]]] });
-    const world = fakeWorld({ cells: { '10,70,20': 'oak_planks', '11,70,20': 'oak_planks', '12,70,20': 'oak_fence' } });
+    const world = fakeWorld({ cells: { '10,70,20': 'oak_planks', '11,70,20': 'oak_planks',
+      '12,70,20': 'oak_fence[east=true,north=true,south=false,waterlogged=false,west=true]' } });
     const said = blueprintCheckText({ key: 'lookout', name: null, anchor: [10, 70, 20],
       blueprint: accepted.blueprint!, plan: accepted.plan! }, 'lookout', world);
     expect(said.verdict).toBe('bad');
     expect(said.text).toContain('对上 2/2 格');
     expect(said.text).toContain('尚未通过完整核验');
     expect(said.text).toContain('冲突 1 格((12, 70, 20) 该是空气,现在是橡木栅栏)');
+    expect(said.text).not.toContain('oak_fence[');
     expect(said.text).not.toContain('整张图都到位了');
   });
 
