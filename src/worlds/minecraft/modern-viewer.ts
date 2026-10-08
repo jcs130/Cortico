@@ -32,6 +32,7 @@ import type { EventEmitter } from 'node:events';
 import { isRaining } from './terrain.ts';
 import { observeStatusEffects, remainingEffectTicks } from './status-effects.ts';
 import { viewerPlayerSkin } from './viewer-player-skin.ts';
+import { ViewerSpeechRelay } from './viewer-speech.ts';
 export { viewerItem } from './viewer-state.ts';
 
 export function viewerMessageKind(message: { translate?: string; toString(): string }, position: string): string | null {
@@ -90,6 +91,7 @@ export interface ModernViewerOptions {
   port: number;
   assetsDir: string;
   speakerName?: string;
+  speechSourceId?: string;
   agentMana?: () => ViewerSkills['mana'] | undefined;
 }
 
@@ -436,6 +438,7 @@ export async function startModernViewer(bot: mineflayer.Bot, options: ModernView
   const speechBubbleScript = await readFile(new URL('./speech-bubble-client.js', import.meta.url), 'utf8');
   const speakerScript = speechBubbleScript.replace("'__VIEWER_SPEAKER_NAME__'",
     JSON.stringify(options.speakerName || bot.username));
+  const speechRelay = new ViewerSpeechRelay(options.speechSourceId || bot.username);
 
   const origin = `http://127.0.0.1:${options.port}`;
   const sessions = new Set<() => void>();
@@ -702,6 +705,7 @@ export async function startModernViewer(bot: mineflayer.Bot, options: ModernView
       if (pathname === '/speech-bubble.js') {
         res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' }); res.end(speakerScript); return;
       }
+      if (await speechRelay.handle(req, res, pathname)) return;
       if (pathname === '/healthz') {
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
         res.end(JSON.stringify({ ok: !closed, version: bot.version, ...sessionSlots.status() })); return;
@@ -1280,6 +1284,7 @@ export async function startModernViewer(bot: mineflayer.Bot, options: ModernView
     async close() {
       if (closed) return;
       closed = true;
+      speechRelay.close();
       stopInventoryPreview();
       (bot as unknown as EventEmitter).off('path_update', onPathUpdate);
       (bot as unknown as EventEmitter).off('goal_updated', onGoalUpdated);
