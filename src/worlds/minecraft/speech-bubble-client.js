@@ -2,36 +2,33 @@
 (() => {
   const frame = document.getElementById('corti-speech-bubble');
   if (!frame) return;
-  const ports = [7792, 7793, 7794, 7795, 7796];
   const speaker = '__VIEWER_SPEAKER_NAME__';
-  let activePort = null;
-
-  async function overlayAt(port) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/overlay`, {
-        cache: 'no-store', signal: AbortSignal.timeout(1_500),
-      });
-      if (!response.ok) return false;
-      const html = await response.text();
-      return html.includes('id="bubbles"') && html.includes('/overlay/app.js');
-    } catch { return false; }
-  }
+  let activeSource = null;
+  let connecting = false;
+  let stopped = false;
 
   async function connect() {
-    if (activePort !== null && await overlayAt(activePort)) return;
+    if (connecting || stopped) return;
+    connecting = true;
+    let source = null;
+    try {
+      const response = await fetch('/speech-source', { cache: 'no-store', signal: AbortSignal.timeout(6_000) });
+      if (response.ok) {
+        const info = await response.json();
+        if (info.available === true && typeof info.sourceId === 'string' && info.sourceId) source = info.sourceId;
+      }
+    } catch { /* Keep captions hidden when the owning service is unavailable. */ }
+    finally { connecting = false; }
+    if (stopped || source === activeSource) return;
     frame.hidden = true;
     frame.removeAttribute('src');
-    activePort = null;
-    for (const port of ports) {
-      if (!await overlayAt(port)) continue;
-      activePort = port;
-      frame.src = `http://127.0.0.1:${port}/overlay?subtitles=1&cues=0&danmaku=0&ingame=1&speaker=${encodeURIComponent(speaker)}`;
-      frame.hidden = false;
-      return;
-    }
+    activeSource = source;
+    if (source === null) return;
+    frame.src = `/overlay?subtitles=1&cues=0&danmaku=0&ingame=1&speaker=${encodeURIComponent(speaker)}&source=${encodeURIComponent(source)}`;
+    frame.hidden = false;
   }
 
   void connect();
   const check = setInterval(() => { void connect(); }, 20_000);
-  window.addEventListener('pagehide', () => clearInterval(check), { once: true });
+  window.addEventListener('pagehide', () => { stopped = true; clearInterval(check); }, { once: true });
 })();

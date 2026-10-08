@@ -3997,6 +3997,7 @@ export class MinecraftWorld implements World {
       viewerPort: this.cfg.viewerPort,
       viewerAssetsDir: this.cfg.viewerAssetsDir,
       viewerSpeakerName: this.cfg.viewerSpeakerName,
+      viewerSpeechSourceId: this.botName,
       log,
       diag: this.diag,
       shuttingDown: () => this.shuttingDown,

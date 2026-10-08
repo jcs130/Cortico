@@ -1216,6 +1216,8 @@ Minecraft 日志通过 `WorldHost.log` 写入 `<dataDir>/runs/<run>/log.jsonl`�
 
 ## 配置
 
+网页字幕通过当前 viewer 的同源 `/overlay`、`/stream` 转发。宿主只选择本机 `/identity` 中 `sourceId` 与当前 bot 名称一致的演出服务；`viewerSpeakerName` 只决定姓名牌。演出服务不可用或未提供身份时隐藏字幕，浏览器不连接观看者电脑上的其他服务。关闭 viewer 会同时关闭字幕订阅。
+
 控制台里分成四组：**连接**（重启生效）、**节奏与反射**（全热改）、
 **观察者客户端**、**玩家客户端**。技能表由
 `skills.ts` 注册表提供,并直接进入 `mc_do` 的参数说明。

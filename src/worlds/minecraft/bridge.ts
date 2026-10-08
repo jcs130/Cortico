@@ -47,6 +47,7 @@ interface BridgeOptions {
   viewerPort: number;
   viewerAssetsDir?: string;
   viewerSpeakerName?: string;
+  viewerSpeechSourceId?: string;
   log: Logger;
   /** World 日志;不给就不记(合成与放置的包流走它) */
   diag?: MinecraftLog;
@@ -1033,6 +1034,7 @@ export class Bridge {
           if (this.stopped || this._bot !== bot || this.generation !== gen || this.bagFor(gen).disposed) return;
           const handle = await startModernViewer(bot, {
             port, assetsDir: this.opts.viewerAssetsDir, speakerName: this.opts.viewerSpeakerName,
+            speechSourceId: this.opts.viewerSpeechSourceId,
             agentMana: () => this.agentMana,
           });
           this.bagFor(gen).register('modern-viewer', () => this.releaseViewer(gen, port, handle.close));
