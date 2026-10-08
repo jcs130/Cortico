@@ -31,6 +31,45 @@ function adopt(agenda: ActivityAgenda, value = plan()) {
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
 describe('persistent Persona activity agenda', () => {
+  it('invalidates dependent candidates after a premise correction, including a late result across restart', () => {
+    const { agenda, dir } = rig(); adopt(agenda);
+    const candidate = { ...plan().items[1], id: 'new-route', title: '沿新路线探索' };
+    const draft = { summary: '按当前前提出发', items: [candidate] };
+    const capturedRevision = agenda.revision();
+    agenda.propose(JSON.stringify(draft), capturedRevision, stamp);
+    agenda.operate({ operation: 'update', id: 'river', note: '普通进度更新', when: '已有补给可出发' });
+    expect(agenda.state().proposal).not.toBeNull();
+    const revision = agenda.revision();
+    agenda.operate({ operation: 'update', id: 'river', expected_revision: revision,
+      why: '原路线依据被最新现场否定', note: '新观测确认原前提不成立，需要重新规划' });
+    expect(agenda.state().proposal).toBeNull();
+    const restored = new ActivityAgenda(dir, now);
+    expect(restored.operate({ operation: 'adopt', id: 'new-route' })).toContain('没有候选');
+    const corrected = readFileSync(join(dir, AGENDA_FILE), 'utf8');
+    expect(restored.propose(JSON.stringify(draft), capturedRevision, stamp)).toContain('日程候选未保存');
+    expect(readFileSync(join(dir, AGENDA_FILE), 'utf8')).toBe(corrected);
+    expect(restored.state().items.some(item => item.id === 'new-route')).toBe(false);
+    restored.propose(JSON.stringify(draft), restored.revision(), stamp);
+    restored.operate({ operation: 'update', id: 'river', expected_revision: restored.revision(),
+      why: '原路线依据被最新现场否定', note: '同一前提再次核对，没有订正' });
+    expect(restored.state().proposal).not.toBeNull();
+    restored.operate({ operation: 'adopt', id: 'new-route' });
+    expect(restored.state().items.some(item => item.id === 'new-route')).toBe(true);
+  });
+  it('conservatively retires a legacy candidate when dated premise corrections lack a revision boundary', () => {
+    const { agenda, dir } = rig(); adopt(agenda);
+    agenda.operate({ operation: 'update', id: 'river', expected_revision: agenda.revision(),
+      why: '有现场证据的新前提', note: '原前提已订正' });
+    agenda.propose(JSON.stringify({ summary: '新候选', items: [{ ...plan().items[1], id: 'new-route' }] }), agenda.revision(), stamp);
+    const file = join(dir, AGENDA_FILE), legacy = JSON.parse(readFileSync(file, 'utf8'));
+    delete legacy.premiseRevision;
+    writeFileSync(file, JSON.stringify(legacy));
+    const restored = new ActivityAgenda(dir, now);
+    expect(restored.state().proposal).toBeNull();
+    expect(restored.state().items).toEqual(agenda.state().items);
+    expect(restored.state().revision).toBe(agenda.revision());
+    expect(restored.propose(JSON.stringify(plan()), agenda.revision() - 1, stamp)).toContain('日程候选未保存');
+  });
   it('revises an adopted premise by revision, preserves its dated history and excludes that history from planning', () => {
     const { dir } = rig(); let at = now();
     const agenda = new ActivityAgenda(dir, () => at); adopt(agenda);

@@ -26,6 +26,8 @@ interface Proposal extends AgendaPlan { baseRevision: number; capturedAt: string
 interface Ledger {
   version: 1;
   revision: number;
+  /** Proposals captured before this correction boundary cannot be reused. */
+  premiseRevision?: number;
   summary: string;
   items: AcceptedItem[];
   proposal: Proposal | null;
@@ -97,6 +99,8 @@ export class ActivityAgenda {
     if (!existsSync(this.file)) return;
     const saved: unknown = JSON.parse(readFileSync(this.file, 'utf8'));
     if (!object(saved) || saved.version !== 1 || !Number.isSafeInteger(saved.revision) || Number(saved.revision) < 0
+      || (saved.premiseRevision !== undefined && (!Number.isSafeInteger(saved.premiseRevision)
+        || Number(saved.premiseRevision) < 0 || Number(saved.premiseRevision) > Number(saved.revision)))
       || !text(saved.summary, 300, true) || !Array.isArray(saved.items) || !saved.items.every(validAccepted)
       || saved.items.filter(item => !closed(item) && !restoredCompletion(item)).length > AGENDA_MAX_ITEMS
       || saved.items.filter(item => item.status === 'active').length > 1
@@ -107,6 +111,11 @@ export class ActivityAgenda {
       throw new Error(`${AGENDA_FILE} 格式无效；原文件未修改`);
     }
     this.ledger = saved as unknown as Ledger;
+    // Older correction records have timestamps but no proposal dependency revision.
+    // Retire their candidate once rather than treating an unknown dependency as current.
+    if (this.ledger.premiseRevision === undefined && this.ledger.items.some(item => item.whyUpdatedAt !== undefined)) {
+      this.save({ ...this.ledger, premiseRevision: this.ledger.revision, proposal: null });
+    }
   }
   revision(): number { return this.ledger.revision; }
   state(): Ledger { return structuredClone(this.ledger); }
@@ -117,6 +126,9 @@ export class ActivityAgenda {
     try { parsed = JSON.parse(json); } catch { return '[日程候选未保存] 后台输出不是有效 JSON；现有日程保留。'; }
     if (!validPlan(parsed) || !Number.isSafeInteger(baseRevision) || baseRevision < 0 || !timestamp(capturedAt)) {
       return '[日程候选未保存] 缺少明确的阶段、完成条件或受阻处理；现有日程保留。';
+    }
+    if (baseRevision < (this.ledger.premiseRevision ?? 0)) {
+      return '[日程候选未保存] 采样之后已有前提订正，旧候选不能复用；按当前前提重新规划。';
     }
     this.save({ ...this.ledger, proposal: { summary: parsed.summary,
       items: parsed.items.map(cleanItem), baseRevision, capturedAt } });
@@ -214,7 +226,8 @@ export class ActivityAgenda {
       return '[日程输入错误] 订正 why 需要 1 至 240 字符的新前提、note 中的核验证据和 read 返回的当前 expected_revision；先重新读取已变化的日程。';
     }
     const updatedAt = this.stamp();
-    const premise = args.why !== undefined && args.why !== item.why ? {
+    const premiseChanged = args.why !== undefined && args.why !== item.why;
+    const premise = premiseChanged ? {
       why: args.why as string, whyUpdatedAt: updatedAt,
       whyHistory: [...item.whyHistory ?? [], { why: item.why,
         ...((item.whyUpdatedAt ?? item.sourceCapturedAt) ? { sourceAt: item.whyUpdatedAt ?? item.sourceCapturedAt } : {}),
@@ -224,7 +237,8 @@ export class ActivityAgenda {
       ? { ...entry, ...premise, status: (args.status ?? entry.status) as AgendaStatus, note: args.note as string,
         when: (args.when ?? entry.when) as string, ifBlocked: (args.ifBlocked ?? entry.ifBlocked) as string, updatedAt }
       : entry);
-    this.save({ ...this.ledger, revision: this.ledger.revision + 1, items });
+    this.save({ ...this.ledger, revision: this.ledger.revision + 1, items,
+      ...(premiseChanged ? { premiseRevision: this.ledger.revision + 1, proposal: null } : {}) });
     return this.summary();
   }
   summary(): string {
