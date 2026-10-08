@@ -8,6 +8,7 @@ interface FlightAbilities {
   flyingSpeed: number;
   speedObserved: boolean;
   requestedFlying?: boolean;
+  lastStop?: { reason: string; atMs: number };
   expiresAtMs?: number;
   expiryTimer?: ReturnType<typeof setTimeout>;
 }
@@ -20,8 +21,10 @@ export interface FlightState {
   allowed: boolean;
   flying: boolean;
   serverFlying: boolean;
+  controlActive: boolean;
   observedAtMs?: number;
   expiresAtMs?: number;
+  lastStop?: { reason: string; atMs: number };
 }
 export interface FlightMoveOptions {
   /** End flight on a safe supporting surface. Otherwise retain flight for the next action. */
@@ -62,6 +65,7 @@ export function watchFlightAbilities(bot: Bot): () => void {
       speedObserved: speedObserved || old?.speedObserved === true,
       expiresAtMs: flags & 4 ? old?.expiresAtMs : undefined,
       expiryTimer: flags & 4 ? old?.expiryTimer : undefined,
+      lastStop: old?.lastStop,
     };
     abilities.set(bot, state);
     if (!(flags & 4)) {
@@ -120,6 +124,7 @@ export function flightState(bot: Bot, now = Date.now()): FlightState {
   return {
     allowed, flying: allowed && (state?.requestedFlying ?? !!(flightFlags(bot, now) & 2)),
     serverFlying: !!(state?.flags && state.flags & 2),
+    controlActive: controls.has(bot), lastStop: state?.lastStop,
     observedAtMs: state?.observedAtMs, expiresAtMs: state?.expiresAtMs,
   };
 }
@@ -132,7 +137,10 @@ function releaseFlight(bot: Bot, reason: string, send: boolean): void {
   bot.physics.gravity = control.gravity;
   bot.physicsEnabled = control.physicsEnabled;
   const state = abilities.get(bot);
-  if (state) state.requestedFlying = false;
+  if (state) {
+    state.requestedFlying = false;
+    state.lastStop = { reason, atMs: Date.now() };
+  }
   if (send && ((abilities.get(bot)?.flags ?? 0) & 4)) bot._client.write('abilities', { flags: 0 });
 }
 
@@ -163,6 +171,7 @@ function beginFlight(bot: Bot): FlightControl {
   const control = { physicsEnabled: bot.physicsEnabled, gravity: bot.physics.gravity };
   if (!flightState(bot).flying) bot._client.write('abilities', { flags: 2 });
   abilities.get(bot)!.requestedFlying = true;
+  abilities.get(bot)!.lastStop = undefined;
   controls.set(bot, control);
   bot.clearControlStates();
   bot.physicsEnabled = false;

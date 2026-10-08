@@ -58,6 +58,23 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2025-01-01T00:
 afterEach(() => { releases.splice(0).forEach(release => release()); vi.useRealTimers(); });
 
 describe('server-granted flight movement', () => {
+  it('keeps the reason for a completed hover ending until the next real takeoff', async () => {
+    const { bot, client } = flightBot();
+    client.emit('abilities', { flags: 4 });
+    await finish(flyToPosition(bot, { x: 0.5, y: 66, z: 0.5 }, () => false));
+    expect(flightState(bot)).toMatchObject({ controlActive: true, flying: true });
+    client.emit('abilities', { flags: 0 });
+    expect(flightState(bot)).toMatchObject({ allowed: false, controlActive: false, flying: false,
+      lastStop: { reason: '服务端已收回飞行权限', atMs: Date.now() } });
+    expect(bot.physicsEnabled).toBe(true);
+    client.emit('abilities', { flags: 4 });
+    expect(flightState(bot).lastStop?.reason).toBe('服务端已收回飞行权限');
+    await finish(flyToPosition(bot, { x: 0.5, y: 67, z: 0.5 }, () => false));
+    expect(flightState(bot)).toMatchObject({ controlActive: true, lastStop: undefined });
+    bot.emit('forcedMove');
+    expect(flightState(bot)).toMatchObject({ controlActive: false,
+      lastStop: { reason: '服务端修正了位置，已停止飞行移动' } });
+  });
   it('projects every relative leg and rejects an over-budget whole route before casting', () => {
     const { bot, client, positions } = flightBot();
     client.emit('abilities', { flags: 0, flyingSpeed: 0.035 });

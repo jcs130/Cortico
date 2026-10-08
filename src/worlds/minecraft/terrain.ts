@@ -20,6 +20,7 @@ import { animalStateNote, type FactBot, type FactEntity } from './animal-state.t
 import { BURNING_BLOCKS, SCORCHING_FLOOR, hazardBodyBounds } from './hazard-geometry.ts';
 import { remainingEffectTicks } from './status-effects.ts';
 import type { TargetDiag } from './skill-context.ts';
+import { flightState, type FlightState } from './flight.ts';
 export { BURNING_BLOCKS, SCORCHING_FLOOR } from './hazard-geometry.ts';
 
 /** 八方位罗盘。北=-z 南=+z 东=+x 西=-x,与 move 技能同一套词。 */
@@ -152,6 +153,8 @@ export interface WorldSnapshot {
   raining: boolean;
   biome: string;
   gameMode: string;
+  /** Server ability readings and the client's current hover controller. */
+  flight?: FlightState;
   heldItem: string | null;
   heldItemDisplayName?: string | null;
   inventory: ItemStack[];
@@ -302,7 +305,7 @@ function whereIs(direction: Direction | null, distance: number, dy: number): str
  * 键不同才算"这段变了";显示文本在判定变了之后用当刻新鲜值。
  */
 interface SnapshotSegment {
-  key: 'place' | 'clock' | 'realclock' | 'body' | 'gear' | 'equip' | 'life' | 'structure' | 'terrain' | 'players';
+  key: 'place' | 'flight' | 'clock' | 'realclock' | 'body' | 'gear' | 'equip' | 'life' | 'structure' | 'terrain' | 'players';
   /** 完整句子;空串=本段当下无内容(目前只有 structure 可能为空) */
   text: string;
   cmp: string;
@@ -318,10 +321,12 @@ function dyBand(dy: number): string {
   return dy >= 3 ? '高' : dy <= -3 ? '低' : '平';
 }
 
-/**
- * 世界快照正文,按段给出(分段去重的数据源)。一律中文,写成话:
- * 在哪、现在什么时辰、身上什么情况、带着什么、周围有什么、地形如何。
- */
+function flightFingerprint(flight: FlightState | undefined): string {
+  if (!flight || flight.observedAtMs === undefined) return 'flight?';
+  return `flight:${flight.allowed}:${flight.flying}:${flight.serverFlying}:${flight.controlActive}:` +
+    `${flight.expiresAtMs ?? '?'}:${flight.lastStop?.atMs ?? ''}:${flight.lastStop?.reason ?? ''}`;
+}
+
 /**
  * 快照实质变化指纹；位置按调用方阈值单独比较，重生点由 World 加入比对键。
  * 血量向上取整、饥饿四舍五入；敌对生物只计可见者数量及最近者的方向、距离档。
@@ -333,7 +338,7 @@ export function snapshotFingerprint(s: WorldSnapshot): string {
     ? hostiles.reduce((a, b) => (a.distance <= b.distance ? a : b))
     : null;
   return [
-    s.dimension, s.gameMode,
+    s.dimension, s.gameMode, flightFingerprint(s.flight),
     s.health === null ? 'hp?' : `hp${Math.ceil(s.health)}`,
     s.food === null ? 'fd?' : `fd${Math.round(s.food)}`,
     s.xpLevel === null ? 'xp?' : 'xp',
@@ -379,6 +384,14 @@ export function narrateWorldSegments(
     `${zhDimension(s.dimension)}。` +
     `${motionPhrase(s)}，面朝${DIRECTION_ZH[s.facing]}。`;
   segs.push({ key: 'place', text: place, cmp: place });
+  const flight = s.flight;
+  const flightText = !flight || flight.observedAtMs === undefined
+    ? '飞行权限尚未从服务端核实。'
+    : `飞行权限：${flight.allowed ? '允许' : '未授予'}；客户端悬停控制：${flight.controlActive ? '运行中' : '未运行'}；` +
+      `最近服务端飞行标志：${flight.serverFlying ? '开启' : '关闭'}；` +
+      `许可期限：${flight.expiresAtMs === undefined ? '服务端未提供' : new Date(flight.expiresAtMs).toISOString()}。` +
+      (flight.lastStop ? `上次停止飞行：${flight.lastStop.reason}（${new Date(flight.lastStop.atMs).toISOString()}）。` : '');
+  segs.push({ key: 'flight', text: flightText, cmp: flightFingerprint(flight) });
 
   const night = isNight(s.timeOfDay);
   const rain = s.raining ? '，在下雨' : '';
@@ -1869,6 +1882,7 @@ export function snapshotFromBot(
     raining: isRaining(bot),
     biome,
     gameMode: String(bot.game.gameMode ?? 'survival'),
+    flight: flightState(bot),
     heldItem: bot.heldItem ? bot.heldItem.name : null,
     heldItemDisplayName: bot.heldItem ? itemCustomName(bot.heldItem) : null,
     inventory: (bot.inventory?.items() ?? []).map(describeItem),
