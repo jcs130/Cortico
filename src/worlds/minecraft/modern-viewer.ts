@@ -31,6 +31,7 @@ import { minecraftTextComponent } from './text-component.ts';
 import type { EventEmitter } from 'node:events';
 import { isRaining } from './terrain.ts';
 import { observeStatusEffects, remainingEffectTicks } from './status-effects.ts';
+import { viewerPlayerSkin } from './viewer-player-skin.ts';
 export { viewerItem } from './viewer-state.ts';
 
 export function viewerMessageKind(message: { translate?: string; toString(): string }, position: string): string | null {
@@ -221,7 +222,8 @@ export function ownEntity(bot: mineflayer.Bot): Record<string, unknown> {
     equipped[2], equipped[3], equipped[4], equipped[5]].map(viewerItem);
   return { id: entity.id, name: 'player', type: 'player', pos: entity.position,
     width: entity.width, height: entity.height, yaw: entity.yaw, pitch: entity.pitch,
-    username: bot.username, isSelf: true, equipment,
+    username: bot.username, uuid: entity.uuid, isSelf: true, equipment, skinUrl: null, skinModel: null,
+    ...viewerPlayerSkin(bot, bot.username, entity.uuid),
     burning: Boolean((entity as unknown as { isOnFire?: boolean }).isOnFire) ||
       (Number((entity as unknown as { metadata?: unknown[] }).metadata?.[0]) & 1) !== 0 };
 }
@@ -287,6 +289,7 @@ export function viewerEntity(bot: mineflayer.Bot, entity: ViewerEntity,
     yaw: entity.yaw, pitch: entity.pitch, headYaw: record.headYaw,
     velocity: entity.velocity ? { x: entity.velocity.x, y: entity.velocity.y, z: entity.velocity.z } : undefined,
     username: entity.username, uuid: entity.uuid, age: record.age,
+    ...(name === 'player' ? { skinUrl: null, skinModel: null, ...viewerPlayerSkin(bot, entity.username, entity.uuid) } : {}),
     metadata: viewerRenderableMetadata(record.metadata),
     burning: record.isOnFire === true || (Number((record.metadata as unknown[] | undefined)?.[0]) & 1) !== 0,
     equipment: Array.isArray(record.equipment) ? record.equipment.slice(0, 6).map(viewerItem) : undefined,
@@ -936,6 +939,9 @@ export async function startModernViewer(bot: mineflayer.Bot, options: ModernView
     const entitySpawn = (entity: ViewerEntity) => queueEntity(entity, true);
     const entityMoved = (entity: ViewerEntity) => queueEntity(entity);
     const entityUpdate = (entity: ViewerEntity) => queueEntity(entity, true);
+    const playerUpdated = (player: mineflayer.Player) => {
+      if (player.entity) queueEntity(player.entity, true);
+    };
     const flushEntities = () => {
       if (!active || !socket.connected || socket.conn?.transport?.writable === false) return;
       for (const id of knownEntities) {
@@ -1126,6 +1132,7 @@ export async function startModernViewer(bot: mineflayer.Bot, options: ModernView
       bot.off('chunkColumnUnload', chunkUnload);
       bot.off('entitySpawn', entitySpawn); bot.off('entityMoved', entityMoved);
       bot.off('entityUpdate', entityUpdate); bot.off('entityEquip', entityUpdate);
+      bot.off('playerUpdated', playerUpdated); bot.off('playerJoined', playerUpdated);
       bot.off('entityGone', removeEntity);
       bot.off('entitySwingArm', otherSwing);
       bot.off('entityHurt', entityHurt);
@@ -1171,6 +1178,7 @@ export async function startModernViewer(bot: mineflayer.Bot, options: ModernView
     bot.on('chunkColumnUnload', chunkUnload);
     bot.on('entitySpawn', entitySpawn); bot.on('entityMoved', entityMoved);
     bot.on('entityUpdate', entityUpdate); bot.on('entityEquip', entityUpdate);
+    bot.on('playerUpdated', playerUpdated); bot.on('playerJoined', playerUpdated);
     bot.on('entityGone', removeEntity);
     bot.on('entitySwingArm', otherSwing);
     bot.on('entityHurt', entityHurt);

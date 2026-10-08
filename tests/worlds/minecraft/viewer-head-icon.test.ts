@@ -7,6 +7,24 @@ const hud = readFileSync(new URL('../../../scripts/minecraft-viewer-hud.js', imp
 const { JSDOM } = createRequire(import.meta.url)('jsdom');
 
 describe('player head in the survival hotbar', () => {
+  it('uses the custom head in the offhand and refreshes a changed profile without changing item count', () => {
+    const dom = new JSDOM(`<!doctype html><div id="corti-survival">
+      <div data-corti-hearts></div><div data-corti-food></div><div data-corti-armor></div>
+      <div data-corti-air></div><div data-corti-level></div><div data-corti-xp></div>
+      <div data-corti-selection></div><div data-corti-slots></div><div data-corti-offhand></div></div>`,
+    { runScripts: 'outside-only', url: 'http://127.0.0.1:7793/' });
+    dom.window.eval(`${helper}\n${hud}`);
+    const slot = dom.window.document.querySelector('[data-corti-offhand]')!;
+    for (const hash of ['a'.repeat(64), 'b'.repeat(64)]) {
+      const state = { offhand: { name: 'player_head', displayName: '大背包', customName: '大背包', headTextureHash: hash, count: 1 } };
+      dom.window.eval(`renderCortiSurvivalHud(${JSON.stringify(state)})`);
+      expect(slot.querySelector('.corti-head-face')?.getAttribute('style')).toContain(`/head-texture/${hash}.png`);
+      expect(slot.querySelectorAll('.corti-head-face')).toHaveLength(1);
+    }
+    dom.window.eval('renderCortiSurvivalHud({ offhand: null })');
+    expect(slot.querySelector('.corti-head-face')).toBeNull();
+  });
+
   it('updates the skin face and name when the slot keeps the same item type and count', () => {
     const dom = new JSDOM(`<!doctype html><div id="corti-survival">
       <div data-corti-hearts></div><div data-corti-food></div><div data-corti-armor></div>
