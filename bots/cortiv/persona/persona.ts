@@ -691,22 +691,23 @@ export class CortiV extends Cormini {
         + 'existing progress; omit id to merge the whole proposal only when its revision is current, retaining omitted goals and evidence. focus selects a current stage. update records actual progress '
         + 'or marks a stage done/deferred/queued/cancelled with evidence or an explicit cancellation reason in note. update can revise when/ifBlocked with fresh evidence in note while preserving the objective and completion criteria. Adoption preserves existing stage conditions and evidence. Cancelled is not completed; neither closed status can be reopened by an old proposal. Plans do not execute World actions; '
          + 'amend corrects the note of a closed stage using the expected_revision from read; it preserves status and prior note history. '
+         + 'reopen corrects a mistaken completion using the exact expected_revision from read and fresh contradictory evidence in note. It returns that done stage to queued, preserves its prior closure and objective, and keeps the current active stage. Cancelled stages cannot reopen. '
          + 'completion is never inferred from time or task acceptance. Details and references are loaded only when needed.',
       tags: ['write'],
       parameters: {
         type: 'object', additionalProperties: false,
         properties: {
-          operation: { type: 'string', enum: ['read', 'review', 'adopt', 'focus', 'update', 'amend'] },
-          expected_revision: { type: 'integer', minimum: 0, description: 'amend: exact current agenda revision from read; correction preserves the closed status and previous note.' },
+          operation: { type: 'string', enum: ['read', 'review', 'adopt', 'focus', 'update', 'amend', 'reopen'] },
+          expected_revision: { type: 'integer', minimum: 0, description: 'amend/reopen: exact current agenda revision from read. amend preserves closed status; reopen returns a mistakenly done stage to queued and preserves its prior closure.' },
           question: { type: 'string', minLength: 1, maxLength: 1200,
             description: 'review: optional focused question about evidence, net progress or an uncertain cause; omit for a full agenda proposal.' },
-          id: { type: 'string', minLength: 1, maxLength: 80, description: 'Exact adopted item id for focus/update; read: one stage or unadopted candidate, including closed evidence; adopt: one verified new candidate id, even if other stages changed.' },
+          id: { type: 'string', minLength: 1, maxLength: 80, description: 'Exact adopted item id for focus/update/amend/reopen; read: one stage or unadopted candidate, including closed evidence; adopt: one verified new candidate id, even if other stages changed.' },
           offset: { type: 'integer', minimum: 0, description: 'read: pagination offset, default 0.' },
           limit: { type: 'integer', minimum: 1, maximum: AGENDA_MAX_ITEMS, description: 'read: page size, default 8.' },
           includeCompleted: { type: 'boolean', description: 'read: include completed history, default false.' },
           includeClosed: { type: 'boolean', description: 'read: include completed and explicitly cancelled history, default false.' },
           status: { type: 'string', enum: ['queued', 'deferred', 'done', 'cancelled'], description: 'update: cancelled explicitly abandons a goal without claiming completion; omit to retain the current stage status.' },
-          note: { type: 'string', minLength: 1, maxLength: 400, description: 'update: actual evidence, progress, blocker or explicit reason for cancellation.' },
+          note: { type: 'string', minLength: 1, maxLength: 400, description: 'update: actual evidence, progress, blocker or explicit reason for cancellation; amend: corrected closure evidence; reopen: fresh evidence contradicting the completion.' },
           when: { type: 'string', minLength: 1, maxLength: 240, description: 'update: revised execution or resumption conditions, with fresh supporting evidence in note; omit to retain existing conditions.' },
           ifBlocked: { type: 'string', minLength: 1, maxLength: 240, description: 'update: revised response to a blocker, with fresh supporting evidence in note; objective id and completion criteria stay unchanged.' },
         }, required: ['operation'],
