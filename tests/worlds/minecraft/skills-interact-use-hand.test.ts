@@ -118,6 +118,30 @@ it('missing held item explains the target contract without clicking or navigatin
   expect(r.bot.entity.position).toEqual(new Vec3(0.5, 64, 0.5));
 });
 
+it.each(['cherry_door', 'cherry_trapdoor', 'cherry_fence_gate'].flatMap((name) =>
+  [true, false].map((open) => ({ name, open }))))(
+  'keeps position, inventory and switch state when a distant $name already has open=$open',
+  async ({ name, open }) => {
+    const r = rig(false);
+    const definition = registry.blocksByName[name];
+    const state = Array.from({ length: definition.maxStateId - definition.minStateId + 1 }, (_, i) => definition.minStateId + i)
+      .find((id) => {
+        const properties = Block.fromStateId(id, 0).getProperties();
+        return properties.open === open && (properties.half === undefined || properties.half !== 'upper');
+      })!;
+    r.setBlock(AT, name, state);
+    const beforePosition = r.bot.entity.position.clone();
+    const beforeInventory = r.bot.inventory.items().map((item) => [item.name, item.count]);
+    const receipt = await useOnce(r.bot, { skill: 'use', at: AT, open }, r.ctx);
+    expect(receipt).toContain('保持状态，未点击');
+    expect(r.bot.entity.position).toEqual(beforePosition);
+    expect(r.bot.inventory.items().map((item) => [item.name, item.count])).toEqual(beforeInventory);
+    expect(r.bot.blockAt(new Vec3(...AT))?.getProperties().open).toBe(open);
+    expect(r.navigated).toEqual([]);
+    expect(r.wire).toEqual([]);
+  },
+);
+
 describe('use preserves its selected hand through navigation and native look', () => {
   it('keeps an explicitly selected torch when the navigation door wrapper is installed', async () => {
     const r = rig(false);
