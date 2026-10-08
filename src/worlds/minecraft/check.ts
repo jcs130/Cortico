@@ -584,7 +584,7 @@ export function blueprintCheckText(site: CheckSite | null, key: string, world: C
     bits.push(`缺 ${diff.missing} 格${samples.length > 0 ? `(${samples.join('、')}${diff.missing > samples.length ? ' 等' : ''})` : ''}`);
   }
   if (conflicts > 0) {
-    const samples = diff.conflicts.map((conflict) => `${posText(conflict.pos)} 该是${zhName(conflict.expect)},现在是${zhName(conflict.actual)}`);
+    const samples = diff.conflicts.map((conflict) => `${posText(conflict.pos)} 该是${zhName(blockIdOf(conflict.expect))},现在是${zhName(blockIdOf(conflict.actual))}`);
     bits.push(`冲突 ${conflicts} 格(${samples.join('、')}${conflicts > samples.length ? ' 等' : ''})`);
   }
   if (diff.unknown > 0) bits.push(`${diff.unknown} 格没加载,没对全(这些格的现状未知)`);
