@@ -8,6 +8,8 @@ import type { GitWorkspaceMemory } from '../../cormini/persona/memory.ts';
 export const STATE_MEMORY_FILE = '.state-memory.json';
 export const MEMORY_HISTORY_DIR = '.memory-history';
 export const STATE_MEMORY_MAX_CHARS = 1800;
+/** Default search receipts carrying this header excluded managed historical bodies before matching. */
+export const STATE_MEMORY_SEARCH_NOTICE = '[检索范围：默认省略状态笔记的历史正文；查原始经历、坐标或回执，原参数加 history:true，再用 read_file 带 history:true 读命中段落。]\n';
 const digest = (text: string): string => createHash('sha256').update(text).digest('hex');
 const dated = (value: unknown): value is string => typeof value === 'string'
   && /(?:Z|[+-]\d{2}:\d{2})$/.test(value) && Number.isFinite(Date.parse(value));
@@ -219,8 +221,12 @@ export class StateMemory {
         const current = this.operate(args);
         return withText(record, typeof current === 'string' ? current : current.text);
       }
-      if ((call.name === 'read_file' && managed(String(call.args.path ?? '')))
-        || call.name === 'grep_files') return withText(record, '[历史 Memory 工具结果未重放；当前结论见本轮当前记忆，历史原文可显式检索。]');
+      if (call.name === 'read_file' && managed(String(call.args.path ?? ''))) {
+        return withText(record, '[旧读取视图未重放；当前结论见本轮当前记忆。]\n' + this.historicalSource(String(call.args.path)));
+      }
+      if (call.name === 'grep_files' && !itemText(record.item).startsWith(STATE_MEMORY_SEARCH_NOTICE)) {
+        return withText(record, '[旧检索结果未重放；原参数加 history:true 可读原始命中，再用 read_file 带 history:true 查对应段落。]');
+      }
       return record;
     });
   }

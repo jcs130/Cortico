@@ -91,10 +91,12 @@ describe('versioned current memory', () => {
     const { state } = rig(); set(state, '新观察已完成', newAt, 0);
     const records = [functionCall('old', 'memory_record', '{"operation":"read"}'), functionResult('old', '旧版本待办'),
       functionCall('note', 'read_file', JSON.stringify({ path: RECENT_FILE })), functionResult('note', '旧门没开'),
-      functionCall('archive', 'read_file', JSON.stringify({ path: RECENT_FILE, history: true })), functionResult('archive', '当时门没开')];
+      functionCall('archive', 'read_file', JSON.stringify({ path: RECENT_FILE, history: true })), functionResult('archive', '当时门没开'),
+      functionCall('legacy-search', 'grep_files', '{"pattern":"门"}'), functionResult('legacy-search', '旧搜索说门还没开')];
     const view = state.project(records, path => path === RECENT_FILE).map(record => itemText(record.item)).join('\n');
     expect(view).toContain('新观察已完成'); expect(view).not.toContain('旧版本待办'); expect(view).not.toContain('旧门没开');
     expect(view).toContain('当时门没开'); expect(itemText(records[1].item)).toBe('旧版本待办');
+    expect(view).not.toContain('旧搜索说门还没开'); expect(view).toContain('原参数加 history:true');
   });
 
   it('bounds automatic summaries and evidence previews, retaining explicit full-source reads', () => {
@@ -142,6 +144,12 @@ describe('current memory across Persona read surfaces', () => {
     expect(view).toContain('行号和分页只对应此视图');
     expect(view).toContain(JSON.stringify({ path: RECENT_FILE, history: true }));
     expect(view).not.toContain('(-10,64,20)');
+    const readRecords = [functionCall('view', 'read_file', JSON.stringify({ path: RECENT_FILE, offset: -1, limit: 1, max_chars: 1 })),
+      functionResult('view', view), message('user', '查原始经历')];
+    const requestView = persona.prepareRequest({ sessionId: 'main', round: 2, messages: readRecords })!
+      .filter(record => record.item.type === 'function_call_output').map(record => itemText(record.item)).join('\n');
+    expect(requestView).toContain(RECENT_FILE);
+    expect(requestView).toContain('history:true'); expect(requestView).not.toContain('(-10,64,20)');
     const history = await reader.handler({ path: RECENT_FILE, offset: -1, limit: 1, history: true }, ctx) as string;
     expect(history).toContain('第 61-61 行,共 61 行');
     expect(history).toContain('2026-08-01T10:00:00Z 取材回执：箱子 (-10,64,20) 存入原木2个');
@@ -150,6 +158,13 @@ describe('current memory across Persona read surfaces', () => {
     expect(search.startsWith('[检索范围：')).toBe(true);
     expect(search).toContain('原参数加 history:true'); expect(search).not.toContain('(-10,64,20)');
     expect(await grep.handler({ pattern: '取材回执', history: true }, ctx)).toContain(`${RECENT_FILE}:61:`);
+    const methodSearch = await grep.handler({ pattern: '普通方法说明' }, ctx) as string;
+    const searchRecords = [functionCall('method', 'grep_files', '{"pattern":"普通方法说明"}'), functionResult('method', methodSearch),
+      functionCall('history', 'read_file', JSON.stringify({ path: RECENT_FILE, history: true })), functionResult('history', history)];
+    const requestSearch = (persona.prepareRequest({ sessionId: 'main', round: 3, messages: searchRecords }) ?? searchRecords)
+      .filter(record => record.item.type === 'function_call_output').map(record => itemText(record.item)).join('\n');
+    expect(requestSearch).toContain('methods/example.md:1: 普通方法说明');
+    expect(requestSearch).toContain('2026-08-01T10:00:00Z 取材回执');
     expect(await reader.handler({ path: 'methods/example.md' }, ctx)).not.toContain('[当前记忆视图；');
     expect(memory.readFile(RECENT_FILE)).toBe(journal);
   });
