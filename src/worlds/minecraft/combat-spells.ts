@@ -1,6 +1,8 @@
 import type { Bot } from 'mineflayer';
 import { HOSTILE } from './melee.ts';
 import { manaSnapshotFromText } from './viewer-state.ts';
+import { viewerCastResult } from './viewer-cast.ts';
+import { CombatTacticBook, type CombatCastAttempt, type CombatResult, type CombatReceipt } from './combat-tactics.ts';
 
 export type CombatSpell = string;
 export interface CombatTactic {
@@ -37,8 +39,21 @@ export class CombatSpells {
   private mana: number | null = null;
   private manaLoading = false;
   private tactic: CombatTactic | null = null;
+  private realm = '';
+  private readonly casts: CombatCastAttempt[] = [];
+
+  constructor(private readonly book = new CombatTacticBook()) {}
+
+  useRealm(realm: string): void {
+    if (realm === this.realm) return;
+    this.realm = realm;
+    this.book.useRealm(realm);
+    this.tactic = this.book.current().tactic;
+    this.reset();
+  }
 
   setTactic(tactic: CombatTactic | null): void {
+    this.book.set(tactic);
     this.tactic = tactic && { spells: tactic.spells?.slice() ?? null,
       healAtOrBelow: tactic.healAtOrBelow };
   }
@@ -66,6 +81,7 @@ export class CombatSpells {
     this.pending = null;
     this.mana = null;
     this.manaLoading = false;
+    this.casts.length = 0;
   }
 
   noteMana(current: number | null, now = Date.now()): void {
@@ -100,6 +116,13 @@ export class CombatSpells {
   }
 
   noteServerMessage(text: string, now = Date.now()): void {
+    const attempt = this.casts.at(-1);
+    if (attempt && now - Date.parse(attempt.sentAt) >= 0
+      && now - Date.parse(attempt.sentAt) <= 3_000 && !attempt.reply
+      && viewerCastResult(text, attempt.spell)) {
+      attempt.reply = text.slice(0, 240);
+      attempt.replyAt = new Date(now).toISOString();
+    }
     const reportedMana = manaSnapshotFromText(text);
     if (reportedMana) this.noteMana(reportedMana.current, now);
     if (/^(?:战斗咏唱|探索咏唱)[：:]/.test(text)) {
@@ -133,7 +156,7 @@ export class CombatSpells {
   }
 
   /** 返回一项即时施法决定；调用方成功发包后须调用 noteSent。 */
-  next(bot: Bot, fighting: boolean, now = Date.now(), reserveGolem = false): CombatSpell | null {
+  next(bot: Bot, fighting: boolean, now = Date.now()): CombatSpell | null {
     if (!fighting || !bot.entity || (bot.health ?? 0) <= 0) return null;
     if (now - this.lastCheck < CHECK_GAP_MS) return null;
     this.lastCheck = now;
@@ -152,7 +175,6 @@ export class CombatSpells {
       && now - (this.lastSent.get(spell) ?? Number.NEGATIVE_INFINITY) >= this.cooldownOf(spell);
 
     const planned = this.tactic?.spells ?? null;
-    if (reserveGolem && !planned) return null;
     for (const spell of planned ?? SPELLS) {
       if (!ready(spell)) continue;
       if (spell === 'golem' && foes.length >= (planned ? 1 : 3)) return spell;
@@ -165,14 +187,10 @@ export class CombatSpells {
     return null;
   }
 
-  finalArenaOpening(now = Date.now()): CombatSpell | null {
-    if (now < this.manaBlockedUntil || now - this.lastAny < GLOBAL_GAP_MS) return null;
-    if (!this.available.has('golem') || !this.hasMana('golem', now)) return null;
-    if (now - (this.lastSent.get('golem') ?? Number.NEGATIVE_INFINITY) < this.cooldownOf('golem')) return null;
-    return 'golem';
-  }
-
-  noteSent(spell: CombatSpell, now = Date.now()): void {
+  noteSent(spell: CombatSpell, now = Date.now(), source: CombatCastAttempt['source'] = 'automatic'): void {
+    this.casts.push({ spell, sentAt: new Date(now).toISOString(), source,
+      tacticRevision: this.book.current().revision, manaBefore: this.mana });
+    if (this.casts.length > 128) this.casts.shift();
     this.lastSent.set(spell, now);
     this.lastAny = now;
     this.pending = { spell, at: now };
@@ -181,7 +199,7 @@ export class CombatSpells {
   }
 
   noteSupportSent(now = Date.now()): void {
-    this.noteSent('selfheal', now);
+    this.noteSent('selfheal', now, 'support');
   }
 
   private hasMana(spell: CombatSpell, now: number): boolean {
@@ -192,7 +210,40 @@ export class CombatSpells {
   }
 
   noteManualCast(spell: string, now = Date.now()): void {
-    this.noteSent(spell, now);
+    this.noteSent(spell, now, 'manual');
+  }
+
+  recordCombat(result: CombatResult): CombatReceipt {
+    const from = Date.parse(result.startedAt), to = Date.parse(result.endedAt);
+    return this.book.record(result, this.casts.filter((cast) => {
+      const at = Date.parse(cast.sentAt);
+      return at >= from && at <= to;
+    }));
+  }
+
+  readout(report?: number, now = Date.now()): string {
+    const state = this.book.current();
+    if (report !== undefined) {
+      const receipt = state.reports.find((entry) => entry.id === report);
+      return receipt ? '[战斗观察回执；reply 只是在命令发送后3秒内收到的相关回音，归因需结合现场；不是已学会的结论]\n'
+        + JSON.stringify(receipt) : `未找到战斗回执#${report}；仅保留本世界最近五场。`;
+    }
+    const selection = this.tactic?.spells ?? SPELLS;
+    const checks = [...new Set([...selection, ...SPELLS])].map((spell) => ({ spell,
+      selected: selection.includes(spell),
+      observed: this.available.has(spell), manaCost: this.costs.get(spell) ?? DEFAULT_COST[spell] ?? null,
+      block: !selection.includes(spell) ? '未选入当前编排'
+        : !this.available.has(spell) ? '本连接尚未确认该能力'
+        : this.manualCastBlock(spell, now) }));
+    const recent = state.reports.slice(-3).map((r) => ({ id: r.id, endedAt: r.endedAt,
+      reason: r.reason, healthBefore: r.healthBefore, healthAfter: r.healthAfter,
+      kills: r.kills, tacticRevision: r.tacticRevision,
+      spellsSent: r.casts.map((cast) => cast.spell), castsTruncated: r.castsTruncated }));
+    return `[战术状态] 版本 ${state.revision}，修改时间 ${state.updatedAt ?? '未设置'}；已按世界保存。\n`
+      + JSON.stringify({ observedAt: new Date(now).toISOString(), mana: this.mana,
+        manaLoading: this.manaLoading, available: [...this.available], checks, recent })
+      + '\n能力与魔力只代表本连接已收到的读数，命令发送会扣减客户端估算；block为空仍须满足目标条件并等服务端回执。'
+      + '\n默认是可替换的即时战斗 fallback，无按试炼楼层保留魔力或自动开场施法；详细战斗用 report:回执编号按需读取。';
   }
 
   /** Stop repeated manual commands while the server-known spell is cooling down. */

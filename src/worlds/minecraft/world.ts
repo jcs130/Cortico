@@ -118,6 +118,7 @@ import { ItemBreakDecoder, type ItemBreakFact } from './item-break.ts';
 import { WorksBook } from './works.ts';
 import { CombatSession } from './combat.ts';
 import { CombatSpells, type CombatSpell } from './combat-spells.ts';
+import { CombatTacticBook } from './combat-tactics.ts';
 import { chooseRoutineFood, renderFoodReserveReadout } from './nutrition.ts';
 import { publishViewerCastCommand } from './viewer-cast.ts';
 import { parseSkillsPayload, VIEWER_STATE_CHANNEL } from './viewer-state.ts';
@@ -2169,11 +2170,13 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
     name: 'mc_combat_tactic',
     tags: ['write'],
     description:
-      'Read or replace the immediate combat spell tactic. {} reads it; '
+      'Read or update the immediate combat spell tactic. {} reads it; omitted fields keep their current values; '
       + '{enabled:false} clears it. A spell list of server-listed combat spell IDs sets priority order while fighting; '
       + 'healAtOrBelow casts selfheal at that health or lower before another attack. '
       + 'The World checks observed spell availability, mana, targets and announced cooldowns; '
-      + 'server replies still decide success. This tactic stays through reconnects in this process.',
+      + 'server replies still decide success. Settings and the last five observed combat receipts persist per world across restarts. '
+      + '{} also reads current capability constraints and recent receipt IDs; {report:id} expands one receipt. '
+      + 'Receipts are observations for reviewing and revising a tactic, not learned conclusions.',
     parameters: {
       type: 'object',
       properties: {
@@ -2181,6 +2184,7 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
         spells: { type: 'array', minItems: 1, maxItems: 8, uniqueItems: true,
           items: { type: 'string', pattern: '^[a-z][a-z0-9_:-]{0,63}$' } },
         healAtOrBelow: { type: 'integer', minimum: 1, maximum: 20 },
+        report: { type: 'integer', minimum: 1, description: 'Read one observed combat receipt by its returned ID; do not combine with setting fields.' },
       },
       required: [],
     },
@@ -2762,7 +2766,7 @@ export class MinecraftWorld implements World {
   private lastDecisionAdviceSceneKey: string | null = null;
   /** 服务端本连接明确列出的自愈能力；重连后必须重新确认。 */
   private selfHealAvailable = false;
-  private readonly combatSpells = new CombatSpells();
+  private readonly combatSpells: CombatSpells;
   private arenaFloor: { floor: number; total: number } | null = null;
   /** 每次真实 spawn 递增；断线前后的工具、事件与连接日志据此分代。 */
   private connectionGeneration = 0;
@@ -2800,6 +2804,7 @@ export class MinecraftWorld implements World {
     });
     this.dataDir = opts.dataDir ?? '';
     const ledger = (name: string): string | null => (opts.dataDir ? join(opts.dataDir, name) : null);
+    this.combatSpells = new CombatSpells(new CombatTacticBook(ledger('minecraft-combat-tactics.json')));
     this.rejectedRoutes = new RejectedRouteLedger(ledger('minecraft-rejected-routes.json'));
     this.chests = new ChestBook(ledger('minecraft-chests.json'));
     this.directionalSweeps = new DirectionalSweepBook(ledger('minecraft-directional-sweeps.json'));
@@ -3933,6 +3938,22 @@ export class MinecraftWorld implements World {
           urgent ? undefined : { trigger: 'piggyback' });
       },
       onLowHealth: (bot) => this.onLowHealth(bot),
+      report: (result) => {
+        if (!this.agentFriendEnabled) return;
+        try {
+          const receipt = this.combatSpells.recordCombat(result);
+          this.emit('minecraft.combat', `[Minecraft] 战斗观察回执#${receipt.id}：${result.reason}；`
+            + `生命 ${result.healthBefore ?? '未知'}→${result.healthAfter ?? '未知'}，`
+            + `刀 ${result.swings} 次/命中 ${result.meleeLanded} 次；`
+            + `结束时战术版本 ${receipt.tacticRevision}，已发送法术 ${receipt.casts.map((cast) => cast.spell).join('、') || '无'}。`
+            + `详细前后读数及施法回音用 mc_combat_tactic {"report":${receipt.id}} 读取；中断不等于败战，回执不自动证明某战术有效。`,
+          false, { trigger: 'piggyback', meta: { receipt } });
+        } catch (error) {
+          this.diag.write({ lane: 'combat', event: 'receipt-save-failed', msg: String(error) });
+          this.emit('minecraft.event', '[Minecraft] 这场战斗的观察回执未保存，不能按已归档处理。', false,
+            { trigger: 'piggyback' });
+        }
+      },
       ranged: {
         ready: (bot) => this.rangedBot === bot && Boolean(bestRangedWeapon(bot)) && hasUsableArrows(bot),
         active: () => this.ranged?.active ?? false,
@@ -4424,16 +4445,23 @@ export class MinecraftWorld implements World {
 
   private setCombatTactic(args: Record<string, unknown>): string {
     const tool = 'mc_combat_tactic';
+    this.syncRealm();
+    if (args.report !== undefined) {
+      if (Object.keys(args).length !== 1 || !Number.isInteger(args.report) || (args.report as number) < 1)
+        return this.toolLog(tool, args, '未读取：report 必须是回执编号，且不能与战术设置混用。');
+      return this.toolLog(tool, args, this.combatSpells.readout(args.report as number));
+    }
     if (Object.keys(args).length === 0) {
       const tactic = this.combatSpells.getTactic();
-      return this.toolLog(tool, args, tactic
+      return this.toolLog(tool, args, (tactic
         ? `当前战术：${tactic.spells?.join(' → ') ?? '默认法术顺序'}；`
           + `生命线 ${tactic.healAtOrBelow ?? '未设置'}/20。`
-        : '当前使用默认即时战斗法术；低血撤退时尝试圣愈术。');
+        : '当前使用默认即时战斗法术；低血撤退时尝试圣愈术。')
+        + '\n' + this.combatSpells.readout());
     }
     if (args.enabled === false) {
       this.combatSpells.setTactic(null);
-      return this.toolLog(tool, args, '已清除自定战术，恢复默认即时战斗法术。');
+      return this.toolLog(tool, args, '已清除并保存自定战术，恢复默认即时战斗法术。');
     }
     const rawSpells = args.spells;
     const rawHeal = args.healAtOrBelow;
@@ -4450,14 +4478,16 @@ export class MinecraftWorld implements World {
       || (rawHeal as number) > 20)) {
       return this.toolLog(tool, args, '未设置：healAtOrBelow 必须是 1–20 的整数。');
     }
-    const spells = rawSpells as CombatSpell[] | undefined;
-    const healAtOrBelow = rawHeal as number | undefined;
-    this.combatSpells.setTactic({ spells: spells ?? null, healAtOrBelow: healAtOrBelow ?? null });
+    const previous = this.combatSpells.getTactic();
+    const spells = rawSpells as CombatSpell[] | undefined ?? previous?.spells ?? null;
+    const healAtOrBelow = rawHeal as number | undefined ?? previous?.healAtOrBelow ?? null;
+    this.combatSpells.setTactic({ spells, healAtOrBelow });
     return this.toolLog(tool, args,
       `已设置战术：${spells?.join(' → ') ?? '默认法术顺序'}；`
-      + (healAtOrBelow === undefined ? '治疗血线未设置。'
+      + (healAtOrBelow === null ? '治疗血线未设置。'
         : `生命 ≤${healAtOrBelow}/20 时先尝试圣愈术。`)
-      + '只在交战时按目标、魔力和冷却尝试；是否生效以服务端回执为准。');
+      + '已按当前世界保存，重载后继续使用；只在交战时按目标、魔力和冷却尝试，效果以服务端回执为准。'
+      + '\n' + this.combatSpells.readout());
   }
 
   private onLowHealth(bot: Bot): void {
@@ -4499,8 +4529,7 @@ export class MinecraftWorld implements World {
       this.tryAutoSelfHeal(bot);
       return;
     }
-    const floor = this.arenaFloor;
-    const spell = this.combatSpells.next(bot, fighting, Date.now(), Boolean(floor && floor.floor < floor.total));
+    const spell = this.combatSpells.next(bot, fighting);
     if (!spell) return;
     this.sendAutoCombatSpell(bot, spell);
   }
@@ -6101,8 +6130,6 @@ export class MinecraftWorld implements World {
     const connectionGeneration = ++this.connectionGeneration;
     this.selfHealAvailable = false;
     this.combatSpells.reset();
-    const initialMana = this.bridge?.agentManaState;
-    if (initialMana !== undefined) this.combatSpells.noteMana(initialMana?.current ?? null);
     this.arenaFloor = null;
     this.resetBodyOwners();
     this.bodyLease.bindGeneration(connectionGeneration, Date.now());
@@ -6113,6 +6140,8 @@ export class MinecraftWorld implements World {
     // World 状态生命周期的开端(PWSR 生命周期第 1 条):暂态先对齐到这个世界的命名
     // 空间,再去渲染连接回执 —— 那一行现状说的必须是**这个**世界的暂态
     this.syncRealm();
+    const initialMana = this.bridge?.agentManaState;
+    if (initialMana !== undefined) this.combatSpells.noteMana(initialMana?.current ?? null);
     // 重连后的世界可能整个换了(重生点、另一台服务器):快照基线作废
     this.snapshotAnchorPending = true;
     this.setPersonalSpawn(undefined, '重连,等待核实', { announce: false });
@@ -6300,6 +6329,7 @@ export class MinecraftWorld implements World {
    */
   private syncRealm(): void {
     const key = this.realmKey();
+    this.combatSpells.useRealm(key);
     this.explored.useRealm(key);
     // 蓝图表自己按 realm 分施工命名空间(设计跨世界),先切它再切骨架:
     // 骨架的「下桌」那几句里有一句要问蓝图表旧世界那边还剩什么
@@ -6881,10 +6911,6 @@ export class MinecraftWorld implements World {
           const arenaEntry = /(?:进入第|已恢复第|^第)\s*(\d+)\s*\/\s*(\d+)\s*层(?=[：:试炼]|$)/.exec(reply);
           if (arenaEntry) {
             this.arenaFloor = { floor: Number(arenaEntry[1]), total: Number(arenaEntry[2]) };
-            if (this.arenaFloor.floor === this.arenaFloor.total) {
-              const spell = this.combatSpells.finalArenaOpening();
-              if (spell) this.sendAutoCombatSpell(bot, spell);
-            }
           }
           if (/第\s*(\d+)\s*\/\s*\1\s*层已通关/.test(reply)) this.arenaFloor = null;
         }

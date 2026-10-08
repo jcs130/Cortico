@@ -74,15 +74,15 @@ describe('服务端公布的战斗法术', () => {
     expect(spells.manualCastBlock('starbolt', 106_000)).toBeNull();
   });
 
-  it('普通楼层保留全部进攻魔力，到最终层入口无需等敌人贴脸', () => {
+  it('默认法术选择依据现场敌人，不按试炼楼层保留全部进攻魔力', () => {
     const spells = new CombatSpells();
     const bot = botWithFoes(['zombie', 'husk', 'witch']);
     spells.noteServerMessage(combatNotice);
     spells.noteServerMessage(exploreNotice);
-    expect(spells.next(bot, true, 100_000, true)).toBeNull();
-    expect(spells.finalArenaOpening(100_000)).toBe('golem');
+    expect(spells.next(bot, false, 100_000)).toBeNull();
+    expect(spells.next(bot, true, 100_000)).toBe('golem');
     spells.noteSent('golem', 100_000);
-    expect(spells.finalArenaOpening(101_500)).toBeNull();
+    expect(spells.next(bot, true, 101_500)).toBe('frostnova');
   });
 
   it('使用服务端魔力读数和公布的消耗，魔力不足时不继续试高消耗法术', () => {
@@ -91,7 +91,7 @@ describe('服务端公布的战斗法术', () => {
     spells.noteServerMessage(combatNotice);
     spells.noteServerMessage(exploreNotice);
     spells.noteMana(26);
-    expect(spells.finalArenaOpening(100_000)).toBe('golem');
+    expect(spells.next(bot, true, 100_000)).toBe('golem');
     spells.noteSent('golem', 100_000);
     expect(spells.next(bot, true, 101_500)).toBe('frostnova');
     spells.noteSent('frostnova', 101_500);
@@ -171,12 +171,12 @@ describe('服务端公布的战斗法术', () => {
     spells.setTactic({ spells: ['golem', 'starbolt', 'frostnova'], healAtOrBelow: 12 });
     expect(spells.wantsHeal(13)).toBe(false);
     expect(spells.wantsHeal(12)).toBe(true);
-    expect(spells.next(bot, true, 100_000, true)).toBe('golem');
+    expect(spells.next(bot, true, 100_000)).toBe('golem');
     spells.noteSent('golem', 100_000);
-    expect(spells.next(bot, true, 101_000, true)).toBeNull();
-    expect(spells.next(bot, true, 101_500, true)).toBe('starbolt');
+    expect(spells.next(bot, true, 101_000)).toBeNull();
+    expect(spells.next(bot, true, 101_500)).toBe('starbolt');
     spells.noteSupportSent(101_500);
-    expect(spells.next(bot, true, 102_000, true)).toBeNull();
+    expect(spells.next(bot, true, 102_000)).toBeNull();
     expect(spells.getTactic()).toEqual({ spells: ['golem', 'starbolt', 'frostnova'], healAtOrBelow: 12 });
   });
 
@@ -203,5 +203,45 @@ describe('服务端公布的战斗法术', () => {
     spells.noteMana(5);
     expect(spells.next(bot, true, 107_999)).toBeNull();
     expect(spells.next(bot, true, 108_250)).toBe('thunderlance');
+  });
+
+  it('回读解释未确认、魔力和冷却约束，复盘保留实际发送及回音而不宣布已学会', () => {
+    const spells = new CombatSpells();
+    spells.setTactic({ spells: ['golem', 'starbolt'], healAtOrBelow: 12 });
+    expect(spells.readout(undefined, 100_000)).toContain('本连接尚未确认该能力');
+    spells.noteServerMessage(combatNotice, 100_000);
+    spells.noteServerMessage(exploreNotice, 100_000);
+    spells.noteMana(7, 100_000);
+    expect(spells.readout(undefined, 100_000)).toContain('所需魔力高于');
+    spells.noteMana(20, 101_000);
+    spells.noteManualCast('golem', 101_000);
+    spells.noteServerMessage('守护傀儡已经召唤，帮你对抗敌人。', 101_200);
+    // A later unrelated reply cannot rewrite that observation.
+    spells.noteServerMessage('魔力不足', 106_000);
+    expect(spells.readout(undefined, 107_000)).toContain('冷却');
+    spells.setTactic({ spells: ['starbolt'], healAtOrBelow: 12 });
+    const receipt = spells.recordCombat({ startedAt: new Date(100_000).toISOString(),
+      endedAt: new Date(110_000).toISOString(), reason: 'flee', healthBefore: 20, healthAfter: 9,
+      kills: { zombie: 1 }, swings: 4, meleeLanded: 3, arrows: 0, rangedLanded: 0 });
+    expect(receipt.casts).toEqual([{ spell: 'golem', source: 'manual',
+      sentAt: new Date(101_000).toISOString(), tacticRevision: 1, manaBefore: 20,
+      reply: '守护傀儡已经召唤，帮你对抗敌人。', replyAt: new Date(101_200).toISOString() }]);
+    expect(receipt).toMatchObject({ tacticRevision: 2, tacticAtEnd: { spells: ['starbolt'] } });
+    expect(spells.readout(receipt.id)).toContain('归因需结合现场');
+    expect(spells.readout()).toContain('"healthAfter":9');
+    spells.reset();
+    expect(spells.readout(receipt.id)).toContain('守护傀儡已经召唤');
+    expect(spells.readout()).toContain('本连接尚未确认该能力');
+  });
+
+  it('读回明确指出已确认但未选入编排的默认技能', () => {
+    const spells = new CombatSpells();
+    spells.noteServerMessage(exploreNotice);
+    spells.setTactic({ spells: ['starbolt'], healAtOrBelow: 12 });
+    const output = spells.readout();
+    const state = JSON.parse(output.split('\n')[1]);
+    expect(state.checks.find((s: { spell: string }) => s.spell === 'golem')).toMatchObject({
+      observed: true, selected: false, manaCost: 12, block: '未选入当前编排',
+    });
   });
 });
