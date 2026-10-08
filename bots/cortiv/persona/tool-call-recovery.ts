@@ -38,6 +38,38 @@ export function withoutInputEchoes(records: readonly ContextRecord[]): ContextRe
   return records.filter(record => !echoed.has(record));
 }
 
+function transcriptTools(text: string, availableTools: ReadonlySet<string>): string[] {
+  const names = new Set<string>();
+  let fenced = false;
+  let request: string | null = null;
+  for (const line of text.split(/\r?\n/)) {
+    if (/^\s*(```|~~~)/.test(line)) { fenced = !fenced; continue; }
+    if (fenced) continue;
+    const match = /^\s*\[历史工具请求\]\s+([A-Za-z_][\w]*)(?:\s|$)/.exec(line);
+    if (match) request = availableTools.has(match[1]) ? match[1] : null;
+    else if (request && /^\s*\[历史回执\]/.test(line)) { names.add(request); request = null; }
+  }
+  return [...names];
+}
+
+/** Unexecuted transcript-shaped replies remain in the ledger, outside the next request's examples. */
+export function projectToolCallRecovery(records: readonly ContextRecord[], availableTools: ReadonlySet<string>): ContextRecord[] {
+  const current = withoutInputEchoes(records);
+  const discarded = new Set<ContextRecord>();
+  for (const entry of current) {
+    if (entry.context.head || !hasRole(entry, 'assistant')) continue;
+    const output = entry.context.responseId
+      ? current.filter(record => !record.context.head && record.context.responseId === entry.context.responseId)
+      : [entry];
+    if (output.some(record => record.item.type === 'function_call')) continue;
+    const text = output.filter(record => hasRole(record, 'assistant')).map(textOf).join('\n');
+    if (transcriptTools(text, availableTools).length) {
+      for (const record of output) if (hasRole(record, 'assistant') || record.item.type === 'reasoning') discarded.add(record);
+    }
+  }
+  return current.filter(record => !discarded.has(record));
+}
+
 export class ToolCallRecoveryFallback {
   private lastResponse: string | null = null;
   private advised = false;
@@ -72,6 +104,11 @@ export class ToolCallRecoveryFallback {
     if (inputEcho(text, records.slice(0, latest))) {
       this.advised = true;
       return '[工具接口核验] 刚才回复原样复制了已经收到的事件帧或交接通知，没有原生工具调用，也没有执行行动。原始事件和实际回执仍在；请根据当前现场与目标重新选择行动，通过当前原生工具接口执行。需要等待时可以结束本轮。不必复述内部通知。';
+    }
+    const transcripts = transcriptTools(text, availableTools);
+    if (transcripts.length) {
+      this.advised = true;
+      return `[工具接口核验] 刚才的正文为 ${transcripts.join('、')} 写了历史请求和回执样式，但本轮没有原生工具调用，这些行没有对应本轮执行记录。回顾过去请核验原始账本；需要新的行动或观察时使用当前原生工具接口，等待实际回执。不要模拟工具回执。也可以选择结束本轮。`;
     }
     const names = new Set<string>();
     let fenced = false;
