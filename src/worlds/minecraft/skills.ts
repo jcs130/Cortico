@@ -1639,7 +1639,7 @@ ground 使用普通物理，飞行悬停时先 land 或改用 flight。flight �
     name: 'take',
     doc: `{"skill":"take","item":"coal","count":16}        从当前楼层附近箱子或运输矿车取出。先查近处有货/未查的箱子，再去较远有货的；最多 3 个
  {"skill":"take","item":"iron_ingot","count":1,"at":[103,63,-31]} 从指定熔炉/箱子直接取；无需先 use at 开窗
- {"skill":"take","item":"furnace","count":1,"from":"open"} 只用于仍开着的自定义容器窗口,不会走向附近的箱子。同一单连续从这个窗口取多类物品,只在最后关窗
+ {"skill":"take","item":"furnace","count":1,"from": "open"} 只用于仍开着的自定义容器窗口,不会走向附近的箱子。同一单连续从这个窗口取多类物品,只在最后关窗
                                                  单独 use 查看结束后窗口已关闭；下一单须重新开窗，例如 steps:[{skill:"use",item:"背包显示名"},{skill:"take",item:"furnace",count:1,from:"open"}]
 {"skill":"take","at":[103,63,-31],"all":true}    箱子整箱取;炉子输入槽有原料时只取输出,原料烧完后连剩余燃料一同取。要收回未烧完的原料或燃料,用 item+count 点名。
                                                  定量取物必须同时写 item 和 count,不默认数量`,

@@ -35,6 +35,9 @@ importers:
       playwright-core:
         specifier: ^1.63.0
         version: 1.63.0
+      prismarine-block:
+        specifier: ^1.23.0
+        version: 1.23.0(prismarine-registry@1.12.0)
       prismarine-viewer:
         specifier: ^1.33.0
         version: 1.33.0(prismarine-registry@1.12.0)
@@ -90,9 +93,6 @@ importers:
       minecraft-data:
         specifier: ^3.112.0
         version: 3.112.0
-      prismarine-block:
-        specifier: ^1.23.0
-        version: 1.23.0(prismarine-registry@1.12.0)
       tailwindcss:
         specifier: ^4.3.3
         version: 4.3.3
