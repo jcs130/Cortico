@@ -223,16 +223,16 @@ Persona 决定何时观察入口、路线、物品与菜单、玩家动作、战
 方块状态、模型、画作表也来自同一 JAR。`minecraft-renderer` 的模型与图集在构建时
 替换为这套数据。JAR、资源包和浏览器 bundle 的 SHA-256 / 版本均会校验。
 
-在已装有 Python Pillow 的环境下运行（路径按实际安装位置调整）：
+网页源码、素材与构建工具由独立项目 [mc-visual-console](https://github.com/jcs130/mc-visual-console) 的 `main` 分支维护。共享素材包含对应版本的原始模型、贴图和图标；以下命令逐文件校验后构建（路径按实际安装位置调整）：
 
 ```powershell
-python scripts/export-minecraft-viewer-assets.py I:\mc-1206\versions\1.20.6\1.20.6.jar I:\Cortico\deployments\runtimes\modern-viewer-1.20.6
-node scripts/build-minecraft-viewer-client.mjs D:\workspace\mengyue-world-platform\packages\minecraft-modern-viewer I:\Cortico\deployments\runtimes\modern-viewer-1.20.6
-node scripts/verify-minecraft-viewer-assets.mjs I:\mc-1206\versions\1.20.6\1.20.6.jar I:\Cortico\deployments\runtimes\modern-viewer-1.20.6
+$viewerSourceDir = 'C:\path\to\mc-visual-console'
+$viewerOutputDir = 'I:\Cortico\deployments\runtimes\modern-viewer-1.20.6'
+npm ci --prefix "$viewerSourceDir\packages\modern-viewer\renderer-src"
+node "$viewerSourceDir\tools\prepare-viewer-assets.mjs" java-1.20.6 $viewerOutputDir
 ```
 
-校验完成后设置 `worlds.minecraft.viewerAssetsDir` 为上述输出目录，重启 World 才会
-切换网页 viewer。`worlds.minecraft.host/port` 仍按原部署配置连接游戏服务器。
+首次接入或切换目录时设置 `worlds.minecraft.viewerAssetsDir` 并重启 World。已有目录更新画面时，从共享源码重新构建、同步产物，核对 `viewer-client.json` 的 `browserBundleSha256` 与页面 `/index.js` 的实际哈希，再刷新页面；无需因同路径静态文件更新重启游戏连接。`worlds.minecraft.host/port` 仍按原部署配置连接游戏服务器。不同 Minecraft 版本与预设分别构建；服务器专用视觉预设由使用者显式选择。
 
 客户端窗口出现后，World 将其标题设置为该客户端的账号名，供 OBS 按标题区分。直连进服后再次更新标题。
 
