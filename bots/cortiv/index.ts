@@ -235,7 +235,7 @@ export interface CortiVConfig extends CoreConfig {
 function build(loaded: LoadedConfig<CortiVConfig>, worlds: World[]): BotParts<CortiVConfig> {
   const cfg = loaded.config;
 
-  // CortiV(可缇Corti):直播 memory 系统(观众档案首见唤起/软边界速记/交接后并行梦)
+  // 直播 memory 系统(观众档案首见唤起/软边界速记/交接后并行梦)
   // 是类自身的行为,不走构造开关。
   const persona = new CortiV({
     memoryDir: loaded.memoryDir,
@@ -269,6 +269,10 @@ function build(loaded: LoadedConfig<CortiVConfig>, worlds: World[]): BotParts<Co
     tickDelayMs: () =>
       cfg.tick.intervalMinutes === null ? null : cfg.tick.intervalMinutes * 60_000,
   });
+  persona.memory.seed(['index.json', 'project-faq.json', 'server-access.json'].map((name) => [
+    `references/server-technical/${name}`,
+    readFileSync(resolve(HERE, 'references/server-technical', name), 'utf8'),
+  ] as const));
 
   return {
     persona,
@@ -295,14 +299,14 @@ const definition: BotDefinition<CortiVConfig> = {
   declares: DECLARES,
   defaults: () => ({
     ...CORE_DEFAULTS,
-    displayName: '可缇Corti',
+    displayName: '可米 Cormy',
     // 端点表是全局部署事实(`<部署根>/providers/`),不归代码包。
     providers: {},
     web: { port: 7789, theme: 'navigator' },
     paths: { memory: 'workspace', data: 'data' },
     batching: { ...CORE_DEFAULTS.batching },
     // 交接阈值(塞满多少就交接)。这只是**层 2 建议值** —— config.json 的 context 段
-    // 压过它(deploy.ts 的四层深合并),控制台「可缇Corti → 参数」改的也是那一份。
+    // 压过它(deploy.ts 的四层深合并),控制台配置页改的也是那一份。
     // 别把它跟 provider 那份 spec 的 contextWindow(模型物理窗口)或 maxTokens
     // (单轮生成上限)搞混:那两样归 provider,Persona拿不到。
     context: { maxTokens: 64000, keepRatio: 1 / 4, softRatio: 0.85, firstTurn: false, ...CORE_DEFAULTS.context },

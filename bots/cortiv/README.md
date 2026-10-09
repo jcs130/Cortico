@@ -2,7 +2,7 @@
 
 # bots/cortiv
 
-直播 bot,默认展示名可缇Corti。Persona `CortiV` 继承 `Cormini`，增加观众档案和交接后的后台整理。
+直播 bot，默认展示名可米 Cormy，基于 Cortico 框架。Persona `CortiV` 继承 `Cormini`，增加观众档案和交接后的后台整理。
 
 ## 启动
 
@@ -39,6 +39,8 @@ pnpm start cortiv
 持续安静时结合演出空闲起点、现场与试验进度接话；语法通过、脚本结束和目标达成分别核验。
 
 ## 按需参考资料
+
+启动时将 `references/server-technical/` 的技术资料种子复制到工作区，只创建缺失文件，保留已有订正。ORIENTATION 提供目录入口，正文通过 `read_file` 和 `grep_files` 按需读取；它使用 `technical_reference_index`，与下述活动资料索引分别读取。部署中的模型、音色和服务配置变化后，需要核对来源并更新相应资料。
 
 `references.indexFiles` 配置工作区中的资料索引；`references.enabled` 开启后，主会话与长期复盘可见有界主题目录。
 `reference_guide` 的 `catalog` 分页读主题，`guides` 分页读候选，`detail` 读一个活动，`clear` 关闭阅读分支。

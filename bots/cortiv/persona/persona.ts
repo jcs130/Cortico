@@ -3,9 +3,9 @@ import { withBlobLines } from 'cortico/core/blobs.ts';
 import { itemText, message, withText, type ContextRecord } from 'cortico/protocol/open-responses/context.ts';
 import { hasRole, textOf } from 'cortico/protocol/open-responses/context-helpers.ts';
 /**
- * CortiV(可缇Corti)——AI VTuber 实时系统的Persona。
+ * AI VTuber 实时系统的 Persona。
  *
- * 继承 Cormini(可缇mini)的最小骨架(平铺工作区/文件三件套/四时机钩子),
+ * 继承 Cormini 的最小骨架(平铺工作区/文件三件套/四时机钩子),
  * 把直播场景的 memory 系统**内建为类行为**(不走构造开关):
  *  - 人物档案 `viewers/<来源>/<账号键>.md`:首行=一句话摘要,senderKey 在当前
  *    上下文窗口首次出现时在投递刻机械唤起(注入收编同批,原子到达);同一句摘要

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "kind": "technical_reference_index",
+  "title": "千灯纪与 Cormy 项目技术资料",
+  "updatedAt": "2026-10-09T17:03:27+08:00",
+  "purpose": "观众提问时按需定位原文；资料正文不常驻模型上下文。",
+  "reading": "先按标题和关键词选文档，再用 read_file 分段读取或 grep_files 定位。回答保留来源、观察时间和适用版本；没有资料就说明尚未确认。部署快照可能过时，文件修改时间不等于事实发生时间。",
+  "entries": [
+    {
+      "id": "server-access",
+      "title": "千灯纪：入服与跨版本支持",
+      "keywords": ["服务器介绍", "入服", "怎么加入", "基岩版", "Java", "手机版", "手机", "跨版本", "QQ群", "项目地址", "内测"],
+      "file": "references/server-technical/server-access.json",
+      "updatedAt": "2026-10-07T22:48:11.0045152+08:00",
+      "source": "操作员于 2026-10-07 确认的服务器资料"
+    },
+    {
+      "id": "project-faq",
+      "title": "可米 Cormy 项目技术问答",
+      "keywords": ["可米", "Cormy", "萌悦", "名字", "可缇", "Corti", "技术", "框架", "Cortico", "模型", "快慢系统", "视觉", "建筑", "记忆", "观众", "语音", "IndexTTS", "桃子", "流式", "唱歌", "音乐", "歌词", "ACE-Step", "Seed-VC"],
+      "file": "references/server-technical/project-faq.json",
+      "updatedAt": "2026-10-09T17:03:27+08:00",
+      "source": "操作员命名确认与代码、部署配置、现役服务采样；2026-10-09"
+    }
+  ]
+}
