@@ -2215,7 +2215,7 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
   {
     name: 'mc_flight_plan',
     tags: ['read'],
-    description: 'Preview a whole flight route before casting, without moving or consuming permission. Each point starts at the previous projected endpoint, including relative coordinates. Returns collisions, per-leg and total time, whether the supplied budget fits, and whether the last point has safe support. Only loaded geometry is checked; execution revalidates. Unknown duration is not unlimited.',
+    description: 'Preview a whole flight route before casting, without moving or consuming permission. Use subdivide:true to turn distant endpoints into short diagonal or vertical legs with executable dependent steps. Each point starts at the previous projected endpoint, including relative coordinates. Returns collisions, total time, budget fit and final support. Only loaded geometry is checked; execution revalidates. Unknown duration is not unlimited.',
     parameters: {
       type: 'object',
       properties: {
@@ -2227,6 +2227,7 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
           }, required: ['at'], additionalProperties: false } },
         budgetMs: { type: 'integer', minimum: 1,
           description: 'Available milliseconds from current server instructions, supplied by caller; does not grant or renew flight' },
+        subdivide: { type: 'boolean', description: 'Split distant endpoints into client-sized legs; intermediate legs hover, each requested point keeps its land choice. Returns absolute mc_do steps with needs dependencies.' },
       },
       required: ['points'],
     },
@@ -4176,9 +4177,9 @@ export class MinecraftWorld implements World {
         if ('error' in parsed || !bot) return { text: this.toolLog('mc_flight_plan', args,
           `[mc_flight_plan 失败] ${'error' in parsed ? parsed.error : '尚未连接 Minecraft'}`), failed: true };
         try {
-          const result = previewFlightPlan(bot, parsed.steps, parsed.budgetMs);
+          const result = previewFlightPlan(bot, parsed.steps, parsed.budgetMs, parsed.subdivide);
           return { text: this.toolLog('mc_flight_plan', args,
-            `整段飞行试算（未施法、未移动；后续起点是假定上一段到达，实际执行重验；估时仅含所列移动，每段含500毫秒余量；各段allowed仅表示采样时的飞行许可，不表示几何试算成败；null为未知，末段悬停不表示已有落脚支撑）：${JSON.stringify(result)}`),
+            `整段飞行试算（未施法、未移动；后续起点是假定上一段到达，实际执行重验；估时仅含所列移动，每段含500毫秒余量；allowed仅表示采样时许可；null为未知，悬停不表示有支撑。steps为可整体提交的绝对坐标与needs，未核验完整路线或超预算时为null；施法不包含在steps中，合并前置步骤须重编号needs。起点变化后应重算）：${JSON.stringify(result)}`),
           ...(!result.complete || result.fitsBudget === false ? { failed: true } : {}) };
         } catch (error) {
           if (!(error instanceof SkillBlocked)) throw error;

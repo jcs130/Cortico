@@ -58,6 +58,101 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2025-01-01T00:
 afterEach(() => { releases.splice(0).forEach(release => release()); vi.useRealTimers(); });
 
 describe('server-granted flight movement', () => {
+  it('compiles a distant diagonal endpoint into executable dependent legs and lands at the requested platform', async () => {
+    const { bot, client, positions } = flightBot();
+    const parsed = parseFlightPlan({ points: [{ at: [18, 64, 18] }], subdivide: true, budgetMs: 15_000 });
+    if ('error' in parsed) throw new Error(parsed.error);
+    const result = previewFlightPlan(bot, parsed.steps, parsed.budgetMs, parsed.subdivide);
+    expect(result).toMatchObject({ complete: true, fitsBudget: true, endsOnSupport: true });
+    expect(result.segments.length).toBeGreaterThan(1);
+    expect(result.segments.every(segment => segment.distance <= MAX_FLIGHT_DISTANCE)).toBe(true);
+    expect(result.segments.slice(0, -1).every(segment => !segment.land)).toBe(true);
+    expect(positions).toHaveLength(0);
+    expect(client.write.mock.calls).toHaveLength(0);
+    const execution = parseSteps(result.steps);
+    if ('error' in execution) throw new Error(execution.error);
+    expect(execution.notes).toBeUndefined();
+    expect(execution.steps.map(step => step.needs)).toEqual(execution.steps.map((_, index) => index ? [index] : undefined));
+    expect(execution.steps.every(step => step.skill === 'flight' && !step.dryRun)).toBe(true);
+    client.emit('abilities', { flags: 4 });
+    for (const [index, segment] of result.segments.entries()) {
+      const move = flyToPosition(bot, { x: segment.at[0], y: segment.at[1], z: segment.at[2] }, () => false, { land: segment.land });
+      await vi.advanceTimersByTimeAsync(segment.estimatedDurationMs);
+      await move;
+      expect(bot.entity.position).toEqual(new Vec3(...result.segments[index].at));
+    }
+    expect(bot.entity.position).toEqual(new Vec3(18.5, 64, 18.5));
+    expect(flightState(bot).controlActive).toBe(false);
+    expect(bot.physicsEnabled).toBe(true);
+  });
+
+  it('withholds compiled execution for an over-budget route or an unverified tail', () => {
+    const { bot, set, client, positions } = flightBot();
+    const parsed = parseFlightPlan({ points: [{ at: [30, 64, 0] }], subdivide: true, budgetMs: 1_000 });
+    if ('error' in parsed) throw new Error(parsed.error);
+    expect(previewFlightPlan(bot, parsed.steps, parsed.budgetMs, parsed.subdivide))
+      .toMatchObject({ complete: true, fitsBudget: false, steps: null });
+    for (let x = 0; x <= 32; x++) set(new Vec3(x, 65, 0), null);
+    const blocked = previewFlightPlan(bot, parsed.steps, 30_000, parsed.subdivide);
+    expect(blocked).toMatchObject({ complete: false, estimatedDurationMs: null, steps: null });
+    expect(blocked.reason).toContain('未加载');
+    expect(positions).toHaveLength(0);
+    expect(client.write.mock.calls).toHaveLength(0);
+  });
+
+  it('subdivides relative points from the observed fractional origin and bounds generated work', () => {
+    const { bot, client } = flightBot();
+    bot.entity.position = new Vec3(0.98, 64.2, 0.01);
+    const parsed = parseFlightPlan({ points: [
+      { at: ['~18', '~6', '~18'], land: false }, { at: ['~0', '~2', '~0'], land: false },
+    ], subdivide: true });
+    if ('error' in parsed) throw new Error(parsed.error);
+    const result = previewFlightPlan(bot, parsed.steps, undefined, parsed.subdivide);
+    expect(result).toMatchObject({ complete: true, from: [0.98, 64.2, 0.01], fitsBudget: null, endsOnSupport: false });
+    expect(result.segments.every(segment => segment.distance <= MAX_FLIGHT_DISTANCE)).toBe(true);
+    expect(result.segments.at(-1)?.at).toEqual([18.5, 72, 18.5]);
+    const large = parseFlightPlan({ points: [{ at: [1_000_000, 64, 0] }], subdivide: true });
+    if ('error' in large) throw new Error(large.error);
+    expect(previewFlightPlan(bot, large.steps, undefined, large.subdivide)).toMatchObject({ complete: false, steps: null });
+    expect(client.write.mock.calls).toHaveLength(0);
+    expect(parseFlightPlan({ points: [{ at: [1, 64, 1] }], subdivide: 'true' })).toHaveProperty('error');
+  });
+
+  it.each([false, true])('runs World-generated dependent steps through the executor and rechecks a changed origin: %s', async (changedOrigin) => {
+    const { bot, client, positions } = flightBot();
+    Object.assign(bot, { inventory: { items: () => [] }, pathfinder: { stop() {}, setGoal() {} } });
+    const reports: TaskReport[] = [];
+    const executor = new Executor({ getBot: () => bot, log, nextId: nextTaskId(), precheck: () => false,
+      report: report => reports.push(report) });
+    releases.push(() => executor.shutdown());
+    const world = new MinecraftWorld({ cfg: structuredClone({ ...MINECRAFT_DEFAULTS, enabled: true }) });
+    Object.assign(world, { bridge: { bot }, executor });
+    const tool = world.tools().find(tool => tool.name === 'mc_flight_plan')!;
+    const reply = await tool.handler({ points: [{ at: [18, 64, 18] }], subdivide: true, budgetMs: 15_000 }, {} as never);
+    const text = typeof reply === 'string' ? reply : reply.text;
+    const plan = JSON.parse(text.slice(text.indexOf('{"sampledAt":')));
+    expect(plan).toMatchObject({ complete: true, fitsBudget: true });
+    expect(reports).toHaveLength(0);
+    expect(client.write.mock.calls).toHaveLength(0);
+    const parsed = parseSteps(plan.steps);
+    if ('error' in parsed) throw new Error(parsed.error);
+    client.emit('abilities', { flags: 4 });
+    if (changedOrigin) bot.entity.position = new Vec3(100.5, 64, 100.5);
+    const positionsBefore = positions.length;
+    executor.submit(parsed.steps);
+    await vi.advanceTimersByTimeAsync(plan.estimatedDurationMs + 1_000);
+    expect(reports).toHaveLength(1);
+    if (changedOrigin) {
+      expect(positions).toHaveLength(positionsBefore);
+      expect(reports[0].text).toContain('没跑');
+      expect(reports[0].text).toContain('客户端飞行单段');
+    } else {
+      expect(bot.entity.position).toEqual(new Vec3(18.5, 64, 18.5));
+      expect(flightState(bot).controlActive).toBe(false);
+      expect(reports[0].text).toContain('完成');
+    }
+  });
+
   it('keeps the reason for a completed hover ending until the next real takeoff', async () => {
     const { bot, client } = flightBot();
     client.emit('abilities', { flags: 4 });
