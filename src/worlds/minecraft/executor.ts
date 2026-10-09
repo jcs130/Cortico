@@ -130,7 +130,7 @@ import {
   AIR_NAMES, BUILD_CELL_CAP, EXCAVATE_CELL_CAP, FACE_TRY_ORDER, FACE_ZH, LIQUIDS, NEIGHBORS6,
   NO_PLACE_REFERENCE, PLACE_REACH, PROBE_CELLWISE_MAX, PROBE_CELL_CAP, PROBE_WHERE_CELL_CAP,
   SHAPE_ZH, blockAtCell, blockNamesOf, cellKeyOf, cellText, chebyshev, cropAgeOfCell, faceText,
-  feetOf, fnv32, nearLavaAt, readRegion, refAt, refCellOf, resolveAt, shapeCells, skyVisibleAt,
+  feetOf, fnv32, nearLavaAt, readRegion, resolveAt, shapeCells, skyVisibleAt,
   solidAt, type RegionReading,
 } from './cell-facts.ts';
 import {
@@ -546,10 +546,8 @@ const DIRECTIONAL_SWEEP_HOLD_MS = 24 * 60 * 60_000;
 const DIRECTIONAL_SWEEP_REPEAT_MS = 2 * 60_000;
 const DIRECTIONAL_SWEEP_EVIDENCE_RADIUS = 64;
 const IMMATURE_FIND_HOLD_MS = 120_000;
-const LOCAL_BUILD_FAILURE_WINDOW_MS = 90_000;
-const LOCAL_BUILD_FAILURE_DISTANCE = 8;
-const BUILD_FAILURE_BURST_WINDOW_MS = 3 * 60_000;
-const BUILD_FAILURE_BURST_COUNT = 5;
+const LOCAL_FARM_FAILURE_WINDOW_MS = 90_000;
+const LOCAL_FARM_FAILURE_DISTANCE = 8;
 const NEARBY_GOAL_DISTANCE = 4;
 const PROVEN_TARGET_DISTANCE = 1.5;
 const GOAL_PROGRESS_SAMPLE_MS = 2_000;
@@ -1872,18 +1870,10 @@ export class Executor {
   }> = [];
   /** Full virtual/open containers: a successful stow of another item does not free a slot. */
   private readonly fullOpenStorageFailures = new Map<string, { count: number; at: number; why: string }>();
-  private localBuildFailures: Array<{
-    material: string; at: number; why: string;
-    from: { x: number; y: number; z: number; dimension: string };
-  }> = [];
   /** 已知耕种操作在同片区域的失败账；换地点或找到可核验土格后放行。 */
   private localFarmFailures: Array<{
     at: number; why: string; from: { x: number; y: number; z: number; dimension: string };
   }> = [];
-  /** 已明确无效的静态落点反复变换写法时，暂挂这一片的同材料施工意图。 */
-  private readonly buildSiteRefusals = new Map<string, {
-    count: number; firstAt: number; until: number; from: Cell;
-  }>();
   /** 相邻目标从同一站位反复走不通；不可站的目标格跨站位记忆。 */
   private spatialFailures: Array<{
     count: number; at: number; why: string; dimension: string;
@@ -2133,8 +2123,6 @@ export class Executor {
       ?? refusal(this.impossibleCraftStartNote(task.steps), 'craft.invalid', 'correction')
       ?? refusal(this.fullInventoryGridCraftNote(task.steps), 'craft.capacity', 'correction')
       ?? refusal(this.fullInventoryTakeNote(task.steps), 'take.capacity', 'correction')
-      ?? refusal(this.localBuildFailureNote(task.steps, at), 'build.failed', 'repeat')
-      ?? refusal(this.buildSiteNote(task.steps, at), 'build.site')
       ?? refusal(this.tunnelLiquidStopNote(task.steps, at), 'tunnel.liquid', 'repeat')
       ?? refusal(this.tunnelSupportStopNote(task.steps, at), 'tunnel.support', 'repeat')
       ?? refusal(this.verticalTunnelOscillationNote(task.steps, at), 'tunnel.oscillation', 'repeat')
@@ -3142,7 +3130,8 @@ export class Executor {
 
   /** 同一整单在相同现场连续失败后暂缓；换站位、维度或做法即可重新尝试。 */
   private repeatFailedTaskNote(steps: readonly SkillCall[], now: number): string | null {
-    if (!retryGuardApplies(steps)) return null;
+    // 施工前置步骤会改变支撑与占位；失败历史不能冻结修正后的整单。
+    if (steps.some((step) => step.skill === 'build') || !retryGuardApplies(steps)) return null;
     for (const [key, entry] of this.exactFailures) {
       if (now - entry.at >= EXACT_FAILURE_WINDOW_MS) this.exactFailures.delete(key);
     }
@@ -3453,136 +3442,6 @@ export class Executor {
     }
   }
 
-  /** 只看 goto 前缀之后的首个 build；前置施工会改变地形，不能按旧现场拒单。 */
-  private inspectableBuild(steps: readonly SkillCall[]): PlaceCall | null {
-    const index = steps.findIndex((step) => step.skill === 'build');
-    if (index < 0 || steps.slice(0, index).some((step) => step.skill !== 'goto')) return null;
-    const call = steps[index];
-    return call.skill === 'build' && 'material' in call && !call.dryRun ? call : null;
-  }
-
-  /** 从已加载的邻近方块给出一处可核验的落点，避免模型反复猜坐标。 */
-  private nearbySupportedBuildCell(bot: Bot): Cell | null {
-    const feet = feetOf(bot);
-    for (const y of [feet.y, feet.y - 1, feet.y + 1]) {
-      for (let radius = 1; radius <= 4; radius++) {
-        for (let dx = -radius; dx <= radius; dx++) for (let dz = -radius; dz <= radius; dz++) {
-          if (Math.max(Math.abs(dx), Math.abs(dz)) !== radius || (dx === 0 && dz === 0)) continue;
-          const cell = { x: feet.x + dx, y, z: feet.z + dz };
-          const block = blockAtCell(bot, cell);
-          if (!block || !AIR_NAMES.has(block.name)) continue;
-          if (!refAt(bot, { x: cell.x, y: cell.y - 1, z: cell.z })) continue;
-          return cell;
-        }
-      }
-    }
-    return null;
-  }
-
-  /** 已加载的静态落点若全被占或无贴附面，绕着它换站位也不会让它变得可放。 */
-  private buildSiteNote(steps: readonly SkillCall[], now: number): string | null {
-    const call = this.inspectableBuild(steps);
-    const bot = this.opts.getBot();
-    if (!call || !bot || 'blueprint' in call) return null;
-    const key = `${dimensionOf(bot)}:${call.material}`;
-    const pos = feetOf(bot);
-    const previous = this.buildSiteRefusals.get(key);
-    if (previous && (now - previous.firstAt > 3 * 60_000
-      || Math.hypot(pos.x - previous.from.x, pos.y - previous.from.y, pos.z - previous.from.z) >= 24)) {
-      this.buildSiteRefusals.delete(key);
-    }
-    // 单步 build 平时由技能解释现场；同材料已有连续无效落点时也核对新坐标，
-    // 以免换成单步绕过冷却，同时允许真正有支撑的新落点立即恢复施工。
-    if (steps.length < 2 && !this.buildSiteRefusals.has(key)) return null;
-    const cells = shapeFootprint(bot, call);
-    if (!cells?.length || cells.length > 16) return null;
-    let occupied = 0;
-    let unsupported = 0;
-    for (let i = 0; i < cells.length; i++) {
-      const cell = cells[i];
-      const block = blockAtCell(bot, cell);
-      if (!block) return null; // 未加载，不猜。
-      if (matchPlacedMaterialName(bot, call.material, block.name)) return null; // 已有目标材料，交给技能核验。
-      if (block.boundingBox === 'block') { occupied++; continue; }
-      const face = 'on' in call ? call.on[i]?.face : null;
-      const hasRef = isGravityBlock(call.material)
-        ? refAt(bot, { x: cell.x, y: cell.y - 1, z: cell.z })
-        : face ? refAt(bot, refCellOf(cell, face))
-          : NEIGHBORS6.some(([dx, dy, dz]) => refAt(bot, { x: cell.x + dx, y: cell.y + dy, z: cell.z + dz }));
-      if (!hasRef) unsupported++;
-    }
-    // 冷却针对的是无效落点，不是整个 build 工具。新坐标有空格和实心支撑时立即放行。
-    if (occupied + unsupported !== cells.length) {
-      this.buildSiteRefusals.delete(key);
-      return null;
-    }
-    const candidate = cells.length === 1 && 'anchors' in call
-      ? this.nearbySupportedBuildCell(bot) : null;
-    const candidateHint = candidate
-      ? `；已加载的附近可核验落点 ${cellText(candidate)} 为空、正下方有实心支撑（仍须保护预检）`
-      : '';
-    const held = this.buildSiteRefusals.get(key);
-    if (held && held.until > now) {
-      const left = Math.ceil((held.until - now) / 1000);
-      return `这片位置用${zhName(call.material)}的落点已连续 ${held.count} 次不可施工，${left} 秒内暂停重复的无效落点；请先做其他任务，或找已加载、空着且有实心支撑的新位置${candidateHint}`;
-    }
-    const reason = occupied === cells.length ? '目标格全被其他方块占着'
-      : unsupported === cells.length ? '目标格都没有能贴附的实心面'
-        : `目标格 ${occupied} 处被占、${unsupported} 处无实心贴附面`;
-    const current = this.buildSiteRefusals.get(key);
-    const count = current && now - current.firstAt < 3 * 60_000 ? current.count + 1 : 1;
-    const from = current?.from ?? pos;
-    this.buildSiteRefusals.set(key, { count, firstAt: current?.firstAt ?? now,
-      until: count >= 3 ? now + 3 * 60_000 : 0, from });
-    const next = count >= 3
-      ? `这片位置已连续 ${count} 次选到无效落点，本次${zhName(call.material)}施工暂停 3 分钟；先换一件与放置无关的事，或离开此处至少 24 格后重新探查。`
-      : '先探查新的空位和支撑，再改目标。';
-    return `放置前现场核对:${reason}（共 ${cells.length} 处）${candidateHint}；${next}原队列保留`;
-  }
-
-  /** 同区域或同材料连续放不下时暂停该施工意图，成功一次即清账。 */
-  private localBuildFailureNote(steps: readonly SkillCall[], now: number): string | null {
-    const step = this.inspectableBuild(steps);
-    if (!step) return null;
-    const bot = this.opts.getBot();
-    const pos = bot?.entity?.position;
-    if (!bot || !pos) return null;
-    this.localBuildFailures = this.localBuildFailures.filter((entry) => now - entry.at < BUILD_FAILURE_BURST_WINDOW_MS);
-    const sameMaterial = this.localBuildFailures.filter((entry) => entry.material === step.material
-      && entry.from.dimension === dimensionOf(bot));
-    const nearby = sameMaterial.filter((entry) => now - entry.at < LOCAL_BUILD_FAILURE_WINDOW_MS
-      && Math.hypot(pos.x - entry.from.x, pos.y - entry.from.y, pos.z - entry.from.z) < LOCAL_BUILD_FAILURE_DISTANCE);
-    if (sameMaterial.length >= BUILD_FAILURE_BURST_COUNT) {
-      const last = sameMaterial.at(-1)!;
-      const left = Math.ceil((BUILD_FAILURE_BURST_WINDOW_MS - (now - last.at)) / 1000);
-      return `用${zhName(step.material)}在不同位置连续放置失败 ${sameMaterial.length} 次，${left} 秒内不再受理同材料的 build；上次卡在:${last.why}。先换目标或查询保护、支撑与占位`;
-    }
-    if (nearby.length < 3) return null;
-    const last = nearby.at(-1)!;
-    const left = Math.ceil((LOCAL_BUILD_FAILURE_WINDOW_MS - (now - last.at)) / 1000);
-    return `附近用${zhName(step.material)}连续放置失败 ${nearby.length} 次，${left} 秒内不再受理这一带同材料的 build；上次卡在:${last.why}。先换行动，或走到别处找可贴附的实心方块`;
-  }
-
-  private recordLocalBuildOutcome(steps: readonly SkillCall[], landings: readonly StepLanding[]): void {
-    const bot = this.opts.getBot();
-    const pos = bot?.entity?.position;
-    if (!bot || !pos) return;
-    const now = Date.now();
-    this.localBuildFailures = this.localBuildFailures.filter((entry) => now - entry.at < BUILD_FAILURE_BURST_WINDOW_MS);
-    for (const landing of landings) {
-      const step = steps[landing.step - 1];
-      if (step?.skill !== 'build' || !('material' in step) || step.dryRun) continue;
-      if (landing.outcome === 'ok') {
-        this.localBuildFailures = this.localBuildFailures.filter((entry) => entry.material !== step.material
-          || entry.from.dimension !== dimensionOf(bot));
-      } else if (landing.outcome === 'fail' && landing.code !== 'resource-unavailable') {
-        this.localBuildFailures.push({ material: step.material, at: now,
-          why: maskCoords(landing.why ?? '没说清为什么').slice(0, 180),
-          from: { x: pos.x, y: pos.y, z: pos.z, dimension: dimensionOf(bot) } });
-      }
-    }
-  }
-
   /** 只覆盖原版锄地/种植：真实可用的土格立即放行，不因附近坏格阻断修正方案。 */
   private localFarmFailureNote(steps: readonly SkillCall[], now: number): string | null {
     const index = steps.findIndex((step) => step.skill === 'use' && !!step.at
@@ -3592,9 +3451,9 @@ export class Executor {
     const pos = bot?.entity?.position;
     const step = steps[index];
     if (!bot || !pos || step.skill !== 'use' || !step.at || !step.item) return null;
-    this.localFarmFailures = this.localFarmFailures.filter((entry) => now - entry.at < LOCAL_BUILD_FAILURE_WINDOW_MS);
+    this.localFarmFailures = this.localFarmFailures.filter((entry) => now - entry.at < LOCAL_FARM_FAILURE_WINDOW_MS);
     const nearby = this.localFarmFailures.filter((entry) => entry.from.dimension === dimensionOf(bot)
-      && Math.hypot(pos.x - entry.from.x, pos.y - entry.from.y, pos.z - entry.from.z) < LOCAL_BUILD_FAILURE_DISTANCE);
+      && Math.hypot(pos.x - entry.from.x, pos.y - entry.from.y, pos.z - entry.from.z) < LOCAL_FARM_FAILURE_DISTANCE);
     if (nearby.length < 3) return null;
     // 新目标在已加载区块里确实具备种植条件，就让执行层现场核验；不靠倒计时妨碍纠错。
     try {
@@ -3607,7 +3466,7 @@ export class Executor {
           : target.name === (step.item === 'nether_wart' ? 'soul_sand' : 'farmland'))) return null;
     } catch { /* 锚点暂不可读时沿用本地冷却。 */ }
     const last = nearby.at(-1)!;
-    const left = Math.ceil((LOCAL_BUILD_FAILURE_WINDOW_MS - (now - last.at)) / 1000);
+    const left = Math.ceil((LOCAL_FARM_FAILURE_WINDOW_MS - (now - last.at)) / 1000);
     return `这片区域的锄地/种植已连续失败 ${nearby.length} 次，${left} 秒内暂停相同耕种尝试；上次卡在:${last.why}。先探查已加载的土格及其上方空间，找到可用耕地或换一件事`;
   }
 
@@ -3616,14 +3475,14 @@ export class Executor {
     const pos = bot?.entity?.position;
     if (!bot || !pos) return;
     const now = Date.now();
-    this.localFarmFailures = this.localFarmFailures.filter((entry) => now - entry.at < LOCAL_BUILD_FAILURE_WINDOW_MS);
+    this.localFarmFailures = this.localFarmFailures.filter((entry) => now - entry.at < LOCAL_FARM_FAILURE_WINDOW_MS);
     for (const landing of landings) {
       const step = steps[landing.step - 1];
       if (step?.skill !== 'use' || !step.at || !step.item
         || (!isHoeUseItem(step.item) && !SEED_CROP[step.item] && step.item !== 'nether_wart')) continue;
       if (landing.outcome === 'ok') {
         this.localFarmFailures = this.localFarmFailures.filter((entry) => entry.from.dimension !== dimensionOf(bot)
-          || Math.hypot(pos.x - entry.from.x, pos.y - entry.from.y, pos.z - entry.from.z) >= LOCAL_BUILD_FAILURE_DISTANCE);
+          || Math.hypot(pos.x - entry.from.x, pos.y - entry.from.y, pos.z - entry.from.z) >= LOCAL_FARM_FAILURE_DISTANCE);
       } else if (landing.outcome === 'fail') {
         this.localFarmFailures.push({ at: now, why: maskCoords(landing.why ?? '没说清为什么').slice(0, 180),
           from: { x: pos.x, y: pos.y, z: pos.z, dimension: dimensionOf(bot) } });
@@ -5826,7 +5685,6 @@ export class Executor {
     this.recordTunnelLiquidStop(steps, task.stepLog);
     this.recordTunnelSupportStop(steps, task.stepLog);
     this.recordEmptyProbeReads(steps, task.stepLog);
-    this.recordLocalBuildOutcome(steps, task.stepLog);
     this.recordLocalFarmOutcome(steps, task.stepLog);
     if (kind === null) this.inspections.record(steps, normalizeDimension(dimensionOf(bot)), task.stepLog, Date.now());
     for (let i = 0; i < steps.length; i++) {

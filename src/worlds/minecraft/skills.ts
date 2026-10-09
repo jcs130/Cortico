@@ -1076,7 +1076,7 @@ ground 使用普通物理，飞行悬停时先 land 或改用 flight。flight �
                                                  赶路可能挖方块或搭路；已绑定蓝图范围内不生成这些动作，完工后仍生效。
                                                  walkOnly:true 只沿现有通路走，不挖掘或垫脚；只靠走试算可达时，可用同一目标加此字段实际执行。与 dryRun 同用时只试算这条走法。
                                                  梯子用可达下端进入，再沿连续梯段到出口平台；use 右键不爬梯。看见一格梯子不证明它已接到地面或通向顶部，probe 可核对整段。
-                                                 走不通时核对门洞、通道与落点；改结构用显式 dig/build，按现场和权限核验。`,
+                                                 走不通时核对门洞、通道与落点；改结构用显式 excavate/build，按现场和权限核验。`,
     parse: parseGoto,
     fields: [
       {
@@ -1178,7 +1178,7 @@ ground 使用普通物理，飞行悬停时先 land 或改用 flight。flight �
     doc: `{"skill":"collect","block":"oak_log","count":3}  采集方块,只挖看得见的——埋在石头里的看不见,得先挖开或者找暴露的。
                                                  加 "buried":true = 看得见但走不过去时,允许挖条路过去(最多 4 次)。
                                                  作物默认只收 age 到顶的,没长成的留着；mature:true 也可显式写出。
-                                                 已开工蓝图中材质已对上的非作物格不作为采集来源；明确拆改用精确坐标的 dig。
+                                                 已开工蓝图中材质已对上的非作物格不作为采集来源；明确拆改用 excavate 指定形状和 anchors；单格用 shape:"box" 加两个相同坐标。
                                                  tool 不写=节约耐久;"fastest"=本步最快;物品 id=本步精确指定,都不改长期设置`,
     fields: [
       { key: 'block', kind: 'string', required: true, hint: '方块英文 id' },
