@@ -44,6 +44,7 @@ import type {
   SessionOpeningReason,
   ToolDef,
   ToolOutcome,
+  WorldLifecycleEvent,
 } from 'cortico/core/types.ts';
 import type { Language } from 'cortico/core/language.ts';
 import { DeadlineError, estimateTokens, withDeadline } from 'cortico/core/util.ts';
@@ -69,6 +70,7 @@ import { DreamMemory, dreamWorkspaceTools } from './dream-memory.ts';
 import { MemoryNoteProvenance, NOTE_PROVENANCE_DIR } from './note-provenance.ts';
 import { memoryIndex } from './memory-index.ts';
 import { StateMemory, STATE_MEMORY_FILE, MEMORY_HISTORY_DIR, STATE_MEMORY_SEARCH_NOTICE } from './state-memory.ts';
+import { WorldLifecycleContext, WORLD_LIFECYCLE_STATE_KEY } from './world-lifecycle-context.ts';
 import { workspaceTools } from '../../cormini/persona/workspaceTools.ts';
 import { ToolCallRecoveryFallback, TOOL_CALL_RECOVERY_DEFAULTS, projectToolCallRecovery, type ToolCallRecoveryConfig } from './tool-call-recovery.ts';
 import { SleepReview, SLEEP_REVIEW_DEFAULTS, type SleepReviewConfig } from './sleep-review.ts';
@@ -534,12 +536,15 @@ export class CortiV extends Cormini {
 
   override attach(core: CoreApi): void {
     super.attach(core);
+    this.worldLifecycle.restore(core.personaState()[WORLD_LIFECYCLE_STATE_KEY]);
+    if (this.worldLifecycle.sync(this.worlds)) this.saveWorldLifecycle();
     this.sleepReview = new SleepReview(core, this.sleepReviewConfig);
     this.pendingWork = new PendingWork(core, this.memoryDir, this.timezone);
     this.activityAgenda = new ActivityAgenda(this.memoryDir);
     this.stateMemory.migrate(this.stateNotePaths());
     this.planningReview = new PeriodicPlanningReview({
       core, config: this.planningConfig, agenda: this.activityAgenda,
+      runtime: () => this.currentWorldLifecycle(),
       memory: (files) => ({
         constitution: this.memory.readFile('CONSTITUTION.md'),
         memories: [...(this.referenceLibrary.catalog() ? [{ file: 'reference_guide/catalog', text: this.referenceLibrary.catalog() }] : []), ...files.map((file) => {
@@ -554,6 +559,29 @@ export class CortiV extends Cormini {
       this.pendingWork?.onDue(entry);
       this.planningReview?.onDue(entry);
     });
+  }
+
+  private readonly worldLifecycle = new WorldLifecycleContext();
+
+  override onWorldLifecycle(event: WorldLifecycleEvent): void {
+    this.worldLifecycle.observe(event, this.worlds);
+    this.saveWorldLifecycle();
+    this.foregroundEpoch.reset();
+    super.onWorldLifecycle(event);
+  }
+
+  private saveWorldLifecycle(): void {
+    if (!this.core) return;
+    this.core.personaState()[WORLD_LIFECYCLE_STATE_KEY] = this.worldLifecycle.snapshot();
+    this.core.savePersonaState();
+  }
+
+  private currentWorldLifecycle(): string {
+    if (this.worldLifecycle.sync(this.worlds)) {
+      this.saveWorldLifecycle();
+      this.foregroundEpoch.reset();
+    }
+    return this.worldLifecycle.text();
   }
 
   override startRhythm(): void {
@@ -791,8 +819,18 @@ export class CortiV extends Cormini {
     const current = excerptHandoffRecords(this.stateMemory.project(ctx.messages, path => this.isStateNote(path)), text => text,
       { coveredCheckpoints: staleCheckpoints, replaceCurrentState: true });
     const refreshed = current.length !== original.length || current.some((record, index) => record !== original[index]);
-    const complete = (): ContextRecord[] | null => refreshed || this.stateMemory.hasClaims()
-      ? [...current, message('user', this.stateMemory.summary())] : null;
+    const lifecycle = ctx.sessionId === MAIN ? this.currentWorldLifecycle() : '';
+    const complete = (): ContextRecord[] | null => {
+      const claims = this.stateMemory.hasClaims();
+      if (!refreshed && !claims && !lifecycle) return null;
+      const records = [...current, ...(refreshed || claims ? [message('user', this.stateMemory.summary())] : [])];
+      if (lifecycle) {
+        const firstBody = records.findIndex(record => !record.context.head
+          && !(record.item.type === 'message' && (record.item.role === 'system' || record.item.role === 'developer')));
+        records.splice(firstBody < 0 ? records.length : firstBody, 0, message('user', lifecycle));
+      }
+      return records;
+    };
     ctx = { ...ctx, messages: current };
     const cfg = this.foregroundConfig();
     if (ctx.sessionId !== MAIN) return refreshed ? current : null;
@@ -822,7 +860,7 @@ export class CortiV extends Cormini {
       ...(agenda ? ['activity_plan', ...(this.planningConfig().agendaEnabled ? ['planning'] : [])] : []),
     ];
     const pins = [...ctx.messages.filter(record => !!record.item.id && this.deferredInputIds.has(record.item.id)),
-      ...[recentMemory, index].filter(Boolean).map(text => message('user', text)), ...facts.pins, ...[recentSpeech, this.actionEvidence(ctx.messages), pending, agenda, this.viewerEncounters.text(), this.viewerRecallContext.text(), this.referenceLibrary.context()].filter(Boolean)
+      ...[recentMemory, index, lifecycle].filter(Boolean).map(text => message('user', text)), ...facts.pins, ...[recentSpeech, this.actionEvidence(ctx.messages), pending, agenda, this.viewerEncounters.text(), this.viewerRecallContext.text(), this.referenceLibrary.context()].filter(Boolean)
       .map((text) => message('user', text))];
     const handoffSources = new Map<string, { digest: string; original: boolean }>();
     this.foregroundCurrentHandoffs = ctx.messages.flatMap((record) => {

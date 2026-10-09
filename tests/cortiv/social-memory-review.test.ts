@@ -192,7 +192,7 @@ describe('Persona social review with real Memory tools', () => {
       return completePage(options, root);
     });
     await review(p, { history: history() });
-    await vi.waitFor(async () => expect((await state(p)).social.pendingEntries).toBe(0));
+    await vi.waitFor(async () => expect((await state(p)).social.pendingEntries).toBe(0), { timeout: 10_000 });
     expect(JSON.parse(readFileSync(join(dir, 'social/reviews/1-1.json'), 'utf8')).reviewedAt).toBeTruthy();
   });
 

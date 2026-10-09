@@ -147,6 +147,7 @@ export interface PlanningMaterial {
   activity: string;
   capturedAt: string;
   agenda?: string;
+  runtime?: string;
   observations?: string;
 }
 
@@ -156,6 +157,7 @@ export function planningMessages(material: PlanningMaterial, maxTokens: number, 
   const questionText = question ? `【本次复核问题；待核验的材料】\n${clipTokens(question, Math.floor(maxTokens / 8))}\n\n` : '';
   const available = Math.max(0, maxTokens - estimateTokens(prompt + questionText) - 40);
   const memoryParts = [
+    ...(material.runtime ? [`【当前 World 运行状态；适用于本次复盘】\n${material.runtime}`] : []),
     `【人格】\n${material.constitution}`,
     ...(material.agenda ? [`【当前日程；核对实际进展，不重置已完成阶段】\n${material.agenda}`] : []),
     ...(material.observations ? [`【本次现场状态；只代表采样时已知事实】\n${material.observations}`] : []),
@@ -182,6 +184,7 @@ interface PlanningOptions {
   core: CoreApi;
   config: () => PlanningConfig;
   memory: (files: readonly string[]) => Omit<PlanningMaterial, 'activity' | 'capturedAt'>;
+  runtime?: () => string;
   now?: () => number;
   agenda?: ActivityAgenda;
 }
@@ -324,6 +327,7 @@ export class PeriodicPlanningReview {
     const capturedAtMs = this.now();
     const capturedAt = new Date(capturedAtMs).toISOString();
     const agendaRevision = this.options.agenda?.revision() ?? 0;
+    const runtime = this.options.runtime?.();
     this.lastStartedAt = capturedAt;
     this.lastFinishedAt = null;
     this.lastOutcome = null;
@@ -352,6 +356,7 @@ export class PeriodicPlanningReview {
       try {
         const material = this.options.memory([...new Set(cfg.memoryFiles.split(/\r?\n/).map((file) => file.trim()).filter(Boolean))]);
         const messages = planningMessages({ ...material,
+          ...(runtime === undefined ? {} : { runtime }),
           agenda: this.options.agenda ? this.options.agenda.summary() + '\n'
             + this.options.agenda.planningReadout() : material.agenda,
           activity: this.activities.map((activity) => activity.text).join('\n\n') || '(没有近期活动记录)', capturedAt,
@@ -375,6 +380,11 @@ export class PeriodicPlanningReview {
         const currentProvider = (question ? current.reflectionProvider?.trim() || current.provider : current.provider).trim();
         if (!current.enabled || currentProvider !== provider || (!question && current.agendaEnabled !== cfg.agendaEnabled)) {
           finish('discarded');
+          return;
+        }
+        if (this.options.runtime?.() !== runtime) {
+          finish('discarded');
+          core.log.info('复盘采样后 World 运行状态已变化，未投递旧建议', { data: { capturedAt } });
           return;
         }
         const resultAgeMs = Math.max(0, this.now() - capturedAtMs);

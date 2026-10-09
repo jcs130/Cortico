@@ -52,6 +52,38 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2026-01-01T10:
 afterEach(() => { for (const run of cleanup.splice(0).reverse()) run(); vi.useRealTimers(); });
 
 describe('Persona长期复盘', () => {
+  it('actual Persona review includes lifecycle state and drops a result sampled before World deactivation', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'planning-lifecycle-'));
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+    const world = makeFakeIO('game');
+    world.requestFacts = () => ({ text: 'OLD_GAME_OBSERVATION '.repeat(3000), snapshotTypes: [] });
+    const worlds = [world];
+    const forks: ForkOptions[] = [];
+    const injected: Array<{ text: string; kind?: string }> = [];
+    let finish!: (text: string) => void;
+    const persona = new CortiV({ memoryDir: dir, worlds, tickDelayMs: () => null,
+      planning: () => ({ ...PLANNING_DEFAULTS, enabled: true, provider: 'configured-planner',
+        reflectionMaxContextTokens: 2400 }) });
+    persona.attach({ ...makeFakeHarnessApi({ injectInternal: (text, kind) => { injected.push({ text, kind }); } }),
+      sessionInfo: () => ({ id: 'main', running: 0, snapshot: [], estTokens: null, hardTokens: null }),
+      spawnFork: async options => { forks.push(options); return new Promise(resolve => { finish = resolve; }); } });
+    persona.startRhythm(); cleanup.push(() => persona.stopRhythm());
+    const surface = persona.console();
+    expect(await surface.invoke!('planning', 'review', [{ question: 'What can proceed now?' }])).toMatchObject({ accepted: true });
+    expect(forks[0].messages.map(row => itemText(row.item)).join('\n')).toContain('game (game)：已挂载');
+    worlds.splice(0); persona.onWorldLifecycle({ kind: 'unmounted', id: 'game', label: 'Game' });
+    finish('Continue moving in the game.'); await vi.advanceTimersByTimeAsync(0);
+    expect(await surface.invoke!('planning', 'state', [])).toMatchObject({ lastOutcome: 'discarded' });
+    expect(injected.some(row => row.kind === 'causal_review')).toBe(false);
+    expect(await surface.invoke!('planning', 'review', [{ question: 'What can proceed now?' }])).toMatchObject({ accepted: true });
+    const request = forks[1].messages.map(row => itemText(row.item)).join('\n');
+    expect(request).toContain('Game (game)：未挂载');
+    expect(request).not.toContain('OLD_GAME_OBSERVATION');
+    expect(estimateMessagesTokens(forks[1].messages)).toBeLessThanOrEqual(2400);
+    finish('(nothing)'); await vi.advanceTimersByTimeAsync(0);
+    expect(await surface.invoke!('planning', 'state', [])).toMatchObject({ lastOutcome: 'empty' });
+  });
+
   const candidate = JSON.stringify({ summary: '收尾已有目标后尝试新的活动', items: [
     { id: 'create', title: '创作一个作品', why: '尚未完成的兴趣', doneWhen: '现场验收一个可用阶段',
       when: '资源足够且安全', ifBlocked: '记录缺口后去探索', references: [] },

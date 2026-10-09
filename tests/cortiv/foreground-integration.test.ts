@@ -12,6 +12,7 @@ import { estimateMessagesTokens, estimateTokens, nullLogger } from '../../src/co
 import { validatePairing } from '../../src/core/truncate.ts';
 import type { EventEnvelope, World, WorldRequestFacts } from '../../src/core/types.ts';
 import { makeFakeHarnessApi } from '../core/helpers.ts';
+import { WORLD_LIFECYCLE_STATE_KEY } from '../../bots/cortiv/persona/world-lifecycle-context.ts';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -36,6 +37,44 @@ function rig(worlds: World[] = [], agendaEnabled = false) {
 }
 
 describe('CortiV foreground request context', () => {
+  it.each([true, false])('preserves lifecycle across compaction and restart with current pins=%s', currentPins => {
+    const game: World = { id: 'game', envPromptVars: () => ({}), tools: () => [],
+      start: async () => {}, stop: async () => {}, requestFacts: () => ({ text: 'Current game observation', snapshotTypes: [] }) };
+    const worlds = [game];
+    const { persona, config, messages } = rig(worlds);
+    config.currentStateOnly = currentPins;
+    const core = makeFakeHarnessApi(); persona.attach(core);
+    config.maxHistoryTokens = 1; config.minRecentRounds = 0;
+    const original = structuredClone(messages);
+    persona.prepareRequest({ sessionId: 'main', round: 1, messages });
+    worlds.splice(0);
+    persona.onWorldLifecycle({ kind: 'unmounted', id: 'game', label: 'Game' });
+    const compact = persona.prepareRequest({ sessionId: 'main', round: 2, messages })!;
+    const compactText = compact.map(row => itemText(row.item)).join('\n');
+    expect(compactText).toContain('Game (game)：未挂载');
+    expect(compactText).not.toContain('Current game observation');
+    expect(core.personaState()[WORLD_LIFECYCLE_STATE_KEY]).toMatchObject([{ id: 'game', mounted: false }]);
+    expect(messages).toEqual(original);
+
+    const restarted = rig(worlds); restarted.persona.attach(core);
+    const fresh = [message('system', 'Contract'), message('user', 'Continue current work.')];
+    const full = () => restarted.persona.prepareRequest({ sessionId: 'main', round: 1, messages: fresh })!;
+    restarted.config.enabled = false;
+    expect(full().map(row => itemText(row.item)).join('\n')).toContain('Game (game)：未挂载');
+    worlds.push(game); // A later process can mount it before delivering any lifecycle notification.
+    const mountedText = full().map(row => itemText(row.item)).join('\n');
+    expect(mountedText).toContain('Game (game)：已挂载');
+    expect(mountedText).not.toContain('Game (game)：未挂载');
+    expect(core.personaState()[WORLD_LIFECYCLE_STATE_KEY]).toMatchObject([{ id: 'game', mounted: true }]);
+    restarted.persona.onWorldLifecycle({ kind: 'visibility', id: 'game', label: 'Game', visible: false });
+    expect(full().map(row => itemText(row.item)).join('\n')).toContain('已挂载，对你隐藏');
+    restarted.config.enabled = true;
+    const focused = restarted.persona.prepareRequest({ sessionId: 'main', round: 2, messages: fresh })!;
+    expect(validatePairing(focused)).toEqual([]);
+    expect(focused.map(row => itemText(row.item)).join('\n')).toContain('已挂载，对你隐藏');
+    persona.stopRhythm(); restarted.persona.stopRhythm();
+  });
+
   function adaptiveRig() {
     const memoryDir = mkdtempSync(join(tmpdir(), 'adaptive-foreground-')); dirs.push(memoryDir);
     const cfg = { ...FAST_FOREGROUND_DEFAULTS, enabled: true, endpoint: 'http://fixture/decision',
