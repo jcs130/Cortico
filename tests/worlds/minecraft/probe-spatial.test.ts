@@ -7,9 +7,10 @@ import { compositionText } from '../../../src/worlds/minecraft/receipt.ts';
 import type { SkillContext } from '../../../src/worlds/minecraft/skill-context.ts';
 import { skillProbe } from '../../../src/worlds/minecraft/skills-gather.ts';
 import { PROBE_WHERE_SHOWN } from '../../../src/worlds/minecraft/skills.ts';
+import { PROBE_SLICE_CELL_CAP } from '../../../src/worlds/minecraft/spatial-slices.ts';
 
 interface CellFixture { x: number; y: number; z: number; name: string; age?: number; moisture?: number; level?: number | string;
-  properties?: Record<string, unknown> }
+  properties?: Record<string, unknown>; collision?: number[][] }
 
 function terrainBot(cells: CellFixture[], position = new Vec3(6, 67, 3)): Bot {
   const blocks = new Map(cells.map((cell) => [`${cell.x},${cell.y},${cell.z}`, cell]));
@@ -29,6 +30,7 @@ function terrainBot(cells: CellFixture[], position = new Vec3(6, 67, 3)): Bot {
         name: cell.name,
         position: p,
         boundingBox: cell.name === 'wheat' ? 'empty' : 'block',
+        shapes: cell.collision,
         getProperties: () => ({ ...cell.properties, ...(cell.age === undefined ? {} : { age: cell.age }),
           ...(cell.moisture === undefined ? {} : { moisture: cell.moisture }),
           ...(cell.level === undefined ? {} : { level: cell.level }) }),
@@ -50,6 +52,48 @@ function fieldCells(): CellFixture[] {
 }
 
 describe('probe spatial material samples', () => {
+  it('sections preserve relative-anchor coordinates, gaps and loaded collision shapes', async () => {
+    const cells = [
+      { x: -2, y: 64, z: 3, name: 'ladder', properties: { facing: 'west' }, collision: [[0.875, 0, 0, 1, 1, 1]] },
+      { x: -2, y: 65, z: 3, name: 'air', collision: [] },
+    ];
+    const bot = terrainBot(cells, new Vec3(-1.2, 64, 3.5));
+    const before = bot.entity.position.clone();
+    const text = await skillProbe(bot, {
+      skill: 'probe', shape: 'box', anchors: [['~', '~', '~'], ['~', '~2', '~']], slice: 'z',
+    }, probeContext());
+    expect(text).toContain('feet=(-2,64,3);x=-2..-2,y=64..66,z=3..3');
+    expect(text).toMatch(/observedAt=\d{4}-\d\d-\d\dT/);
+    expect(text).toContain('dimension=未读');
+    expect(text).toContain('00=ladder(facing=west);collision=[[0.875,0,0,1,1,1]]');
+    expect(text).toContain('[z=3]\ny=66: ??\ny=65: ..\ny=64: 00');
+    expect(bot.entity.position).toEqual(before);
+  });
+
+  it('sections always return current geometry independently of summary memo or earlier sections', async () => {
+    const door = { x: 0, y: 64, z: 0, name: 'oak_door', properties: { facing: 'north', open: false } };
+    const bot = terrainBot([door]), ctx = probeContext();
+    const call: Parameters<typeof skillProbe>[1] = { skill: 'probe', shape: 'box', anchors: [[0, 64, 0], [0, 64, 0]] };
+    await skillProbe(bot, call, ctx);
+    const first = await skillProbe(bot, { ...call, slice: 'y' }, ctx);
+    expect(first).toContain('open=false');
+    expect(first).toContain('[y=64]\nz=0: 00');
+    expect(await skillProbe(bot, { ...call, slice: 'y' }, ctx)).toContain('[y=64]\nz=0: 00');
+    door.properties.open = true;
+    expect(await skillProbe(bot, { ...call, slice: 'z' }, ctx)).toContain('open=true');
+  });
+
+  it('rejects excessive or filtered sections before reading blocks', async () => {
+    const bot = terrainBot([]);
+    bot.blockAt = () => { throw new Error('unexpected block read'); };
+    await expect(skillProbe(bot, { skill: 'probe', shape: 'box',
+      anchors: [[0, 64, 0], [1_000_000_000, 64, 0]], slice: 'y' }, probeContext()))
+      .rejects.toThrow(`一单上限 ${PROBE_SLICE_CELL_CAP}`);
+    await expect(skillProbe(bot, { skill: 'probe', shape: 'box',
+      anchors: [[0, 64, 0], [0, 64, 0]], slice: 'y', where: ['ladder'] }, probeContext()))
+      .rejects.toThrow('不与 where 同用');
+  });
+
   it('a short ladder column exposes its facing and exact gaps, including state-only changes', async () => {
     const first = { x: 0, y: 64, z: 0, name: 'ladder', properties: { facing: 'west', waterlogged: false } };
     const cells = [first, { x: 0, y: 65, z: 0, name: 'air' },

@@ -16,6 +16,7 @@ import {
 import { DIRECTIONS, type Direction } from './terrain.ts';
 import { normalizeDimension } from './escape.ts';
 import type { PositionXYZ } from './blueprint.ts';
+import { PROBE_SLICE_CELL_CAP, SPATIAL_SLICE_AXES, type SpatialSliceAxis } from './spatial-slices.ts';
 
 /** 步骤依赖与验收的可选覆写；省略时使用执行器推导的因果依赖和验收规则。 */
 export interface StepBounds {
@@ -115,7 +116,7 @@ export type SkillCall = StepBounds & (
     }
   | { skill: 'excavate'; shape: ShapeName; anchors: Anchor[]; fill?: BoxFill; dryRun?: boolean; tool?: string }
   | { skill: 'tunnel'; at: Anchor; spiral?: boolean; dryRun?: boolean; until?: string[]; tool?: string }
-  | { skill: 'probe'; shape: ShapeName; anchors: Anchor[]; fill?: BoxFill; where?: string[] }
+  | { skill: 'probe'; shape: ShapeName; anchors: Anchor[]; fill?: BoxFill; where?: string[]; slice?: SpatialSliceAxis }
   | { skill: 'craft'; item?: string; count: number; grid?: string[][] }
   | { skill: 'smelt'; input: string; count: number; fuel: string; at?: Anchor }
   | { skill: 'brew'; at?: Anchor; input: string; bottle: string; count: number; fuel: string }
@@ -660,10 +661,20 @@ function parseShaped(skill: 'build' | 'excavate' | 'probe') {
     }
     const where = nameListOf(c.where, at, 'probe 的 where');
     if (where !== null && 'error' in where) return { error: where.error };
+    let slice: SpatialSliceAxis | undefined;
+    if (c.slice !== undefined) {
+      if (!SPATIAL_SLICE_AXES.includes(c.slice as SpatialSliceAxis)) {
+        return { error: `${at} probe 的 slice 只认 x/y/z` };
+      }
+      if (shape !== 'box' || (fill !== undefined && fill !== 'solid') || where) {
+        return { error: `${at} probe.slice 须用 box、fill:solid(可省略)，且不与 where 同用` };
+      }
+      slice = c.slice as SpatialSliceAxis;
+    }
     return {
       step: {
         skill, shape: shape as ShapeName, anchors,
-        ...(fill ? { fill } : {}), ...(where ? { where: where.names } : {}),
+        ...(fill ? { fill } : {}), ...(where ? { where: where.names } : {}), ...(slice ? { slice } : {}),
       },
     };
   };
@@ -1324,6 +1335,10 @@ ground 使用普通物理，飞行悬停时先 land 或改用 flight。flight �
                                                  只看不动:读出你圈的这片形状里的材质构成与液体;27 格以内
                                                  逐格报「(x,y,z):方块」,作物带 age，耕地带 moisture，水/岩浆带 level/source；梯子、台阶、门等带朝向、开合等已读通行属性。短 line 同时列空气坐标，可核对梯段或支撑的断档。
                                                  大区域与 where 另列 level=0 的源方块坐标；空桶装液体先核对源格。圈哪片由你定
+{"skill":"probe","shape":"box","anchors":[["~-2","~","~-2"],["~2","~4","~2"]],"slice":"y"}
+                                                 slice 保留每格位置：y=水平各层，z=各正截面，x=各侧截面；世界坐标轴，不随镜头转。
+                                                 须用 box、fill:solid(可省略)，不与 where 同用，每次最多 ${PROBE_SLICE_CELL_CAP} 格；过长时缩小范围。
+                                                 附读取时间、维度、脚下坐标和碰撞箱；.. 是已读空气，?? 是未加载。直接读区块，不检查视线。
 {"skill":"probe","shape":"box","anchors":[[-40,40,-120],[-8,60,-88]],"where":["spawner","#chests"]}
                                                  加 "where" = 只报这几样在这片里的坐标(按远近,每样最多 ${PROBE_WHERE_SHOWN} 处)。
                                                  这一档直接读区块,不看视线也不管挡没挡着 —— 封在结构里的刷怪笼、
@@ -1340,6 +1355,7 @@ ground 使用普通物理，飞行悬停时先 land 或改用 flight。flight �
         doc: '数量由 shape 定',
       },
       { key: 'fill', kind: 'enum', values: ['solid', 'outline', 'edges'], error: 'fill 只认 solid/outline/edges', doc: '只对 box 有意义' },
+      { key: 'slice', kind: 'enum', values: SPATIAL_SLICE_AXES, error: 'slice 只认 x/y/z', doc: `box 空间切片，最多 ${PROBE_SLICE_CELL_CAP} 格，不与 where 同用` },
       {
         key: 'where', kind: 'names', hint: `方块英文 id 或类别 ${UNTIL_CATEGORY_DOC};实体 id 按收到的实体表报`,
         doc: '只报这几样在这片里的坐标(不看视线)',

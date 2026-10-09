@@ -1,4 +1,4 @@
-<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/method-runner.ts, src/worlds/minecraft/method-worker.mjs, src/worlds/minecraft/flight.ts, src/worlds/minecraft/flight-preview.ts, src/worlds/minecraft/agentfriend-flight.ts, src/worlds/minecraft/terrain.ts, src/worlds/minecraft/executor.ts, src/worlds/minecraft/combat.ts, src/worlds/minecraft/skills.ts, src/worlds/minecraft/skills-control.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts, src/worlds/minecraft/chests.ts, src/worlds/minecraft/inventory.ts, src/worlds/minecraft/inventory-click-sync.ts, src/worlds/minecraft/equipment.ts, src/worlds/minecraft/check.ts -->
+<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/method-runner.ts, src/worlds/minecraft/method-worker.mjs, src/worlds/minecraft/flight.ts, src/worlds/minecraft/flight-preview.ts, src/worlds/minecraft/agentfriend-flight.ts, src/worlds/minecraft/terrain.ts, src/worlds/minecraft/executor.ts, src/worlds/minecraft/combat.ts, src/worlds/minecraft/skills.ts, src/worlds/minecraft/skills-control.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts, src/worlds/minecraft/chests.ts, src/worlds/minecraft/inventory.ts, src/worlds/minecraft/inventory-click-sync.ts, src/worlds/minecraft/equipment.ts, src/worlds/minecraft/check.ts, src/worlds/minecraft/spatial-slices.ts, src/worlds/minecraft/cell-facts.ts -->
 
 # worlds/minecraft
 
@@ -140,6 +140,8 @@ console/         控制台面板两侧:服务器、存档、权限、客户端�
 ## 土地探查与生长
 
 普通 `probe` 在区域超过 27 格时，汇总数量最多的 10 种材质并报告各自离玩家最近的样本坐标；样本来自本次读取的已加载方块，不证明其上方可种植或具有施工权限。指定 `where` 的探查仍列匹配坐标。相同区域的重复读数标为上次摘要，移动后需要新的精确读数时可点查目标格。
+
+`probe.slice` 按世界 x/y/z 轴返回小范围 box 的完整截面，保留每格材质、已读通行状态与格内碰撞箱。y 切片为水平各层，x/z 切片为竖直截面；列坐标递增，竖直截面的行从高到低。`..` 表示已读空气，`??` 表示未加载，碰撞箱未读不会当成空箱。每次附读取时间、维度、脚下格和绝对边界；直接读取客户端区块，不检查视线。仅支持 solid box，与 where 互斥；每次最多 512 格、12000 字符，超限要求缩小范围，不返回截断地图。相同请求仍返回本次完整地图，普通聚合摘要的重复缓存不应用于切片。
 
 水和岩浆逐格报告服务端 `level` 与 `source`。大区域和 `where` 另列源方块数量及最近坐标，源格不受流动液体的最近样本数量限制；未知 `level` 不计作源格或流动格。液体状态变化会更新探查摘要。空桶使用仍须核对源格并按背包中的满桶增量验收。
 
@@ -670,6 +672,7 @@ collect **只挖看得见的**：`collectVisible` 经 `canSeeBlockAt` 检查视�
 - **tunnel 横向位移为零**：向下逐格挖竖井，待挖格下方无支撑时停止；向上逐格垫塔。竖井是单程的，返回可搭塔；两者到达终点才完成，回执分别报告到底或到顶。
 - **probe**：只读指定形状内的材质构成、矿石最近坐标、液体与空气连通性；`pocketScan` 报封闭空气容积。27 格以内逐格报告坐标和方块，作物附 age，耕地附 moisture；属性变化会更新探查回执。近处作物快照同时报告该株正下方的土壤坐标与水分，未加载时明确未读到。这些单格读数不代表整片农田。必须给出形状和锚点，不提供以自身为圆心的 target/radius 搜索。
   `where` 可在明确圈定区域中列出指定方块的位置，最多 8192 格；它直接读取已加载区块，不受遮挡与视线限制，回执明确标注此口径。
+  `slice:"y"` 保留水平层的三维排列，`slice:"x"`/`"z"` 返回竖直截面；上限与读取口径见土地探查。solid box 在栅格化前核对体积上限。
 - **dryRun**：build/excavate/tunnel 共用规划路径，运行至栅格化和读取世界为止，报告格数、材料缺口和无掉落工具条件。goto 仅探路不移动，报告三种走法的步数、垫块数、挖块数和开门等交互次数；交互不计入垫块数量和材料代价。
 
 collect 认名字分三层：整名、类别名（`log` → 各树种原木）、**掉落物反查**。第三

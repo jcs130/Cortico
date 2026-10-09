@@ -41,6 +41,7 @@ import { beginTemporaryScaffold, closeTemporaryScaffold, reclaimTemporaryScaffol
   type TemporaryScaffoldScope } from './temporary-scaffold.ts';
 import pathfinderPkg from 'mineflayer-pathfinder';
 import { blockIdOf, isAirState, normalizeBlockName } from './blueprint.ts';
+import { PROBE_SLICE_CELL_CAP, renderSpatialSlices } from './spatial-slices.ts';
 
 const { goals } = pathfinderPkg;
 
@@ -1665,14 +1666,28 @@ export function probeWhereText(
 export async function skillProbe(bot: Bot, call: Extract<SkillCall, { skill: 'probe' }>, ctx: SkillContext): Promise<string> {
   checkAbort(ctx);
   const locating = call.where !== undefined && call.where.length > 0;
+  if (call.slice && (call.shape !== 'box' || (call.fill !== undefined && call.fill !== 'solid') || locating)) {
+    throw new SkillBlocked('probe.slice 须用 box、fill:solid(可省略)，且不与 where 同用');
+  }
+  const observedAt = new Date().toISOString();
   const cells = shapeCells(
-    bot, call.shape, call.anchors, call.fill, locating ? PROBE_WHERE_CELL_CAP : PROBE_CELL_CAP,
+    bot, call.shape, call.anchors, call.fill,
+    call.slice ? PROBE_SLICE_CELL_CAP : locating ? PROBE_WHERE_CELL_CAP : PROBE_CELL_CAP,
   );
   const pre = cells.map((c) => {
     const b = blockAtCell(bot, c);
     return { c, name: b?.name ?? null, state: b ? probeStateText(bot, c) : '',
+      ...(call.slice ? { air: b !== null && b !== undefined && AIR_NAMES.has(b.name), collision: b?.shapes } : {}),
       fluidLevel: b?.name === 'water' || b?.name === 'lava' ? blockProp(b, 'level') : null };
   });
+  // Each requested section is complete within its bounds, including after context handoff.
+  if (call.slice) {
+    const text = renderSpatialSlices({ axis: call.slice, observedAt,
+      dimension: bot.game?.dimension === undefined ? null : String(bot.game.dimension), feet: feetOf(bot),
+      cells: pre.map(e => ({ ...e, air: e.air ?? false })) });
+    if (typeof text !== 'string') throw new SkillBlocked(text.error);
+    return text;
+  }
   const unloaded = pre.filter((e) => e.name === null).length;
   const memo = ctx.probeMemo;
   const geoKey = fnv32(`${locating ? `where:${call.where!.join('|')}` : 'all'}|${call.shape}|${cells.map((c) => `${c.x},${c.y},${c.z}`).join(';')}`);
