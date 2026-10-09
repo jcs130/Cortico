@@ -442,7 +442,7 @@ describe('MinecraftWorld World 面(未连接状态)', () => {
     expect(Object.keys(byName).sort())
       .toEqual([
         'mc_bag', 'mc_blocked', 'mc_blueprint', 'mc_check', 'mc_do', 'mc_escape',
-        'mc_flight_plan', 'mc_goal', 'mc_help', 'mc_map', 'mc_policy', 'mc_queue', 'mc_scout', 'mc_stop', 'mc_view_map', 'mc_visual',
+        'mc_flight_plan', 'mc_goal', 'mc_help', 'mc_map', 'mc_policy', 'mc_queue', 'mc_scout', 'mc_script', 'mc_stop', 'mc_view_map', 'mc_visual',
       ]);
     // 三个只读原语与 mc_check 同一档:纯读、不进队列、不该进只读 fork 的禁区;
     // 回执是此刻读数,另打 snapshot(交接笔记同名只留最后一次)
@@ -458,6 +458,7 @@ describe('MinecraftWorld World 面(未连接状态)', () => {
     expect(byName.mc_scout.barrierAfter).toBeUndefined();
     // 这三个改的是世界,不是她的嘴:标成 speak 会让"禁言"连挖矿一起禁掉
     expect(byName.mc_do.tags).toContain('act');
+    expect(byName.mc_script.tags).toContain('act');
     expect(byName.mc_stop.tags).toContain('act');
     expect(byName.mc_escape.tags).toContain('act');
     // 规矩改的是常驻内部状态,不是外部世界也不是记忆:write 是唯一说得通的那一档,

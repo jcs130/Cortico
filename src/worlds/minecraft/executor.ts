@@ -935,6 +935,7 @@ export interface TaskReport {
   taskId?: number;
   /** Last completed step of a successful task. */
   lastSkill?: SkillCall['skill'];
+  steps?: Array<{ step: number; outcome: StepOutcome | 'cut'; why: string | null }>;
   /** 同形状任务在短时间内再次未达整体目标时，附上上一回的受阻事实。 */
   repeatFailure?: { attempts: number; previousReceipt: string; scope: 'target' | 'shape'; observation: 'changed' | 'unchanged' | 'unavailable' };
   /** 这条汇报已经讲明了掉血的来由;World 据此不再复述一遍掉血播报 */
@@ -1676,6 +1677,7 @@ export interface TaskAdmissionRejection {
 export interface TaskAdmissionDecision {
   receipt: string;
   accepted: boolean;
+  taskId?: number;
   retryAfterMs?: number;
   completedImmediately?: true;
   rejection?: TaskAdmissionRejection;
@@ -2054,9 +2056,9 @@ export class Executor {
    */
   submit(steps: SkillCall[], mode: QueueMode = 'replace', wrote?: unknown,
     onDecision?: (accepted: boolean, retryAfterMs?: number, completedImmediately?: true,
-      rejection?: TaskAdmissionRejection) => void, beforeEnqueue?: () => void): string {
+      rejection?: TaskAdmissionRejection, taskId?: number) => void, beforeEnqueue?: () => void): string {
     const decision = this.submitDetailed(steps, mode, wrote, beforeEnqueue);
-    onDecision?.(decision.accepted, decision.retryAfterMs, decision.completedImmediately, decision.rejection);
+    onDecision?.(decision.accepted, decision.retryAfterMs, decision.completedImmediately, decision.rejection, decision.taskId);
     return decision.receipt;
   }
 
@@ -2262,7 +2264,7 @@ export class Executor {
     const receipt = `[${this.clock(at)}] ${warn.length > 0 ? `⚠ ${warn.join(';')} → ` : ''}` +
       `${place}。${echo.tail ?? ''}` +
       `${notes.length > 0 ? `\n${notes.join(';')}。` : ''}`;
-    return { receipt, accepted: true };
+    return { receipt, accepted: true, taskId: id };
   }
 
   /** 同一整单已经在途时不再入队；换坐标或数量的修正计划照常受理。 */
@@ -4532,6 +4534,25 @@ export class Executor {
     ].filter(Boolean).join(';');
   }
 
+  /** Revoke only a caller-owned task, preserving unrelated work and rescue holds. */
+  cancelTask(id: number, reason: string): boolean {
+    const current = this.task?.id === id ? this.task : null;
+    let pending: QueuedTask | null = null;
+    if (this.frozen?.id === id) { pending = this.frozen; this.frozen = null; }
+    if (this.checkpointDrain?.continuation?.id === id) pending = this.takeDrainingContinuation();
+    const index = this.queue.findIndex((task) => task.id === id);
+    if (index >= 0) pending = this.queue.splice(index, 1)[0];
+    if (current) {
+      const progress = this.progressOf(current);
+      this.abortTask(current, reason);
+      this.detachCheckpointOwner(id);
+      this.reportCancelled(current, reason, progress);
+    } else if (pending) this.reportCancelled(pending, reason, Executor.frozenProgress(pending));
+    else return false;
+    this.pump();
+    return true;
+  }
+
   /** 服务端明确拒绝当前动作时，终止这单并保留原话；后续排队任务照常排队。 */
   blockCurrentFromServer(reason: string): boolean {
     const task = this.task;
@@ -4966,7 +4987,8 @@ export class Executor {
       lane: 'task', event: 'cancelled', taskId: task.id, msg: text,
       data: { by, landings },
     });
-    this.opts.report({ kind: 'cancelled', text, taskId: task.id });
+    this.opts.report({ kind: 'cancelled', text, taskId: task.id,
+      steps: landings.map(({ step, outcome, why }) => ({ step, outcome, why })) });
   }
 
   /**
@@ -6055,6 +6077,7 @@ export class Executor {
     });
     const lastLanding = t?.stepLog.at(-1);
     this.opts.report({ ...report, text,
+      ...(t ? { steps: t.stepLog.map(({ step, outcome, why }) => ({ step, outcome, why })) } : {}),
       ...(report.kind === 'done' && t && lastLanding
         && (lastLanding.outcome === 'ok' || lastLanding.outcome === 'noop')
         ? { lastSkill: t.steps[lastLanding.step - 1]?.skill } : {}) });

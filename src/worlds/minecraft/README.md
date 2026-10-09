@@ -1,6 +1,8 @@
-<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/flight.ts, src/worlds/minecraft/flight-preview.ts, src/worlds/minecraft/agentfriend-flight.ts, src/worlds/minecraft/terrain.ts, src/worlds/minecraft/executor.ts, src/worlds/minecraft/skills.ts, src/worlds/minecraft/skills-control.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts, src/worlds/minecraft/chests.ts, src/worlds/minecraft/inventory.ts, src/worlds/minecraft/inventory-click-sync.ts, src/worlds/minecraft/equipment.ts, src/worlds/minecraft/check.ts -->
+<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/method-runner.ts, src/worlds/minecraft/method-worker.mjs, src/worlds/minecraft/flight.ts, src/worlds/minecraft/flight-preview.ts, src/worlds/minecraft/agentfriend-flight.ts, src/worlds/minecraft/terrain.ts, src/worlds/minecraft/executor.ts, src/worlds/minecraft/skills.ts, src/worlds/minecraft/skills-control.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts, src/worlds/minecraft/chests.ts, src/worlds/minecraft/inventory.ts, src/worlds/minecraft/inventory-click-sync.ts, src/worlds/minecraft/equipment.ts, src/worlds/minecraft/check.ts -->
 
 # worlds/minecraft
+
+`mc_script` 执行模型编写的 JavaScript 异步函数体，独立 Worker 内使用 SES Compartment；只提供 JSON `params` 与 `mc.state()`、`mc.flightPlan(args)`、`mc.do(steps)`，不提供原始 bot、模块导入、文件、网络或进程入口。`mc.do` 共用普通受理检查、执行器与身体优先级，并等待对应任务的实际终态；返回受理状态、任务编号、各步结果、完整回执与新采样。语法校验不执行脚本。源码上限12000字符，参数4096字符，单次JSON消息24000字符；最多32次串行SDK调用、16组动作，默认60秒、最多120秒（含排队）。超时、取消、死亡、断线、World停止或新的已受理身体任务撤销方法及其自己的一单，保留其他工作和救生冻结。最近八次运行仅在本进程保留，含源码哈希、时间及调用链；Persona 自行保存源码、经验与验证证据。脚本完成不等于原目标已实现。
 
 实时游戏 World：以 mineflayer 玩家客户端连原版服务器，把"游戏状态 → 文字观察"
 与"高层意图 → 游戏操作"接通。

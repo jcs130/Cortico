@@ -29,6 +29,8 @@ import { PlayerObservations, playerObservationMeta, renderPlayerObservation, typ
 import { precheckEmptyUseTarget } from './precheck.ts';
 import { blockAtCell, resolveAt } from './cell-facts.ts';
 import { FLIGHT_PLAN_MAX_POINTS, parseFlightPlan, previewFlightPlan } from './flight-preview.ts';
+import { MethodRunner, METHOD_LIMITS, type MethodOperation, type MethodRun } from './method-runner.ts';
+import { flightState } from './flight.ts';
 import { createDecisionAdviser, type DecisionAdvice } from './decision-adviser.ts';
 import { IdleBehaviorController, type IdleBehaviorScene } from './idle-behavior.ts';
 import { sampleIdleActions, executeIdleAction } from './idle-actions.ts';
@@ -78,7 +80,7 @@ import {
   QUEUE_SCHEMA, renderQueue,
   SCOUT_SKILL_DOC, SCOUT_STEP_SCHEMA, SKILL_STEP_SCHEMA,
   type BlueprintDesk, type BlueprintSurvey, type MarkDesk, type MarkLookup,
-  type ParseNote, type ResourcePlacementPermit, type SkillCall, type TaskAdmissionRejection, type TaskQueueTail, type TaskReport,
+  type ParseNote, type ResourcePlacementPermit, type SkillCall, type TaskAdmissionDecision, type TaskAdmissionRejection, type TaskQueueTail, type TaskReport,
 } from './executor.ts';
 import { Aborted, SkillBlocked, sleep, type BlueprintPlacementIntent } from './skill-context.ts';
 import { worldStateAt } from './skills-build.ts';
@@ -2194,6 +2196,30 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
     },
   },
   {
+    name: 'mc_script',
+    tags: ['act'],
+    description: 'Run an agent-authored JavaScript async function body with params and a restricted mc SDK. '
+      + 'mc.state() returns fresh snapshot, flight permission, queue and combat observations. '
+      + 'await mc.do(steps) submits one ordered group to the normal executor and waits for its actual terminal result: accepted, taskId, kind, done, receipt, steps and fresh state. '
+      + 'A sent server command still needs observed effects; done is the executor result, not proof of an external quest. '
+      + 'await mc.flightPlan(args) uses the same read-only geometry/budget contract as mc_flight_plan. '
+      + 'Use JavaScript conditions, calculations and bounded loops to adapt to feedback. Prepare a timed route before casting; combine already-known cast/movement/blink steps with needs in one mc.do to avoid model delays. '
+      + 'No imports, process, filesystem, network or raw bot access. Calls must be awaited serially. '
+      + `Limits: ${METHOD_LIMITS.sourceChars} source chars, ${METHOD_LIMITS.calls} SDK calls, ${METHOD_LIMITS.actions} action groups, default ${METHOD_LIMITS.durationMs}ms including queue waits, maximum ${METHOD_LIMITS.maxDurationMs}ms. `
+      + 'Only one program runs at a time. New admitted body work, stop, death, disconnect, World stop or timeout revoke it and its own pending task. '
+      + 'Returns a run id immediately; {runId} reads result and call summaries, {runId,call} expands one complete SDK call; {} lists the last eight run summaries, {stop:true} cancels the current run. '
+      + '{validate:true,name,code} checks syntax without running any action. Program completion does not certify a learned method. '
+      + 'Store source, conditions, version/hash and verified before/after evidence in your own workspace; read relevant methods on demand.',
+    parameters: { type: 'object', properties: {
+      name: { type: 'string', minLength: 1, maxLength: 80 },
+      code: { type: 'string', minLength: 1, maxLength: METHOD_LIMITS.sourceChars },
+      params: { type: 'object', additionalProperties: true },
+      durationMs: { type: 'integer', minimum: 1000, maximum: METHOD_LIMITS.maxDurationMs },
+      validate: { type: 'boolean' }, runId: { type: 'integer', minimum: 1 },
+      call: { type: 'integer', minimum: 1, maximum: METHOD_LIMITS.calls }, stop: { type: 'boolean' },
+    }, required: [] },
+  },
+  {
     name: 'mc_do',
     tags: ['act'],
     description:
@@ -2661,6 +2687,12 @@ export class MinecraftWorld implements World {
   private bridge: Bridge | null = null;
   private itemBreak: ItemBreakDecoder | null = null;
   private executor: Executor | null = null;
+  private readonly methodTasks = new Map<number, (report: TaskReport) => void>();
+  private readonly methodTerminals = new Map<number, TaskReport>();
+  private readonly methods = new MethodRunner({
+    call: (method, args, signal) => this.methodCall(method, args, signal),
+    onFinish: (run) => this.onMethodFinish(run),
+  });
   private idleBehavior: IdleBehaviorController | null = null;
   private idleActivityVersion = 0;
   private idleQuietUntil = 0;
@@ -3309,7 +3341,11 @@ export class MinecraftWorld implements World {
   /** 子进程定期同步给主进程的提示词活状态；不触发快照重锚。 */
   envPromptRuntimeVars(): Record<'minecraft.current_task' | 'minecraft.goals', string> {
     return {
-      'minecraft.current_task': (() => { try { return this.executor?.current ?? '(手上没有在做的事)'; } catch { return '(读取当前任务失败)'; } })(),
+      'minecraft.current_task': (() => { try {
+        const method = this.methods.current;
+        return (this.executor?.current ?? '(手上没有在做的事)')
+          + (method ? `；自主方法#${method.id}「${method.name}」仍在运行，包含自己的后续动作；mc_script可查终态或取消` : '');
+      } catch { return '(读取当前任务失败)'; } })(),
       'minecraft.goals': (() => { try { return goalSnapshotLine(this.goalTable().list); } catch { return '(读取目标表失败)'; } })(),
     };
   }
@@ -3952,7 +3988,7 @@ export class MinecraftWorld implements World {
             + `刀 ${result.swings} 次/命中 ${result.meleeLanded} 次；`
             + `结束时战术版本 ${receipt.tacticRevision}，已发送法术 ${receipt.casts.map((cast) => cast.spell).join('、') || '无'}。`
             + `详细前后读数及施法回音用 mc_combat_tactic {"report":${receipt.id}} 读取；中断不等于败战，回执不自动证明某战术有效。`,
-          false, { trigger: 'piggyback', meta: { receipt } });
+          false, { trigger: ['death', 'flee', 'timeout', 'stuck'].includes(result.reason) ? 'debounce' : 'piggyback', meta: { receipt } });
         } catch (error) {
           this.diag.write({ lane: 'combat', event: 'receipt-save-failed', msg: String(error) });
           this.emit('minecraft.event', '[Minecraft] 这场战斗的观察回执未保存，不能按已归档处理。', false,
@@ -4043,6 +4079,7 @@ export class MinecraftWorld implements World {
       // 第一次掉线值得叫醒她(手上的事全废了);之后每一次重连没成只是同一件事的
       // 复述,压成不唤醒的一条,免得连不上的那半小时里每隔几十秒炸一次
       onDisconnect: (reason, willReconnect, attempt) => {
+        this.methods.stop('游戏连接已断开，原方法坐标和权限作废');
         this.visualInFlight?.controller.abort(new Error('游戏连接已断开'));
         this.interruptIdle('disconnect');
         this.bodyLease.invalidate('disconnect', Date.now());
@@ -4104,6 +4141,8 @@ export class MinecraftWorld implements World {
 
   async stop(): Promise<void> {
     this.shuttingDown = true;
+    this.methods.stop('Minecraft World 已停止');
+    this.methodTerminals.clear();
     this.visualInFlight?.controller.abort(new Error('Minecraft World 已停止'));
     this.requestFactsCache = null;
     this.idleBehavior?.stop();
@@ -4169,6 +4208,28 @@ export class MinecraftWorld implements World {
       },
       mc_cast: async (args) => this.castSpell(args),
       mc_combat_tactic: async (args) => this.setCombatTactic(args),
+      mc_script: async (args) => {
+        try {
+          if (args.validate !== undefined && typeof args.validate !== 'boolean') throw new Error('validate须为布尔值');
+          if (args.stop !== undefined && typeof args.stop !== 'boolean') throw new Error('stop须为布尔值');
+          if (args.stop === true) {
+            if (args.code !== undefined || args.runId !== undefined || args.call !== undefined) throw new Error('stop不能与code、runId或call合用');
+            return this.toolLog('mc_script', args, this.methods.stop('mc_script明确取消') ? '已取消当前方法' : '当前没有运行中的方法');
+          }
+          if (args.code !== undefined) {
+            if (args.runId !== undefined || args.call !== undefined) throw new Error('code不能与runId或call合用');
+            if (args.validate !== true && (!this.executor || !this.bridge?.bot?.entity)) throw new Error('Minecraft尚未连接');
+            const run = this.methods.start({ name: args.name as string, code: args.code as string,
+              params: args.params as Record<string, unknown> | undefined,
+              durationMs: args.durationMs as number | undefined, validate: args.validate === true });
+            return this.toolLog('mc_script', args, `方法#${run.id}已启动，尚无执行终态：${JSON.stringify(run)}`);
+          }
+          if (args.runId !== undefined && (!Number.isInteger(args.runId) || Number(args.runId) <= 0)) throw new Error('runId须为正整数');
+          if (args.call !== undefined && (args.runId === undefined || !Number.isInteger(args.call)
+            || Number(args.call) < 1 || Number(args.call) > METHOD_LIMITS.calls)) throw new Error('call须配合runId，取1至32的调用编号');
+          return this.toolLog('mc_script', args, JSON.stringify(this.methods.inspect(args.runId as number | undefined, args.call as number | undefined)));
+        } catch (error) { return { text: this.toolLog('mc_script', args, String(error)), failed: true }; }
+      },
       // 路标表在受理这一刻取一次:at 写名字时按当刻登记解析
       mc_do: async (args) => this.enqueueTool('mc_do', args, (raw) => parseSteps(raw, this.markLookup())),
       mc_scout: async (args) => this.enqueueTool('mc_scout', args, (raw) => parseScoutSteps(raw, this.markLookup())),
@@ -4199,6 +4260,7 @@ export class MinecraftWorld implements World {
       mc_queue: async (_args, ctx) => this.readOnce('mc_queue', ctx, () => this.queueReadout()),
       mc_blocked: async (_args, ctx) => this.readOnce('mc_blocked', ctx, () => this.blockedReadout()),
       mc_stop: async () => {
+        this.methods.stop('mc_stop取消方法');
         this.interruptIdle('stop-command');
         if (!this.executor) return this.toolLog('mc_stop', {}, '[mc_stop 失败] World 未启动');
         // 正在打:mc_stop = 收手 + 撤退(原地站住等于送死),队列照旧全撤
@@ -4210,6 +4272,66 @@ export class MinecraftWorld implements World {
       mc_escape: async () => this.toolLog('mc_escape', {}, await this.doEscape()),
     };
     return minecraftToolDecls(this.agentFriendEnabled).map((decl) => ({ ...decl, handler: handlers[decl.name] }));
+  }
+
+  private methodState(): Record<string, unknown> {
+    const bot = this.bridge?.bot;
+    return { sampledAt: new Date().toISOString(), connectionGeneration: this.connectionGeneration,
+      method: this.methods.current,
+      snapshot: this.snapshot({ scanBlocks: false }), flight: bot ? flightState(bot) : null,
+      queue: this.executor?.status() ?? null, combatActive: this.combat?.active ?? false,
+      combat: this.agentFriendEnabled ? this.combatSpells.readout(undefined, Date.now(), bot ?? undefined) : null };
+  }
+
+  private async methodCall(method: MethodOperation, args: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
+    signal.throwIfAborted();
+    const bot = this.bridge?.bot;
+    if (!bot?.entity || !this.executor) throw new Error('Minecraft尚未连接');
+    if (method === 'state') return this.methodState();
+    if (method === 'flightPlan') {
+      const parsed = parseFlightPlan(args, this.markLookup());
+      if ('error' in parsed) throw new Error(parsed.error);
+      return previewFlightPlan(bot, parsed.steps, parsed.budgetMs, parsed.subdivide);
+    }
+    let decision: TaskAdmissionDecision | undefined;
+    // Explicit append keeps a method's single outstanding group behind existing work.
+    // Plain chat also follows the executor so its receipt has a real task identity.
+    const outcome = this.enqueueTool('mc_do', { steps: args.steps, queue: 'append' },
+      (raw) => parseSteps(raw, this.markLookup()), (value) => { decision = value; });
+    const receipt = typeof outcome === 'string' ? outcome : outcome.text;
+    if (!decision?.accepted) return { accepted: false, done: false, kind: 'rejected', receipt,
+      rejection: decision?.rejection ?? null, state: this.methodState() };
+    if (decision.completedImmediately) return { accepted: true, done: true, kind: 'done', receipt,
+      taskId: null, steps: [], state: this.methodState() };
+    const taskId = decision.taskId!;
+    const terminal = await new Promise<TaskReport>((resolve) => {
+      const settle = (report: TaskReport) => {
+        this.methodTasks.delete(taskId);
+        signal.removeEventListener('abort', abort);
+        resolve(report);
+      };
+      const abort = () => {
+        this.executor?.cancelTask(taskId, '脚本权限撤销');
+        settle({ kind: 'cancelled', taskId, text: String(signal.reason) });
+      };
+      const landed = this.methodTerminals.get(taskId);
+      if (landed) { resolve(landed); return; }
+      this.methodTasks.set(taskId, settle);
+      signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) abort();
+    });
+    return { accepted: true, taskId, kind: terminal.kind, done: terminal.kind === 'done',
+      receipt: terminal.text, steps: terminal.steps ?? [], state: this.methodState() };
+  }
+
+  private onMethodFinish(run: MethodRun): void {
+    this.diag.write({ lane: 'task', event: 'method-terminal', msg: `方法#${run.id}「${run.name}」${run.status}`,
+      data: { runId: run.id, sourceHash: run.sourceHash, status: run.status, calls: run.trace.length,
+        startedAt: run.startedAt, endedAt: run.endedAt, error: run.error } });
+    this.emit('minecraft.method', `方法#${run.id}「${run.name}」终态${run.status}；源码SHA256 ${run.sourceHash}；`
+      + `${run.trace.length}次SDK调用。${run.error ?? ''}用 mc_script {runId:${run.id}}读取各次真实回执；`
+      + '脚本结束不等于原目标已达成。核对执行后状态，修订方法并记录已验证范围。', true,
+    { meta: { runId: run.id, sourceHash: run.sourceHash, status: run.status } });
   }
 
   private visualArgumentFailure(args: Record<string, unknown>): ToolOutcome | undefined {
@@ -4705,12 +4827,13 @@ export class MinecraftWorld implements World {
     if (!ex) return { stamp: 'nomod', text: '[mc_queue 失败] World 未启动' };
     const q = ex.status();
     const last = this.lastFinishedTask;
+    const method = this.methods.current;
     return {
-      stamp: queueStamp(q, last?.at ?? null),
+      stamp: queueStamp(q, last?.at ?? null) + `:${method?.id ?? ''}`,
       text: renderQueueReadout(
         q,
         last ? { at: this.clock(last.at), kind: last.kind, text: last.text } : null,
-      ),
+      ) + (method ? `\n[自主方法] #${method.id}「${method.name}」仍在运行；它会按代码继续提交后续动作，mc_script可查结果或取消。` : ''),
     };
   }
 
@@ -5998,6 +6121,7 @@ export class MinecraftWorld implements World {
     name: 'mc_do' | 'mc_scout',
     args: Record<string, unknown>,
     parse: (raw: unknown) => { steps: SkillCall[]; notes?: ParseNote[] } | { error: string },
+    methodAdmission?: (decision: TaskAdmissionDecision) => void,
   ): string | ToolOutcome {
     const mode = parseQueueMode(args.queue);
     if ('error' in mode) return { text: this.toolLog(name, args, `[${name} 失败] ${mode.error}`), failed: true };
@@ -6075,11 +6199,16 @@ export class MinecraftWorld implements World {
     let admitted = true;
     let completedImmediately = false;
     let rejection: TaskAdmissionRejection | undefined;
-    const accepted = this.executor.submit(parsed.steps, mode.mode, args.steps, (value, _retryAfterMs, completed, rejected) => {
+    const accepted = this.executor.submit(parsed.steps, mode.mode, args.steps, (value, retryAfterMs, completed, rejected, taskId) => {
       admitted = value;
       completedImmediately = completed === true;
       rejection = rejected;
-    }, () => this.interruptIdle('task'));
+      methodAdmission?.({ accepted: value, receipt: '', retryAfterMs, completedImmediately: completed,
+        rejection: rejected, taskId });
+    }, () => {
+      if (!methodAdmission) this.methods.stop('新的身体任务已受理，原方法取消');
+      this.interruptIdle('task');
+    });
     if (admitted && directChat) {
       this.serverActionWait.noteChat(directChat);
       if (!this.serverActionWait.isReadOnlyQuery(directChat)) this.recentSystemMessages.clear();
@@ -7047,6 +7176,7 @@ export class MinecraftWorld implements World {
       this.interruptIdle('death');
       this.bodyLease.invalidate('death', Date.now());
       this.resetBodyOwners();
+      this.methods.stop('死亡使原方法和身体状态作废');
       this.executor?.cancelForDeath();
       this.lastDeathAt = Date.now();
       // 死亡清空全部状态效果,服务端不逐个发 remove_entity_effect
@@ -7911,6 +8041,11 @@ export class MinecraftWorld implements World {
    * 说要agent自己拼,拼错了就会往一个已经在做的队列上再排一条。
    */
   private onTaskReport(r: TaskReport): void {
+    if (r.taskId !== undefined && r.kind !== 'suspended' && r.kind !== 'resumed' && r.kind !== 'reflex') {
+      this.methodTerminals.set(r.taskId, r);
+      while (this.methodTerminals.size > 64) this.methodTerminals.delete(this.methodTerminals.keys().next().value!);
+      this.methodTasks.get(r.taskId)?.(r);
+    }
     if (r.kind === 'suspended' || r.kind === 'resumed') {
       this.diag.write({ lane: 'task', event: `task-${r.kind}`, taskId: r.taskId, msg: r.text });
       this.emit(`minecraft.task.${r.kind}`, `[执行器] ${r.text}`, false,
