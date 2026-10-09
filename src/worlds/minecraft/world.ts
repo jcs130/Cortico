@@ -6914,6 +6914,7 @@ export class MinecraftWorld implements World {
   private hookBotEvents(bot: any): void {
     if (this.hookedBots.has(bot)) return;
     this.hookedBots.add(bot);
+    this.bossQuarter.clear();
     observeStatusEffects(bot);
     if (this.agentFriendEnabled) watchAgentFriendFlight(bot);
     this.hookMessageEvents(bot);
@@ -7157,7 +7158,7 @@ export class MinecraftWorld implements World {
       const what = String(soundName).includes('lightning') ? '雷击声' : '爆炸声';
       this.emit('minecraft.event', `[Minecraft] 听见${what}${dir ? ',在' + DIRECTION_ZH[dir] + '边' : ''}。`, true);
     });
-    bot.on('bossBarCreated', (bar: { title?: unknown }) => {
+    bot.on('bossBarCreated', (bar: { entityUUID?: string; title?: unknown }) => {
       const title = minecraftTextComponent(bar?.title);
       const kind = classifyBossBarTitle(title);
       if (kind === 'skillExperience') {
@@ -7165,25 +7166,26 @@ export class MinecraftWorld implements World {
         this.diag.write({ lane: 'world', event: 'skill-experience-hud', msg: title });
         return;
       }
-      this.bossQuarter.set(title, 4);
+      this.bossQuarter.set(bar.entityUUID ?? bar, 4);
       this.emit('minecraft.event', `[Minecraft] 出现了${kind === 'boss' ? ' Boss 血条' : '顶部状态条'}:${title}。`, true);
     });
-    bot.on('bossBarUpdated', (bar: { title?: unknown; health?: number }) => {
+    bot.on('bossBarUpdated', (bar: { entityUUID?: string; title?: unknown; health?: number }) => {
       const title = minecraftTextComponent(bar?.title);
       const kind = classifyBossBarTitle(title);
       if (kind === 'skillExperience') return;
       const health = typeof bar?.health === 'number' ? bar.health : 1;
       // 每跌破一个 25% 档报一次,逐点进度变化不吵。
       const quarter = Math.ceil(health * 4);
-      const prev = this.bossQuarter.get(title) ?? 4;
+      const key = bar.entityUUID ?? bar;
+      const prev = this.bossQuarter.get(key) ?? 4;
       if (quarter < prev) {
-        this.bossQuarter.set(title, quarter);
+        this.bossQuarter.set(key, quarter);
         this.emit('minecraft.event', `[Minecraft] ${title} ${kind === 'boss' ? '血量剩' : '状态条进度为'} ${Math.round(health * 100)}%。`, false);
       }
     });
-    bot.on('bossBarDeleted', (bar: { title?: unknown }) => {
+    bot.on('bossBarDeleted', (bar: { entityUUID?: string; title?: unknown }) => {
       const title = minecraftTextComponent(bar?.title);
-      this.bossQuarter.delete(title);
+      this.bossQuarter.delete(bar.entityUUID ?? bar);
       const kind = classifyBossBarTitle(title);
       if (kind !== 'skillExperience') {
         this.emit('minecraft.event', `[Minecraft] ${title} 的${kind === 'boss' ? '血条' : '顶部状态条'}已移除。`, false);
@@ -7560,7 +7562,7 @@ export class MinecraftWorld implements World {
   private lastDimension: string | null = null;
   private lastLevel: number | null = null;
   /** 顶部状态条已报过的 25% 档位(按标题) */
-  private readonly bossQuarter = new Map<string, number>();
+  private readonly bossQuarter = new Map<string | object, number>();
   private lastBoomAt = 0;
   /** mineflayer 聊天模式已派发成 chat/whisper 的消息对象 */
   private readonly chatClaimed = new WeakSet<object>();
@@ -8043,7 +8045,8 @@ export class MinecraftWorld implements World {
         const queue = executor.queueTailStatus(notice);
         if (!queue) return null;
         const snapshot = this.renderSnapshotEvent();
-        const text = `[执行器/队列] 当前任务正在执行最后一步，后面没有待办。\n[队列] ${renderQueue(queue)}`
+        const text = `[执行器/队列] 当前任务正在执行最后一步，后面没有待办。任务继续执行；这条观察不要求停止或换任务。`
+          + `需要提前提交同一目标的后续步骤时可用 queue:"append" 保留原队列。\n[队列] ${renderQueue(queue)}`
           + (snapshot ? `\n${snapshot}` : '');
         this.diag.write({ lane: 'event', event: 'minecraft.task.queue', msg: text,
           data: { trigger: 'debounce', connectionGeneration: generation, taskId: notice.taskId } });
