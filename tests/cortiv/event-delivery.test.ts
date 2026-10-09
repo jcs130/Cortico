@@ -87,4 +87,29 @@ describe('CortiV 外界事件投递', () => {
     persona.onDelivery({ events: [{ ...task, cursor: 6, meta: undefined, text: '[system] 第 2 次同一坐标目标，立即复盘' }] });
     expect(injected.some((text) => text.includes('修正原假设'))).toBe(false);
   });
+
+  it('战斗终态按真实回执打开一次自主改进入口，不把外部抢占或聊天当败战', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cortiv-combat-review-')); dirs.push(dir);
+    const persona = new CortiV({ memoryDir: dir });
+    const injected: string[] = [];
+    persona.attach(makeFakeHarnessApi({ injectInternal: text => injected.push(text) }));
+    const event: EventEnvelope = { cursor: 21, source: 'mymc', type: 'mymc.combat', origin: 'external',
+      ts: '2026-10-09T00:00:00Z', text: '战斗结束', meta: { receipt: { id: 7, tacticRevision: 3,
+        reason: 'death', startedAt: '2026-10-08T23:59:00Z', endedAt: '2026-10-09T00:00:00Z', casts: [] } } };
+    persona.onDelivery({ events: [event] });
+    const review = injected.find(text => text.includes('战斗观察回执#7'))!;
+    expect(review).toContain('结束时战术版本3');
+    expect(review).toContain('读回实际配置或装备');
+    expect(review).toContain('没有再执行和结果对照');
+    expect(review).toContain('不自动等于战败');
+    injected.length = 0;
+    persona.onDelivery({ events: [event] });
+    persona.onDelivery({ events: [{ ...event, cursor: 22, type: 'mymc.chat' }] });
+    persona.onDelivery({ events: [{ ...event, cursor: 23, contextDelivery: 'archive-only' }] });
+    persona.onDelivery({ events: [{ ...event, cursor: 24, meta: { receipt: {
+      ...(event.meta!.receipt as object), reason: 'preempt' } } }] });
+    expect(injected.some(text => text.includes('战斗观察回执#7'))).toBe(false);
+    persona.onDelivery({ events: [{ ...event, cursor: 25, source: 'minecraft', type: 'minecraft.combat' }] });
+    expect(injected.some(text => text.includes('战斗观察回执#7'))).toBe(true);
+  });
 });

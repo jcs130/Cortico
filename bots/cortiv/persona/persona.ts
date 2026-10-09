@@ -55,6 +55,7 @@ import { causalReviewTail, PeriodicPlanningReview, PLANNING, PLANNING_DEFAULTS, 
 import { ActivityAgenda, AGENDA_FILE, AGENDA_MAX_ITEMS } from './activity-agenda.ts';
 import { CortiVSocialAttention, FAST_ATTENTION_DEFAULTS, type FastAttentionConfig } from './attention-adviser.ts';
 import { ActionFailureReflection, FAILURE_REFLECTION_ADVICE } from './failure-reflection.ts';
+import { combatReviewEvidence, COMBAT_REFLECTION_ADVICE } from './combat-reflection.ts';
 import { RecentSpeech } from './recent-speech.ts';
 import { actionEvidence } from './action-evidence.ts';
 import { FocusedCognition, FOCUSED_COGNITION } from './focused-cognition.ts';
@@ -866,6 +867,7 @@ export class CortiV extends Cormini {
 
   private readonly actionFailureReflection = new ActionFailureReflection();
   private lastTaskReflectionCursor = -1;
+  private lastCombatReflectionCursor = -1;
 
   private actionEvidence(records: readonly ContextRecord[]): string {
     const core = this.core;
@@ -1612,6 +1614,23 @@ export class CortiV extends Cormini {
       } });
       this.core?.injectInternal(reflection
         + (review?.accepted ? '\n已异步请求后台因果复核；当前行动与交流继续，结果尚未返回。' : ''), 'reflection');
+    }
+    const combat = combatReviewEvidence(ctx.events, this.lastCombatReflectionCursor);
+    if (combat) {
+      const { event, receipt } = combat;
+      this.lastCombatReflectionCursor = event.cursor;
+      const reflection = `[system] 战斗观察回执#${receipt.id}在${receipt.endedAt}以${receipt.reason}结束；`
+        + `结束时战术版本${receipt.tacticRevision}。${COMBAT_REFLECTION_ADVICE}`;
+      const evidence = JSON.stringify(receipt);
+      const review = this.planningReview?.review(
+        `战斗终态 ${event.ts} ${event.source}/${event.type} 游标${event.cursor}\n`
+        + `${evidence.length <= 5000 ? evidence : evidence.slice(0, 5000) + '\n[结构化回执过长，余下按编号展开]'}\n${reflection}`,
+      );
+      this.core?.log.emit('debug', '战斗终态复核入口', { event: 'combat-causal-review', data: {
+        cursor: event.cursor, source: event.source, reportId: receipt.id, tacticRevision: receipt.tacticRevision, ...review,
+      } });
+      this.core?.injectInternal(reflection
+        + (review?.accepted ? '\n已异步请求后台复核；即时自保、行动与交流继续，结论尚未返回。' : ''), 'reflection');
     }
     const attention = this.core ? this.socialAttention.observe(ctx.events, this.core) : undefined;
     // Reading suggestions are optional background work. A validated ready result wakes

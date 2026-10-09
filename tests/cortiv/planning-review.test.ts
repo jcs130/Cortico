@@ -566,6 +566,40 @@ describe('Persona长期复盘', () => {
     expect(await persona.console().invoke!('planning', 'state', [])).toMatchObject({ running: false, lastOutcome: 'completed' });
   });
 
+  it('战斗复核实际请求包含本批装备与施法证据，后台只读且前台不等待', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'combat-background-review-'));
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+    const forks: ForkOptions[] = [];
+    const injected: Array<{ text: string; kind?: string }> = [];
+    let finish!: (text: string) => void;
+    const persona = new CortiV({ memoryDir: dir, tickDelayMs: () => null,
+      planning: () => ({ ...PLANNING_DEFAULTS, enabled: true, provider: 'configured-planner' }) });
+    persona.attach({ ...makeFakeHarnessApi({ injectInternal: (text, kind) => injected.push({ text, kind }) }),
+      sessionInfo: () => ({ id: 'main', running: 0, snapshot: [], estTokens: null, hardTokens: null }),
+      spawnFork: async options => { forks.push(options); return new Promise(resolve => { finish = resolve; }); } });
+    persona.startRhythm(); cleanup.push(() => persona.stopRhythm());
+    const event: EventEnvelope = { cursor: 19, ts: stamp(), source: 'mymc', type: 'mymc.combat', origin: 'external',
+      text: '战斗回执#4', meta: { receipt: { id: 4, reason: 'stuck', tacticRevision: 6,
+        startedAt: stamp(), endedAt: stamp(), healthBefore: 20, healthAfter: 9,
+        swings: 10, meleeLanded: 0, sceneBefore: { equipment: { offhand: 'shield', chest: 'diamond_chestplate' } },
+        casts: [{ spell: 'summon', reply: '当前不可用', tacticRevision: 6 }] } } };
+    await persona.onDelivery({ events: [event] });
+    expect(forks).toHaveLength(1);
+    expect(forks[0].tools).toEqual([]);
+    const input = forks[0].messages.map(record => itemText(record.item)).join('\n');
+    expect(input).toContain('shield');
+    expect(input).toContain('diamond_chestplate');
+    expect(input).toContain('当前不可用');
+    expect(input).toContain('"meleeLanded":0');
+    expect(input).toContain('游标19');
+    expect(injected.some(row => row.text.includes('已异步请求后台复核'))).toBe(true);
+    await persona.onDelivery({ events: [event] });
+    expect(forks).toHaveLength(1);
+    finish('当前证据证明十次挥刀没有命中；核对敌人距离后选择新的位置或方法，并用下一场实际命中验证。');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(injected.some(row => row.kind === 'causal_review' && row.text.includes('实际命中验证'))).toBe(true);
+  });
+
   it('owner配置默认关闭，provider引用和文件指针可热更，模型强度保留provider配置', () => {
     const cfg = definition.defaults();
     expect(cfg.planning).toMatchObject({ enabled: false, provider: '', intervalMinutes: 30 });
