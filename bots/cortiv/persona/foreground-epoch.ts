@@ -1,4 +1,4 @@
-/** Persona-local request epochs preserve the entire actual input prefix between compactions. */
+/** Persona-local request epochs retain history prefixes and optionally replace current-state suffixes. */
 import { createHash, type Hash } from 'node:crypto';
 import { estimateMessagesTokens } from 'cortico/core/util.ts';
 import { fixPairing, validatePairing } from 'cortico/core/truncate.ts';
@@ -9,6 +9,8 @@ import { projectForeground, type ForegroundProjection } from './foreground-conte
 export interface ForegroundEpochOptions {
   maxHistoryTokens: number;
   minRecentRounds: number;
+  /** Current pins form a replaceable suffix; append retains the legacy replay policy. */
+  pinMode?: 'append' | 'current';
   coveredSnapshots?: readonly { source: string; type: string }[];
   coveredCheckpoints?: readonly string[];
 }
@@ -39,6 +41,9 @@ interface EpochState {
   source: string[];
   optionsKey: string;
   activePins: Set<string>;
+  base: ContextRecord[];
+  protectedBaseTokens: number;
+  tail: ContextRecord[];
   view: ForegroundProjection;
   rebuildAtHistoryTokens: number;
 }
@@ -92,6 +97,7 @@ function optionsKey(options: ForegroundEpochOptions, notice?: ContextRecord): st
   return fingerprint({
     maxHistoryTokens: options.maxHistoryTokens,
     minRecentRounds: options.minRecentRounds,
+    pinMode: options.pinMode ?? 'append',
     coveredSnapshots: [...new Set((options.coveredSnapshots ?? [])
       .map(({ source, type }) => JSON.stringify([source, type])))].sort(),
     coveredCheckpoints: [...new Set(options.coveredCheckpoints ?? [])].sort(),
@@ -117,7 +123,7 @@ function uniquePins(pins: readonly ContextRecord[]): { records: ContextRecord[];
 
 /**
  * Holds request copies only. The authoritative session remains complete and is never mutated.
- * On append, old facts/notes keep their exact place and content; new observations follow them.
+ * Current pins can occupy a replaceable suffix after the stable history prefix.
  * reset() is required when switching to a full expand_context request or changing session identity.
  */
 export class ForegroundEpoch {
@@ -146,13 +152,18 @@ export class ForegroundEpoch {
     const source = records.map(fingerprint);
     const key = optionsKey(options, notice);
     const supplied = uniquePins(pins);
+    const sourceSet = new Set(source);
     const previous = this.current;
+    const external = supplied.records.filter(record => !sourceSet.has(fingerprint(record)));
+    const oldPins = new Map(previous?.tail.map(record => [pinFingerprint(record), record]) ?? []);
+    const tailPins = external.map(record => oldPins.get(pinFingerprint(record)) ?? record);
     const appendable = previous !== null && source.length >= previous.source.length
       && previous.source.every((part, index) => source[index] === part);
     const delta = appendable ? records.slice(previous.source.length) : [];
     const oldSource = new Set(previous?.source ?? []);
     const introduced = previous ? records.filter((_, index) => !oldSource.has(source[index])) : [];
     const changedPins = previous ? supplied.records.filter((pin) => !previous.activePins.has(pinFingerprint(pin))) : [];
+    const currentPins = options.pinMode === 'current';
     let reason: ForegroundEpochReason = previous ? 'unchanged' : this.resetPending ? 'reset' : 'initial';
     if (previous && !appendable) reason = 'source_changed';
     else if (previous && previous.optionsKey !== key) reason = 'options_changed';
@@ -162,20 +173,23 @@ export class ForegroundEpoch {
     }
 
     if (previous && reason === 'unchanged') {
-      const appended = [...this.prepareAppend(delta, options), ...changedPins];
-      const next = [...previous.view.messages, ...appended];
+      const appended = [...this.prepareAppend(delta, options), ...(currentPins ? [] : changedPins)];
+      const base = [...previous.base, ...appended];
+      const next = currentPins ? [...base, ...tailPins] : base;
       const tokens = historyTokens(next);
       if (validatePairing(next).length) reason = 'pairing';
       else if (tokens > previous.rebuildAtHistoryTokens) reason = 'history_budget';
       else {
         this.current = {
-          ...previous, source, activePins: supplied.keys,
+          ...previous, source, activePins: supplied.keys, base, tail: structuredClone(tailPins),
+          protectedBaseTokens: previous.protectedBaseTokens + historyTokens(appended),
           view: {
             ...previous.view, messages: structuredClone(next), historyTokens: tokens,
-            protectedTokens: previous.view.protectedTokens + historyTokens(appended),
+            protectedTokens: previous.protectedBaseTokens + historyTokens(appended)
+              + (currentPins ? historyTokens(tailPins) : 0),
           },
         };
-        return this.result(false, appended.length ? 'append' : 'unchanged', delta.length, changedPins.length);
+        return this.result(false, appended.length || changedPins.length ? 'append' : 'unchanged', delta.length, changedPins.length);
       }
     }
 
@@ -183,12 +197,16 @@ export class ForegroundEpoch {
     // makes the source cease to be an extension. Identity includes content, not only generated IDs.
     // The projector retains these by original identity and closes their complete response/tool group.
     const candidate = this.project(records, options, [...supplied.records, ...introduced]);
-    const messages = fixPairing(candidate.messages);
+    const externalPins = new Set(external.map(fingerprint));
+    const base = fixPairing(currentPins
+      ? candidate.messages.filter(record => !externalPins.has(fingerprint(record))) : candidate.messages);
+    const messages = currentPins ? [...base, ...tailPins] : base;
     let noticeInserted = false;
     if (notice && !messages.some((entry) => pinFingerprint(entry) === pinFingerprint(notice))) {
       let index = 0;
       while (index < messages.length && isPrefix(messages[index])) index++;
-      messages.splice(index, 0, notice);
+      base.splice(index, 0, notice);
+      if (messages !== base) messages.splice(index, 0, notice);
       noticeInserted = true;
     }
     const tokens = historyTokens(messages);
@@ -199,7 +217,8 @@ export class ForegroundEpoch {
     this.epoch++;
     this.resetPending = false;
     this.current = {
-      source, optionsKey: key, activePins: supplied.keys,
+      source, optionsKey: key, activePins: supplied.keys, base: structuredClone(base), tail: structuredClone(tailPins),
+      protectedBaseTokens: protectedTokens - (currentPins ? historyTokens(tailPins) : 0),
       view: { ...candidate, messages: structuredClone(messages), historyTokens: tokens,
         protectedTokens, projected: candidate.projected || altered },
       // Mandatory input can already exceed 2x the soft budget; repeated identical cold builds help nobody.

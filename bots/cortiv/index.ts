@@ -14,6 +14,7 @@ import { FAST_REFERENCE_DEFAULTS, type FastReferenceConfig } from './persona/ref
 import { REFERENCE_LIBRARY_DEFAULTS, type ReferenceLibraryConfig } from './persona/reference-library.ts';
 import { PLANNING_DEFAULTS, type PlanningConfig } from './persona/planning-review.ts';
 import { FOREGROUND_CONTEXT_DEFAULTS, type ForegroundContextConfig } from './persona/foreground-context.ts';
+import { FAST_FOREGROUND_DEFAULTS, type FastForegroundConfig } from './persona/foreground-adviser.ts';
 import { DREAM_DEFAULTS, type DreamConfig } from './persona/dream-context.ts';
 import { SLEEP_REVIEW_DEFAULTS, type SleepReviewConfig } from './persona/sleep-review.ts';
 import { TOOL_CALL_RECOVERY_DEFAULTS, type ToolCallRecoveryConfig } from './persona/tool-call-recovery.ts';
@@ -178,6 +179,18 @@ export const CORTIV_FOREGROUND_CONFIG_GROUP: ConfigGroup = {
       'foreground.maxHistoryTokens': { type: 'integer', minimum: 1024, title: '近期历史预算(token估算)', 'x-hot': true,
         description: '不含完整系统前缀和工具定义；未处理输入和原子调用组超预算时完整保留。' },
       'foreground.minRecentRounds': { type: 'integer', minimum: 1, maximum: 16, title: '至少保留的近期轮次', 'x-hot': true },
+      'foreground.currentStateOnly': { type: 'boolean', title: '仅保留当前状态副本', 'x-hot': true,
+        description: '当前事实放在近期历史之后，每轮替换旧副本；原始事件账本不变。' },
+      'fastForeground.enabled': { type: 'boolean', title: '启用即时阅读快判断', 'x-hot': true },
+      'fastForeground.endpoint': { type: 'string', title: '判断服务地址', 'x-hot': true },
+      'fastForeground.timeoutMs': { type: 'integer', minimum: 1, maximum: 250, title: '判断等待上限(毫秒)', 'x-hot': true },
+      'fastForeground.minConfidence': { type: 'number', minimum: 0, maximum: 1, title: '首选概率下限', 'x-hot': true },
+      'fastForeground.minIntervalMs': { type: 'integer', minimum: 0, title: '判断调用间隔(毫秒)', 'x-hot': true },
+      'fastForeground.focusedHistoryTokens': { type: 'integer', minimum: 1024, title: '集中阅读的历史预算(token估算)', 'x-hot': true,
+        description: '仅缩短额外历史；目标、新输入、完整最近回执和当前状态仍保留。' },
+      'fastForeground.deferQueueTail': { type: 'boolean', title: '允许延后正常尾步观察的决策', 'x-hot': true,
+        description: '只有新鲜的尾步队列观察且没有其他新问题时可延后。聊天、执行终态和危险事件继续触发决策。' },
+      'fastForeground.maxDeferMs': { type: 'integer', minimum: 1, maximum: 30000, title: '延后复核上限(毫秒)', 'x-hot': true },
       'foreground.memoryFiles': { type: 'string', title: '长期记忆索引入口', 'x-hot': true,
         description: '每行一个工作区相对文件路径。最多8份合计4000字符原文节选，独立于近期短笺；完整内容按需读取。空值不增加入口。' },
     },
@@ -210,6 +223,7 @@ export interface CortiVConfig extends CoreConfig {
   dream: DreamConfig;
   sleepReview: SleepReviewConfig;
   foreground: ForegroundContextConfig;
+  fastForeground: FastForegroundConfig;
   toolCallRecovery: ToolCallRecoveryConfig;
   tick: {
     /** null disables baseline wakeups. */
@@ -264,6 +278,7 @@ function build(loaded: LoadedConfig<CortiVConfig>, worlds: World[]): BotParts<Co
     dream: () => cfg.dream ?? DREAM_DEFAULTS,
     sleepReview: () => cfg.sleepReview ?? SLEEP_REVIEW_DEFAULTS,
     foreground: () => cfg.foreground ?? FOREGROUND_CONTEXT_DEFAULTS,
+    fastForeground: () => cfg.fastForeground ?? FAST_FOREGROUND_DEFAULTS,
     toolCallRecovery: () => cfg.toolCallRecovery ?? TOOL_CALL_RECOVERY_DEFAULTS,
     timezone: () => cfg.timezone,
     tickDelayMs: () =>
@@ -325,6 +340,7 @@ const definition: BotDefinition<CortiVConfig> = {
     dream: { ...DREAM_DEFAULTS },
     sleepReview: { ...SLEEP_REVIEW_DEFAULTS },
     foreground: { ...FOREGROUND_CONTEXT_DEFAULTS },
+    fastForeground: { ...FAST_FOREGROUND_DEFAULTS },
     toolCallRecovery: { ...TOOL_CALL_RECOVERY_DEFAULTS },
     rounds: { soft: 6, hard: 12 },
     // World 段不在这里:实现的默认值由启动器补。人格身份与演出选择

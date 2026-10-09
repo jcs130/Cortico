@@ -62,6 +62,7 @@ import { FocusedCognition, FOCUSED_COGNITION } from './focused-cognition.ts';
 import { projectForeground, FOREGROUND_CONTEXT_DEFAULTS, type ForegroundContextConfig } from './foreground-context.ts';
 import { excerptHandoffRecords } from './context-excerpts.ts';
 import { ForegroundEpoch } from './foreground-epoch.ts';
+import { ForegroundAdviser, FAST_FOREGROUND_DEFAULTS, type FastForegroundConfig } from './foreground-adviser.ts';
 import { DreamContext, DREAM_DEFAULTS, dreamHistoryWithinBudget, normalizeDreamConfig, renderDreamHistory, type DreamConfig, type DreamHistory } from './dream-context.ts';
 import { DreamTaskQueue, DreamTaskStoppedError, dreamAbortable, dreamDelay } from './dream-task-queue.ts';
 import { DreamMemory, dreamWorkspaceTools } from './dream-memory.ts';
@@ -391,6 +392,7 @@ export const BLUEPRINT_COGNITION_DEFAULTS: BlueprintCognitionConfig = {
 };
 
 export interface CortiVOptions extends CorminiOptions {
+  fastForeground?: () => FastForegroundConfig;
   /** Optional compact semantic classification; never owns player actions. */
   fastAttention?: () => FastAttentionConfig;
   references?: () => ReferenceLibraryConfig;
@@ -469,6 +471,12 @@ export class CortiV extends Cormini {
   private foregroundMemoryState = '';
   private planningReview: PeriodicPlanningReview | null = null;
   private readonly foregroundConfig: () => ForegroundContextConfig;
+  private readonly fastForegroundConfig: () => FastForegroundConfig;
+  private readonly foregroundAdviser: ForegroundAdviser;
+  private foregroundReading: 'focused' | 'connected' | undefined;
+  private deferredInputIds = new Set<string>();
+  private deferredModelBaseline: string | null = null;
+  private foregroundDeadline: ReturnType<typeof setTimeout> | undefined;
   private readonly toolCallRecoveryConfig: () => ToolCallRecoveryConfig;
   private readonly toolCallRecovery = new ToolCallRecoveryFallback();
   private fullContextRequested = false;
@@ -501,6 +509,8 @@ export class CortiV extends Cormini {
     this.dreamConfig = opts.dream ?? (() => DREAM_DEFAULTS);
     this.sleepReviewConfig = opts.sleepReview ?? (() => SLEEP_REVIEW_DEFAULTS);
     this.foregroundConfig = opts.foreground ?? (() => FOREGROUND_CONTEXT_DEFAULTS);
+    this.fastForegroundConfig = opts.fastForeground ?? (() => FAST_FOREGROUND_DEFAULTS);
+    this.foregroundAdviser = new ForegroundAdviser(this.fastForegroundConfig);
     this.toolCallRecoveryConfig = opts.toolCallRecovery ?? (() => TOOL_CALL_RECOVERY_DEFAULTS);
     this.cognitionHistoryTokens = opts.cognitionHistoryTokens ?? (() => 4000);
     this.blueprintCognition = opts.blueprintCognition ?? (() => BLUEPRINT_COGNITION_DEFAULTS);
@@ -553,6 +563,8 @@ export class CortiV extends Cormini {
   }
 
   override stopRhythm(): void {
+    clearTimeout(this.foregroundDeadline);
+    this.foregroundAdviser.reset();
     this.referenceRouting.reset();
     this.dreamQueue.stop();
     this.planningReview?.stop();
@@ -563,6 +575,12 @@ export class CortiV extends Cormini {
    * 摘要指纹按 session 生存。onOpening 的 restarted 分支恢复指纹；new/cleared 分支清空内存与持久化指纹。
    */
   override onOpening(ctx: { reason: SessionOpeningReason }): void {
+    clearTimeout(this.foregroundDeadline);
+    this.foregroundDeadline = undefined;
+    this.foregroundAdviser.reset();
+    this.foregroundReading = undefined;
+    this.deferredInputIds.clear();
+    this.deferredModelBaseline = null;
     this.viewerRecallContext.clear();
     this.recalledConversation.clear();
     this.socialAttention.reset();
@@ -732,7 +750,13 @@ export class CortiV extends Cormini {
   }
 
   onTurnEnded(): void {
+    clearTimeout(this.foregroundDeadline);
+    this.foregroundDeadline = undefined;
     const snapshot = this.core?.sessionInfo(MAIN).snapshot ?? [];
+    if (this.latestModelRecord(snapshot) !== this.deferredModelBaseline) {
+      this.deferredInputIds.clear();
+      this.deferredModelBaseline = null;
+    }
     this.captureRecentSpeech(snapshot);
     this.planningReview?.noteSnapshot(snapshot);
     if (this.core && this.toolCallRecoveryConfig().enabled) {
@@ -797,7 +821,8 @@ export class CortiV extends Cormini {
       ...(recentSpeech ? ['recent_speech'] : []), ...(this.pendingWork ? ['pending_work'] : []),
       ...(agenda ? ['activity_plan', ...(this.planningConfig().agendaEnabled ? ['planning'] : [])] : []),
     ];
-    const pins = [...[recentMemory, index].filter(Boolean).map(text => message('user', text)), ...facts.pins, ...[recentSpeech, this.actionEvidence(ctx.messages), pending, agenda, this.viewerEncounters.text(), this.viewerRecallContext.text(), this.referenceLibrary.context()].filter(Boolean)
+    const pins = [...ctx.messages.filter(record => !!record.item.id && this.deferredInputIds.has(record.item.id)),
+      ...[recentMemory, index].filter(Boolean).map(text => message('user', text)), ...facts.pins, ...[recentSpeech, this.actionEvidence(ctx.messages), pending, agenda, this.viewerEncounters.text(), this.viewerRecallContext.text(), this.referenceLibrary.context()].filter(Boolean)
       .map((text) => message('user', text))];
     const handoffSources = new Map<string, { digest: string; original: boolean }>();
     this.foregroundCurrentHandoffs = ctx.messages.flatMap((record) => {
@@ -811,8 +836,11 @@ export class CortiV extends Cormini {
       return original ? events.filter((event) => event.source === 'persona' && event.type === HANDOFF_NOTE_TYPE
         && estimateTokens(text.slice(event.start, event.start + event.chars)) > cfg.maxHistoryTokens) : [];
     });
+    const maxHistoryTokens = this.fastForegroundConfig().enabled && this.foregroundReading === 'focused'
+      ? Math.min(cfg.maxHistoryTokens, Math.max(1024, this.fastForegroundConfig().focusedHistoryTokens)) : cfg.maxHistoryTokens;
     const view = this.foregroundEpoch.prepare(ctx.messages, {
-      maxHistoryTokens: cfg.maxHistoryTokens, minRecentRounds: cfg.minRecentRounds,
+      maxHistoryTokens, minRecentRounds: cfg.minRecentRounds,
+      pinMode: cfg.currentStateOnly === false ? 'append' : 'current',
       coveredSnapshots: facts.coveredSnapshots,
       coveredCheckpoints,
     }, pins, this.foregroundNotice);
@@ -823,10 +851,44 @@ export class CortiV extends Cormini {
       storedRecords: ctx.messages.length, requestRecords: view.messages.length,
       historyTokens: view.historyTokens, protectedTokens: view.protectedTokens,
       appendedRecords: view.appendedRecords, appendedPins: view.appendedPins,
+      reading: this.foregroundReading ?? 'standard', maxHistoryTokens,
+      currentStateOnly: cfg.currentStateOnly !== false, deferredInputRecords: this.deferredInputIds.size,
       coveredSnapshots: facts.coveredSnapshots,
       coveredCheckpoints,
     } });
     return view.messages;
+  }
+
+  async beforeDecision(ctx: { events: readonly EventEnvelope[]; messages: readonly ContextRecord[] }): Promise<boolean> {
+    const core = this.core;
+    if (!core) return true;
+    const facts = this.worlds.flatMap(world => {
+      try { const current = world.requestFacts?.(); return current ? [{ source: world.id, text: current.text }] : []; }
+      catch { return []; }
+    });
+    const advice = await this.foregroundAdviser.advise({ events: ctx.events, facts,
+      agenda: this.activityAgenda?.summary() ?? '', intent: this.recentReferenceIntent() });
+    if (advice.kind !== 'cooldown') this.foregroundReading = advice.reading;
+    core.log.emit('debug', '即时阅读与决策时机判断', { event: 'foreground-advice', data: advice });
+    if (!advice.defer) {
+      clearTimeout(this.foregroundDeadline);
+      this.foregroundDeadline = undefined;
+      return true;
+    }
+    const cursors = new Set(ctx.events.map(event => event.cursor));
+    if (!this.deferredInputIds.size) this.deferredModelBaseline = this.latestModelRecord(ctx.messages);
+    for (const record of ctx.messages) {
+      if (record.item.id && record.context.frame?.events.some(event => cursors.has(event.cursor))) this.deferredInputIds.add(record.item.id);
+    }
+    if (!this.foregroundDeadline) {
+      const delay = Math.max(1, Math.min(30_000, this.fastForegroundConfig().maxDeferMs));
+      this.foregroundDeadline = setTimeout(() => {
+        this.foregroundDeadline = undefined;
+        core.injectInternal('[即时复核] 已延后的队列观察到达复核时间。核对当前执行状态、最近结果和原目标；仍在执行不表示失败，也不要求替换任务。', 'foreground-check');
+      }, delay);
+      this.foregroundDeadline.unref?.();
+    }
+    return false;
   }
 
   private recoveryTools(): Set<string> {
@@ -1571,6 +1633,12 @@ export class CortiV extends Cormini {
   }
 
   onDelivery(ctx: { events: EventEnvelope[] }): void | Promise<void> {
+    if (ctx.events.some(event => event.contextDelivery !== 'archive-only'
+      && !event.tags?.includes('snapshot') && !(event.source === 'persona' && ['notice', 'tick'].includes(event.type)))) {
+      this.foregroundReading = undefined;
+      clearTimeout(this.foregroundDeadline);
+      this.foregroundDeadline = undefined;
+    }
     super.onDelivery(ctx);
     this.viewerHistoryReadsRemaining = VIEWER_HISTORY_READS_PER_DELIVERY;
     this.viewerArrivalHistory.clear();

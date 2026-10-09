@@ -25,6 +25,39 @@ function source(): ContextRecord[] {
 function text(records: readonly ContextRecord[]): string { return records.map(({ item }) => itemText(item)).join('\n'); }
 
 describe('前台上下文缓存epoch', () => {
+  it('current pins replace obsolete state while the historical wire prefix stays stable', () => {
+    const epoch = new ForegroundEpoch();
+    const cfg = { ...options, pinMode: 'current' as const };
+    const records = source();
+    const first = epoch.prepare(records, cfg, [message('user', '魔力：20'), message('user', '当前目标：还工具')]);
+    const added = action('progress');
+    const next = epoch.prepare([...records,...added], cfg, [message('user', '魔力：25'), message('user', '当前目标：还工具')]);
+    expect(wire(next.messages).slice(0, first.messages.length-2)).toEqual(wire(first.messages.slice(0,-2)));
+    expect(text(next.messages)).not.toContain('魔力：20');
+    expect(next.messages.slice(-2).map(record => itemText(record.item))).toEqual(['魔力：25','当前目标：还工具']);
+    expect(next.rebuilt).toBe(false);
+    expect(validatePairing(next.messages)).toEqual([]);
+    const again = epoch.prepare([...records,...added], cfg, [message('user', '魔力：20')]);
+    expect(again.messages.filter(record => itemText(record.item)==='魔力：20')).toHaveLength(1);
+    expect(text(again.messages)).not.toContain('魔力：25');
+    expect(text(again.messages)).not.toContain('当前目标：还工具');
+  });
+
+  it('current pins do not grow the request over repeated updates and source pins remain paired once', () => {
+    const epoch = new ForegroundEpoch();
+    const cfg = { ...options, pinMode: 'current' as const };
+    const records = source();
+    const receipt = records.at(-1)!;
+    const initial = epoch.prepare(records, cfg, [receipt,message('user','当前状态0'.repeat(10))]);
+    for (let index = 1; index < 50; index++) {
+      const result = epoch.prepare(records, cfg, [receipt,message('user',`当前状态${index}`.repeat(10))]);
+      expect(result.epoch).toBe(initial.epoch);
+      expect(result.messages.length).toBe(initial.messages.length);
+      expect(result.messages.filter(record => record.item.id===receipt.item.id)).toHaveLength(1);
+      expect(validatePairing(result.messages)).toEqual([]);
+    }
+  });
+
   it('excerpts newly appended covered snapshots once while retaining wire prefix, fresh pins and adjacent chat', () => {
     const coverage = { ...options, coveredSnapshots: [{ source: 'game', type: 'game.state' }] };
     const epoch = new ForegroundEpoch(projectForeground, (records, cfg) => excerptHandoffRecords(records, text => text, {
