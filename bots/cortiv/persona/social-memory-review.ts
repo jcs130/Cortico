@@ -276,3 +276,18 @@ export function verifySocialReviewProof(page: SocialReviewPage, content: string,
   return proof.decision === 'retained' && proof.files.length > 0
     && proof.files.every(file => typeof file === 'string' && page.profilePaths.includes(file) && ownsCurrent(file));
 }
+
+/** Validate completion while the fork can repair its arguments; stamp this review's write. */
+export function prepareSocialReviewProof(page: SocialReviewPage, content: unknown, ownsCurrent: (path: string) => boolean): string | ToolOutcome {
+  let proof: Record<string, unknown>;
+  try {
+    if (typeof content !== 'string') throw new Error('content 须为 JSON 文本');
+    proof = JSON.parse(content) as Record<string, unknown>;
+  } catch (error) {
+    return { failed: true, text: `[memory failed] 审阅凭据 JSON 无效：${String(error)}。未写入；修正 content 中的引号或转义后重试 write_file。` };
+  }
+  if (!verifySocialReviewProof(page, content as string, path => path === page.proofPath || ownsCurrent(path))) {
+    return { failed: true, text: `[memory failed] 审阅凭据未通过核验。未写入；使用本页 system 提供的摘要、序号和截止时间。retained 的 files 只能列本次已成功修改且仍为当前版本的人物档案；没有新事实时用 no_durable_facts 和空 files。修正后重试 write_file。` };
+  }
+  return JSON.stringify({ ...proof, reviewedAt: new Date().toISOString() }, null, 2) + '\n';
+}

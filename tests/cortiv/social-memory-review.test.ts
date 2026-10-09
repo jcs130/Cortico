@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SocialMemoryReview, SOCIAL_REVIEW_LIMITS, isRoomEnded, verifySocialReviewProof,
@@ -164,6 +164,36 @@ describe('Persona social review with real Memory tools', () => {
     await vi.waitFor(async () => expect((await state(p)).social.pendingEntries).toBe(0));
     expect(existsSync(join(dir, 'viewers/stream/123456.md'))).toBe(false);
     expect(JSON.parse(readFileSync(join(dir, 'social/reviews/1-1.json'), 'utf8')).decision).toBe('no_durable_facts');
+  });
+
+  it('returns a malformed proof to the fork for repair before acknowledging the page', async () => {
+    const { p, dir } = rig(async (options, root) => {
+      const page = new SocialMemoryReview(root).nextPage()!;
+      const write = options.tools!.find(t => t.name === 'write_file')!;
+      const ctx = { role: 'social-memory', log: nullLogger() };
+      const content = proof(page).replace('核对完本页', '观众说了"明天见"，核对完本页');
+      const rejected = await write.handler({ path: page.proofPath, content }, ctx);
+      expect(rejected).toMatchObject({ failed: true });
+      expect(existsSync(join(root, page.proofPath))).toBe(false);
+      expect(new SocialMemoryReview(root).stateInfo().committedSeq).toBe(0);
+      await write.handler({ path: page.proofPath, content: proof(page) }, ctx);
+      return '已修正凭据。';
+    });
+    await review(p, { history: history() });
+    await vi.waitFor(async () => expect((await state(p)).social.pendingEntries).toBe(0));
+    expect(JSON.parse(readFileSync(join(dir, 'social/reviews/1-1.json'), 'utf8')).reviewedAt).toBeTruthy();
+  });
+
+  it('can confirm an unchanged valid old proof after explicitly reviewing it again', async () => {
+    const { p, dir } = rig(async (options, root) => {
+      const page = new SocialMemoryReview(root).nextPage()!;
+      mkdirSync(join(root, 'social/reviews'), { recursive: true });
+      writeFileSync(join(root, page.proofPath), proof(page));
+      return completePage(options, root);
+    });
+    await review(p, { history: history() });
+    await vi.waitFor(async () => expect((await state(p)).social.pendingEntries).toBe(0));
+    expect(JSON.parse(readFileSync(join(dir, 'social/reviews/1-1.json'), 'utf8')).reviewedAt).toBeTruthy();
   });
 
   it('retains an interrupted page across stop and restart; late Memory writes are rejected', async () => {

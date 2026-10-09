@@ -72,7 +72,7 @@ import { StateMemory, STATE_MEMORY_FILE, MEMORY_HISTORY_DIR, STATE_MEMORY_SEARCH
 import { workspaceTools } from '../../cormini/persona/workspaceTools.ts';
 import { ToolCallRecoveryFallback, TOOL_CALL_RECOVERY_DEFAULTS, projectToolCallRecovery, type ToolCallRecoveryConfig } from './tool-call-recovery.ts';
 import { SleepReview, SLEEP_REVIEW_DEFAULTS, type SleepReviewConfig } from './sleep-review.ts';
-import { SocialMemoryReview, socialReviewPrompt, verifySocialReviewProof } from './social-memory-review.ts';
+import { SocialMemoryReview, socialReviewPrompt, verifySocialReviewProof, prepareSocialReviewProof } from './social-memory-review.ts';
 import { ViewerConversationRecall, VIEWER_CONVERSATION_RECALL_LIMITS } from './viewer-conversation-recall.ts';
 import { ViewerRecallContext } from './viewer-recall-context.ts';
 import { ReferenceLibrary, REFERENCE_LIBRARY_DEFAULTS, type ReferenceLibraryConfig } from './reference-library.ts';
@@ -2018,6 +2018,14 @@ export class CortiV extends Cormini {
               signal.throwIfAborted();
               if (tool.tags.includes('write') && !allowed.has(String(args.path ?? ''))) {
                 return { failed: true as const, text: '[memory failed] 观众整理只能写本页对应人物档案和审阅凭据；未写入。' };
+              }
+              if (tool.tags.includes('write') && args.path === page.proofPath) {
+                if (tool.name !== 'write_file') {
+                  return { failed: true as const, text: '[memory failed] 审阅凭据须用 write_file 写完整 JSON；未写入。' };
+                }
+                const prepared = prepareSocialReviewProof(page, args.content, path => access.ownsCurrent(path));
+                if (typeof prepared !== 'string') return prepared;
+                args = { ...args, content: prepared };
               }
               return tool.handler(args, ctx);
             } }));
