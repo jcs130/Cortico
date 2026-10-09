@@ -24,10 +24,10 @@ export function protocolConfig(name: string, entry: LLMProviderEntry, language: 
           description: S.imageReplayScopeDescription, 'x-hot': true,
         },
         [`providers.${name}.options.extraHeaders`]: {
-          type: 'object', title: language === 'zh' ? '附加请求头（JSON object）' : 'Extra headers (JSON object)',
+          type: 'object', title: S.extraHeaders,
         },
         [`providers.${name}.options.extraBody`]: {
-          type: 'object', title: language === 'zh' ? '附加请求体（JSON object）' : 'Extra request body (JSON object)',
+          type: 'object', title: S.extraBody,
         },
         [`providers.${name}.options.endpointPath`]: {
           type: 'string', title: S.endpointPath, description: S.endpointPathDescription, 'x-hot': true,

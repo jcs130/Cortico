@@ -1,6 +1,6 @@
 import { pick, type Language } from '../../core/language.ts';
 
-/** Server side: ConfigGroup titles, panel titles and validation errors. */
+/** Server side: module description, ConfigGroup titles, panel titles and validation errors. */
 const zh = {
   maxContextImages: '附件图像回放上限',
   maxContextImagesDescription: '未设置时不限；0 只保留附件的文字。设置后只展开最新若干不同的图像附件句柄，同一图像只在最后一次引用处展开；旧图保留原文字，不读取字节。不修改记录或 Memory；原生 input_image 分片不受此附件预算限制。',
@@ -11,6 +11,9 @@ const zh = {
   imageReplayScope: '图像回放范围',
   imageReplayScopeDescription: '默认 history 回放历史图像。fresh 只发送最近一次模型输出之后新增的图像；模型回复或调用工具后，旧图只保留原记录。适用于不复用多模态缓存的端点。附件及原生 input_image 都受此范围约束；同一请求重试仍携带新图。',
   imageReplayScopeValue: '图像回放范围只能是 history 或 fresh',
+  description: '连接兼容 Responses API 的模型服务。',
+  extraHeaders: '附加请求头（JSON object）',
+  extraBody: '附加请求体（JSON object）',
   endpointPath: 'Responses 端点路径',
   endpointPathDescription: '相对供应地址;默认 /responses。',
   endpointPathSlash: '端点路径必须以 / 开头',
@@ -42,6 +45,9 @@ const en: typeof zh = {
   imageReplayScope: 'Image replay scope',
   imageReplayScopeDescription: 'Default history replays past images. Fresh sends images added after the latest model output; a reply or tool call ends their replay. For endpoints that do not reuse multimodal caches. Covers saved attachments and native input_image parts without changing records; retries of the same request retain fresh images.',
   imageReplayScopeValue: 'Image replay scope must be history or fresh',
+  description: 'Connect to Responses-compatible model services.',
+  extraHeaders: 'Extra headers (JSON object)',
+  extraBody: 'Extra request body (JSON object)',
   endpointPath: 'Responses endpoint path',
   endpointPathDescription: 'Relative to the provider URL; default /responses.',
   endpointPathSlash: 'The endpoint path must start with /',

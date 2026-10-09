@@ -46,7 +46,7 @@ import type {
   ToolOutcome,
 } from 'cortico/core/types.ts';
 import type { Language } from 'cortico/core/language.ts';
-import { estimateTokens, withDeadline } from 'cortico/core/util.ts';
+import { DeadlineError, estimateTokens, withDeadline } from 'cortico/core/util.ts';
 import { Cormini, HANDOFF_DIR, MAIN, type CorminiOptions } from '../../cormini/persona/persona.ts';
 import { HANDOFF_NOTE_TYPE } from '../../cormini/persona/handoffNote.ts';
 import { AUTHOR_SELF, type WorkspaceGit } from '../../cormini/persona/workspaceGit.ts';
@@ -1092,6 +1092,8 @@ export class CortiV extends Cormini {
     const others = core.sessionInfo(COGNITION).running > 0;
     if (mine || others) return { error: '上一件后台思考还没结束,排队没开,稍后再请' };
 
+    // withDeadline 不取消 fork;到期后 fork 在下一个轮次边界收线。
+    let timedOut = false;
     try {
       const blueprint = req.hint?.kind === 'blueprint' ? { ...this.blueprintCognition() } : null;
       const info = core.sessionInfo(MAIN);
@@ -1111,7 +1113,6 @@ export class CortiV extends Cormini {
         kind: req.hint?.kind ?? null, provider: blueprint?.provider.trim() || null,
       } });
       const deadline = Date.now() + COGNITION_TIMEOUT_MS;
-      let timedOut = false;
       const text = await withDeadline(
         core.spawnFork({
           id: COGNITION,
@@ -1140,8 +1141,11 @@ export class CortiV extends Cormini {
       if (!out) return { error: '后台思考跑完了,但最后一轮一句话都没说,没有可以交回去的结论' };
       return { text: out };
     } catch (e) {
+      if (e instanceof DeadlineError) {
+        timedOut = true;
+        return { error: '后台思考超时(15 分钟),已放弃' };
+      }
       const msg = e instanceof Error ? e.message : String(e);
-      if (/超时/.test(msg)) return { error: '后台思考超时(15 分钟),已放弃' };
       this.core?.log.warn('认知外包受理出错', { worldId: ctx.worldId, err: msg });
       return { error: `后台思考没跑起来:${msg}` };
     }
