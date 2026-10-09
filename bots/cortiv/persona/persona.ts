@@ -839,7 +839,8 @@ export class CortiV extends Cormini {
     const maxHistoryTokens = this.fastForegroundConfig().enabled && this.foregroundReading === 'focused'
       ? Math.min(cfg.maxHistoryTokens, Math.max(1024, this.fastForegroundConfig().focusedHistoryTokens)) : cfg.maxHistoryTokens;
     const view = this.foregroundEpoch.prepare(ctx.messages, {
-      maxHistoryTokens, minRecentRounds: cfg.minRecentRounds,
+      maxHistoryTokens: cfg.maxHistoryTokens, minRecentRounds: cfg.minRecentRounds,
+      ...(this.fastForegroundConfig().enabled ? { adaptiveMaxHistoryTokens: maxHistoryTokens } : {}),
       pinMode: cfg.currentStateOnly === false ? 'append' : 'current',
       coveredSnapshots: facts.coveredSnapshots,
       coveredCheckpoints,
@@ -851,7 +852,8 @@ export class CortiV extends Cormini {
       storedRecords: ctx.messages.length, requestRecords: view.messages.length,
       historyTokens: view.historyTokens, protectedTokens: view.protectedTokens,
       appendedRecords: view.appendedRecords, appendedPins: view.appendedPins,
-      reading: this.foregroundReading ?? 'standard', maxHistoryTokens,
+      reading: this.foregroundReading ?? 'standard', maxHistoryTokens: view.maxHistoryTokens,
+      requestedMaxHistoryTokens: maxHistoryTokens,
       currentStateOnly: cfg.currentStateOnly !== false, deferredInputRecords: this.deferredInputIds.size,
       coveredSnapshots: facts.coveredSnapshots,
       coveredCheckpoints,

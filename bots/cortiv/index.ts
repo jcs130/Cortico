@@ -187,7 +187,7 @@ export const CORTIV_FOREGROUND_CONFIG_GROUP: ConfigGroup = {
       'fastForeground.minConfidence': { type: 'number', minimum: 0, maximum: 1, title: '首选概率下限', 'x-hot': true },
       'fastForeground.minIntervalMs': { type: 'integer', minimum: 0, title: '判断调用间隔(毫秒)', 'x-hot': true },
       'fastForeground.focusedHistoryTokens': { type: 'integer', minimum: 1024, title: '集中阅读的历史预算(token估算)', 'x-hot': true,
-        description: '仅缩短额外历史；目标、新输入、完整最近回执和当前状态仍保留。' },
+        description: '在下一次历史整理时应用；目标、新输入、完整最近回执和当前状态仍保留。' },
       'fastForeground.deferQueueTail': { type: 'boolean', title: '允许延后正常尾步观察的决策', 'x-hot': true,
         description: '只有新鲜的尾步队列观察且没有其他新问题时可延后。聊天、执行终态和危险事件继续触发决策。' },
       'fastForeground.maxDeferMs': { type: 'integer', minimum: 1, maximum: 30000, title: '延后复核上限(毫秒)', 'x-hot': true },

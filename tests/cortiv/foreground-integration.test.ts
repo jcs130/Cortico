@@ -103,15 +103,17 @@ describe('CortiV foreground request context', () => {
     expect(injected.filter(row => row.kind === 'foreground-check')).toHaveLength(1);
   });
 
-  it('connected reading restores the usual history budget and full expansion remains available', async () => {
+  it('automatic reading changes keep the current prefix and full expansion remains immediate', async () => {
     const { persona, records, event, reading, diagnostics } = adaptiveRig();
     await persona.beforeDecision({ events: [event], messages: records });
-    persona.prepareRequest({ sessionId: 'main', round: 1, messages: records });
+    const first = persona.prepareRequest({ sessionId: 'main', round: 1, messages: records })!;
     expect(diagnostics.at(-1)).toMatchObject({ maxHistoryTokens: 1024 });
     reading('connected');
     expect(await persona.beforeDecision({ events: [{ ...event, type: 'game.chat', meta: undefined }], messages: records })).toBe(true);
-    persona.prepareRequest({ sessionId: 'main', round: 2, messages: records });
-    expect(diagnostics.at(-1)).toMatchObject({ reading: 'connected', maxHistoryTokens: 6000 });
+    const next = persona.prepareRequest({ sessionId: 'main', round: 2, messages: records })!;
+    expect(diagnostics.at(-1)).toMatchObject({ reading: 'connected', maxHistoryTokens: 1024,
+      requestedMaxHistoryTokens: 6000, rebuilt: false });
+    expect(next.slice(0, first.length)).toEqual(first);
     const expand = persona.declareSessions().find(session => session.id === 'main')!.tools().find(tool => tool.name === 'expand_context')!;
     await expand.handler({ reason: 'Review earlier agreement.' }, { role: 'main', log: nullLogger() });
     expect(persona.prepareRequest({ sessionId: 'main', round: 3, messages: records })).toBeNull();

@@ -239,6 +239,30 @@ describe('前台上下文缓存epoch', () => {
     expect(rounds.rebuildReason).toBe('options_changed');
   });
 
+  it('automatic budgets wait for compaction while fresh input and the wire prefix survive each change', () => {
+    const epoch = new ForegroundEpoch();
+    const records = source();
+    const first = epoch.prepare(records, { ...options, adaptiveMaxHistoryTokens: 300 });
+    expect(first.maxHistoryTokens).toBe(300);
+    const fresh = [...action('response'), frame('minecraft', 'minecraft.chat', '请继续原来的目标。', 30)];
+    const next = epoch.prepare([...records, ...fresh], { ...options, adaptiveMaxHistoryTokens: 600 });
+    expect(next.rebuilt).toBe(false);
+    expect(next.maxHistoryTokens).toBe(first.maxHistoryTokens);
+    expect(wire(next.messages).slice(0, first.messages.length)).toEqual(wire(first.messages));
+    for (const record of fresh) expect(next.messages).toContainEqual(record);
+    const large = frame('minecraft', 'minecraft.chat', '新输入需要完整保留。'.repeat(1000), 31);
+    const rotated = epoch.prepare([...records, ...fresh, large], { ...options, adaptiveMaxHistoryTokens: 600 });
+    expect(rotated.rebuildReason).toBe('history_budget');
+    expect(rotated.maxHistoryTokens).toBe(600);
+    expect(rotated.messages).toContainEqual(large);
+    expect(validatePairing(rotated.messages)).toEqual([]);
+    const configured = epoch.prepare([...records, ...fresh, large], {
+      ...options, maxHistoryTokens: 700, adaptiveMaxHistoryTokens: 300,
+    });
+    expect(configured.rebuildReason).toBe('options_changed');
+    expect(configured.maxHistoryTokens).toBe(300);
+  });
+
   it('历史达到轮换阈值才重建，完整保留这次所有新输入批与多调用，不受软预算截断', () => {
     const epoch = new ForegroundEpoch();
     const records = source();
@@ -339,6 +363,7 @@ describe('前台上下文缓存epoch', () => {
     const records = source();
     const initial = epoch.prepare(records, options);
     expect(() => epoch.prepare(records, { ...options, maxHistoryTokens: Number.NaN })).toThrow(RangeError);
+    expect(() => epoch.prepare(records, { ...options, adaptiveMaxHistoryTokens: 0 })).toThrow(RangeError);
     expect(epoch.prepare(records, options).epoch).toBe(initial.epoch);
   });
 });

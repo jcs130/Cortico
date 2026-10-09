@@ -103,11 +103,11 @@ export class ForegroundAdviser {
       sampledAt: new Date(started).toISOString(),
       observations: scene.events.filter(event => event.contextDelivery !== 'archive-only'
         && !(event.source === 'persona' && event.type === 'notice')).slice(-3)
-        .map(event => ({ source: event.source, type: event.type, cursor: event.cursor, at: event.ts, text: excerpt(event.text, 360) })),
-      facts: scene.facts.slice(0, 2).map(fact => ({ source: fact.source, text: excerpt(fact.text, 700) })),
-      agenda: excerpt(scene.agenda, 450),
-      recentRequest: scene.intent ? { ...scene.intent, arguments: excerpt(scene.intent.arguments, 240),
-        receipt: excerpt(scene.intent.receipt ?? '', 400) } : null,
+        .map(event => ({ source: event.source, type: event.type, cursor: event.cursor, at: event.ts, text: excerpt(event.text, 200) })),
+      facts: scene.facts.slice(0, 2).map(fact => ({ source: fact.source, text: excerpt(fact.text, 300) })),
+      agenda: excerpt(scene.agenda, 240),
+      recentRequest: scene.intent ? { ...scene.intent, arguments: excerpt(scene.intent.arguments, 140),
+        receipt: excerpt(scene.intent.receipt ?? '', 240) } : null,
       queueTail: opportunity?.meta?.minecraftQueueTail ?? null,
       boundary: '状态、目标、新用户输入、完整最新调用与失败回执始终保留。只选择额外历史的阅读量；继续执行不等于完成。',
     };

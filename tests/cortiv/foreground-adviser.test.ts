@@ -88,11 +88,22 @@ describe('foreground reading and timing fallback', () => {
       body = String(init?.body); return new Response(JSON.stringify(answer()));
     });
     const adviser = new ForegroundAdviser(config, fetcher as typeof fetch, () => now);
-    const input = scene(Array.from({ length: 100 }, () => tail({ text: '很长的观察'.repeat(10000) })));
-    input.facts[0].text = '很长的事实'.repeat(10000);
-    input.agenda = '很长的日程'.repeat(10000);
+    const long = (head: string, end: string) => head + '中间的较旧细节'.repeat(10000) + end;
+    const input = scene(Array.from({ length: 100 }, () => tail({ text: long('仍在执行', '尚未抵达') })));
+    input.facts[0].text = long('观测来源及当前位置', '生命下降，下一步需核验');
+    input.facts.push({ source: 'other', text: long('同伴在线', '对方尚未回应') });
+    input.agenda = long('目标是归还装备', '尚未完成');
+    input.intent.arguments = long('目的地', '不能替换队列');
+    input.intent.receipt = long('受理时间', '终态失败，装备仍在自己身上');
     await adviser.advise(input);
-    expect(body.length).toBeLessThan(4500);
+    expect(body.length).toBeLessThan(3100);
+    const request = JSON.parse(body);
+    expect(request.state.observations).toHaveLength(3);
+    expect(request.state.observations[0]).toMatchObject({ source: 'game', type: 'game.task.queue', cursor: 42,
+      at: tail().ts });
+    for (const value of ['仍在执行', '尚未抵达', '观测来源及当前位置', '生命下降', '同伴在线', '对方尚未回应',
+      '目标是归还装备', '尚未完成', '目的地', '不能替换队列', '受理时间', '终态失败，装备仍在自己身上']) expect(body).toContain(value);
+    expect(request.state.queueTail).toEqual(tail().meta!.minecraftQueueTail);
     expect((await adviser.advise(input)).kind).toBe('cooldown');
     expect(fetcher).toHaveBeenCalledTimes(1);
   });

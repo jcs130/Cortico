@@ -8,6 +8,8 @@ import { projectForeground, type ForegroundProjection } from './foreground-conte
 
 export interface ForegroundEpochOptions {
   maxHistoryTokens: number;
+  /** Automatic reading advice takes effect at the next compaction; configured budgets still rebuild immediately. */
+  adaptiveMaxHistoryTokens?: number;
   minRecentRounds: number;
   /** Current pins form a replaceable suffix; append retains the legacy replay policy. */
   pinMode?: 'append' | 'current';
@@ -28,6 +30,8 @@ export type ForegroundEpochReason = 'initial' | 'reset' | 'source_changed' | 'op
   | 'handoff' | 'history_budget' | 'pairing' | 'append' | 'unchanged';
 
 export interface ForegroundEpochProjection extends ForegroundProjection {
+  /** History budget used when building this epoch. */
+  maxHistoryTokens: number;
   epoch: number;
   rebuilt: boolean;
   rebuildReason: ForegroundEpochReason;
@@ -38,6 +42,7 @@ export interface ForegroundEpochProjection extends ForegroundProjection {
 }
 
 interface EpochState {
+  maxHistoryTokens: number;
   source: string[];
   optionsKey: string;
   activePins: Set<string>;
@@ -96,6 +101,7 @@ function pinFingerprint(record: ContextRecord): string {
 function optionsKey(options: ForegroundEpochOptions, notice?: ContextRecord): string {
   return fingerprint({
     maxHistoryTokens: options.maxHistoryTokens,
+    adaptive: options.adaptiveMaxHistoryTokens !== undefined,
     minRecentRounds: options.minRecentRounds,
     pinMode: options.pinMode ?? 'append',
     coveredSnapshots: [...new Set((options.coveredSnapshots ?? [])
@@ -146,6 +152,8 @@ export class ForegroundEpoch {
     pins: readonly ContextRecord[] = [], notice?: ContextRecord,
   ): ForegroundEpochProjection {
     if (!Number.isFinite(options.maxHistoryTokens) || options.maxHistoryTokens <= 0
+      || (options.adaptiveMaxHistoryTokens !== undefined
+        && (!Number.isFinite(options.adaptiveMaxHistoryTokens) || options.adaptiveMaxHistoryTokens <= 0))
       || !Number.isFinite(options.minRecentRounds) || options.minRecentRounds < 0) {
       throw new RangeError('Foreground epoch requires a positive history budget and nonnegative recent rounds.');
     }
@@ -173,7 +181,8 @@ export class ForegroundEpoch {
     }
 
     if (previous && reason === 'unchanged') {
-      const appended = [...this.prepareAppend(delta, options), ...(currentPins ? [] : changedPins)];
+      const appended = [...this.prepareAppend(delta, { ...options, maxHistoryTokens: previous.maxHistoryTokens }),
+        ...(currentPins ? [] : changedPins)];
       const base = [...previous.base, ...appended];
       const next = currentPins ? [...base, ...tailPins] : base;
       const tokens = historyTokens(next);
@@ -196,7 +205,8 @@ export class ForegroundEpoch {
     // Rotation must not discard newly delivered or rewritten records, even when a prefix/body edit
     // makes the source cease to be an extension. Identity includes content, not only generated IDs.
     // The projector retains these by original identity and closes their complete response/tool group.
-    const candidate = this.project(records, options, [...supplied.records, ...introduced]);
+    const maxHistoryTokens = options.adaptiveMaxHistoryTokens ?? options.maxHistoryTokens;
+    const candidate = this.project(records, { ...options, maxHistoryTokens }, [...supplied.records, ...introduced]);
     const externalPins = new Set(external.map(fingerprint));
     const base = fixPairing(currentPins
       ? candidate.messages.filter(record => !externalPins.has(fingerprint(record))) : candidate.messages);
@@ -217,12 +227,12 @@ export class ForegroundEpoch {
     this.epoch++;
     this.resetPending = false;
     this.current = {
-      source, optionsKey: key, activePins: supplied.keys, base: structuredClone(base), tail: structuredClone(tailPins),
+      source, optionsKey: key, maxHistoryTokens, activePins: supplied.keys, base: structuredClone(base), tail: structuredClone(tailPins),
       protectedBaseTokens: protectedTokens - (currentPins ? historyTokens(tailPins) : 0),
       view: { ...candidate, messages: structuredClone(messages), historyTokens: tokens,
         protectedTokens, projected: candidate.projected || altered },
       // Mandatory input can already exceed 2x the soft budget; repeated identical cold builds help nobody.
-      rebuildAtHistoryTokens: Math.max(options.maxHistoryTokens * 2, tokens + options.maxHistoryTokens),
+      rebuildAtHistoryTokens: Math.max(maxHistoryTokens * 2, tokens + maxHistoryTokens),
     };
     return this.result(true, reason, 0, 0);
   }
@@ -233,6 +243,7 @@ export class ForegroundEpoch {
     const current = this.current!;
     return {
       ...current.view, messages: structuredClone(current.view.messages), epoch: this.epoch,
+      maxHistoryTokens: current.maxHistoryTokens,
       rebuilt, rebuildReason, appendedRecords, appendedPins,
       rebuildAtHistoryTokens: current.rebuildAtHistoryTokens,
     };
