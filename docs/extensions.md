@@ -35,8 +35,16 @@ World 先在 World 页停用。
 
 扩展更新检查在页面打开及清单刷新时执行。发现新版时显示磁盘版本与 `latest` 版本；
 更新会向 `extensions/` 执行 `pnpm add`，重启进程后加载新版，不需要先卸载。
+详情的历史版本可安装 registry 中仍存在的任一版本，经 check 后 `pnpm add name@version`，重启后生效；配置与 Memory 不随包回退。
 契约不兼容的新版不能更新。
-`link:` 本机扩展不查 npm；registry 查询失败的包显示错误，不算已是最新。
+`link:` 本机扩展不查 npm；registry 查询失败的包显示错误，不算已是最新。错误里带出错的主机和底层错误码
+(例如证书不符时的 `ERR_TLS_CERT_ALTNAME_INVALID`)。
+搜索、详情和检查更新用安装时的 registry:在 `extensions/` 里跑 `pnpm config get registry --ignore-workspace`,
+读 `extensions/` 与用户的 .npmrc、`pnpm_config_registry`,不读外层工作区的配置。改了要重启进程;
+pnpm 读不出地址时这三处都报 pnpm 的错误。
+搜索结果的下载量另问 npm 下载统计 `api.npmjs.org`,不随 registry 配置变:近 30 天、近 7 天,
+以及按 365 天一段往前累加的累计,某段为 0 即停,所以中间有整年无下载的包少计更早的下载。
+单次请求 3 秒没回就缺那一项,卡片显示「—」;近 30 天缺时用搜索端点给的月数。
 磁盘版本与本进程加载版本不同，即使依赖范围没变，扩展仍标为「待重启」。
 
 ## 起步

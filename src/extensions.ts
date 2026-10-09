@@ -42,7 +42,6 @@ export const EXTENSION_PAGE_KIND: Readonly<Record<ExtensionKind, ContributingKin
   provider: 'llm',
   bot: 'persona',
 };
-const NPM_REGISTRY = 'https://registry.npmjs.org';
 
 /** 一个已安装包在本进程启动时的加载结果。 */
 export interface ExtensionRecord {
@@ -387,6 +386,18 @@ function newerVersion(latest: string, installed: string): boolean | null {
   }
   return left.length > right.length;
 }
+/**
+ * 一次失败的请求:`<主机>: <错误> (<cause 的错误码>: <cause 的说明>)`。undici 的错误文本固定是
+ * `fetch failed`,出错的原因(证书不符、连接被拒、超时)只在 cause 里。
+ */
+function fetchFailure(url: string, err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  const cause = err instanceof Error ? err.cause : undefined;
+  const code = (cause as { code?: unknown } | undefined)?.code;
+  const detail = cause instanceof Error ? [typeof code === 'string' ? code : '', cause.message].filter(Boolean).join(': ') : '';
+  return `${new URL(url).host}: ${message}${detail ? ` (${detail})` : ''}`;
+}
+
 /** 本地目录。排除 `%` `!` `"` 与重定向符,其余交给引号。 */
 const LOCAL_PATH = /^[A-Za-z0-9_.\-/:\\ ~]{1,512}$/;
 
@@ -455,6 +466,21 @@ const SEARCH_PAGE_SIZE = 250;
 const SEARCH_MAX_HITS = 1000;
 
 /**
+ * npm 官方的下载统计。镜像 registry 没有这套数,不论安装走哪个 registry 都问这里。
+ * 合批查询一次至多 128 个包、区间至多 365 天,且不收带 scope 的包名;单包查询的区间超过 18 个月会被截短。
+ */
+const DOWNLOADS_API = 'https://api.npmjs.org/downloads/point';
+const DOWNLOADS_BULK_MAX = 128;
+const DOWNLOADS_WINDOW_DAYS = 365;
+/**
+ * 搜索列表要等下载统计回来才出。实测一次统计请求 0.2–0.3 秒;连不上 api.npmjs.org 的机器
+ * (registry 走镜像、npm 主站被挡)会卡到系统的连接超时,三秒没回就不要这一项。
+ */
+const DOWNLOADS_TIMEOUT_MS = 3000;
+/** npm 下载统计的第一天,更早没有数据。 */
+const DOWNLOADS_EPOCH = '2015-01-10';
+
+/**
  * registry 给的仓库地址是 npm 规范化过的 `git+https://….git`:浏览器不认这个 scheme。
  * 收成可点的 https；认不出形状就原样返回，让操作员自己看。
  */
@@ -474,7 +500,8 @@ function urlOf(v: { url?: string } | string | undefined): string | undefined {
 
 /** package.json 的 author,只取名字。 */
 export function packageAuthor(pkg: ExtensionPackageJson): string | undefined {
-  return (typeof pkg.author === 'string' ? pkg.author : pkg.author?.name) || undefined;
+  // the string form is "Name <email> (url)"
+  return (typeof pkg.author === 'string' ? pkg.author.match(/^[^(<]*/)![0].trim() : pkg.author?.name) || undefined;
 }
 
 /** 本机 package.json 里详情页显示的字段,与 npm 包文档同形;不联网就能给出。 */
@@ -482,7 +509,6 @@ export function packageMetadata(pkg: ExtensionPackageJson): Partial<ExtensionPac
   const parsed = parseExtensionManifest(pkg);
   const repository = urlOf(pkg.repository);
   const bugs = urlOf(pkg.bugs);
-  const author = packageAuthor(pkg);
   return {
     ...(parsed.ok && parsed.manifest.displayName ? { displayName: parsed.manifest.displayName } : {}),
     ...(pkg.description ? { description: pkg.description } : {}),
@@ -490,7 +516,6 @@ export function packageMetadata(pkg: ExtensionPackageJson): Partial<ExtensionPac
     ...(pkg.engines?.node ? { engines: pkg.engines.node } : {}),
     dependencies: Object.keys(pkg.dependencies ?? {}),
     ...(pkg.keywords?.length ? { keywords: pkg.keywords } : {}),
-    ...(author ? { publisher: author } : {}),
     links: {
       ...(repository ? { repository: repositoryWebUrl(repository) } : {}),
       ...(pkg.homepage ? { homepage: pkg.homepage } : {}),
@@ -501,6 +526,7 @@ export function packageMetadata(pkg: ExtensionPackageJson): Partial<ExtensionPac
 
 export interface ExtensionManagerOptions {
   run?: PackageManagerRunner;
+  /** 搜索、详情与检查更新用的 registry;缺省取 pnpm 安装时用的那个(`pnpm config get registry`)。 */
   registry?: string;
   fetchJson?: (url: string) => Promise<unknown>;
   /** 随框架提供的 World 与 provider,与已装的包列在一起;不能卸载。 */
@@ -513,7 +539,8 @@ export interface ExtensionManagerOptions {
 export class ExtensionManager {
   private readonly dir: string;
   private readonly run: PackageManagerRunner;
-  private readonly registry: string;
+  /** 首次查询 registry 时解析,解析成功后本进程内不再变。 */
+  private registryUrl: Promise<string> | null;
   private readonly fetchJson: (url: string) => Promise<unknown>;
   private busy = false;
   private readonly builtins?: (language: Language) => ExtensionInfo[];
@@ -528,12 +555,41 @@ export class ExtensionManager {
     this.run = opts.run ?? runPnpm;
     this.builtins = opts.builtins;
     this.decorate = opts.decorate;
-    this.registry = (opts.registry ?? NPM_REGISTRY).replace(/\/$/, '');
+    this.registryUrl = opts.registry ? Promise.resolve(opts.registry.replace(/\/$/, '')) : null;
     this.fetchJson = opts.fetchJson ?? (async (url) => {
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      let res: Response;
+      try { res = await fetch(url); } catch (err) { throw new Error(fetchFailure(url, err)); }
+      if (!res.ok) throw new Error(`${new URL(url).host}: ${res.status} ${res.statusText}`);
       return res.json();
     });
+  }
+
+  /**
+   * 安装走的 registry:和 `pnpm add` 同样在 extensions/ 里带 `--ignore-workspace` 跑
+   * `pnpm config get registry`,读的是 extensions/ 与用户的 .npmrc、`pnpm_config_registry`,没配时是 npm 官方的。
+   * pnpm 失败或没给出地址时抛出它的退出码与输出,下次查询再问。改了配置要重启进程。
+   */
+  private registry(): Promise<string> {
+    if (this.registryUrl) return this.registryUrl;
+    const args = ['config', 'get', 'registry', '--ignore-workspace'];
+    const pending = this.run(args, this.prepareDir()).then(({ code, output }) => {
+      const url = code === 0 ? output.split(/\r?\n/).map((line) => line.trim()).reverse().find((line) => /^https?:\/\/\S+$/.test(line)) : undefined;
+      if (!url) throw new Error(`读不到 pnpm 的 registry 配置(pnpm ${args.join(' ')} 退出码 ${code}):\n${output.trim().split('\n').slice(-20).join('\n')}`);
+      return url.replace(/\/$/, '');
+    });
+    pending.catch(() => { if (this.registryUrl === pending) this.registryUrl = null; });
+    this.registryUrl = pending;
+    return pending;
+  }
+
+  /** extensions/ 和其中的 package.json,pnpm 以它为项目目录;返回目录。 */
+  private prepareDir(): string {
+    if (!existsSync(this.dir)) mkdirSync(this.dir, { recursive: true });
+    const pkgFile = join(this.dir, 'package.json');
+    if (!existsSync(pkgFile)) {
+      writeFileSync(pkgFile, JSON.stringify({ name: 'cortico-extensions', private: true, dependencies: {} }, null, 2) + '\n', 'utf8');
+    }
+    return this.dir;
   }
 
   /** 已加载扩展的浏览器端产物。服务端据此把页 id 映到 URL 并只发这几个文件。 */
@@ -638,9 +694,10 @@ export class ExtensionManager {
     const installed = new Set(readInstalled(this.dir).map((p) => p.name));
     const hits: ExtensionSearchHit[] = [];
     const seen = new Set<string>();
+    const registry = await this.registry();
     for (let from = 0; from < SEARCH_MAX_HITS; from += SEARCH_PAGE_SIZE) {
       const text = encodeURIComponent(`keywords:${keyword}`);
-      const url = `${this.registry}/-/v1/search?text=${text}&size=${SEARCH_PAGE_SIZE}&from=${from}`;
+      const url = `${registry}/-/v1/search?text=${text}&size=${SEARCH_PAGE_SIZE}&from=${from}`;
       const data = (await this.fetchJson(url)) as RegistrySearchResponse;
       const objects = data.objects ?? [];
       for (const obj of objects) {
@@ -658,7 +715,7 @@ export class ExtensionManager {
           ...(p.publisher?.username ? { publisher: p.publisher.username } : {}),
           ...(p.license ? { license: p.license } : {}),
           ...(p.keywords?.length ? { keywords: p.keywords } : {}),
-          downloads: obj.downloads?.monthly ?? 0,
+          downloads: { month: obj.downloads?.monthly ?? 0 },
           dependents: Number(obj.dependents) || 0,
           links: {
             ...(p.links?.npm ? { npm: p.links.npm } : {}),
@@ -671,7 +728,61 @@ export class ExtensionManager {
       if (objects.length < SEARCH_PAGE_SIZE) break;
       if (from + SEARCH_PAGE_SIZE >= SEARCH_MAX_HITS) this.partialSearch.set(kind, true);
     }
+    const stats = await this.downloadStats(hits.map((hit) => hit.name));
+    for (const hit of hits) Object.assign(hit.downloads, stats.get(hit.name));
     return hits;
+  }
+
+  /**
+   * 向 npm 下载统计问每个包的近 7 天、近 30 天与累计下载量。不带 scope 的合批问,带 scope 的逐个问。
+   * 累计按 365 天一段往前加,一个包某段为 0 就不再往前问;中间有整年无下载的包因此少计更早的下载。
+   * 某次请求失败,涉及的包就缺那一项;统计接口整个不可达时返回空表,列表照常出。
+   */
+  private async downloadStats(names: string[]): Promise<Map<string, Partial<ExtensionSearchHit['downloads']>>> {
+    const point = async (period: string, batch: string[]): Promise<Map<string, number>> => {
+      const plain = batch.filter((name) => !name.startsWith('@'));
+      const groups = [
+        ...Array.from({ length: Math.ceil(plain.length / DOWNLOADS_BULK_MAX) }, (_, i) => plain.slice(i * DOWNLOADS_BULK_MAX, (i + 1) * DOWNLOADS_BULK_MAX)),
+        ...batch.filter((name) => name.startsWith('@')).map((name) => [name]),
+      ];
+      const counts = new Map<string, number>();
+      await Promise.all(groups.map(async (group) => {
+        let data: unknown;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), DOWNLOADS_TIMEOUT_MS); });
+        try { data = await Promise.race([this.fetchJson(`${DOWNLOADS_API}/${period}/${group.join(',')}`), late]); } catch { return; } finally { clearTimeout(timer); }
+        // 只问一个包时回的是那个包本身,问多个时按包名分开回,没有数据的包是 null
+        const entries = group.length === 1 ? { [group[0]!]: data } : (data ?? {}) as Record<string, unknown>;
+        for (const name of group) {
+          const n = (entries[name] as { downloads?: unknown } | null | undefined)?.downloads;
+          if (typeof n === 'number') counts.set(name, n);
+        }
+      }));
+      return counts;
+    };
+    const day = (date: Date) => date.toISOString().slice(0, 10);
+    const [week, month, total] = await Promise.all([point('last-week', names), point('last-month', names), (async () => {
+      const sums = new Map<string, number>();
+      let pending = names;
+      for (let end = new Date(); pending.length && day(end) >= DOWNLOADS_EPOCH;) {
+        const start = new Date(end.getTime() - (DOWNLOADS_WINDOW_DAYS - 1) * 86_400_000);
+        const from = day(start) < DOWNLOADS_EPOCH ? DOWNLOADS_EPOCH : day(start);
+        const counts = await point(`${from}:${day(end)}`, pending);
+        // 有一段没问到,这个包的累计就不完整,整项不报
+        for (const name of pending) {
+          const n = counts.get(name);
+          if (n === undefined) sums.delete(name); else sums.set(name, (sums.get(name) ?? 0) + n);
+        }
+        pending = pending.filter((name) => (counts.get(name) ?? 0) > 0);
+        end = new Date(start.getTime() - 86_400_000);
+      }
+      return sums;
+    })()]);
+    return new Map(names.map((name) => [name, {
+      ...(week.has(name) ? { week: week.get(name) } : {}),
+      ...(month.has(name) ? { month: month.get(name) } : {}),
+      ...(total.has(name) ? { total: total.get(name) } : {}),
+    }]));
   }
 
   /**
@@ -681,20 +792,20 @@ export class ExtensionManager {
    */
   async packageInfo(name: string, version?: string): Promise<ExtensionPackageDetail> {
     if (!PACKAGE_NAME.test(name)) throw new Error(`不是合法的 npm 包名: ${name}`);
-    const doc = (await this.fetchJson(`${this.registry}/${name.replace('/', '%2F')}`)) as RegistryPackument;
+    const doc = (await this.fetchJson(`${await this.registry()}/${name.replace('/', '%2F')}`)) as RegistryPackument;
     const latest = version ? doc['dist-tags']?.[version] ?? version : doc['dist-tags']?.latest;
     const v = latest ? doc.versions?.[latest] : undefined;
     if (!latest || !v) throw new Error(`registry 没有给出 ${name} 的 ${version ?? 'latest'} 版本`);
 
     const parsed = parseExtensionManifest(v);
-    const times = Object.entries(doc.time ?? {}).filter(([k]) => k !== 'created' && k !== 'modified');
+    const times = Object.keys(doc.versions ?? {}).map((version) => [version, doc.time?.[version] ?? ''] as const);
     const history = times
       .sort((a, b) => (a[1] < b[1] ? 1 : -1))
-      .slice(0, 6)
       .map(([version, date]) => ({ version, date }));
     const spec = readInstalled(this.dir).find((p) => p.name === name)?.spec;
     const repository = urlOf(v.repository);
     const bugs = urlOf(v.bugs);
+    const author = packageAuthor(v);
 
     return {
       name,
@@ -717,6 +828,7 @@ export class ExtensionManager {
       ...(v.dist?.fileCount ? { fileCount: v.dist.fileCount } : {}),
       dependencies: Object.keys(v.dependencies ?? {}),
       maintainers: (v.maintainers ?? []).map((m) => m.username ?? m.name ?? '').filter(Boolean),
+      ...(author ? { author } : {}),
       ...(v._npmUser?.name ? { publisher: v._npmUser.name } : {}),
       links: {
         npm: `https://www.npmjs.com/package/${name}`,
@@ -752,11 +864,7 @@ export class ExtensionManager {
 
   async install(target: ExtensionInstallTarget): Promise<string> {
     const spec = this.installSpec(target);
-    if (!existsSync(this.dir)) mkdirSync(this.dir, { recursive: true });
-    const pkgFile = join(this.dir, 'package.json');
-    if (!existsSync(pkgFile)) {
-      writeFileSync(pkgFile, JSON.stringify({ name: 'cortico-extensions', private: true, dependencies: {} }, null, 2) + '\n', 'utf8');
-    }
+    this.prepareDir();
     const output = await this.exclusive(['add', spec, '--ignore-workspace']);
     return `已安装 ${spec}。重启进程后加载。\n${output}`;
   }

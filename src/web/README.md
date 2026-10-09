@@ -38,6 +38,7 @@ manifest 的 `CONSOLE_PROTOCOL_VERSION` 不匹配时，浏览器拒绝加载。
 | `/api/console/lamps` | 状态灯。 |
 | `/api/extensions` | 扩展目录、各扩展状态、作者与本机包元数据;随框架提供的 World 与供应商列在最后。 |
 | `/api/extensions/updates` | 已安装 npm 扩展的可用新版本及逐包检查错误。 |
+| `/api/extensions/package` | 指定包版本的详情;作者 `author` 与 npm 发布者 `publisher` 分开给出。 |
 | `/api/extensions/icon` | 已装包声明的图标文件;没有时 404。SVG 带禁脚本的 CSP。 |
 | `/api/extensions/check` | 安装前只读 manifest 的检查;`kind` 给了就要求类别一致。 |
 | `/api/run/lifecycle` | 本进程的 bootId、部署摘要与是否就绪;控制台据此认出重启后的新进程。 |
@@ -46,8 +47,11 @@ manifest 的 `CONSOLE_PROTOCOL_VERSION` 不匹配时，浏览器拒绝加载。
 
 ## 服务端
 
+经 `server.ts` 里 `wrap` 注册的路由，handler 抛错或返回的 promise 被拒绝时，服务端记一条 `API错误 <路径>` 的 error 日志并回 500,
+body 为 `{ error }`;已开始回应的请求只记日志。
+
 `GET /api/framework/release` 返回 `package.json` 的版本；GitHub 最新正式 Release 更高时带上它的版本与链接，
-查询失败返回错误。
+查询失败回 500。
 
 `WebApp` 默认监听 `127.0.0.1`，支持由依赖配置指定监听地址。从首选端口起最多尝试五个端口；
 端口为 0 时仅申请一次系统分配。WebSocket 使用 `noServer` 分派 `/ws/debug`、`/ws/sessions` 和面板流。

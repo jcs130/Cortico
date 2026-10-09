@@ -228,8 +228,11 @@ export interface ExtensionSearchHit {
   publisher?: string;
   license?: string;
   keywords?: string[];
-  /** 月下载量 */
-  downloads: number;
+  /**
+   * npm 的下载量,所有版本合计。`month` 是近 30 天,`week` 是近 7 天,`total` 是往前逐年累加到某年为 0 为止。
+   * npm 下载统计接口没答上来时只有搜索端点给的 `month`。
+   */
+  downloads: { total?: number; month: number; week?: number };
   /** npm 上依赖这个包的包数 */
   dependents: number;
   links: { npm?: string; repository?: string; homepage?: string };
@@ -258,7 +261,7 @@ export interface ExtensionPackageDetail {
   /** 这个包第一次发布的时间 */
   created?: string;
   versionCount: number;
-  /** 最近几个版本,新的在前 */
+  /** registry 包文档 versions 里的全部版本,按发布时间新的在前 */
   history: Array<{ version: string; date: string }>;
   /** npm 上标了 deprecated 时是那句话 */
   deprecated?: string;
@@ -275,6 +278,9 @@ export interface ExtensionPackageDetail {
   fileCount?: number;
   dependencies: string[];
   maintainers: string[];
+  /** package.json 的 author,只取名字。 */
+  author?: string;
+  /** npm registry 的 _npmUser.name。 */
   publisher?: string;
   /** npm 页面只在包文档里有;本机 package.json 给出的详情没有它 */
   links: { npm?: string; repository?: string; homepage?: string; bugs?: string };
@@ -1392,12 +1398,16 @@ export class WebApp {
       res.status(403).json({ error: '跨站请求被拒绝' });
     });
 
-    const wrap = (h: (req: Request, res: Response) => void) => (req: Request, res: Response) => {
-      try {
-        h(req, res);
-      } catch (err) {
+    // Express 4 不接 handler 返回的 promise;async handler 的拒绝与同步异常一样记日志、回 500。
+    const wrap = (h: (req: Request, res: Response) => void | Promise<void>) => (req: Request, res: Response) => {
+      const fail = (err: unknown) => {
         this.deps.log.error(`API错误 ${req.path}`, { error: String(err) });
         if (!res.headersSent) res.status(500).json({ error: String(err) });
+      };
+      try {
+        void Promise.resolve(h(req, res)).catch(fail);
+      } catch (err) {
+        fail(err);
       }
     };
     // 登录、登出与状态三条路由在闸前;其余路由连同各自的 body 解析都在闸后。
@@ -1845,7 +1855,9 @@ export class WebApp {
         this.deps.log.warn('扩展已安装(重启后加载)', { target });
         res.json({ ok: true, result, restartRequired: true });
       } catch (err) {
-        res.status(400).json({ error: String(err instanceof Error ? err.message : err) });
+        const error = err instanceof Error ? err.message : String(err);
+        this.deps.log.error('扩展安装失败', { target, error });
+        res.status(400).json({ error });
       }
     }));
 
@@ -1860,7 +1872,9 @@ export class WebApp {
         this.deps.log.warn('扩展已卸载(重启后消失)', { name });
         res.json({ ok: true, result, restartRequired: true });
       } catch (err) {
-        res.status(400).json({ error: String(err instanceof Error ? err.message : err) });
+        const error = err instanceof Error ? err.message : String(err);
+        this.deps.log.error('扩展卸载失败', { name, error });
+        res.status(400).json({ error });
       }
     }));
 
