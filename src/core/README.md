@@ -75,6 +75,8 @@ piggyback 只入队，随后续唤醒一起投递。
 一批正文归档后，Core 调用 `Persona.onDelivery` 并等待它返回的 Promise,不设期限。完成前
 `injectInternal` 的内容排在这批的内部行末尾、外部正文之前;完成后的注入进入总线。
 
+批次已写入会话后，可选的 `Persona.beforeDecision({events,messages})` 决定是否立即响应。只有返回false才延后这次模型调用；记录和投递水位照常保留，跳过自动批末交接检查。Persona 负责后续唤醒与期限；Core 不解释延后原因。等待钩子时到达的新唤醒覆盖延后，钩子异常照常响应。该钩子不停止工具或 World。
+
 模型请求经过可选的 `Persona.prepareRequest` 同步钩子。该视图只用于本轮模型调用；持久 Session、投递水位、
 交接和 fork 快照保留完整记录。投影视图的上游用量记入 `lastUsage`，不作为完整 Session 的 token 计数 anchor。
 轮次日志的 `requestContext` 记录完整与实际请求的条数、是否投影及估算输入量。

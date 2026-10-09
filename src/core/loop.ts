@@ -285,6 +285,8 @@ export class MainLoop {
   private deliveryCollector: EventEnvelope[] | null = null;
   /** 已投递但前面仍有外部缺口的游标；水位只越过连续前缀。 */
   private readonly deliveredCursors = new Set<number>();
+  private lastDeliveryEvents: EventEnvelope[] = [];
+
   /**
    * 已由候选处理函数处理的原始归档位置，包含选中及丢弃项。
    * 未处理的归档项阻止水位越过；该集合不持久化，重启时根据已生成事件的来源引用恢复。
@@ -718,6 +720,7 @@ export class MainLoop {
     this.noteHandled(delivered, generation);
     this.notifySettled(delivered, 'delivered');
     const changed = lines.length > 0 || events.length > 0;
+    this.lastDeliveryEvents = delivered;
     if (changed) this.batchesHandled++;
     return changed;
   }
@@ -1030,13 +1033,31 @@ export class MainLoop {
           const changed = await this.deliverBatch(batch, generation);
           if (!this.active(generation)) break;
           if (changed) {
-            await this.rounds(generation);
+            let respond = true;
+            if (persona.beforeDecision) {
+              try {
+                respond = (await persona.beforeDecision({ events: this.lastDeliveryEvents,
+                  messages: this.d.session.records })) !== false;
+              } catch (error) { log.warn('beforeDecision failed; responding to delivered input', { error: String(error) }); }
+              if (!this.active(generation)) break;
+              const ready = bus.takeIfReady();
+              if (ready) {
+                await this.deliverBatch(ready, generation);
+                respond = true;
+              } else if (bus.pendingImmediate() > 0) respond = true;
+            }
+            if (respond) await this.rounds(generation);
+            else {
+              this.roundsLastBatch = 0;
+              log.emit('debug', 'Persona deferred response to delivered batch', { event: 'decision-deferred',
+                data: { cursors: this.lastDeliveryEvents.map(event => event.cursor) } });
+            }
             if (!this.active(generation)) break;
             this.enterPhase('idle');
             // 先执行本批登记的交接请求，再运行批末钩子与容量检查。
             await this.flushRequestedHandoff(generation);
             if (!this.active(generation)) break;
-            await this.batchEndCheck(generation);
+            if (respond) await this.batchEndCheck(generation);
             if (!this.active(generation)) break;
           } else {
             this.enterPhase('idle');

@@ -1025,6 +1025,12 @@ export interface Persona {
    */
   onDelivery?(ctx: { events: EventEnvelope[] }): void | Promise<void>;
   /**
+   * A delivered batch is already in the session. Returning false defers its model response;
+   * records and delivery watermarks remain intact. Persona owns resumption and any deadline.
+   * New waking input overrides false. Errors continue with a normal response.
+   */
+  beforeDecision?(ctx: { events: readonly EventEnvelope[]; messages: readonly ContextRecord[] }): boolean | Promise<boolean>;
+  /**
    * 工具 handler 正常返回结果（包括失败回执）并记录后同步调用，主会话与 fork 均提供发起的 role。
    * 返回非空文本时追加到原回执正文；不改 failed/endsTurn/附件或工具日志。
    * 钩子不得等待网络；异常只记告警，原回执照常保存。
