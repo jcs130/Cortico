@@ -2200,7 +2200,10 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
     name: 'mc_script',
     tags: ['act'],
     description: 'Run an agent-authored JavaScript async function body with params and a restricted mc SDK. '
-      + 'mc.state() returns fresh snapshot, flight permission, queue and combat observations. '
+      + 'mc.state() returns {sampledAt,connectionGeneration,snapshot,flight,queue,combatActive,combat,method}. '
+      + 'Read position, dimension, health, food, inventory and equipment under snapshot, which can be null. '
+      + 'snapshot.entities is a bounded array of {entityId?,name,kind,distance,direction,dy,visible}; snapshot.entitiesOmitted reports truncation. '
+      + 'snapshot.blocksScanned is false here; empty nearbyBlocks/terrain do not establish water depth or traversability. Missing fields are unknown observations. '
       + 'await mc.do(steps) submits one ordered group to the normal executor and waits for its actual terminal result: accepted, taskId, kind, done, receipt, steps and fresh state. '
       + 'A sent server command still needs observed effects; done is the executor result, not proof of an external quest. '
       + 'await mc.flightPlan(args) uses the same read-only geometry/budget contract as mc_flight_plan. '
@@ -2210,6 +2213,7 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
       + 'Only one program runs at a time. New admitted body work, stop, death, disconnect, World stop or timeout revoke it and its own pending task. '
       + 'Returns a run id immediately; {runId} reads result and call summaries, {runId,call} expands one complete SDK call; {} lists the last eight run summaries, {stop:true} cancels the current run. '
       + '{validate:true,name,code} checks syntax without running any action. Program completion does not certify a learned method. '
+      + 'Expand an SDK call to inspect its actual fields before interpreting results; compare the returned observations with the method objective before saving verified claims. '
       + 'Store source, conditions, version/hash and verified before/after evidence in your own workspace; read relevant methods on demand.',
     parameters: { type: 'object', properties: {
       name: { type: 'string', minLength: 1, maxLength: 80 },
