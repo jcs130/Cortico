@@ -517,20 +517,76 @@ describe('战斗会话:进入(夺手不夺嘴)', () => {
     expect(busy.session.onHurtBy(7, 'zombie')).toBe(false);
   });
 
-  /**
-   * 任务正在逃跑时，3 格圈不主动夺手；受击仍可还手，结束后从断点继续逃跑。
-   */
-  it('任务在逃时:3 格圈不主动进场,但被打照样还手', async () => {
+  it('任务逃生期间，巡检与受击都保留正在执行的路线', async () => {
     const near = combatRigBot([foe(7, 'cave_spider', 2.2)]);
     const a = rig(near.bot);
     a.setTaskEscaping(true);
     a.session.start();
     await sleep(600);
     expect(a.session.active).toBe(false); // 不趁逃跑抢场
-    expect(a.session.onHurtBy(7, 'cave_spider')).toBe(true); // 挨打了就还手
-    expect(a.session.active).toBe(true);
-    expect(a.calls.suspended).toBe(1); // 逃跑任务挂起,打完接着逃
+    expect(a.session.onHurtBy(7, 'cave_spider')).toBe(true);
+    expect(a.session.active).toBe(false);
+    expect(a.calls.suspended).toBe(0);
     a.session.stop();
+  });
+
+  it.each([5, 20])('真实逃跑任务生命=%s：连续受击后仍到达，后续任务只执行一次', async (health) => {
+    const { bot, attacks } = combatRigBot([foe(7, 'skeleton', 2.2)]);
+    const native = bot as unknown as Bot;
+    const said: string[] = [];
+    const reports: TaskReport[] = [];
+    let arrive: (() => void) | undefined;
+    let destination: Vec3 | undefined;
+    Object.assign(bot, { health, food: 16, game: { dimension: 'overworld' },
+      chat: (text: string) => said.push(text) });
+    Object.assign(native.pathfinder, {
+      movements: { canDig: true, scafoldingBlocks: [1] },
+      goto: async (goal: { x: number; z: number }) => {
+        destination = new Vec3(goal.x, 64, goal.z);
+        await new Promise<void>((resolve) => { arrive = resolve; });
+      },
+    });
+    let id = 0;
+    let exec: Executor;
+    const session = new CombatSession({
+      getBot: () => native,
+      tuning: () => ({ enabled: true, engageRadius: 3, chaseMax: 6, maxSec: 30, space: 2.6,
+        busyRatio: 60, cooldownSec: 60, fleeHealth: 10, fight: 'auto' }),
+      envBusy: () => false,
+      taskEscaping: () => exec?.escaping ?? false,
+      suspendTasks: (reason) => exec.suspend(reason),
+      resumeTasks: () => exec.resume(), emit: () => {}, log,
+    });
+    exec = new Executor({ getBot: () => native, report: (r) => reports.push(r), log, nextId: () => ++id,
+      busyWith: () => session.active ? '正在跟怪打' : null,
+      stopCombat: (first) => session.standDown(first) });
+    try {
+      exec.submit([{ skill: 'flee', distance: 24 }, { skill: 'chat', text: '撤退后的待办' }]);
+      await waitUntil(() => exec.escaping && arrive !== undefined);
+      session.start();
+      for (let i = 0; i < 5; i++) {
+        expect(session.onHurtBy(7, 'skeleton')).toBe(true);
+        await drive(native, 200);
+        expect(session.active).toBe(false);
+        expect(exec.escaping).toBe(true);
+        expect(reports).toEqual([]);
+      }
+      expect(attacks).toEqual([]);
+      expect(said).toEqual([]);
+      native.entity.position = destination!;
+      arrive!();
+      await waitUntil(() => reports.length === 1);
+      expect(reports[0].kind).toBe('done');
+      expect(said).toEqual(['撤退后的待办']);
+      expect(exec.escaping).toBe(false);
+      expect(native.pathfinder.movements.canDig).toBe(true);
+      (native.entities[7] as { isValid: boolean }).isValid = false;
+      await drive(native, 300);
+      expect(session.active).toBe(false);
+    } finally {
+      session.stop();
+      exec.shutdown();
+    }
   });
 
   it('头在水里不接手:水下近战交回 surface/防溺水那条线', () => {

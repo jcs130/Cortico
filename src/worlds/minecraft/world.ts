@@ -3967,8 +3967,7 @@ export class MinecraftWorld implements World {
         fleeHealth: this.cfg.reflex.fleeHealth,
         fight: this.policy.get().fight,
       }),
-      // 环境反射与主动传送占用时禁止战斗接手；任务逃生单走 taskEscaping，
-      // 仅阻止主动进场，受击仍交给 onHurtBy 判定。
+      // 环境自保与任务逃生分别持有身体，战斗不重复接管。
       envBusy: () => (this.reflexes?.envActive ?? false) || Date.now() < this.escapeHoldUntil,
       taskEscaping: () => this.executor?.escaping ?? false,
       taskEating: () => this.executor?.eating ?? false,

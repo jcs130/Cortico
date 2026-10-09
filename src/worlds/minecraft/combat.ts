@@ -189,7 +189,7 @@ export interface CombatTuning {
   fleeHealth: number;
   /**
    * 主动进场的条件(mc_policy 的 `fight`)。只接在 `watchTick` 那一条上:
-   * 不接 `onHurtBy`(挨打一律还手)、不接 E1–E9 任何一道退出闸。
+   * 受击处理与 E1–E9 退出闸独立于此模式。
    */
   fight: FightMode;
 }
@@ -200,8 +200,7 @@ interface CombatSessionOptions {
   /** 环境自保(岩浆/溺水反射/主动传送)正在进行:比战斗优先,期间不进场、进了也让位 */
   envBusy: () => boolean;
   /**
-   * flee/surface/eat 任务正在逃生时，阻止近处敌对触发主动进场；
-   * 受击仍交给 onHurtBy 判定，战斗结束后从断点恢复任务。
+   * 逃生任务持有身体期间，巡检与受击均不另起战斗。
    */
   taskEscaping?: () => boolean;
   /** 已开始的进食占用主手；受击不另起战斗打断消费。 */
@@ -464,7 +463,7 @@ export class CombatSession {
   }
 
   /**
-   * 反射层受击时转进来。返回 true = 会话接手(反射不再自己抡);
+   * 反射层受击时转进来。返回 true = 会话或逃生任务处理(反射不再自己抡);
    * false = 会话进不了场(关着/冷却/环境自保中),退回反射的降级行为。
    */
   onHurtBy(attackerId: number, name: string): boolean {
@@ -486,6 +485,14 @@ export class CombatSession {
       this.provoked.add(attackerId);
       this.opts.diag?.write({ lane: 'combat', event: 'hurt-during-eat',
         msg: '进食仍持有主手，受击未另起战斗', data: { attackerId, name, health: this.opts.getBot()?.health } });
+      return true;
+    }
+    if (this.opts.taskEscaping?.()) {
+      this.provoked.add(attackerId);
+      const bot = this.opts.getBot();
+      if (bot && (bot.health ?? 20) < t.fleeHealth) this.opts.onLowHealth?.(bot);
+      this.opts.diag?.write({ lane: 'combat', event: 'hurt-during-escape',
+        msg: '逃生任务仍持有身体，受击未另起战斗', data: { attackerId, name, health: bot?.health } });
       return true;
     }
     if (this.opts.envBusy()) return false;
@@ -541,7 +548,7 @@ export class CombatSession {
   private watchTick(): void {
     if (this.state !== 'idle') return;
     const t = this.opts.tuning();
-    // 她正在跑(flee/surface):不趁逃跑抢场——挨了打另说(onHurtBy 不看这道闸)
+    // 逃生与主动攻击各自持有身体，巡检不重复接管。
     if (!t.enabled || this.opts.envBusy() || this.opts.taskEscaping?.() || this.opts.taskFighting?.()) return;
     if (t.fight === 'off') return;
     if (!t.arena && Date.now() < this.cooldownUntil) return;
