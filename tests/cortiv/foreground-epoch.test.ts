@@ -25,6 +25,71 @@ function source(): ContextRecord[] {
 function text(records: readonly ContextRecord[]): string { return records.map(({ item }) => itemText(item)).join('\n'); }
 
 describe('前台上下文缓存epoch', () => {
+  it('new source-backed pins occur once in the native request and retain the cached prefix', () => {
+    const epoch = new ForegroundEpoch();
+    const records = [message('system', 'Contract'), message('user', 'Original goal')];
+    const first = epoch.prepare(records, options);
+    const deferred = frame('game', 'task.queue', 'Task is still moving; preserve the route.', 42);
+    const next = epoch.prepare([...records, deferred], options, [deferred]);
+    expect(wire(next.messages).slice(0, first.messages.length)).toEqual(wire(first.messages));
+    expect(next.messages.filter(row => row.item.id === deferred.item.id)).toEqual([deferred]);
+    const input = wire(next.messages);
+    if (!Array.isArray(input)) throw new Error('Expected native input items');
+    const ids = input.map(item => item.id).filter(Boolean);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(next.rebuilt).toBe(false);
+  });
+
+  it('pinning a source record already in the epoch does not replay its ID', () => {
+    const epoch = new ForegroundEpoch();
+    const input = frame('game', 'chat', 'The player asks for help.', 43);
+    const records = [message('system', 'Contract'), input];
+    const first = epoch.prepare(records, options);
+    const next = epoch.prepare(structuredClone(records), options, [structuredClone(input)]);
+    expect(wire(next.messages)).toEqual(wire(first.messages));
+    expect(next.messages.filter(row => row.item.id === input.item.id)).toHaveLength(1);
+  });
+
+  it('cloned source pins refer to the original record during a fresh projection', () => {
+    const epoch = new ForegroundEpoch();
+    const input = frame('game', 'task.queue', 'Keep the actual queue input.', 46);
+    const records = [message('system', 'Contract'), input];
+    const archive = structuredClone(records);
+    const next = epoch.prepare(records, options, [structuredClone(input)]);
+    expect(next.messages.filter(row => row.item.id === input.item.id)).toEqual([input]);
+    expect(records).toEqual(archive);
+  });
+
+  it('an appended protected source input keeps its full body instead of adding a duplicate excerpt', () => {
+    const epoch = new ForegroundEpoch(projectForeground, records => records.map(row => {
+      const copy = structuredClone(row);
+      if (copy.item.type === 'message') copy.item.content = [{ type: 'input_text', text: 'Excerpt only' }];
+      return copy;
+    }));
+    const records = [message('system', 'Contract'), message('user', 'Original goal')];
+    const first = epoch.prepare(records, options);
+    const input = frame('game', 'task.queue', 'Actual movement and failure evidence must survive.', 44);
+    const next = epoch.prepare([...records, input], options, [input]);
+    expect(next.messages.filter(row => row.item.id === input.item.id)).toEqual([input]);
+    expect(wire(next.messages).slice(0, first.messages.length)).toEqual(wire(first.messages));
+  });
+
+  it('protecting an existing excerpt rebuilds with one full source record', () => {
+    const epoch = new ForegroundEpoch(projectForeground, records => records.map(row => {
+      const copy = structuredClone(row);
+      if (copy.item.type === 'message') copy.item.content = [{ type: 'input_text', text: 'Excerpt only' }];
+      return copy;
+    }));
+    const records = [message('system', 'Contract'), message('user', 'Original goal')];
+    epoch.prepare(records, options);
+    const input = frame('game', 'task.queue', 'Actual movement and failure evidence must survive.', 45);
+    epoch.prepare([...records, input], options);
+    const next = epoch.prepare([...records, input], options, [input]);
+    expect(next.rebuilt).toBe(true);
+    expect(next.rebuildReason).toBe('pin_changed');
+    expect(next.messages.filter(row => row.item.id === input.item.id)).toEqual([input]);
+  });
+
   it('current pins replace obsolete state while the historical wire prefix stays stable', () => {
     const epoch = new ForegroundEpoch();
     const cfg = { ...options, pinMode: 'current' as const };

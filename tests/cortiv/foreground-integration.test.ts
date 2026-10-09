@@ -85,6 +85,23 @@ describe('CortiV foreground request context', () => {
     persona.stopRhythm();
   });
 
+  it('a queue input deferred after an established epoch occurs once through failed generations', async () => {
+    const { persona, records, event, frame } = adaptiveRig();
+    persona.prepareRequest({ sessionId: 'main', round: 1, messages: records.slice(0, -1) });
+    expect(await persona.beforeDecision({ events: [event], messages: records })).toBe(false);
+    const archive = structuredClone(records);
+    for (const round of [2, 3]) {
+      const view = persona.prepareRequest({ sessionId: 'main', round, messages: structuredClone(records) })!;
+      expect(view.filter(row => row.item.id === frame.item.id)).toEqual([frame]);
+      const ids = view.map(row => row.item.id).filter(Boolean);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(validatePairing(view)).toEqual([]);
+      persona.onTurnEnded(); // No successful model output; the queue input must stay protected.
+    }
+    expect(records).toEqual(archive);
+    persona.stopRhythm();
+  });
+
   it('deferral has a deadline and new substantive input or shutdown cancels the deadline', async () => {
     vi.useFakeTimers();
     const { persona, records, event, injected } = adaptiveRig();

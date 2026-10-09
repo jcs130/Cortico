@@ -27,7 +27,7 @@ export type ForegroundEpochAppender = (
 ) => ContextRecord[];
 
 export type ForegroundEpochReason = 'initial' | 'reset' | 'source_changed' | 'options_changed'
-  | 'handoff' | 'history_budget' | 'pairing' | 'append' | 'unchanged';
+  | 'handoff' | 'history_budget' | 'pairing' | 'pin_changed' | 'append' | 'unchanged';
 
 export interface ForegroundEpochProjection extends ForegroundProjection {
   /** History budget used when building this epoch. */
@@ -159,8 +159,12 @@ export class ForegroundEpoch {
     }
     const source = records.map(fingerprint);
     const key = optionsKey(options, notice);
-    const supplied = uniquePins(pins);
+    const sourceRecords = new Map(records.map((record, index) => [source[index], record]));
+    // Source-backed pins protect the original record; they are not additional input items.
+    const supplied = uniquePins(pins.map(pin => sourceRecords.get(fingerprint(pin)) ?? pin));
     const sourceSet = new Set(source);
+    const sourcePins = new Map(supplied.records.filter(pin => sourceSet.has(fingerprint(pin)))
+      .flatMap(pin => pin.item.id ? [[pin.item.id, pin] as const] : []));
     const previous = this.current;
     const external = supplied.records.filter(record => !sourceSet.has(fingerprint(record)));
     const oldPins = new Map(previous?.tail.map(record => [pinFingerprint(record), record]) ?? []);
@@ -181,12 +185,23 @@ export class ForegroundEpoch {
     }
 
     if (previous && reason === 'unchanged') {
-      const appended = [...this.prepareAppend(delta, { ...options, maxHistoryTokens: previous.maxHistoryTokens }),
-        ...(currentPins ? [] : changedPins)];
+      const appendedSource = this.prepareAppend(delta, { ...options, maxHistoryTokens: previous.maxHistoryTokens })
+        .map(record => record.item.id ? sourcePins.get(record.item.id) ?? record : record);
+      const retained = new Map([...previous.base, ...appendedSource]
+        .flatMap(record => record.item.id ? [[record.item.id, record] as const] : []));
+      const addedPins = currentPins ? [] : changedPins.filter(pin => !sourceSet.has(fingerprint(pin))
+        || !pin.item.id || !retained.has(pin.item.id));
+      const pinChanged = [...sourcePins].some(([id, pin]) => {
+        const existing = retained.get(id);
+        return existing !== undefined && fingerprint(existing) !== fingerprint(pin);
+      }) || addedPins.some(pin => !!pin.item.id && retained.has(pin.item.id));
+      const appended = [...appendedSource, ...addedPins];
       const base = [...previous.base, ...appended];
       const next = currentPins ? [...base, ...tailPins] : base;
       const tokens = historyTokens(next);
-      if (validatePairing(next).length) reason = 'pairing';
+      // Rebuild an older excerpt when it becomes protected rather than duplicating its native ID.
+      if (pinChanged) reason = 'pin_changed';
+      else if (validatePairing(next).length) reason = 'pairing';
       else if (tokens > previous.rebuildAtHistoryTokens) reason = 'history_budget';
       else {
         this.current = {
