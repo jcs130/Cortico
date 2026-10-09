@@ -22,7 +22,7 @@ const WORN_ORDER: readonly GearSlot[] = ['head', 'chest', 'legs', 'feet'];
 
 function gearPhrase(p: GearPiece): string {
   const dura = p.durability ? ` ${p.durability.left}/${p.durability.max}` : '';
-  return `${GEAR_SLOT_ZH[p.slot]}${zhName(p.name)}${enchantSuffix(p.enchantments)}${dura}`;
+  return `${GEAR_SLOT_ZH[p.slot]}${p.displayName ?? zhName(p.name)}${enchantSuffix(p.enchantments)}${dura}`;
 }
 
 /**
@@ -64,7 +64,9 @@ export function renderStoredItemReadout(
     && normalize(stack.displayName) === normalize(item);
   const matches = (stack: ItemStack) => matchItemName(item, stack.name, registry)
     || zhName(stack.name) === item || displayMatch(stack);
-  const carried = s.inventory.filter(matches)
+  const carriedStacks: ItemStack[] = [...s.inventory,
+    ...s.equipment.map((piece) => ({ ...piece, count: piece.count ?? 1, durability: piece.durability ?? undefined }))];
+  const carried = carriedStacks.filter(matches)
     .reduce((total, stack) => total + stack.count, 0);
   const cursor = s.cursorItem && matches(s.cursorItem) ? narrateCursor(s) : '';
   const label = zhName(item);
@@ -72,7 +74,7 @@ export function renderStoredItemReadout(
     ? `当前打开的「${openWindow.title}」里${label}×${openWindow.items.filter(matches)
       .reduce((total, stack) => total + stack.count, 0)}（现读）；`
     : '虚拟大背包等未开窗容器未计入；';
-  const ids = [...new Set([...s.inventory, ...(s.cursorItem ? [s.cursorItem] : []), ...(openWindow?.items ?? [])]
+  const ids = [...new Set([...carriedStacks, ...(s.cursorItem ? [s.cursorItem] : []), ...(openWindow?.items ?? [])]
     .filter(displayMatch).map((stack) => stack.name))];
   const names = ids.length ? `当前匹配名称的工具物品名:${ids.join('、')}。` : '';
   const found = records.flatMap((record) => {
@@ -139,7 +141,7 @@ export function bagStamp(s: WorldSnapshot | null): string {
       + `${i.durability ? `:${i.durability.left}/${i.durability.max}` : ''}×${i.count}`).sort().join(','),
     `${s.heldItem ?? 'bare'}:${s.heldItemDisplayName ?? ''}`,
     narrateCursor(s),
-    [...s.equipment].map((p) => `${p.slot}:${p.name}`).sort().join(','),
+    [...s.equipment].map((p) => `${p.slot}:${p.name}:${p.displayName ?? ''}`).sort().join(','),
   ].join('|');
 }
 

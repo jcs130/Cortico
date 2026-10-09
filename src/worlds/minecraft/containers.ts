@@ -11,7 +11,8 @@ import { reachCell } from './travel.ts';
 import { blockAtCell, cellText, dimensionOf } from './cell-facts.ts';
 import { zhName } from './names.ts';
 import { moveExactSlot, playerInvIn, type InvPred } from './inventory.ts';
-import { readDurability, readEnchants, readPotionName, type EnchantRegistry } from './item-facts.ts';
+import { readDurability, readEnchants, readPotionName, type EnchantRegistry, type ItemLike } from './item-facts.ts';
+import { itemCustomName } from './item-display.ts';
 import {
   CONTAINER_FIND, ChestBook, FURNACE_KINDS, chestBlockName, hasItem, hasRoom, type ChestRecord,
 } from './chests.ts';
@@ -86,7 +87,7 @@ export async function putIntoStation(
 ): Promise<void> {
   const occupying = win.slots[destSlot];
   if (occupying) {
-    throw new SkillBlocked(`工作站输入格 ${destSlot + 1} 已有${zhName(occupying.name)}，不能再放${asked}；先关窗等物品回包并核对窗口，不要为此丢背包物品`, [], 'server');
+    throw new SkillBlocked(`工作站输入格 ${destSlot + 1} 已有${itemCustomName(occupying) ?? zhName(occupying.name)}，不能再放${asked}；先关窗等物品回包并核对窗口，不要为此丢背包物品`, [], 'server');
   }
   const item = playerInvIn(bot, win).items().find((i) => pred(i.name, i));
   if (!item) throw new SkillBlocked(`包里没有${asked}`);
@@ -106,7 +107,7 @@ export async function putIntoStation(
     const now = win.slots[destSlot];
     throw new SkillBlocked(
       `工作站输入格 ${destSlot + 1} 放不进${asked}`
-      + (now ? `，格里现在是${zhName(now.name)}` : '，窗口槽位状态可能还没同步')
+      + (now ? `，格里现在是${itemCustomName(now) ?? zhName(now.name)}` : '，窗口槽位状态可能还没同步')
       + '；这不是背包空位的判据，不要丢物品腾格。先关窗等服务端回灌再核对',
       [], 'server',
     );
@@ -172,23 +173,26 @@ export function noContainerNearby(bot: Bot, ctx: SkillContext): SkillBlocked {
  * 于是也点不了名(见 item-pick)。
  */
 export function containerStacks(win: {
-  containerItems?: () => Array<{ name: string; count: number }>;
-  slots?: Array<{ name: string; count: number } | null>;
+  containerItems?: () => Array<ItemLike & { count: number }>;
+  slots?: Array<(ItemLike & { count: number }) | null>;
   inventoryStart?: number;
 }, registry?: EnchantRegistry | null): { items: ItemStack[]; usedSlots: number; slots: number } {
   const raw = typeof win.containerItems === 'function'
     ? win.containerItems()
-    : (win.slots ?? []).slice(0, win.inventoryStart ?? 27).filter((s): s is { name: string; count: number } => s != null);
+    : (win.slots ?? []).slice(0, win.inventoryStart ?? 27).filter((s): s is ItemLike & { count: number } => s != null);
   const merged = new Map<string, ItemStack>();
   for (const it of raw) {
     const ench = readEnchants(it as never, registry as never);
     const potion = readPotionName(it as never);
-    const key = `${it.name}|${ench.map((e) => `${e.name}${e.level}`).join(',')}|${potion ?? ''}`;
+    const displayName = itemCustomName(it);
+    const durability = readDurability(it);
+    const key = JSON.stringify([it.name, displayName, ench, potion, durability]);
     const cur = merged.get(key);
     if (cur) cur.count += it.count;
     else {
       merged.set(key, {
         name: it.name, count: it.count,
+        ...(displayName ? { displayName } : {}), ...(durability ? { durability } : {}),
         ...(ench.length > 0 ? { enchantments: ench } : {}), ...(potion ? { potion } : {}),
       });
     }
@@ -244,7 +248,7 @@ export function slotStack(win: unknown, i: number): ItemStack | null {
   const slots = (win as { slots?: Array<{ name?: string; count?: number } | null> }).slots;
   const s = slots?.[i];
   return s && typeof s.name === 'string' && typeof s.count === 'number'
-    ? { name: s.name, count: s.count }
+    ? containerStacks({ containerItems: () => [s as ItemLike & { count: number }] }).items[0] ?? null
     : null;
 }
 
@@ -282,10 +286,10 @@ export const BREW_INPUT_SLOT = 3;
 export const BREW_FUEL_SLOT = 4;
 
 /** 一件药水念成「药水(水瓶)×1」;不是药水就只有名字和数量 */
-export function potionText(stack: { name: string; count: number } | null): string {
+export function potionText(stack: ItemLike & { count: number } | null): string {
   if (!stack) return '空';
   const potion = readPotionName(stack as never);
-  return `${zhName(stack.name)}${potion === null ? '' : `(${potion})`}×${stack.count}`;
+  return `${itemCustomName(stack) ?? zhName(stack.name)}${potion === null ? '' : `(${potion})`}×${stack.count}`;
 }
 
 /** 酿造台现在的样子:三个瓶位、材料、燃料轮数、在不在酿;右键看台与 brew 回执共用 */
@@ -297,7 +301,7 @@ export function brewStandText(
   const brewTicks = windowProp(bot, win, BREW_PROP_TIME);
   const fuelSlot = win.slots[BREW_FUEL_SLOT];
   const fuel = `燃料${fuelLeft === null ? '读数没收到' : `还能烧 ${fuelLeft}/20 轮`}`
-    + (fuelSlot ? `(燃料位另有${zhName(fuelSlot.name)}×${fuelSlot.count})` : '(燃料位空)');
+    + (fuelSlot ? `(燃料位另有${itemCustomName(fuelSlot) ?? zhName(fuelSlot.name)}×${fuelSlot.count})` : '(燃料位空)');
   const brewing = brewTicks === null
     ? '酿造进度读数没收到'
     : brewTicks > 0 ? `正在酿,还剩约 ${Math.ceil(brewTicks / 20)} 秒` : '没在酿';
@@ -332,7 +336,7 @@ export function rememberWindow(
     const now = Date.now();
     const expected = furnaceDoneAt(win, state.input, blockName, now);
     ctx.chests?.rememberFurnace(dimensionOf(bot), cell, blockName, state, now, expected);
-    const slot = (s: ItemStack | null): string => (s ? `${zhName(s.name)}×${s.count}` : '空');
+    const slot = (s: ItemStack | null): string => (s ? `${s.displayName ?? zhName(s.name)}×${s.count}` : '空');
     return `。炉里:输入${slot(state.input)},燃料${slot(state.fuel)},输出${slot(state.output)}`
       + `。装料点火用 smelt 的 input、fuel 和 at:[${cell.x},${cell.y},${cell.z}]；`
       + '手持材料右键是打开窗口，不是写入输入槽或燃料槽。'

@@ -119,6 +119,7 @@ export type GearSlot = 'head' | 'chest' | 'legs' | 'feet' | 'offhand';
 export interface GearPiece {
   slot: GearSlot;
   name: string;
+  displayName?: string;
   count?: number;
   /** 不带耐久的物品(南瓜头)、或损耗读不到时为 null */
   durability: Durability | null;
@@ -353,7 +354,7 @@ export function snapshotFingerprint(s: WorldSnapshot): string {
     narrateCursor(s),
     // 穿着什么、身上有什么效果:一件盔甲耗尽消失、中毒开始与抗火到期都不是她下的令,
     // 快照不报她就无从知道。耐久与剩余秒不进(每秒都在动,进了这道闸就等于没有)
-    s.equipment.map((p) => `${p.slot}:${p.name}x${p.count ?? '?'}`).sort().join(','),
+    s.equipment.map((p) => `${p.slot}:${p.name}:${p.displayName ?? ''}x${p.count ?? '?'}`).sort().join(','),
     s.effects.map((e) => `${e.name}${e.level}`).sort().join(','),
     s.standingOn ?? 'air', s.biome,
     `hostile${hostiles.length}${nearest ? `@${nearest.direction ?? '-'}${distBucket(nearest.distance)}` : ''}`,
@@ -431,7 +432,7 @@ export function narrateWorldSegments(
   segs.push({
     key: 'gear',
     text: gear,
-    cmp: s.invSynced ? `${s.heldItem ?? 'bare'}|${bagFull}|${narrateCursor(s)}` : 'nosync',
+    cmp: s.invSynced ? `${s.heldItem ?? 'bare'}:${s.heldItemDisplayName ?? ''}|${bagFull}|${narrateCursor(s)}` : 'nosync',
   });
 
   // 装备与状态自成一段:背包每挖一块土就变,盔甲与效果几十分钟才动一次,
@@ -549,7 +550,7 @@ function isDroppedItem(e: EntityInfo): boolean {
 }
 
 function dropLabel(stack: ItemStack | undefined): string {
-  const name = stack?.name && stack.name !== 'item' ? zhName(stack.name) : zhEntity('item');
+  const name = stack?.displayName ?? (stack?.name && stack.name !== 'item' ? zhName(stack.name) : zhEntity('item'));
   return `${name}×${stack?.count ?? 1}`;
 }
 
@@ -571,14 +572,18 @@ function narrateDrops(drops: EntityInfo[]): string[] {
   return [...groups.values()]
     .map((group) => {
       const nearest = group.reduce((a, b) => (a.distance <= b.distance ? a : b));
-      const merged = new Map<string, number>();
+      const merged = new Map<string, ItemStack>();
       for (const e of group) {
         const name = e.item?.name ?? 'item';
-        merged.set(name, (merged.get(name) ?? 0) + (e.item?.count ?? 1));
+        const displayName = e.item?.displayName;
+        const key = JSON.stringify([name, displayName]);
+        const previous = merged.get(key);
+        merged.set(key, { name, ...(displayName ? { displayName } : {}),
+          count: (previous?.count ?? 0) + (e.item?.count ?? 1) });
       }
-      const list = [...merged.entries()]
-        .sort((a, b) => b[1] - a[1])
-        .map(([name, count]) => dropLabel({ name, count }))
+      const list = [...merged.values()]
+        .sort((a, b) => b.count - a.count)
+        .map(dropLabel)
         .join('、');
       return { d: nearest.distance, text: `${dropWhere(nearest)}：${list}。` };
     })
@@ -658,7 +663,7 @@ const WORN_ORDER: GearSlot[] = ['head', 'chest', 'legs', 'feet'];
 
 function gearPhrase(p: GearPiece): string {
   const dura = p.durability ? ` ${p.durability.left}/${p.durability.max}` : '';
-  return `${GEAR_SLOT_ZH[p.slot]}${zhName(p.name)}${enchantSuffix(p.enchantments)}${dura}`;
+  return `${GEAR_SLOT_ZH[p.slot]}${p.displayName ?? zhName(p.name)}${enchantSuffix(p.enchantments)}${dura}`;
 }
 
 function effectPhrase(e: StatusEffect): string {
@@ -688,7 +693,7 @@ function equipCmp(s: WorldSnapshot): string {
   const gear = s.equipment
     .map((p) => {
       const wear = p.durability ? Math.round((p.durability.left / p.durability.max) * 10) : '-';
-      return `${p.slot}:${p.name}${enchantSuffix(p.enchantments)}:${wear}`;
+      return `${p.slot}:${p.name}:${p.displayName ?? ''}${enchantSuffix(p.enchantments)}:${wear}`;
     })
     .sort()
     .join(',');
@@ -748,6 +753,12 @@ function countByName(items: ItemStack[]): Map<string, number> {
   return merged;
 }
 
+function inventoryLabel(items: ItemStack[], name: string): string {
+  const labels = [...new Set(items.filter((item) => item.name === name)
+    .map((item) => item.displayName ?? zhName(name)))];
+  return labels.length > 1 ? `${labels.join(' / ')}（同ID合计）` : labels[0] ?? zhName(name);
+}
+
 /**
  * 物品栏变化独立核对执行器回执，并附带变化后的总数；无变化时返回 null。
  * 总数不受事件迟到或合批影响，可直接判断目标数量是否满足。
@@ -759,11 +770,11 @@ function inventoryDelta(prev: ItemStack[], cur: ItemStack[]): string | null {
   const lost: string[] = [];
   for (const [name, n] of after) {
     const d = n - (before.get(name) ?? 0);
-    if (d > 0) gained.push(`${zhName(name)}×${d}(共 ${n})`);
+    if (d > 0) gained.push(`${inventoryLabel(cur, name)}×${d}(共 ${n})`);
   }
   for (const [name, n] of before) {
     const d = n - (after.get(name) ?? 0);
-    if (d > 0) lost.push(`${zhName(name)}×${d}(剩 ${after.get(name) ?? 0})`);
+    if (d > 0) lost.push(`${inventoryLabel(prev, name)}×${d}(剩 ${after.get(name) ?? 0})`);
   }
   const parts: string[] = [];
   if (gained.length > 0) parts.push(`包里多了 ${gained.join('、')}`);
@@ -1548,6 +1559,10 @@ export function pocketScan(
   return visited.size;
 }
 
+type DroppedItemData = Parameters<typeof itemCustomName>[0] & {
+  name?: string; count?: number; itemId?: number; itemCount?: number;
+};
+
 /**
  * 掉落物实体上的物品。优先 `getDroppedItem()`(prismarine-entity 的口径);
  * 没有元数据时记成不明掉落物,不猜。
@@ -1555,16 +1570,16 @@ export function pocketScan(
 export function droppedStackOf(
   e: {
     name?: string;
-    getDroppedItem?: () => { name?: string; count?: number; itemId?: number; itemCount?: number } | null;
-    heldItem?: { name?: string; count?: number };
-    item?: { name?: string; count?: number };
+    getDroppedItem?: () => DroppedItemData | null;
+    heldItem?: DroppedItemData;
+    item?: DroppedItemData;
     metadata?: unknown;
   },
   items?: Record<number, { name: string }>,
 ): ItemStack | null {
   const n = e.name;
   if (n !== 'item' && n !== 'Item' && n !== 'item_stack') return null;
-  let raw: { name?: string; count?: number; itemId?: number; itemCount?: number } | null = null;
+  let raw: DroppedItemData | null = null;
   if (typeof e.getDroppedItem === 'function') {
     try { raw = e.getDroppedItem(); } catch { raw = null; }
   }
@@ -1582,7 +1597,8 @@ export function droppedStackOf(
   const count = typeof raw.count === 'number' ? raw.count
     : typeof raw.itemCount === 'number' ? raw.itemCount
     : 1;
-  return { name, count };
+  const displayName = itemCustomName(raw);
+  return { name, count, ...(displayName ? { displayName } : {}) };
 }
 
 /**
@@ -1692,8 +1708,10 @@ function readEquipment(bot: any): GearPiece[] {
   for (const [slot, idx] of GEAR_SLOT_INDEX) {
     const it = slots[idx] as ItemLike | null | undefined;
     if (!it?.name) continue;
+    const displayName = itemCustomName(it);
     out.push({
       slot, name: it.name, durability: readDurability(it), enchantments: readEnchants(it, bot.registry),
+      ...(displayName ? { displayName } : {}),
       ...(typeof it.count === 'number' && Number.isInteger(it.count) && it.count > 0 ? { count: it.count } : {}),
     });
   }

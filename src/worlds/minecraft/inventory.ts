@@ -124,9 +124,10 @@ export function itemAsked(item: string, pick?: string): string {
   return `${zhName(item)}${pick ? `(带「${pick}」的)` : ''}`;
 }
 
-/** 回执里怎么念这一件:点名挑过就念全标签(带附魔括号),没挑就念 id 的中文名 */
+/** 有实际物品时优先显示名称；挑选回执同时附上附魔与耐久。 */
 export function askedLabel(bot: Bot, name: string, pick?: string, item?: ItemLike | null): string {
-  return pick && item ? pickLabel(pickTargetOf(item, bot.registry as never)) : zhName(name);
+  if (!item) return zhName(name);
+  return pick ? pickLabel(pickTargetOf(item, bot.registry as never)) : itemCustomName(item) ?? zhName(item.name);
 }
 
 /**
@@ -315,7 +316,7 @@ export function invVariantGains(before: Map<string, number>, bot: Bot): string[]
     if (d <= 0) continue;
     const it = bot.inventory.items().find((i) => variantKey(i as ItemLike) === key)!;
     const mapId = readMapId(it as ItemLike);
-    out.push(`${zhName(it.name)}×${d}(换成了新的一份${mapId !== null ? `,地图编号 #${mapId}` : ''})`);
+    out.push(`${itemCustomName(it) ?? zhName(it.name)}×${d}(换成了新的一份${mapId !== null ? `,地图编号 #${mapId}` : ''})`);
   }
   return out;
 }

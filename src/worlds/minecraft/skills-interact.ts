@@ -73,7 +73,7 @@ function useHandOf(item: Bot['heldItem']): UseHand {
 function assertUseHand(bot: Bot, hand: UseHand, ctx: SkillContext): void {
   checkAbort(ctx);
   if (!isDeepStrictEqual(useHandOf(bot.heldItem), hand)) {
-    throw new SkillBlocked(`右键发送前主手已改变，需要${hand ? zhName(hand.name) : '空手'}；没有发送这次使用`,
+    throw new SkillBlocked(`右键发送前主手已改变，需要${hand ? hand.customName ?? zhName(hand.name) : '空手'}；没有发送这次使用`,
       [], 'local', 'use-hand-changed');
   }
 }
@@ -84,7 +84,7 @@ async function prepareUseHand(bot: Bot, hand: UseHand, ctx: SkillContext): Promi
     if (!hand) await clearHandForBlockInteraction(bot, true);
     else {
       const item = bot.inventory.items().find((candidate) => isDeepStrictEqual(useHandOf(candidate), hand));
-      if (!item) throw new SkillBlocked(`右键前包里已没有本次选定的${zhName(hand.name)}；没有发送使用`);
+      if (!item) throw new SkillBlocked(`右键前包里已没有本次选定的${hand.customName ?? zhName(hand.name)}；没有发送使用`);
       await bot.equip(item, 'hand');
     }
   }
@@ -949,7 +949,7 @@ export async function useOnce(bot: Bot, call: Extract<SkillCall, { skill: 'use' 
       await clearHandForBlockInteraction(bot, !needsBareHandToInteract(target.name));
       hand = useHandOf(bot.heldItem);
       held = null;
-      label = hand ? zhName(hand.name) : '空手';
+      label = hand ? hand.customName ?? zhName(hand.name) : '空手';
     }
     // 船由 BoatItem 的 use 沿玩家视线生成，不能通过 use_item_on 放置。
     if (held && isBoat(held)) return await useBoat(bot, cell, held, label, activateItem);
@@ -2061,8 +2061,8 @@ export async function skillAnvil(bot: Bot, call: Extract<SkillCall, { skill: 'an
     }
   }
   const product = landed
-    ? `${zhName(landed.name)}(${stationItemFacts(bot, landed)})`
-    : `${zhName(out.name)}(${stationItemFacts(bot, out)};这是取出前产出槽的读数,没看到它落进包里哪一格)`;
+    ? `${itemCustomName(landed) ?? zhName(landed.name)}(${stationItemFacts(bot, landed)})`
+    : `${itemCustomName(out) ?? zhName(out.name)}(${stationItemFacts(bot, out)};这是取出前产出槽的读数,没看到它落进包里哪一格)`;
   const anvilNow = blockAtCell(bot, cell)?.name ?? null;
   const wear = anvilNow === blockName
     ? ''

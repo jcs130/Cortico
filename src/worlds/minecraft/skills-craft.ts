@@ -460,20 +460,21 @@ export async function equipNamed(bot: Bot, name: string): Promise<string> {
 export async function emptyHand(bot: Bot): Promise<string> {
   const held = bot.heldItem;
   if (!held) return '主手本来就是空的';
+  const label = itemCustomName(held) ?? zhName(held.name);
   const slots = bot.inventory.slots;
   const emptyQuickBar = slots.slice(36, 45).some((item) => !item);
   if (!emptyQuickBar && bot.inventory.firstEmptyInventorySlot() == null) {
     throw new SkillBlocked(
-      `主手拿着${zhName(held.name)}，快捷栏和背包都没有空格；先把其他物品存入箱子，再腾空主手`,
+      `主手拿着${label}，快捷栏和背包都没有空格；先把其他物品存入箱子，再腾空主手`,
     );
   }
   const before = invCount(bot, (n) => n === held.name);
   await bot.unequip('hand');
   const left = invCount(bot, (n) => n === held.name);
   if (left < before) {
-    return `主手腾空了;包是满的,${zhName(held.name)}×${before - left}被扔在了脚下`;
+    return `主手腾空了;包是满的,${label}×${before - left}被扔在了脚下`;
   }
-  return `主手腾空了(原来拿的是${zhName(held.name)})`;
+  return `主手腾空了(原来拿的是${label})`;
 }
 
 /**
@@ -483,6 +484,7 @@ export async function emptyHand(bot: Bot): Promise<string> {
 async function emptyOffHand(bot: Bot): Promise<string> {
   const held = offHandItem(bot);
   if (!held) return '副手本来就是空的';
+  const label = itemCustomName(held) ?? zhName(held.name);
   const bag = bot.inventory.items();
   if (bag.length >= INVENTORY_SLOTS && !bag.some((i) => i.type === held.type && i.count < i.stackSize)) {
     throw new SkillBlocked(
@@ -494,9 +496,9 @@ async function emptyOffHand(bot: Bot): Promise<string> {
   await clearOffHandConfirmed(bot);
   const left = invCount(bot, (n) => n === held.name);
   if (left < before + held.count) {
-    return `副手腾空了;包是满的,${zhName(held.name)}×${before + held.count - left}被扔在了脚下`;
+    return `副手腾空了;包是满的,${label}×${before + held.count - left}被扔在了脚下`;
   }
-  return `副手腾空了(原来挂的是${zhName(held.name)})`;
+  return `副手腾空了(原来挂的是${label})`;
 }
 
 /** item 缺省时腾空 hand 指的那只手(默认主手)；air 别名由 parseEquip 归一化。 */
@@ -509,7 +511,7 @@ export async function skillEquip(bot: Bot, call: Extract<SkillCall, { skill: 'eq
   const item = invItemNamed(bot, want, call.pick);
   const fromOffHand = !!item && item === offHandItem(bot);
   const worn = item && !fromOffHand ? null : equippedAlready(bot, want, call.hand, call.pick);
-  if (worn) return `${zhName(worn.name)}本来就${worn.where}`;
+  if (worn) return `${worn.displayName ?? zhName(worn.name)}本来就${worn.where}`;
   if (!item) {
     const same = items.filter((i) => namedLike(want, i.name, bot?.registry));
     if (call.pick && same.length > 0) throw noSuchItem(bot, want, call.pick, same);

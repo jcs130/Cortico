@@ -1,14 +1,18 @@
 /** Display text carried by an individual item, separate from its registry ID. */
 export function itemCustomName(item: {
+  name?: string;
   customName?: unknown;
   componentMap?: Map<string, { data?: unknown }>;
   components?: Array<{ type?: string; data?: unknown }>;
   nbt?: unknown;
 }): string | null {
   const nbt = item.nbt as { value?: { display?: { value?: { Name?: { value?: unknown } } } } } | undefined;
-  const value = item.customName ?? componentData(item, 'custom_name') ?? componentData(item, 'item_name')
-    ?? nbt?.value?.display?.value?.Name?.value;
-  return chatText(unwrapNbt(value))?.slice(0, 80) ?? null;
+  for (const value of [item.customName, componentData(item, 'custom_name'), componentData(item, 'item_name'),
+    nbt?.value?.display?.value?.Name?.value]) {
+    const text = chatText(unwrapNbt(value))?.replace(/§[0-9a-fk-orx]/gi, '').trim();
+    if (text) return text.slice(0, 80);
+  }
+  return null;
 }
 
 type ComponentItem = {

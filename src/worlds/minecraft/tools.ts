@@ -11,6 +11,7 @@ import { itemMatchesPick, pickLabel, pickTargetOf } from './item-pick.ts';
 import { SkillBlocked, type ReserveHit, type SkillContext, type ToolTrace } from './skill-context.ts';
 import { matchItemName } from './chests.ts';
 import { zhName } from './names.ts';
+import { itemCustomName } from './item-display.ts';
 
 /**
  * 工具材质的等级序,好的在前;倒着读就是等级序的低往高。
@@ -350,7 +351,7 @@ export function harvestFact(
   b: { name: string; canHarvest?: (t: number | null) => boolean },
 ): string | null {
   if (typeof b.canHarvest !== 'function' || b.canHarvest(bot.heldItem?.type ?? null)) return null;
-  const hand = bot.heldItem ? zhName(bot.heldItem.name) : '空手';
+  const hand = bot.heldItem ? itemCustomName(bot.heldItem) ?? zhName(bot.heldItem.name) : '空手';
   const need = minHarvestTool(bot, b.name);
   return `${hand}挖${zhName(b.name)}不掉东西${need ? `,要${zhName(need)}及以上` : ''}`;
 }
@@ -362,12 +363,13 @@ export function harvestFact(
  */
 export function equippedAlready(
   bot: Bot, item: string, hand?: 'main' | 'off', pick?: string,
-): { name: string; where: string } | null {
+): { name: string; displayName?: string; where: string } | null {
   const dest = hand === 'off' ? 'off-hand' : hand === 'main' ? 'hand' : equipDestOf(item, bot.registry);
   if (dest === 'hand') return null;
   const slot = bot.inventory?.slots?.[bot.getEquipmentDestSlot(dest)];
   if (!slot || !namedLike(item, slot.name, bot?.registry) || !itemMatchesPick(pick, slot, bot.registry as never)) return null;
-  return { name: slot.name, where: dest === 'off-hand' ? '挂在副手' : '穿在身上' };
+  const displayName = pickTargetOf(slot, bot.registry as never).displayName;
+  return { name: slot.name, ...(displayName ? { displayName } : {}), where: dest === 'off-hand' ? '挂在副手' : '穿在身上' };
 }
 
 export const HANDHELD_SUFFIXES = ['_pickaxe', '_axe', '_shovel', '_hoe', '_sword'];
