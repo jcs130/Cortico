@@ -8,6 +8,8 @@ import { installMineflayerFixes } from '../../../src/worlds/minecraft/mineflayer
 import { clickInventoryConfirmed, inventoryClickState, INVENTORY_CLICK_CONFIRM_MS } from '../../../src/worlds/minecraft/inventory-click-sync.ts';
 import { inventoryReadConfirmed } from '../../../src/worlds/minecraft/inventory-window-sync.ts';
 import { consumeHeldFood, EAT_SETTLE_MS, skillEat } from '../../../src/worlds/minecraft/skills-craft.ts';
+import { withdrawStack } from '../../../src/worlds/minecraft/container-withdraw.ts';
+import type { SkillContext } from '../../../src/worlds/minecraft/skill-context.ts';
 
 const require = createRequire(import.meta.url);
 const dependency = createRequire(require.resolve('mineflayer'));
@@ -60,6 +62,63 @@ function protocolInventory(initial = true) {
 }
 
 afterEach(() => vi.useRealTimers());
+
+describe('container withdrawal into a full inventory', () => {
+  async function fullContainer(mergeCount: number, named = false) {
+    const r = protocolInventory();
+    const entries: Array<[number, string, number]> = Array.from({ length: 36 }, (_, i) =>
+      [i + 9, i === 0 ? 'oak_planks' : 'cobblestone', i === 0 ? mergeCount : 64]);
+    r.full(r.bot.inventory, entries);
+    r.bot.activateBlock = async () => { queueMicrotask(() => {
+      const win = r.open();
+      r.full(win, [[0, 'oak_planks', 8], ...entries.map(([slot, name, count]) =>
+        [slot + win.inventoryStart - 9, name, count] as [number, string, number])]);
+    }); };
+    const window = await r.bot.openBlock({ position: new Vec3(0, 64, 0) } as never) as Awaited<ReturnType<Bot['openContainer']>>;
+    if (named) {
+      const stack = window.slots[window.inventoryStart]!;
+      Object.assign(stack, { components: [{ type: 'custom_name', data: { type: 'string', value: 'Decorative planks' } }] });
+    }
+    const windows = dependency('prismarine-windows')('1.20.6');
+    const server = windows.createWindow(window.id, 'minecraft:generic_9x3', 'Container');
+    for (let slot = 0; slot < window.slots.length; slot++) {
+      const item = window.slots[slot];
+      if (item) server.updateSlot(slot, r.Item.fromNotch(r.Item.toNotch(item)));
+    }
+    const original = r.client.write;
+    let stateId = 70;
+    r.client.write = (name, packet) => {
+      original(name, packet);
+      if (name !== 'window_click') return;
+      server.acceptClick({ slot: packet.slot, mouseButton: packet.mouseButton, mode: packet.mode,
+        windowId: window.id, id: 1, item: server.slots[packet.slot] });
+      queueMicrotask(() => r.receive('window_items', { windowId: window.id, stateId: ++stateId,
+        items: server.slots.map((item: unknown) => r.Item.toNotch(item)),
+        carriedItem: r.Item.toNotch(server.selectedItem) }));
+    };
+    return { ...r, window };
+  }
+
+  it('merges into an existing stack through native clicks although native withdraw rejects the full inventory', async () => {
+    const r = await fullContainer(12);
+    await expect(r.window.withdraw(r.bot.registry.itemsByName.oak_planks.id, 0, 8)).rejects.toThrow('inventory is full');
+    await withdrawStack(r.bot, r.window, r.window.slots[0]!, 8, { aborted: () => false } as SkillContext);
+    expect(r.window.slots[r.window.inventoryStart]?.count).toBe(20);
+    expect(r.window.slots[0]).toBeNull();
+    expect(r.window.items()).toHaveLength(36);
+    expect(r.window.selectedItem).toBeNull();
+    expect(r.sent.some(packet => packet.name === 'window_click' && packet.packet.slot === -999)).toBe(false);
+  });
+
+  it.each([[64, false], [12, true]] as const)('rejects unavailable compatible capacity with count=%s, named=%s before any click', async (count, named) => {
+    const r = await fullContainer(count, named);
+    await expect(withdrawStack(r.bot, r.window, r.window.slots[0]!, 8, { aborted: () => false } as SkillContext))
+      .rejects.toThrow('No compatible stack capacity');
+    expect(r.sent.filter(packet => packet.name === 'window_click')).toEqual([]);
+    expect(r.window.slots[0]?.count).toBe(8);
+    expect(r.window.selectedItem).toBeNull();
+  });
+});
 
 describe('1.20.6 direct PlayerInventory updates', () => {
   it('consumes offhand food with a full main inventory and preserves the swapped weapon', async () => {

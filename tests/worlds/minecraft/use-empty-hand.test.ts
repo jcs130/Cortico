@@ -67,10 +67,9 @@ describe('use at without item', () => {
       expect(r.facts()).toMatchObject({ activatedItems: 0, openedContainers: 1 });
     });
 
-  it('rejects a full inventory before using or dropping the held item, even with a plain tool available', async () => {
+  it('rejects a full inventory without a safe ordinary tool before using or dropping the held item', async () => {
     const r = rig('ender_pearl', true);
-    r.slots[10] = { name: 'iron_axe', type: 3, count: 1, slot: 10 };
-    await expect(useOnce(r.bot, { skill: 'use', at: AT }, ctx as never)).rejects.toThrow('没有继续右键');
+    await expect(useOnce(r.bot, { skill: 'use', at: AT }, ctx as never)).rejects.toThrow('找不到可安全右键');
     expect(r.bot.heldItem).toBe(r.stack);
     expect(r.stack.count).toBe(2);
     expect(r.facts()).toMatchObject({ activatedItems: 0, openedContainers: 0 });

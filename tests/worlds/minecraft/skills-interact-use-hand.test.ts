@@ -247,6 +247,37 @@ describe('use preserves its selected hand through navigation and native look', (
     expect(r.bot.inventory.slots[37]?.count).toBe(8);
   });
 
+  it('opens a barrel with an ordinary tool when inventory is full without consuming or dropping any stack', async () => {
+    const r = rig(false);
+    r.bot.entity.position = new Vec3(9.5, 64, 0.5);
+    for (let slot = 9; slot < 45; slot++) {
+      r.bot.inventory.updateSlot(slot, new Item(registry.itemsByName.cobblestone.id, 64));
+    }
+    r.bot.inventory.updateSlot(40, new Item(registry.itemsByName.iron_sword.id, 1));
+    r.setBlock(AT, 'barrel');
+    r.setBlockPacket(() => {
+      r.client.emit('open_window', {
+        windowId: 3, inventoryType: 2, windowTitle: { type: 'string', value: 'Barrel' },
+      });
+      const window = r.bot.currentWindow!;
+      const items = Array.from({ length: window.slots.length }, () => Item.toNotch(null));
+      for (let slot = 9; slot < 45; slot++) {
+        items[window.inventoryStart + slot - 9] = Item.toNotch(r.bot.inventory.slots[slot]);
+      }
+      r.client.emit('window_items', { windowId: 3, stateId: 2, items, carriedItem: Item.toNotch(null) });
+    });
+    const before = r.bot.inventory.items().map(item => [item.name, item.count]);
+    const pending = useOnce(r.bot, { skill: 'use', at: AT }, r.ctx);
+    await vi.runAllTimersAsync();
+    const receipt = await pending;
+    expect(receipt).toContain('铁剑右键');
+    expect(receipt).not.toContain('空手右键');
+    expect(r.wire.map(packet => packet.hand)).toEqual(['iron_sword']);
+    expect(receipt).toContain('箱里:空的');
+    expect(r.bot.inventory.items().map(item => [item.name, item.count])).toEqual(before);
+    expect(r.bot.inventory.selectedItem).toBeNull();
+  });
+
   it('blocks a later nonempty hand after bare-hand preparation while preserving both stacks', async () => {
     const r = rig();
     r.setLook(async () => { r.select(1); });
