@@ -187,6 +187,7 @@ import { settleOnGround } from './travel.ts';
 import {
   collectVisible, skillCollect, skillFind, skillFish, skillProbe, skillTrade,
 } from './skills-gather.ts';
+import { spatialObservationText } from './spatial-observation.ts';
 import { CONTAINER_FIND, FURNACE_KINDS } from './chests.ts';
 import { skillExcavate, skillTunnel } from './skills-dig.ts';
 import { reachCell } from './travel.ts';
@@ -856,6 +857,7 @@ async function runSkill(bot: Bot, call: SkillCall, ctx: SkillContext): Promise<s
     case 'excavate': return skillExcavate(bot, call, ctx);
     case 'tunnel': return skillTunnel(bot, call, ctx);
     case 'probe': return skillProbe(bot, call, ctx);
+    case 'observe': return spatialObservationText(bot, call);
     case 'use': return skillUse(bot, call, ctx);
     case 'ride': return skillRide(bot, call, ctx);
     case 'anvil': return skillAnvil(bot, call, ctx);
@@ -3094,7 +3096,7 @@ export class Executor {
     const preservesCapacity = (part: SkillCall): boolean => {
       if ('dryRun' in part && part.dryRun) return true;
       if (part.skill === 'chat') return !part.text.trimStart().startsWith('/');
-      return part.skill === 'probe' || part.skill === 'gesture';
+      return part.skill === 'probe' || part.skill === 'observe' || part.skill === 'gesture';
     };
     for (const [index, step] of steps.entries()) {
       if (step.skill !== 'take' || !step.item) continue;
@@ -5698,7 +5700,7 @@ export class Executor {
     // 终态四分。没做成 > 做了一部分 > 完成:一单里最重的那个结局说了算。
     // 无事可做不影响终态——一单全是「附近没有掉落物」,那一单就是做完了。
     const hasTrials = steps.some(step => 'dryRun' in step && step.dryRun === true);
-    const onlyTrials = hasTrials && steps.every(step => step.skill === 'probe' || 'dryRun' in step && step.dryRun === true);
+    const onlyTrials = hasTrials && steps.every(step => step.skill === 'probe' || step.skill === 'observe' || 'dryRun' in step && step.dryRun === true);
     if (blockedSteps.length === 0 && partialSteps.length === 0) {
       this.finish(flag, {
         kind: 'done',

@@ -1,4 +1,4 @@
-<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/method-runner.ts, src/worlds/minecraft/method-worker.mjs, src/worlds/minecraft/flight.ts, src/worlds/minecraft/flight-preview.ts, src/worlds/minecraft/agentfriend-flight.ts, src/worlds/minecraft/terrain.ts, src/worlds/minecraft/executor.ts, src/worlds/minecraft/combat.ts, src/worlds/minecraft/skills.ts, src/worlds/minecraft/skills-control.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts, src/worlds/minecraft/chests.ts, src/worlds/minecraft/inventory.ts, src/worlds/minecraft/inventory-click-sync.ts, src/worlds/minecraft/equipment.ts, src/worlds/minecraft/check.ts, src/worlds/minecraft/spatial-slices.ts, src/worlds/minecraft/cell-facts.ts -->
+<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/method-runner.ts, src/worlds/minecraft/method-worker.mjs, src/worlds/minecraft/flight.ts, src/worlds/minecraft/flight-preview.ts, src/worlds/minecraft/agentfriend-flight.ts, src/worlds/minecraft/terrain.ts, src/worlds/minecraft/executor.ts, src/worlds/minecraft/combat.ts, src/worlds/minecraft/skills.ts, src/worlds/minecraft/skills-control.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts, src/worlds/minecraft/chests.ts, src/worlds/minecraft/inventory.ts, src/worlds/minecraft/inventory-click-sync.ts, src/worlds/minecraft/equipment.ts, src/worlds/minecraft/check.ts, src/worlds/minecraft/spatial-slices.ts, src/worlds/minecraft/spatial-observation.ts, src/worlds/minecraft/cell-facts.ts -->
 
 # worlds/minecraft
 
@@ -138,6 +138,10 @@ console/         控制台面板两侧:服务器、存档、权限、客户端�
 `use` 或斜杠命令后紧接窗口操作却未打开真实容器时，开窗步骤按失败回报，下游窗口步骤跳过；单独使用未知效果物品仍只回报可观察到的事实。
 
 ## 土地探查与生长
+
+`observe` 参照 [MineDojo 的体素与射线观测](https://docs.minedojo.org/sections/customization/privileged_obs.html)，按需从当前连接读取几何数据。`mode:voxels` 的六个 bounds 为相对执行时脚下格的 xmin/ymin/zmin/xmax/ymax/zmax（含端点），默认 `[-1,-1,-1,1,2,1]`，各偏移 ±16、最多512格。回执附绝对范围、时间、维度、眼位和朝向；palette 保存方块状态、属性及格内碰撞箱，cells 按 y/z/x 展开（x 最快），-1 为未加载，collision:null 为碰撞形状未读。液体单独标记，无碰撞箱不证明有支撑或安全可通行；实体带本连接的坐标与包围箱。
+
+`mode:rays` 的每组参数为 `[相对pitch角,相对yaw角,最大距离]`，单位为度/格，正 pitch 向上、正 yaw 向左，世界 yaw=0 朝北。默认三行五列、24格；每次最多64条、每条64格。terrain 返回沿眼位射线的首个碰撞或未知区，entity 返回已知实体包围箱的最近交点，first 比较两者，entityBeforeTerrain 标明是否在已核对的遮挡之前（未知遮挡之后为 null）。使用真实形状，检查一格邻域以涵盖栅栏等越格形状；邻域未加载或碰撞数据未读时停止确认。液体和纹理不遮挡这种碰撞射线，实体包围箱不等于渲染模型。客户端没收到的区块/实体无法读取，超过512个实体则拒绝不完整观测。单次最多16384格读取，耗尽后返回未知；24,000字符上限要求缩小范围，不返回截断数据。缓存仅在一次调用内复用，不自动注入全量地图。
 
 普通 `probe` 在区域超过 27 格时，汇总数量最多的 10 种材质并报告各自离玩家最近的样本坐标；样本来自本次读取的已加载方块，不证明其上方可种植或具有施工权限。指定 `where` 的探查仍列匹配坐标。相同区域的重复读数标为上次摘要，移动后需要新的精确读数时可点查目标格。
 
@@ -333,7 +337,7 @@ World 将所选文件保存在部署的 `data/minecraft-skin-{bot,player}.png`�
 |---|---|
 | `mc_cast(spell, arguments?)` | 向支持该命令的服务端立即发送一次 `/mycli cast <技能ID> [参数…]`；`arguments` 是按顺序分开的字符串数组，例如造物目标。战斗或撤退中也不排队、不抢移动控制；发送成功不等于生效，须核对服务端回执和现场状态 |
 | `mc_do(steps, queue?)` | 提交任务。立即返回带时刻与任务号（#N）的受理回执；后台依次执行，结果以同一任务号的 `minecraft.task` 事件返回。`queue` 模式见「队列」 |
-| `mc_scout(steps, queue?)` | `tags:['read']`。与 `mc_do` 共用队列和回执，执行 probe，以及按 dryRun 入队的 goto / flight / build / excavate / tunnel。后续操作仍可入队 |
+| `mc_scout(steps, queue?)` | `tags:['read']`。与 `mc_do` 共用队列和回执，执行 probe / observe，以及按 dryRun 入队的 goto / flight / build / excavate / tunnel。后续操作仍可入队 |
 | `mc_flight_plan(points, budgetMs?, subdivide?)` | `tags:['read']`。施法前从当前观察位置依次投影最多16个目标，可自动分为最多64段；回报逐段碰撞、累计耗时、时长预算与末段支撑；不入队、不移动、不授予许可 |
 | `mc_check(checks)` | `tags:['read']`。提交至多 16 条断言（单格 `at/is`、区域 `count/all/air/sealed`、背包 `inv`、蓝图 `blueprint`、路标 `mark`），对照世界后只报差异。同步返回、不进队列、不移动，只读已加载区块；未加载单独报告。`sealed` 按流入通路判断，水和岩浆算通路 |
 | `mc_view_map(id?)` | `tags:['read']`。看身上一张已开图的地图：回执带 512×512 的 PNG 画面（上北右东）与文字读数：编号、比例、已探索比例、图标位置。本机服务端能读到存档 `data/map_<id>.dat` 时再给中心坐标和图标的世界坐标。画面来自服务端推给包里地图的像素包 |

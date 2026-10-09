@@ -3,7 +3,7 @@
  *
  * 每个技能在 `SKILLS` 里声明一次字段(名/类型/必填/范围/默认值/一行文档)与文档段落,
  * 出口全部由这一份生成:`SKILL_NAMES`、mc_do / mc_scout 的 schema 与技能表、
- * `parseSteps` / `parseScoutSteps`。mc_scout 是同一张表的只读切片:probe,以及
+ * `parseSteps` / `parseScoutSteps`。mc_scout 是同一张表的只读切片:probe/observe,以及
  * 声明了 dryRun 的技能(入队时一律按试算跑)。结构约束只有一个家,长出新技能时同步。
  *
  * 横向规则(build 的 shape-锚点数、use 的 at/target 互斥、craft 的 item/grid 二选一)
@@ -17,6 +17,7 @@ import { DIRECTIONS, type Direction } from './terrain.ts';
 import { normalizeDimension } from './escape.ts';
 import type { PositionXYZ } from './blueprint.ts';
 import { PROBE_SLICE_CELL_CAP, SPATIAL_SLICE_AXES, type SpatialSliceAxis } from './spatial-slices.ts';
+import { parseSpatialObservation, SPATIAL_OBSERVATION_LIMITS, type SpatialObserveInput } from './spatial-observation.ts';
 
 /** 步骤依赖与验收的可选覆写；省略时使用执行器推导的因果依赖和验收规则。 */
 export interface StepBounds {
@@ -117,6 +118,7 @@ export type SkillCall = StepBounds & (
   | { skill: 'excavate'; shape: ShapeName; anchors: Anchor[]; fill?: BoxFill; dryRun?: boolean; tool?: string }
   | { skill: 'tunnel'; at: Anchor; spiral?: boolean; dryRun?: boolean; until?: string[]; tool?: string }
   | { skill: 'probe'; shape: ShapeName; anchors: Anchor[]; fill?: BoxFill; where?: string[]; slice?: SpatialSliceAxis }
+  | ({ skill: 'observe' } & SpatialObserveInput)
   | { skill: 'craft'; item?: string; count: number; grid?: string[][] }
   | { skill: 'smelt'; input: string; count: number; fuel: string; at?: Anchor }
   | { skill: 'brew'; at?: Anchor; input: string; bottle: string; count: number; fuel: string }
@@ -1363,6 +1365,31 @@ ground 使用普通物理，飞行悬停时先 land 或改用 flight。flight �
     ],
   },
   {
+    name: 'observe',
+    doc: `{"skill":"observe","mode":"voxels","bounds":[-2,-1,-2,2,3,2]}
+                                                 按 MineDojo 的局部体素观测方式，直接读当前连接已加载方块，不需图像估深。
+                                                 bounds 是相对执行时脚下格的 [xmin,ymin,zmin,xmax,ymax,zmax]，含端点；省略为 [-1,-1,-1,1,2,1]。
+                                                 每项 ±${SPATIAL_OBSERVATION_LIMITS.offset}，最多 ${SPATIAL_OBSERVATION_LIMITS.cells} 格；返回绝对坐标范围、读取时间、维度、眼位、朝向。
+                                                 palette 保留方块状态、属性与真实格内碰撞箱；cells 按 y,z,x 展开(x 最快)，-1 是未知；无碰撞不证明安全可走或有支撑。
+{"skill":"observe","mode":"rays","rays":[[0,0,24],[15,30,16],[-15,-30,16]]}
+                                                 从执行时眼位发射碰撞射线，每组 [相对pitch角,相对yaw角,最大距离]；角度用度，pitch 正值向上，yaw 正值向左，yaw=0 朝北。
+                                                 最多 ${SPATIAL_OBSERVATION_LIMITS.rays} 条，每条 ≤${SPATIAL_OBSERVATION_LIMITS.range} 格；省略 rays 为三行五列、24 格的扇面。
+                                                 terrain 报首个方块碰撞或未知，entity 报本连接已知实体的最近包围箱交点，first 比较两者；未知区不能当无遮挡。
+                                                 计入相邻格延伸的碰撞形状，邻格未知也停止确认；液体和纹理不遮挡碰撞射线，实体箱不是皮肤模型深度。
+                                                 两种模式均只读，按需缩小范围；数据只在本次调用复用，不常驻全量地图。`,
+    parse: (c, at) => {
+      const parsed = parseSpatialObservation(c);
+      return 'error' in parsed ? { error: `${at} ${parsed.error}` } : { step: { skill: 'observe', ...parsed } };
+    },
+    fields: [
+      { key: 'mode', kind: 'enum', values: ['voxels', 'rays'], required: true, error: 'mode 要 voxels/rays' },
+      { key: 'bounds', kind: 'opaque', schema: { type: 'array', minItems: 6, maxItems: 6,
+        items: { type: 'integer', minimum: -SPATIAL_OBSERVATION_LIMITS.offset, maximum: SPATIAL_OBSERVATION_LIMITS.offset } }, doc: 'voxels 相对脚下格的六个边界，含端点' },
+      { key: 'rays', kind: 'opaque', schema: { type: 'array', minItems: 1, maxItems: SPATIAL_OBSERVATION_LIMITS.rays,
+        items: { type: 'array', minItems: 3, maxItems: 3, items: { type: 'number' } } }, doc: 'rays 的 [pitch角,yaw角,距离] 列表' },
+    ],
+  },
+  {
     name: 'use',
     doc: `{"skill":"use","at":[103,64,-31]}
                                                  右键世界里已有的那一格:开门、拉杆、按钮、开箱子看一眼、点床睡觉。优先空手；满包时功能方块可用普通无自定义名称的工具，不丢主手物品。
@@ -1707,7 +1734,7 @@ ground 使用普通物理，飞行悬停时先 land 或改用 flight。flight �
 const SKILL_INDEX = new Map(SKILLS.map((s) => [s.name as string, s]));
 
 function specIsScout(s: SkillSpec): boolean {
-  return s.name === 'probe' || s.fields.some((f) => f.key === 'dryRun');
+  return s.name === 'probe' || s.name === 'observe' || s.fields.some((f) => f.key === 'dryRun');
 }
 
 const SCOUT_SKILLS = SKILLS.filter(specIsScout);
@@ -2043,7 +2070,7 @@ export function parseScoutSteps(
   const steps: SkillCall[] = [];
   for (const [i, step] of parsed.steps.entries()) {
     if (!scout.has(step.skill)) {
-      return { error: `第 ${i + 1} 步「${step.skill}」会动世界,试算只收 probe 和带 dryRun 的技能` };
+      return { error: `第 ${i + 1} 步「${step.skill}」会动世界,试算只收 probe/observe 和带 dryRun 的技能` };
     }
     steps.push(asScoutStep(step));
   }

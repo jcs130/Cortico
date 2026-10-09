@@ -1050,7 +1050,7 @@ describe('MinecraftWorld World 面(未连接状态)', () => {
     const scout = m.tools().find((t) => t.name === 'mc_scout')!;
     const props = scout.parameters.properties as Record<string, { items?: { properties?: Record<string, { enum?: string[] }> } }>;
     const names = props.steps.items!.properties!.skill.enum!;
-    expect(names).toEqual(['goto', 'flight', 'tunnel', 'build', 'excavate', 'probe']);
+    expect(names).toEqual(['goto', 'flight', 'tunnel', 'build', 'excavate', 'probe', 'observe']);
     expect(names).not.toContain('collect');
     expect(names).not.toContain('chat');
   });
