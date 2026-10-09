@@ -108,6 +108,37 @@ describe('Persona长期复盘', () => {
     expect(r.review.state().lastOutcome).toBe('completed');
   });
 
+  it.each([
+    { label: '定向因果复核', question: '核对当前阶段为何未完成', agendaEnabled: true, publicTopic: '核对阶段进展' },
+    { label: '普通叙述复盘', question: '', agendaEnabled: false, publicTopic: '' },
+  ])('$label 不投递日程推进前的旧建议，重新采样可读到完成证据', async ({ question, agendaEnabled, publicTopic }) => {
+    const r = rig({ agendaEnabled });
+    r.agenda.propose(candidate, 0, stamp()); r.agenda.operate({ operation: 'adopt' });
+    let finish!: (text: string) => void;
+    r.reply(() => new Promise(resolve => { finish = resolve; }));
+    expect(r.review.review(question, publicTopic).accepted).toBe(true);
+    expect(r.forks[0].messages.map(record => itemText(record.item)).join('\n')).not.toContain('新回执已验收作品');
+    const before = [...r.injected];
+
+    r.agenda.operate({ operation: 'update', id: 'create', status: 'done', note: '新回执已验收作品' });
+    finish('作品仍未完成，继续重做同一阶段。');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(r.injected).toEqual(before);
+    expect(r.review.state()).toMatchObject({ running: false, lastOutcome: 'discarded', lastCompletedAt: null });
+    expect(r.agenda.state().items[0].status).toBe('done');
+    expect(r.gate).not.toHaveBeenCalled();
+
+    r.reply(async () => '根据最新完成回执继续下一项活动。');
+    expect(r.review.review(question).accepted).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    const fresh = r.forks.at(-1)!.messages.map(record => itemText(record.item)).join('\n');
+    expect(fresh).toContain('新回执已验收作品');
+    expect(fresh).toContain('已完成 1 项');
+    expect(r.injected.at(-1)).toMatchObject({ kind: question ? 'causal_review' : PLANNING });
+    expect(r.injected.at(-1)?.text).toContain('根据最新完成回执');
+    expect(r.review.state().lastOutcome).toBe('completed');
+  });
+
   it('明确的问题走独立深入通道和较长预算，受理后仅发一次公开进度提示，常规规划仍用原通道', async () => {
     const r = rig({ reflectionProvider: 'configured-reflector', reflectionMaxContextTokens: 24_000,
       reflectionMaxOutputTokens: 2800, reflectionTimeoutMs: 180_000 });

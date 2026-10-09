@@ -383,6 +383,13 @@ export class PeriodicPlanningReview {
           core.log.warn('长期复盘结果过期，未投递建议', { data: { capturedAt, resultAgeMs, maxResultAgeMs: cfg.maxResultAgeMs } });
           return;
         }
+        // Structured proposals already carry a revision checked on adoption; narrative advice has no such boundary.
+        const currentAgendaRevision = this.options.agenda?.revision();
+        if (!agendaReview && currentAgendaRevision !== undefined && currentAgendaRevision !== agendaRevision) {
+          finish('discarded');
+          core.log.info('复盘采样后日程已推进，未投递旧建议', { data: { capturedAt, agendaRevision, currentAgendaRevision } });
+          return;
+        }
         if (!question) this.reviewedVersion = version;
         this.lastCompletedAt = new Date(this.now()).toISOString();
         if (!text || text === '(nothing)') {
