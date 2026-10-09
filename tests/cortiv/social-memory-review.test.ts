@@ -57,6 +57,15 @@ describe('durable audience evidence pages', () => {
     expect(existsSync(join(dir, p.profilePaths[0]))).toBe(false);
   });
 
+  it('archives paid audience messages as conversation without treating gifts or arrivals as chat', () => {
+    const journal = new SocialMemoryReview(temp());
+    journal.observe([event({ cursor: 1, type: 'stream.superchat', text: '想听一首新歌', meta: { uname: '观众', message: '想听一首新歌' } }),
+      event({ cursor: 2, type: 'stream.gift' }), event({ cursor: 3, type: 'stream.enter' })]);
+    const page = journal.nextPage()!;
+    expect(page.entries).toHaveLength(1);
+    expect(page.entries[0].entry).toMatchObject({ kind: 'audience', type: 'stream.superchat', text: '想听一首新歌' });
+  });
+
   it('reconstructs a cursor saved after the journal append but before state persistence', () => {
     const dir = temp(), r = new SocialMemoryReview(dir); r.observe([event()]);
     const path = join(dir, '.social-review/state.json'), s = JSON.parse(readFileSync(path, 'utf8'));

@@ -6788,14 +6788,16 @@ export class MinecraftWorld implements World {
         return;
       }
       this.interruptIdle('chat');
-      this.emit('minecraft.chat', `[MC] ${username}: ${message}`, mentionedInChat(message), undefined, username);
+      this.emit('minecraft.chat', `[MC] ${username}: ${message}`, mentionedInChat(message),
+        { meta: { uname: username, socialScope: 'minecraft-server' } }, username);
     });
     bot.on('whisper', (username: string, message: string, _translate: string, jsonMsg: unknown) => {
       if (markMatched(jsonMsg)) return;
       if (jsonMsg && typeof jsonMsg === 'object') this.chatClaimed.add(jsonMsg);
       if (username === this.chatName()) return;
       this.interruptIdle('whisper');
-      this.emit('minecraft.chat', `[MC 私聊] ${username}: ${message}`, true, undefined, username);
+      this.emit('minecraft.chat', `[MC 私聊] ${username}: ${message}`, true,
+        { meta: { uname: username, socialScope: 'minecraft-server' } }, username);
     });
     bot.on('title', (text: unknown) => {
       const t = minecraftTextComponent(text);
@@ -7026,13 +7028,13 @@ export class MinecraftWorld implements World {
         setTimeout(() => this.teleportPlayer('玩家进服'), 2_000);
       }
       this.emit('minecraft.enter', `[Minecraft] 玩家 ${player.username} 进入了服务器。`, true,
-        { meta: { uname: player.username } }, player.username);
+        { meta: { uname: player.username, socialScope: 'minecraft-server' } }, player.username);
     });
     bot.on('playerLeft', (player: { username: string }) => {
       if (player.username === this.chatName() || this.isCamera(player.username)) return;
       if (!this.bridge?.bot || this.bridge.bot === bot) this.playerObservations.forgetPlayer(player.username);
       this.emit('minecraft.leave', `[Minecraft] 玩家 ${player.username} 离开了服务器。`, false,
-        { meta: { uname: player.username } }, player.username);
+        { meta: { uname: player.username, socialScope: 'minecraft-server' } }, player.username);
     });
     bot.on('entitySwingArm', (entity: unknown) => this.notePlayerGesture(bot, entity, 'wave'));
     bot.on('entityCrouch', (entity: unknown) => this.notePlayerGesture(bot, entity, 'crouch'));
@@ -7744,7 +7746,7 @@ export class MinecraftWorld implements World {
     const urgent = fact.kind === 'appearance' || fact.kind === 'approach'
       || (fact.kind === 'gesture' && (fact.motion === 'crouch' || !fact.handItemName));
     this.emit('minecraft.event', `[Minecraft] ${renderPlayerObservation(fact)}。`, urgent,
-      { meta: { minecraftPlayerObservation: playerObservationMeta(fact) } }, fact.playerName);
+      { meta: { uname: fact.playerName, socialScope: 'minecraft-server', minecraftPlayerObservation: playerObservationMeta(fact) } }, fact.playerName);
   }
 
   /**

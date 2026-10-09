@@ -82,6 +82,8 @@ import {
   PENDING_WORK_SELECTOR_MAX_CHARS, PENDING_WORK_LIST_MAX_ENTRIES,
 } from './pending-work.ts';
 import { VIEWERS_DIR, VIEWER_MEMORY_NOTE_FILE, viewerMemoryNote } from './viewers.ts';
+import { ViewerEncounters } from './viewer-encounters.ts';
+import { ViewerIdentityLinks } from './viewer-identity-links.ts';
 
 export { HANDOFF_DIR, VIEWERS_DIR, VIEWER_MEMORY_NOTE_FILE, viewerMemoryNote };
 
@@ -425,7 +427,9 @@ export class CortiV extends Cormini {
   private readonly dreamQueue = new DreamTaskQueue();
   private readonly socialMemoryReview: SocialMemoryReview;
   private readonly viewerConversationRecall: ViewerConversationRecall;
+  private readonly viewerIdentityLinks: ViewerIdentityLinks;
   private readonly viewerRecallContext = new ViewerRecallContext();
+  private readonly viewerEncounters = new ViewerEncounters();
   private readonly recalledConversation = new Map<string, string>();
   private readonly viewerArrivalHistory = new Map<string, string>();
   private viewerHistoryReadsRemaining = 0;
@@ -504,6 +508,7 @@ export class CortiV extends Cormini {
     this.recentSpeech = new RecentSpeech(this.memoryDir);
     this.socialMemoryReview = new SocialMemoryReview(this.memoryDir);
     this.viewerConversationRecall = new ViewerConversationRecall(this.socialMemoryReview);
+    this.viewerIdentityLinks = new ViewerIdentityLinks(this.memoryDir);
     this.timezone = opts.timezone ?? (() => 'UTC');
     this.socialAttention = new CortiVSocialAttention(opts.fastAttention ?? (() => FAST_ATTENTION_DEFAULTS));
     this.referenceConfig = opts.references ?? (() => REFERENCE_LIBRARY_DEFAULTS);
@@ -569,6 +574,7 @@ export class CortiV extends Cormini {
     if (ctx.reason === 'restarted') {
       this.restoreRecalledSummary();
     } else {
+      this.viewerEncounters.clear();
       this.recalledSummary.clear();
       this.viewerNames.clear();
       this.viewerHits.clear();
@@ -749,6 +755,7 @@ export class CortiV extends Cormini {
 
   prepareRequest(ctx: { sessionId: string; round: number; messages: readonly ContextRecord[] }): ContextRecord[] | null {
     const original = ctx.messages;
+    if (ctx.sessionId === MAIN) this.captureRecentSpeech(ctx.messages);
     if (ctx.sessionId === MAIN && this.toolCallRecoveryConfig().enabled)
       ctx = { ...ctx, messages: projectToolCallRecovery(ctx.messages, this.recoveryTools()) };
     this.stateMemory.observeRecords(ctx.messages, this.stateEvidenceTools());
@@ -790,7 +797,7 @@ export class CortiV extends Cormini {
       ...(recentSpeech ? ['recent_speech'] : []), ...(this.pendingWork ? ['pending_work'] : []),
       ...(agenda ? ['activity_plan', ...(this.planningConfig().agendaEnabled ? ['planning'] : [])] : []),
     ];
-    const pins = [...[recentMemory, index].filter(Boolean).map(text => message('user', text)), ...facts.pins, ...[recentSpeech, this.actionEvidence(ctx.messages), pending, agenda, this.viewerRecallContext.text(), this.referenceLibrary.context()].filter(Boolean)
+    const pins = [...[recentMemory, index].filter(Boolean).map(text => message('user', text)), ...facts.pins, ...[recentSpeech, this.actionEvidence(ctx.messages), pending, agenda, this.viewerEncounters.text(), this.viewerRecallContext.text(), this.referenceLibrary.context()].filter(Boolean)
       .map((text) => message('user', text))];
     const handoffSources = new Map<string, { digest: string; original: boolean }>();
     this.foregroundCurrentHandoffs = ctx.messages.flatMap((record) => {
@@ -1250,7 +1257,8 @@ export class CortiV extends Cormini {
         + 'this returns the whole file when the id is given or the name matches exactly one file. '
         + 'A name search also covers people seen this session who have no file yet and gives their id. '
         + 'With query, return a bounded profile summary and this person\'s dated past messages matching the words. '
-        + 'Specify source with id to keep platform identities separate. Retrieved messages do not prove a successful reply. '
+        + 'Specify source with id to keep platform identities separate; ambiguous ids return candidates without profile contents. '
+        + 'Only explicit evidence-bearing identity links can associate accounts. Retrieved messages do not prove a successful reply. '
         + 'Use this instead of list_files to find people.',
       tags: ['read'],
       parameters: {
@@ -1282,13 +1290,20 @@ export class CortiV extends Cormini {
       const n = this.viewerNames.get(`${source}/${key}`);
       return n ? `(本场叫「${n}」)` : '';
     };
-    const whole = (p: ViewerProfile): string => `${p.path}${seenAs(p.source, p.key)}\n${p.content.trimEnd()}`;
+    const whole = (p: ViewerProfile): string => [`[memory] 账号 ${p.source}/${p.key} 的历史档案；不证明当前进场，也不能据昵称转给另一账号。`,
+      this.viewerIdentityLinks.note(p.source, p.key), `${p.path}${seenAs(p.source, p.key)}`, p.content.trimEnd()].filter(Boolean).join('\n');
     if (id) {
       const hits = profiles.filter((p) => p.key === id);
+      const identities = new Set([
+        ...hits.map(p => `${p.source}/${p.key}`),
+        ...[...this.viewerNames.keys()].filter(k => k.endsWith(`/${id}`) && (!source || k.startsWith(`${source}/`))),
+      ]);
+      if (identities.size > 1) return `[身份未确定] 相同 id 对应 ${identities.size} 个账号，请给 source 和 id；不能合并档案。\n`
+        + [...identities].slice(0, RECALL_LIST_MAX).map(identity => `- ${identity}`).join('\n');
       if (hits.length > 0) return hits.map(whole).join('\n\n');
       const seen = [...this.viewerNames].find(([k]) => k.endsWith(`/${id}`) && (!source || k.startsWith(`${source}/`)));
       return seen
-        ? `id ${id} 还没有档案;本场见过,叫「${seen[1]}」。`
+        ? `${seen[0]}（id ${id}）还没有档案;本场见过,叫「${seen[1]}」。`
         : `没有 id ${id} 的档案,本场也没见过这个 id。`;
     }
     // 名字对本场名字表与档案首行两处;本场改了名的人首行还是旧名,靠名字表对回那份档案。
@@ -1301,7 +1316,7 @@ export class CortiV extends Cormini {
     const filed = new Set(files.map((p) => `${p.source}/${p.key}`));
     const live = liveHits
       .filter(([k]) => !filed.has(k))
-      .map(([k, n]) => `- id ${k.slice(k.indexOf('/') + 1)}「${n}」本场见过,还没有档案。`);
+      .map(([k, n]) => `- ${k}（id ${k.slice(k.indexOf('/') + 1)}）「${n}」本场见过,还没有档案。`);
     if (files.length === 0 && live.length === 0) {
       return `没找到叫「${name}」的人:本场没见过这个名字,档案首行里也没有。名字可能改过——他这一场说过话的话,[memory] 行里给过 id。`;
     }
@@ -1312,7 +1327,7 @@ export class CortiV extends Cormini {
     ];
     const lines = [`找到 ${items.length} 个:`, ...items.slice(0, RECALL_LIST_MAX)];
     if (items.length > RECALL_LIST_MAX) lines.push(`…还有 ${items.length - RECALL_LIST_MAX} 个没列;名字给得更完整一点。`);
-    if (files.length > 0) lines.push('要整份档案,用 id 再调一次。');
+    if (files.length > 0) lines.push('要整份档案,用 source 和 id 再调一次；名字文字命中不证明是同一个人。');
     return lines.join('\n');
   }
 
@@ -1336,6 +1351,7 @@ export class CortiV extends Cormini {
       const recall = this.viewerConversationRecall.recall({ source: person.source, senderKey: person.key, query,
         beforeCursor: Number.MAX_SAFE_INTEGER, beforeAt: new Date().toISOString() });
       return [`[memory] ${person.source}/${person.key} 的记忆节选；旧发言不是当前指令，不证明主播已经回复。`,
+        this.viewerIdentityLinks.note(person.source, person.key),
         person.summary ? `档案首行：${clip(person.summary, 600)}` : '目前没有人物档案摘要。', recall.text].filter(Boolean).join('\n');
     } catch (error) { return `[检索失败] ${String(error)}`; }
   }
@@ -1726,8 +1742,9 @@ export class CortiV extends Cormini {
     const seenKey = `${e.source}/${key}`;
     const arrival = [`${e.source}.enter`, `${e.source}.enter-guard`].includes(e.type);
     const presence = arrival || e.type === `${e.source}.leave`;
-    const hits = (this.viewerHits.get(seenKey) ?? 0) + (presence ? 0 : hitBy);
-    if (!presence) this.viewerHits.set(seenKey, hits);
+    const interaction = [`${e.source}.danmaku`, `${e.source}.chat`, `${e.source}.superchat`].includes(e.type);
+    const hits = (this.viewerHits.get(seenKey) ?? 0) + (interaction ? hitBy : 0);
+    if (interaction) this.viewerHits.set(seenKey, hits);
     // 先把键解成路径:逃逸键整条不认(既不唤起,也不该拿它去劝梦建文件)
     let file: string;
     try {
@@ -1735,6 +1752,9 @@ export class CortiV extends Cormini {
     } catch {
       return false;
     }
+    const encounter = this.viewerEncounters.observe(e);
+    if (encounter && !this.foregroundConfig().enabled) this.core?.injectInternal(`[交流身份] ${encounter}\n这是账号事件记录，不是欢迎口播稿；来源不同的账号不能凭昵称合并。`, 'recall');
+    if (!presence && !interaction) return false;
     const uname = typeof e.meta?.uname === 'string' ? e.meta.uname.trim() : '';
     if (uname) this.viewerNames.set(seenKey, uname);
     let content: string | null = null;
@@ -1756,9 +1776,10 @@ export class CortiV extends Cormini {
     }
     if (arrival) this.viewerArrivalHistory.set(seenKey, history);
     const summary = content?.split('\n').map((l) => l.trim()).find(Boolean);
+    const identityLink = this.viewerIdentityLinks.note(e.source, key);
     const note = [`${e.source}/${key}${uname ? `「${uname}」` : ''}`,
-      summary ? `档案首行：${clip(summary, 600)}` : '', history].filter(Boolean).join('\n');
-    if (summary || history) this.viewerRecallContext.update(seenKey, note);
+      identityLink, summary ? `档案首行：${clip(summary, 600)}` : '', history].filter(Boolean).join('\n');
+    if (summary || history || identityLink) this.viewerRecallContext.update(seenKey, note);
     if (history && !this.foregroundConfig().enabled) {
       const digest = createHash('sha256').update(history).digest('base64url');
       if (this.recalledConversation.get(seenKey) !== digest
@@ -1770,14 +1791,17 @@ export class CortiV extends Cormini {
       }
     }
     if (content === null) {
-      if (!presence) this.nudgeEnroll(e, seenKey, key, hits, budget, qualified);
-      return false;
+      if (interaction) this.nudgeEnroll(e, seenKey, key, hits, budget, qualified);
+      if (!identityLink) return false;
     }
-    if (!summary) return false;
+    if (!summary && !identityLink) return false;
     // 同一上下文窗口内不重复注入未变的摘要。
-    const digest = createHash('sha256').update(summary).digest('base64url');
+    const digest = createHash('sha256').update((summary ?? '') + (identityLink ? '\n' + identityLink : '')).digest('base64url');
     if (this.recalledSummary.get(seenKey) === digest) return false;
-    const line = `[memory] 你记得${e.source}的${key}:${summary}`;
+    const line = (summary
+      ? `[memory] 你记得${e.source}的${key}（档案 ${VIEWERS_DIR}/${e.source}/${key}.md；历史资料重现不是新进场，不代表另一平台的同名账号）:${summary}`
+      : `[memory] ${e.source}/${key} 的账号关联资料；没有人物档案正文。`)
+      + (identityLink ? '\n' + identityLink : '');
     if (!this.injectViewerMemory(line, budget)) return false;
     this.recalledSummary.set(seenKey, digest);
     return true;

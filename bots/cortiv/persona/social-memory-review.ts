@@ -44,7 +44,7 @@ function validateEntry(value: unknown, cutoffAt: string): SocialReviewEntry {
     if (typeof row.source !== 'string' || !safeSegment(row.source) || typeof row.senderKey !== 'string'
       || !safeSegment(row.senderKey) || typeof row.uname !== 'string' || !row.uname.trim()
       || !Number.isSafeInteger(row.cursor) || Number(row.cursor) < 0 || typeof row.type !== 'string'
-      || ![`${row.source}.danmaku`, `${row.source}.chat`].includes(row.type)
+      || ![`${row.source}.danmaku`, `${row.source}.chat`, `${row.source}.superchat`].includes(row.type)
       || typeof row.text !== 'string' || !row.text.trim()) throw new Error('观众条目需要真实 source、senderKey、昵称、cursor 和聊天事件');
     return { kind: 'audience', at: row.at, source: row.source, senderKey: row.senderKey,
       uname: row.uname, cursor: Number(row.cursor), type: row.type, text: row.text };
@@ -114,7 +114,7 @@ export class SocialMemoryReview {
     for (const event of events) {
       ended ||= isRoomEnded(event);
       if (event.origin !== 'external' || event.contextDelivery === 'archive-only' || !event.senderKey
-        || ![`${event.source}.danmaku`, `${event.source}.chat`].includes(event.type)) continue;
+        || ![`${event.source}.danmaku`, `${event.source}.chat`, `${event.source}.superchat`].includes(event.type)) continue;
       try {
         const entry = validateEntry({ kind: 'audience', at: event.ts, source: event.source,
           senderKey: event.senderKey, uname: event.meta?.uname, cursor: event.cursor, type: event.type,
