@@ -2724,6 +2724,7 @@ export class MinecraftWorld implements World {
   /** 身上正在生效的状态效果名。服务端对同一效果每 30 秒重推一次 entity_effect,只有出现与消失才成文。 */
   private readonly activeEffects = new Set<string>();
   private hookedBots = new WeakSet<object>();
+  private hookedMessageBots = new WeakSet<object>();
   /** 服务端同一条系统提示在短时间连发时只投递首条；原始重复次数进诊断。 */
   private readonly recentSystemMessages = new Map<string, { at: number; repeats: number }>();
   private readonly mcServer: MinecraftServerManager;
@@ -4079,6 +4080,7 @@ export class MinecraftWorld implements World {
       // 成果登记的垫脚过滤:维度在这里合上,寻路器只问「这一格算不算」
       workCell: (x, y, z) => this.works.has(this.bridge?.bot?.game?.dimension ?? 'overworld', x, y, z),
       showTempo: () => this.showTempo(),
+      onBotCreated: (bot) => this.hookMessageEvents(bot),
       onSpawn: () => this.onSpawn(),
       onRespawn: () => this.onRespawn(),
       // 第一次掉线值得叫醒她(手上的事全废了);之后每一次重连没成只是同一件事的
@@ -6737,16 +6739,12 @@ export class MinecraftWorld implements World {
     return `已借 bot 的权限下 /tp ${who} ${target}(bot 不是 op 时服务器会拒)`;
   }
 
-  private hookBotEvents(bot: any): void {
-    if (this.hookedBots.has(bot)) return;
-    this.hookedBots.add(bot);
-    observeStatusEffects(bot);
-    if (this.agentFriendEnabled) watchAgentFriendFlight(bot);
+  /** 聊天、欢迎说明与屏幕大字可早于 spawn；不依赖实体或背包装配。 */
+  private hookMessageEvents(bot: any): void {
+    if (this.hookedMessageBots.has(bot)) return;
+    this.hookedMessageBots.add(bot);
     this.lastServerFeedback = null;
     this.recentSystemMessages.clear();
-    const detachUses = this.serverActionWait.observeUses(bot._client, (at) =>
-      this.bridge?.bot === bot ? this.useObservation(at) : undefined);
-    bot._client.on('end', detachUses);
     const noteActionFeedback = (value: unknown, keyHint = ''): void => {
       const rendered = minecraftTextComponent(value);
       const key = keyHint || (rendered.startsWith('block.minecraft.bed.') ? rendered : '');
@@ -6769,6 +6767,158 @@ export class MinecraftWorld implements World {
       }
     });
 
+    const matchedChatMessages = new WeakSet<object>();
+    const mentionedInChat = (message: string): boolean => {
+      const lower = message.toLocaleLowerCase();
+      return lower.includes(this.chatName().toLocaleLowerCase())
+        || lower.includes(this.botName.toLocaleLowerCase())
+        || lower.includes('corti') || message.includes('可缇');
+    };
+    const markMatched = (jsonMsg: unknown): boolean => {
+      if (!jsonMsg || typeof jsonMsg !== 'object') return false;
+      if (matchedChatMessages.has(jsonMsg)) return true;
+      matchedChatMessages.add(jsonMsg);
+      return false;
+    };
+    bot.on('chat', (username: string, message: string, _translate: string, jsonMsg: unknown) => {
+      if (markMatched(jsonMsg)) return;
+      if (jsonMsg && typeof jsonMsg === 'object') this.chatClaimed.add(jsonMsg);
+      if (username === this.chatName()) {
+        // 自己说的话:落库存档,但不投递——拿自己的话叫醒自己没有意义
+        this.emit('minecraft.chat', `[MC] ${username}: ${message}`, false, { deliver: false });
+        return;
+      }
+      this.interruptIdle('chat');
+      this.emit('minecraft.chat', `[MC] ${username}: ${message}`, mentionedInChat(message), undefined, username);
+    });
+    bot.on('whisper', (username: string, message: string, _translate: string, jsonMsg: unknown) => {
+      if (markMatched(jsonMsg)) return;
+      if (jsonMsg && typeof jsonMsg === 'object') this.chatClaimed.add(jsonMsg);
+      if (username === this.chatName()) return;
+      this.interruptIdle('whisper');
+      this.emit('minecraft.chat', `[MC 私聊] ${username}: ${message}`, true, undefined, username);
+    });
+    bot.on('title', (text: unknown) => {
+      const t = minecraftTextComponent(text);
+      if (t) this.emit('minecraft.event', `[Minecraft] 屏幕大字:${t}`, false);
+    });
+    // 高层 chat/whisper 由 Mineflayer 的英文格式正则识别；没匹配上的聊天由 message 补送。
+    bot.on('message', (jsonMsg: { translate?: string; with?: Array<{ toString(): string }>; toString(): string }, position: string) => {
+      const loginMessage = !this.hookedBots.has(bot);
+      const key = String(jsonMsg?.translate ?? '');
+      if (key === SET_SPAWN_TRANSLATE) {
+        this.lastSetSpawnAt = Date.now();
+        this.rememberPersonalSpawn(bot, `${SET_SPAWN_TRANSLATE} 系统消息`);
+      }
+      if (position === 'game_info') {
+        // 动作栏也承载不断刷新的 HUD；只保存明确的交互拒绝理由。
+        noteActionFeedback(jsonMsg, key);
+        if (this.agentFriendEnabled) this.combatSpells.noteServerMessage(jsonMsg.toString());
+        this.forwardServerMessage(jsonMsg, 'actionBar');
+        return;
+      }
+      if (position !== 'chat' && position !== 'system') return;
+      let unchangedQueryFeedback = false;
+      if (position === 'system') {
+        const reply = jsonMsg.toString().trim();
+        // AgentFriend 的机器可读权限回执由 Bridge 消费，避免注入主播聊天与记忆。
+        if (this.agentFriendEnabled && parseProtectReply(reply)) return;
+        unchangedQueryFeedback = this.serverActionWait.noteFeedback(reply);
+        if (this.agentFriendEnabled) {
+          this.combatSpells.noteServerMessage(reply);
+          if (/^(?:可用咏唱|守护\/恢复)[：:]/.test(reply))
+            this.selfHealAvailable = /\bselfheal\b/i.test(reply);
+          const arenaEntry = /(?:进入第|已恢复第|^第)\s*(\d+)\s*\/\s*(\d+)\s*层(?=[：:试炼]|$)/.exec(reply);
+          if (arenaEntry) {
+            this.arenaFloor = { floor: Number(arenaEntry[1]), total: Number(arenaEntry[2]) };
+          }
+          if (/第\s*(\d+)\s*\/\s*\1\s*层已通关/.test(reply)) this.arenaFloor = null;
+        }
+      }
+      if (position === 'system') {
+        // 其他玩家的死亡广播与成就走系统消息；自己的死亡由专报处理。
+        if (key.startsWith('death.') || key === 'chat.type.advancement') {
+          const text = jsonMsg.toString();
+          if (!text) return;
+          if (text.includes(this.chatName())) {
+            if (key.startsWith('death.')) {
+              this.diag.write({
+                lane: 'world', event: 'death-cause',
+                msg: `官方死因:${text}`,
+                data: { translate: key, text, position: bot.entity?.position ?? null, health: bot.health ?? null },
+              });
+              this.pendingDeathCause = { text, key, at: Date.now() };
+              this.deaths.noteCause(text);
+            }
+          } else {
+            this.emit('minecraft.event', `[Minecraft] ${text}`, false);
+          }
+          return;
+        }
+        // 玩家进出已有 playerJoined/playerLeft 事件；动作栏由 position 过滤。
+        if (key.startsWith('multiplayer.player.joined') || key === 'multiplayer.player.left') return;
+      }
+      // Mineflayer 在 message 后同步触发 messagestr，再由格式正则触发 chat/whisper。
+      queueMicrotask(() => {
+        if (matchedChatMessages.has(jsonMsg)) return;
+        const text = jsonMsg.toString().trim();
+        if (!text) return;
+        if (unchangedQueryFeedback) return;
+        const privateMessage = key === 'commands.message.display.incoming'
+          || /^\S+ whispers(?: to you)?:? /i.test(text)
+          || /^\[[^\]]+ -> [^\]]+\] /.test(text);
+        if (key === 'commands.message.display.outgoing') {
+          this.emit('minecraft.chat', `[MC 私聊发出] ${text}`, false);
+          return;
+        }
+        if (position === 'chat') {
+          const sender = jsonMsg.with?.[0]?.toString();
+          const self = this.chatName();
+          const fromSelf = sender === self || text.startsWith(`<${self}> `)
+            || text.startsWith(`${self}: `) || text.startsWith(`[${self}] `);
+          this.emit('minecraft.chat', `[MC${privateMessage ? ' 私聊' : ''}] ${text}`,
+            !fromSelf && (privateMessage || mentionedInChat(text)), fromSelf ? { deliver: false } : undefined);
+          return;
+        }
+        // 明确的方块保护拒绝会终止当前任务；其他插件回执按文本识别并即时投递。
+        if (/can't break that block here|你不能破坏这里的方块|不能在这里破坏方块|不许破坏|不允许破坏|这块属于村庄原有建筑|受保护.*(?:破坏|挖掘)/i.test(text)) {
+          const notice = `[MC 系统] ${text}`;
+          this.bridge?.noteServerBreakDenied(text);
+          if (this.executor?.currentTask) {
+            this.emit('minecraft.chat', notice, false, { trigger: 'piggyback' });
+            this.executor.blockCurrentFromServer(text);
+          } else {
+            this.emit('minecraft.chat', notice, true);
+          }
+          return;
+        }
+        const agentFriendPrefixes = [
+          '可用咏唱：', '可学习：', '每项可用原版经验', '魔力统一使用', '已领取技能罗盘', '命格书',
+          '✦ 探矿定位',
+          'Sacred healing restores your health.', // str-cast-self 成功族（英文）
+          'You are already at full health.', // str-max-health 拒绝族（英文，扁平组件）
+          '没有这项技能。', // 非法咒语名（中文，extra[] 包装）
+        ];
+        const agentFriend = this.agentFriendEnabled && !key && agentFriendPrefixes.some((p) => text.includes(p));
+        if (!privateMessage && !agentFriend && this.suppressRepeatedSystemMessage(text)) return;
+        this.emit('minecraft.chat', `[MC ${privateMessage ? '私聊' : agentFriend ? '插件' : loginMessage ? '登录消息' : '系统'}] ${text}`,
+          privateMessage || agentFriend,
+          { ...(privateMessage || agentFriend ? {} : { trigger: 'piggyback' as const }),
+            ...(loginMessage ? { meta: { phase: 'login', server: `${this.cfg.host}:${this.cfg.port}` } } : {}) },
+          agentFriend ? 'AgentFriend' : undefined);
+      });
+    });
+  }
+
+  private hookBotEvents(bot: any): void {
+    if (this.hookedBots.has(bot)) return;
+    this.hookedBots.add(bot);
+    observeStatusEffects(bot);
+    if (this.agentFriendEnabled) watchAgentFriendFlight(bot);
+    this.hookMessageEvents(bot);
+    const detachUses = this.serverActionWait.observeUses(bot._client, (at) =>
+      this.bridge?.bot === bot ? this.useObservation(at) : undefined);
+    bot._client.on('end', detachUses);
     bot.on('physicsTick', () => {
       if (this.idleBehavior?.active) {
         const reason = this.idleUnavailableReason();
@@ -6863,37 +7013,6 @@ export class MinecraftWorld implements World {
       this.scheduleGuiKick();
     });
 
-    const matchedChatMessages = new WeakSet<object>();
-    const mentionedInChat = (message: string): boolean => {
-      const lower = message.toLocaleLowerCase();
-      return lower.includes(this.chatName().toLocaleLowerCase())
-        || lower.includes(this.botName.toLocaleLowerCase())
-        || lower.includes('corti') || message.includes('可缇');
-    };
-    const markMatched = (jsonMsg: unknown): boolean => {
-      if (!jsonMsg || typeof jsonMsg !== 'object') return false;
-      if (matchedChatMessages.has(jsonMsg)) return true;
-      matchedChatMessages.add(jsonMsg);
-      return false;
-    };
-    bot.on('chat', (username: string, message: string, _translate: string, jsonMsg: unknown) => {
-      if (markMatched(jsonMsg)) return;
-      if (jsonMsg && typeof jsonMsg === 'object') this.chatClaimed.add(jsonMsg);
-      if (username === this.chatName()) {
-        // 自己说的话:落库存档,但不投递——拿自己的话叫醒自己没有意义
-        this.emit('minecraft.chat', `[MC] ${username}: ${message}`, false, { deliver: false });
-        return;
-      }
-      this.interruptIdle('chat');
-      this.emit('minecraft.chat', `[MC] ${username}: ${message}`, mentionedInChat(message), undefined, username);
-    });
-    bot.on('whisper', (username: string, message: string, _translate: string, jsonMsg: unknown) => {
-      if (markMatched(jsonMsg)) return;
-      if (jsonMsg && typeof jsonMsg === 'object') this.chatClaimed.add(jsonMsg);
-      if (username === this.chatName()) return;
-      this.interruptIdle('whisper');
-      this.emit('minecraft.chat', `[MC 私聊] ${username}: ${message}`, true, undefined, username);
-    });
     bot.on('playerJoined', (player: { username: string }) => {
       if (player.username === this.chatName()) return;
       // 摄像机不是"玩家进服"这件事的一部分:它进服恰恰是该给它下附身指令的时刻
@@ -7026,112 +7145,6 @@ export class MinecraftWorld implements World {
       if (d > PROXIMITY_EXIT) return;
       this.emit('minecraft.event', `[Minecraft] ${zhEntity(entity.name)}死了(${Math.round(d)} 格外)。`, false,
         { trigger: 'piggyback' });
-    });
-    bot.on('title', (text: unknown) => {
-      const t = minecraftTextComponent(text);
-      if (t) this.emit('minecraft.event', `[Minecraft] 屏幕大字:${t}`, false);
-    });
-    // 高层 chat/whisper 由 Mineflayer 的英文格式正则识别；没匹配上的聊天由 message 补送。
-    bot.on('message', (jsonMsg: { translate?: string; with?: Array<{ toString(): string }>; toString(): string }, position: string) => {
-      const key = String(jsonMsg?.translate ?? '');
-      if (key === SET_SPAWN_TRANSLATE) {
-        this.lastSetSpawnAt = Date.now();
-        this.rememberPersonalSpawn(bot, `${SET_SPAWN_TRANSLATE} 系统消息`);
-      }
-      if (position === 'game_info') {
-        // 动作栏也承载不断刷新的 HUD；只保存明确的交互拒绝理由。
-        noteActionFeedback(jsonMsg, key);
-        if (this.agentFriendEnabled) this.combatSpells.noteServerMessage(jsonMsg.toString());
-        this.forwardServerMessage(jsonMsg, 'actionBar');
-        return;
-      }
-      if (position !== 'chat' && position !== 'system') return;
-      let unchangedQueryFeedback = false;
-      if (position === 'system') {
-        const reply = jsonMsg.toString().trim();
-        // AgentFriend 的机器可读权限回执由 Bridge 消费，避免注入主播聊天与记忆。
-        if (this.agentFriendEnabled && parseProtectReply(reply)) return;
-        unchangedQueryFeedback = this.serverActionWait.noteFeedback(reply);
-        if (this.agentFriendEnabled) {
-          this.combatSpells.noteServerMessage(reply);
-          if (/^(?:可用咏唱|守护\/恢复)[：:]/.test(reply))
-            this.selfHealAvailable = /\bselfheal\b/i.test(reply);
-          const arenaEntry = /(?:进入第|已恢复第|^第)\s*(\d+)\s*\/\s*(\d+)\s*层(?=[：:试炼]|$)/.exec(reply);
-          if (arenaEntry) {
-            this.arenaFloor = { floor: Number(arenaEntry[1]), total: Number(arenaEntry[2]) };
-          }
-          if (/第\s*(\d+)\s*\/\s*\1\s*层已通关/.test(reply)) this.arenaFloor = null;
-        }
-      }
-      if (position === 'system') {
-        // 其他玩家的死亡广播与成就走系统消息；自己的死亡由专报处理。
-        if (key.startsWith('death.') || key === 'chat.type.advancement') {
-          const text = jsonMsg.toString();
-          if (!text) return;
-          if (text.includes(this.chatName())) {
-            if (key.startsWith('death.')) {
-              this.diag.write({
-                lane: 'world', event: 'death-cause',
-                msg: `官方死因:${text}`,
-                data: { translate: key, text, position: bot.entity?.position ?? null, health: bot.health ?? null },
-              });
-              this.pendingDeathCause = { text, key, at: Date.now() };
-              this.deaths.noteCause(text);
-            }
-          } else {
-            this.emit('minecraft.event', `[Minecraft] ${text}`, false);
-          }
-          return;
-        }
-        // 玩家进出已有 playerJoined/playerLeft 事件；动作栏由 position 过滤。
-        if (key.startsWith('multiplayer.player.joined') || key === 'multiplayer.player.left') return;
-      }
-      // Mineflayer 在 message 后同步触发 messagestr，再由格式正则触发 chat/whisper。
-      queueMicrotask(() => {
-        if (matchedChatMessages.has(jsonMsg)) return;
-        const text = jsonMsg.toString().trim();
-        if (!text) return;
-        if (unchangedQueryFeedback) return;
-        const privateMessage = key === 'commands.message.display.incoming'
-          || /^\S+ whispers(?: to you)?:? /i.test(text)
-          || /^\[[^\]]+ -> [^\]]+\] /.test(text);
-        if (key === 'commands.message.display.outgoing') {
-          this.emit('minecraft.chat', `[MC 私聊发出] ${text}`, false);
-          return;
-        }
-        if (position === 'chat') {
-          const sender = jsonMsg.with?.[0]?.toString();
-          const self = this.chatName();
-          const fromSelf = sender === self || text.startsWith(`<${self}> `)
-            || text.startsWith(`${self}: `) || text.startsWith(`[${self}] `);
-          this.emit('minecraft.chat', `[MC${privateMessage ? ' 私聊' : ''}] ${text}`,
-            !fromSelf && (privateMessage || mentionedInChat(text)), fromSelf ? { deliver: false } : undefined);
-          return;
-        }
-        // 明确的方块保护拒绝会终止当前任务；其他插件回执按文本识别并即时投递。
-        if (/can't break that block here|你不能破坏这里的方块|不能在这里破坏方块|不许破坏|不允许破坏|这块属于村庄原有建筑|受保护.*(?:破坏|挖掘)/i.test(text)) {
-          const notice = `[MC 系统] ${text}`;
-          this.bridge?.noteServerBreakDenied(text);
-          if (this.executor?.currentTask) {
-            this.emit('minecraft.chat', notice, false, { trigger: 'piggyback' });
-            this.executor.blockCurrentFromServer(text);
-          } else {
-            this.emit('minecraft.chat', notice, true);
-          }
-          return;
-        }
-        const agentFriendPrefixes = [
-          '可用咏唱：', '可学习：', '每项可用原版经验', '魔力统一使用', '已领取技能罗盘', '命格书',
-          '✦ 探矿定位',
-          'Sacred healing restores your health.', // str-cast-self 成功族（英文）
-          'You are already at full health.', // str-max-health 拒绝族（英文，扁平组件）
-          '没有这项技能。', // 非法咒语名（中文，extra[] 包装）
-        ];
-        const agentFriend = this.agentFriendEnabled && !key && agentFriendPrefixes.some((p) => text.includes(p));
-        if (!privateMessage && !agentFriend && this.suppressRepeatedSystemMessage(text)) return;
-        this.emit('minecraft.chat', `[MC ${privateMessage ? '私聊' : agentFriend ? '插件' : '系统'}] ${text}`,
-          privateMessage || agentFriend, privateMessage || agentFriend ? undefined : { trigger: 'piggyback' }, agentFriend ? 'AgentFriend' : undefined);
-      });
     });
     bot.on('soundEffectHeard', (soundName: string, position: { x: number; z: number } | null) => {
       if (!/explode|lightning_bolt/.test(String(soundName))) return;

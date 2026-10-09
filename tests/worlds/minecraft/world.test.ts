@@ -58,6 +58,56 @@ function stub(m: MinecraftWorld, parts: Record<string, unknown>): void {
   Object.assign(m, parts);
 }
 
+describe('Minecraft login messages', () => {
+  it('receives pre-spawn rules and titles without an entity, preserving origin and avoiding duplicate hooks at spawn', async () => {
+    const world = new MinecraftWorld({ cfg: cfg({ host: 'test-server', port: 25565, username: 'Self' }) });
+    const host = new FakeHost();
+    const bot = Object.assign(new EventEmitter(), { _client: new EventEmitter() });
+    stub(world, { host, bridge: { bot: null, connected: false } });
+    const hooks = world as unknown as { hookMessageEvents(bot: unknown): void; hookBotEvents(bot: unknown): void };
+    hooks.hookMessageEvents(bot);
+    const guide = { toString: () => '欢迎加入测试服，玩法说明请用 /help 查看。' };
+    bot.emit('message', guide, 'system');
+    bot.emit('title', { text: '冒险者欢迎来到这里' });
+    await Promise.resolve();
+    expect(host.events).toMatchObject([
+      { source: 'minecraft', type: 'minecraft.event', text: expect.stringContaining('冒险者欢迎来到这里') },
+      { source: 'minecraft', type: 'minecraft.chat', text: `[MC 登录消息] ${guide.toString()}`,
+        meta: { phase: 'login', server: 'test-server:25565' }, ts: expect.any(String) },
+    ]);
+    expect(host.pushOpts[1]?.deliver).not.toBe(false);
+    Object.assign(bot, idleBot());
+    stub(world, { bridge: { bot, connected: true } });
+    hooks.hookBotEvents(bot);
+    hooks.hookBotEvents(bot);
+    bot.emit('message', { toString: () => '出生后补发的玩法说明。' }, 'system');
+    const chat = { toString: () => '<Alex> 你好' };
+    bot.emit('message', chat, 'chat');
+    bot.emit('chat', 'Alex', '你好', '', chat);
+    await Promise.resolve();
+    expect(host.events.filter(event => event.type === 'minecraft.chat').map(event => event.text)).toEqual([
+      `[MC 登录消息] ${guide.toString()}`, '[MC] Alex: 你好', '[MC 系统] 出生后补发的玩法说明。',
+    ]);
+    expect(bot.listenerCount('message')).toBe(1);
+  });
+
+  it('installs login listeners on each new connection and still filters machine permission replies', async () => {
+    const world = new MinecraftWorld({ cfg: cfg(), agentFriendEnabled: true });
+    const host = new FakeHost();
+    stub(world, { host });
+    for (const text of ['第一次登录的说明。', '重连后的新版说明。']) {
+      const bot = Object.assign(new EventEmitter(), { _client: new EventEmitter() });
+      (world as any).hookMessageEvents(bot);
+      bot.emit('message', { toString: () => text }, 'system');
+      bot.emit('message', { toString: () => 'MC_PROTECT {"action":"break","dimension":"overworld","x":0,"y":64,"z":0,"status":"deny","reason":"protected"}' }, 'system');
+      await Promise.resolve();
+    }
+    expect(host.events.map(event => event.text)).toEqual([
+      '[MC 登录消息] 第一次登录的说明。', '[MC 登录消息] 重连后的新版说明。',
+    ]);
+  });
+});
+
 describe('Minecraft player presence identity', () => {
   it('carries each player identity across arrival and departure without treating chat as arrival', () => {
     const world = new MinecraftWorld({ cfg: cfg({ username: 'Self' }) });
