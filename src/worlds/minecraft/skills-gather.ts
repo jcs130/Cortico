@@ -1563,12 +1563,18 @@ export async function skillTrade(
 
 /* ========== 锚点几何技能族:probe / build / excavate / tunnel ========== */
 
-/** 作物、耕地和液体附服务端属性，属性未读到时不推断。 */
+/** 附可影响使用、种植或通行的方块属性；属性未读到时不推断。 */
 export function probeStateText(bot: Bot, c: Cell): string {
   const block = blockAtCell(bot, c);
   if (block?.name === 'water' || block?.name === 'lava') {
     const level = blockProp(block, 'level');
     return level === null ? '(level未读,source未知)' : `(level=${level},source=${level === '0'})`;
+  }
+  if (block && (block.name === 'ladder' || block.name === 'scaffolding'
+    || /_(?:stairs|slab|door|trapdoor|fence_gate)$/.test(block.name))) {
+    const properties = ['facing', 'half', 'type', 'open', 'waterlogged', 'bottom', 'distance']
+      .flatMap(key => { const value = blockProp(block, key); return value === null ? [] : [`${key}=${value}`]; });
+    return properties.length ? `(${properties.join(',')})` : '(通行属性未读)';
   }
   const age = cropAgeOfCell(bot, c);
   if (age) return `(age ${age.value}/${age.max})`;
@@ -1704,7 +1710,8 @@ export async function skillProbe(bot: Bot, call: Extract<SkillCall, { skill: 'pr
     if (listed.length === 0) {
       lines.push(`${head}: 全是空气。`);
     } else {
-      const airTail = airCells.length > 0 ? `;其余 ${airCells.length} 格是空气` : '';
+      const airTail = airCells.length > 0 ? call.shape === 'line'
+        ? `;空气:${airCells.map(cellText).join('、')}` : `;其余 ${airCells.length} 格是空气` : '';
       lines.push(`${head},逐格: ${listed.map((e) => `(${e.c.x},${e.c.y},${e.c.z}):${zhName(e.name!)}${e.state}`).join('、')}${airTail}。`);
     }
     pushPocketLine(bot, lines, cells, airCells);

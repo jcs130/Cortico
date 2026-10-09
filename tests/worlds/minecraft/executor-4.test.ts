@@ -5692,6 +5692,7 @@ describe('差分为空就是受阻', () => {
     const bot = combatBot({});
     bot.pathfinder.goto = async () => {
       bot.entity.position = new V(10.5, 64.5625, 10.5);
+      Object.assign(bot.entity, { onGround: true });
     };
     const { exec, reports } = makeExecutorOn(bot);
     exec.submit([{ skill: 'goto', at: [10, 66, 10] }]);

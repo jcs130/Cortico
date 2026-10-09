@@ -8,7 +8,8 @@ import type { SkillContext } from '../../../src/worlds/minecraft/skill-context.t
 import { skillProbe } from '../../../src/worlds/minecraft/skills-gather.ts';
 import { PROBE_WHERE_SHOWN } from '../../../src/worlds/minecraft/skills.ts';
 
-interface CellFixture { x: number; y: number; z: number; name: string; age?: number; moisture?: number; level?: number | string }
+interface CellFixture { x: number; y: number; z: number; name: string; age?: number; moisture?: number; level?: number | string;
+  properties?: Record<string, unknown> }
 
 function terrainBot(cells: CellFixture[], position = new Vec3(6, 67, 3)): Bot {
   const blocks = new Map(cells.map((cell) => [`${cell.x},${cell.y},${cell.z}`, cell]));
@@ -28,7 +29,7 @@ function terrainBot(cells: CellFixture[], position = new Vec3(6, 67, 3)): Bot {
         name: cell.name,
         position: p,
         boundingBox: cell.name === 'wheat' ? 'empty' : 'block',
-        getProperties: () => ({ ...(cell.age === undefined ? {} : { age: cell.age }),
+        getProperties: () => ({ ...cell.properties, ...(cell.age === undefined ? {} : { age: cell.age }),
           ...(cell.moisture === undefined ? {} : { moisture: cell.moisture }),
           ...(cell.level === undefined ? {} : { level: cell.level }) }),
       };
@@ -49,6 +50,21 @@ function fieldCells(): CellFixture[] {
 }
 
 describe('probe spatial material samples', () => {
+  it('a short ladder column exposes its facing and exact gaps, including state-only changes', async () => {
+    const first = { x: 0, y: 64, z: 0, name: 'ladder', properties: { facing: 'west', waterlogged: false } };
+    const cells = [first, { x: 0, y: 65, z: 0, name: 'air' },
+      { x: 0, y: 66, z: 0, name: 'ladder', properties: { facing: 'west', waterlogged: false } }];
+    const bot = terrainBot(cells), ctx = probeContext();
+    const call: Parameters<typeof skillProbe>[1] = { skill: 'probe', shape: 'line', anchors: [[0, 64, 0], [0, 66, 0]] };
+    const text = await skillProbe(bot, call, ctx);
+    expect(text).toContain('(0,64,0):梯子(facing=west,waterlogged=false)');
+    expect(text).toContain('空气:(0, 65, 0)');
+    first.properties.facing = 'north';
+    const changed = await skillProbe(bot, call, ctx);
+    expect(changed).toContain('facing=north');
+    expect(changed).not.toContain('与上次探查相同');
+  });
+
   it('a region larger than 27 cells includes the nearest soil coordinate with its actual height', async () => {
     const cells = fieldCells();
     cells[0].name = 'farmland';

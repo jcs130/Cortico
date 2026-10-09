@@ -1075,6 +1075,7 @@ ground 使用普通物理，飞行悬停时先 land 或改用 flight。flight �
                                                  at 也收 mc_map 的路标名:{"skill":"goto","at":"家"}。
                                                  赶路可能挖方块或搭路；已绑定蓝图范围内不生成这些动作，完工后仍生效。
                                                  walkOnly:true 只沿现有通路走，不挖掘或垫脚；只靠走试算可达时，可用同一目标加此字段实际执行。与 dryRun 同用时只试算这条走法。
+                                                 梯子用可达下端进入，再沿连续梯段到出口平台；use 右键不爬梯。看见一格梯子不证明它已接到地面或通向顶部，probe 可核对整段。
                                                  走不通时核对门洞、通道与落点；改结构用显式 dig/build，按现场和权限核验。`,
     parse: parseGoto,
     fields: [
@@ -1321,7 +1322,7 @@ ground 使用普通物理，飞行悬停时先 land 或改用 flight。flight �
     name: 'probe',
     doc: `{"skill":"probe","shape":"line","anchors":[["~","~2","~"],["~","~80","~"]]}
                                                  只看不动:读出你圈的这片形状里的材质构成与液体;27 格以内
-                                                 逐格报「(x,y,z):方块」,作物带 age，耕地带 moisture，水/岩浆带 level/source。
+                                                 逐格报「(x,y,z):方块」,作物带 age，耕地带 moisture，水/岩浆带 level/source；梯子、台阶、门等带朝向、开合等已读通行属性。短 line 同时列空气坐标，可核对梯段或支撑的断档。
                                                  大区域与 where 另列 level=0 的源方块坐标；空桶装液体先核对源格。圈哪片由你定
 {"skill":"probe","shape":"box","anchors":[[-40,40,-120],[-8,60,-88]],"where":["spawner","#chests"]}
                                                  加 "where" = 只报这几样在这片里的坐标(按远近,每样最多 ${PROBE_WHERE_SHOWN} 处)。

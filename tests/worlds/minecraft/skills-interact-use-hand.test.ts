@@ -108,6 +108,20 @@ function rig(consumeBlockItem = true) {
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
+it('right-clicking a ladder reports the unchanged feet position and does not certify climbing', async () => {
+  const r = rig(false);
+  const at: [number, number, number] = [1, 64, 0];
+  r.setBlock(at, 'ladder');
+  const start = r.bot.entity.position.clone();
+  const work = useOnce(r.bot, { skill: 'use', at }, r.ctx);
+  await vi.runAllTimersAsync();
+  const receipt = await work;
+  expect(r.wire.some(packet => packet.name === 'block_place')).toBe(true);
+  expect(r.bot.entity.position).toEqual(start);
+  expect(receipt).toContain('没有执行攀爬');
+  expect(receipt).toContain('实测脚格 (0, 64, 0)');
+});
+
 it('missing held item explains the target contract without clicking or navigating to an inferred block', async () => {
   const r = rig();
   r.setBlock([1, 64, 0], 'green_bed');

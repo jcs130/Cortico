@@ -1081,7 +1081,11 @@ export async function useOnce(bot: Bot, call: Extract<SkillCall, { skill: 'use' 
             + `要踏入并等待维度切换，用 {"skill":"transit","at":[${cell.x},${cell.y},${cell.z}]}`
           : `；实测维度从${zhDimension(beforeDimension)}变为${zhDimension(dimensionOf(bot))}，后续坐标须按当前维度核对`
         : '';
-      return `${head}${changed}。${note || '包里一样没动'}${placementReadback?.() ?? ''}${seen}${portalNote}${frameNote}`;
+      const climbNote = target.name === 'ladder' || target.name === 'vine' || target.name === 'scaffolding'
+        ? `；本次只右键，没有执行攀爬；实测脚格 ${cellText(feetOf(bot))}。攀爬需进入可攀爬方块并移动，`
+          + '先用 probe 核对下端、连续性、朝向与出口；右键回执不证明登高'
+        : '';
+      return `${head}${changed}。${note || '包里一样没动'}${placementReadback?.() ?? ''}${seen}${portalNote}${frameNote}${climbNote}`;
     }
     const v = await settleProbe(probe);
     // 失败路径与成功路径报同一份背包增减:存量事实往往就是病因所在

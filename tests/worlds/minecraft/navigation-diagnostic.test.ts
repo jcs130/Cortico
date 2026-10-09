@@ -46,7 +46,7 @@ describe('目标格诊断的碰撞与到达范围', () => {
 
   it('分数脚高可对应上方寻路格，整层不能借上一格扩大到达范围', () => {
     const goal = new goals.GoalNear(0, 64, 0, 1);
-    const bot = { entity: { position: new Vec3(0.5, 62.5, 0.5) } };
+    const bot = { entity: { position: new Vec3(0.5, 62.5, 0.5), onGround: true } };
     const read: BlockReader = (_x, y, _z) => ({ name: y <= 61 ? 'stone' : 'air', solid: y <= 61 });
     expect(travelGoalReached(bot as never, goal)).toBe(true);
     expect(standCellsAround(read, { x: 0, y: 64, z: 0 })).not.toContainEqual({ x: 0, y: 62, z: 0 });
@@ -59,12 +59,20 @@ describe('目标格诊断的碰撞与到达范围', () => {
 
   it('精确高度必须实际到达，不把下一层的整数脚高当成成功', () => {
     const goal = new goals.GoalBlock(0, 97, 0);
-    const reached = (y: number) => travelGoalReached({ entity: { position: new Vec3(0.5, y, 0.5) } } as never, goal);
+    const reached = (y: number) => travelGoalReached({ entity: { position: new Vec3(0.5, y, 0.5), onGround: true } } as never, goal);
     expect(reached(96)).toBe(false);
     expect(reached(96.00001)).toBe(false);
-    expect(reached(96.5)).toBe(true);
+    expect(reached(96.5)).toBe(false);
+    expect(reached(96.999)).toBe(false);
     expect(reached(97)).toBe(true);
     expect(reached(95.5)).toBe(false);
+  });
+
+  it('跳跃或攀爬途中不能借上格扩大邻近目标的到达范围', () => {
+    const goal = new goals.GoalNear(0, 64, 0, 1);
+    for (const y of [62.1, 62.5, 62.999]) {
+      expect(travelGoalReached({ entity: { position: new Vec3(0.5, y, 0.5), onGround: false } } as never, goal)).toBe(false);
+    }
   });
 
   it('完整路径不会同时被描述成无处站立，实际移动失败仍保留', () => {

@@ -429,6 +429,33 @@ describe('pathfinder 性能补丁', () => {
     expect(m.safeToBreak(block)).toBe(true);
   });
 
+  it.each([
+    ['west', -1, 0], ['east', 1, 0], ['north', 0, -1], ['south', 0, 1],
+  ] as const)('auto-navigation preserves a %s-facing ladder and its attached wall', (facing, dx, dz) => {
+    installPathfinderPerf();
+    const world = makeWorld();
+    const ladder = registry.blocksByName.ladder;
+    let state = ladder.defaultState;
+    for (let id = ladder.minStateId; id <= ladder.maxStateId; id++) {
+      const properties = Block.fromStateId(id, 0).getProperties();
+      if (properties.facing === facing && properties.waterlogged === false) { state = id; break; }
+    }
+    const wall = new Vec3(8, 65, 0);
+    const rung = wall.offset(dx, 0, dz);
+    world.setBlockStateId(rung, state);
+    const bot = makeBot(world);
+    const movements = new Movements(bot as never);
+    const safe = (at: InstanceType<typeof Vec3>) => movements.safeToBreak(world.getBlock(at));
+    expect(safe(wall)).toBe(false);
+    expect(safe(rung)).toBe(false);
+    expect(safe(wall.offset(0, -1, 0))).toBe(true);
+    const route = search(bot, [0, 64, 0], [14, 64, 0]);
+    expect(route.status).toBe('success');
+    expect(route.breaks.some(p => p.x === wall.x && p.y === wall.y && p.z === wall.z)).toBe(false);
+    world.setBlockStateId(rung, registry.blocksByName.air.defaultState);
+    expect(safe(wall)).toBe(true);
+  });
+
   it('成果登记:不往登记格自己、也不往它头顶垫;走与挖照旧', () => {
     installPathfinderPerf();
     expect(searchOutOfPit(makeBot(makeWaterPitWorld())).place).toBeGreaterThan(0);

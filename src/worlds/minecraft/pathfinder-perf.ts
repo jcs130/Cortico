@@ -14,6 +14,7 @@
  * 7. 前行与跳上一格的整个放置分支同样受脚下实底约束。
  * 8. 三分钟内被拒且方块未变的落点进入放置黑名单。
  * 9. 候选边的身体扫掠体积不能接触已加载的烧灼方块；原已接触的身体仍可向外脱离。
+ * 10. 自动寻路保留可攀爬方块及梯子所附着的墙；显式挖掘仍由执行器处理。
  *
  * 缺失区块列须返回不可走；已加载列的越界 y 按空气处理。getMoveJumpUp 的高度调整使用局部值，避免污染缓存。
  */
@@ -459,6 +460,23 @@ export function installPathfinderPerf(log?: Logger): void {
 
   // safeToBreak 是纯世界判断(液体邻查 5 次读块),同一堵墙被相邻节点反复评估,按位置记忆化
   const origSafeToBreak = mProto.safeToBreak;
+  const ladderNeighbors = [[-1, 0, 'west'], [1, 0, 'east'], [0, -1, 'north'], [0, 1, 'south']] as const;
+  const safeBreakPreservingLadders = function (
+    this: PatchedMovements, block: BlockLike & { position: { x: number; y: number; z: number } },
+  ): boolean {
+    if (this.climbables.has(block.type) || !origSafeToBreak.call(this, block)) return false;
+    if (!block.position) return true;
+    for (const [dx, dz, facing] of ladderNeighbors) {
+      const neighbor = mProto.getBlock.call(this, block.position, dx, 0, dz) as { name?: string };
+      if (neighbor.name !== 'ladder') continue;
+      // 搜索缓存只存碰撞特征，梯子朝向在需要判定附着墙时读取完整方块。
+      const ladder = origGetBlock.call(this, block.position, dx, 0, dz) as {
+        getProperties(): Record<string, unknown>;
+      };
+      if (ladder.getProperties().facing === facing) return false;
+    }
+    return true;
+  };
   mProto.safeToBreak = function (this: PatchedMovements, block: BlockLike & { position: { x: number; y: number; z: number } }) {
     const cache = this.__sliceCache;
     const zones = this.__siteZones ?? this.__siteZonesFn?.();
@@ -471,11 +489,11 @@ export function installPathfinderPerf(log?: Logger): void {
     const backoff = this.__digBackoffFn;
     if (backoff && block.position
       && backoff(block.position.x, block.position.y, block.position.z)) return false;
-    if (!cache || !block.position) return origSafeToBreak.call(this, block);
+    if (!cache || !block.position) return safeBreakPreservingLadders.call(this, block);
     const key = packPos(block.position.x, block.position.y, block.position.z);
     let ok = cache.breakable.get(key);
     if (ok === undefined) {
-      ok = origSafeToBreak.call(this, block) as boolean;
+      ok = safeBreakPreservingLadders.call(this, block);
       cache.breakable.set(key, ok);
     }
     return ok;
