@@ -1,4 +1,4 @@
-<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/flight.ts, src/worlds/minecraft/flight-preview.ts, src/worlds/minecraft/terrain.ts, src/worlds/minecraft/executor.ts, src/worlds/minecraft/skills.ts, src/worlds/minecraft/skills-control.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts, src/worlds/minecraft/chests.ts, src/worlds/minecraft/inventory.ts, src/worlds/minecraft/inventory-click-sync.ts, src/worlds/minecraft/equipment.ts, src/worlds/minecraft/check.ts -->
+<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/flight.ts, src/worlds/minecraft/flight-preview.ts, src/worlds/minecraft/agentfriend-flight.ts, src/worlds/minecraft/terrain.ts, src/worlds/minecraft/executor.ts, src/worlds/minecraft/skills.ts, src/worlds/minecraft/skills-control.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts, src/worlds/minecraft/chests.ts, src/worlds/minecraft/inventory.ts, src/worlds/minecraft/inventory-click-sync.ts, src/worlds/minecraft/equipment.ts, src/worlds/minecraft/check.ts -->
 
 # worlds/minecraft
 
@@ -320,7 +320,7 @@ World 将所选文件保存在部署的 `data/minecraft-skin-{bot,player}.png`�
 | `mc_cast(spell, arguments?)` | 向支持该命令的服务端立即发送一次 `/mycli cast <技能ID> [参数…]`；`arguments` 是按顺序分开的字符串数组，例如造物目标。战斗或撤退中也不排队、不抢移动控制；发送成功不等于生效，须核对服务端回执和现场状态 |
 | `mc_do(steps, queue?)` | 提交任务。立即返回带时刻与任务号（#N）的受理回执；后台依次执行，结果以同一任务号的 `minecraft.task` 事件返回。`queue` 模式见「队列」 |
 | `mc_scout(steps, queue?)` | `tags:['read']`。与 `mc_do` 共用队列和回执，执行 probe，以及按 dryRun 入队的 goto / flight / build / excavate / tunnel。后续操作仍可入队 |
-| `mc_flight_plan(points, budgetMs?)` | `tags:['read']`。施法前从当前观察位置依次投影最多16段飞行，回报逐段碰撞、累计耗时、调用者时长预算与末段支撑；不入队、不移动、不授予许可 |
+| `mc_flight_plan(points, budgetMs?, subdivide?)` | `tags:['read']`。施法前从当前观察位置依次投影最多16个目标，可自动分为最多64段；回报逐段碰撞、累计耗时、时长预算与末段支撑；不入队、不移动、不授予许可 |
 | `mc_check(checks)` | `tags:['read']`。提交至多 16 条断言（单格 `at/is`、区域 `count/all/air/sealed`、背包 `inv`、蓝图 `blueprint`、路标 `mark`），对照世界后只报差异。同步返回、不进队列、不移动，只读已加载区块；未加载单独报告。`sealed` 按流入通路判断，水和岩浆算通路 |
 | `mc_view_map(id?)` | `tags:['read']`。看身上一张已开图的地图：回执带 512×512 的 PNG 画面（上北右东）与文字读数：编号、比例、已探索比例、图标位置。本机服务端能读到存档 `data/map_<id>.dat` 时再给中心坐标和图标的世界坐标。画面来自服务端推给包里地图的像素包 |
 | `mc_policy(六格，全可选)` | `tags:['write']`。设置垫脚/照明名单、照明场合、赶路取向、保留工具、主动交战条件。不进队列、不占任务号，同步回执；空调用只回读。见「策略面」 |
@@ -441,6 +441,7 @@ agent 可以在同一轮发出多次调用以提交已确定的后续任务。
 完整几何核验且未超过已知预算时，`steps` 返回可整体提交的绝对坐标和依赖；否则为null。它不包含施法；合并前置步骤须重编号needs。执行起点变化后重新试算，运行时仍重验。未声明期限的路线保持时间未知。
 每段估时含500毫秒余量，累计估时只包含列出的移动；返程和落地须显式列入。
 调用者提供的 `budgetMs` 标为 caller，已知当前许可期限也会参与预算，调用者不能延长它。
+AgentFriend 模式通过 `agentfriend-flight.ts` 接收本人最近三秒内发送的 flight 命令及私有系统持续时间回执，按命令发送时间计算保守截止；重复回执不续期，玩家聊天和帮助文本不参与。实际能力包仍决定许可，断线、重生及失败回执清除尚未匹配的请求。
 期限未知时 `fitsBudget:null`，末段悬停时 `endsOnSupport:false`；两者都不能证明可安全飞完整程。
 任何一段受阻时返回段号、原因与已核验前缀，未核验尾部和完整估时保持未知；执行仍按当时现场重验。
 

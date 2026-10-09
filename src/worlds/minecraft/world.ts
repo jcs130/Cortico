@@ -122,6 +122,7 @@ import { CombatTacticBook } from './combat-tactics.ts';
 import { COMBAT_RULES_SCHEMA, validCombatRules, type CombatRule } from './combat-rules.ts';
 import { chooseRoutineFood, renderFoodReserveReadout } from './nutrition.ts';
 import { publishViewerCastCommand } from './viewer-cast.ts';
+import { watchAgentFriendFlight } from './agentfriend-flight.ts';
 import { parseSkillsPayload, VIEWER_STATE_CHANNEL } from './viewer-state.ts';
 import {
   BowController,
@@ -6606,6 +6607,7 @@ export class MinecraftWorld implements World {
     if (this.hookedBots.has(bot)) return;
     this.hookedBots.add(bot);
     observeStatusEffects(bot);
+    if (this.agentFriendEnabled) watchAgentFriendFlight(bot);
     this.lastServerFeedback = null;
     this.recentSystemMessages.clear();
     const detachUses = this.serverActionWait.observeUses(bot._client, (at) =>

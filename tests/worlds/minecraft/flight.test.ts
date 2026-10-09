@@ -8,6 +8,8 @@ import type { Block } from 'prismarine-block';
 import { describeSkill, parseSteps, Executor, type TaskReport } from '../../../src/worlds/minecraft/executor.ts';
 import { parseScoutSteps } from '../../../src/worlds/minecraft/skills.ts';
 import { parseFlightPlan, previewFlightPlan } from '../../../src/worlds/minecraft/flight-preview.ts';
+import { watchAgentFriendFlight } from '../../../src/worlds/minecraft/agentfriend-flight.ts';
+import { publishViewerCastCommand } from '../../../src/worlds/minecraft/viewer-cast.ts';
 import { MinecraftWorld } from '../../../src/worlds/minecraft/world.ts';
 import { MINECRAFT_DEFAULTS } from '../../../src/worlds/minecraft/config.ts';
 import { log, nextTaskId } from './executor-harness.ts';
@@ -18,6 +20,7 @@ const require = createRequire(import.meta.url);
 const dependency = createRequire(require.resolve('mineflayer'));
 const registry = require('minecraft-data')('1.20.6') as Bot['registry'];
 const Blocks = dependency('prismarine-block')('1.20.6') as typeof Block;
+const ChatMessage = dependency('prismarine-chat')('1.20.6');
 const releases: Array<() => void> = [];
 
 function block(name: string, properties?: Record<string, string>) {
@@ -58,6 +61,73 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2025-01-01T00:
 afterEach(() => { releases.splice(0).forEach(release => release()); vi.useRealTimers(); });
 
 describe('server-granted flight movement', () => {
+  it('uses a private duration reply for the local cast without adding reply latency or renewing on duplicate replies', async () => {
+    const { bot, client } = flightBot();
+    releases.push(watchAgentFriendFlight(bot));
+    const startedAt = Date.now();
+    publishViewerCastCommand(bot, '/mycli cast flight');
+    await vi.advanceTimersByTimeAsync(300);
+    client.emit('abilities', { flags: 6, flyingSpeed: 0.035 });
+    bot.emit('message', new ChatMessage({ text: '✦ 飞行术持续 21 秒；若未立即起飞，可双按跳跃键。结束后会缓降（10 魔力；90 秒冷却）。' }), 'system');
+    expect(flightState(bot).expiresAtMs).toBe(startedAt + 21_000);
+    await vi.advanceTimersByTimeAsync(18_700);
+    const plan = previewFlightPlan(bot, [{ skill: 'flight', at: [0, 73, 0], land: false }]);
+    expect(plan).toMatchObject({ budgetSource: 'server-expiry', budgetMs: 2_000, fitsBudget: false, steps: null });
+    bot.emit('message', new ChatMessage({ text: '✦ 飞行术持续 21 秒；若未立即起飞，可双按跳跃键。' }), 'system');
+    expect(flightState(bot).expiresAtMs).toBe(startedAt + 21_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(flightState(bot).allowed).toBe(false);
+    expect(client.write).not.toHaveBeenCalled();
+  });
+
+  it('does not treat player chat, help, unrelated commands or late replies as a fresh flight deadline', async () => {
+    const { bot, client } = flightBot();
+    releases.push(watchAgentFriendFlight(bot));
+    client.emit('abilities', { flags: 4 });
+    const reply = new ChatMessage({ text: '✦ 飞行术持续 21 秒；若未立即起飞，可双按跳跃键。' });
+    bot.emit('message', reply, 'system');
+    publishViewerCastCommand(bot, '/mycli cast flight');
+    bot.emit('message', reply, 'chat');
+    bot.emit('message', new ChatMessage({ text: '帮助：飞行术持续 21 秒；结束会缓降。' }), 'system');
+    expect(flightState(bot).expiresAtMs).toBeUndefined();
+    publishViewerCastCommand(bot, '/mycli cast leap');
+    bot.emit('message', reply, 'system');
+    expect(flightState(bot).expiresAtMs).toBeUndefined();
+    publishViewerCastCommand(bot, '/mycli cast flight');
+    await vi.advanceTimersByTimeAsync(3_001);
+    bot.emit('message', reply, 'system');
+    expect(flightState(bot).expiresAtMs).toBeUndefined();
+  });
+
+  it('keeps ability packets authoritative and drops pending duration replies after failure, respawn or disposal', () => {
+    const { bot, client } = flightBot();
+    client.emit('abilities', { flags: 0 });
+    const detach = watchAgentFriendFlight(bot);
+    releases.push(detach);
+    const reply = new ChatMessage({ text: '✦ 飞行术持续 21 秒；若未立即起飞，可双按跳跃键。' });
+    publishViewerCastCommand(bot, '/mycli cast flight');
+    bot.emit('message', new ChatMessage({ text: '冷却中，无法施放飞行术' }), 'system');
+    bot.emit('message', reply, 'system');
+    expect(flightState(bot).expiresAtMs).toBeUndefined();
+    publishViewerCastCommand(bot, '/mycli cast flight');
+    bot.emit('respawn');
+    bot.emit('message', reply, 'system');
+    expect(flightState(bot).expiresAtMs).toBeUndefined();
+    client.emit('abilities', { flags: 0 });
+    publishViewerCastCommand(bot, '/mycli cast flight');
+    bot.emit('message', reply, 'system');
+    expect(flightState(bot).allowed).toBe(false);
+    client.emit('abilities', { flags: 4 });
+    expect(flightState(bot).allowed).toBe(true);
+    expect(flightState(bot).expiresAtMs).toBe(Date.now() + 21_000);
+    client.emit('abilities', { flags: 0 });
+    expect(flightState(bot).allowed).toBe(false);
+    detach();
+    publishViewerCastCommand(bot, '/mycli cast flight');
+    bot.emit('message', reply, 'system');
+    expect(flightState(bot).expiresAtMs).toBeUndefined();
+  });
+
   it('compiles a distant diagonal endpoint into executable dependent legs and lands at the requested platform', async () => {
     const { bot, client, positions } = flightBot();
     const parsed = parseFlightPlan({ points: [{ at: [18, 64, 18] }], subdivide: true, budgetMs: 15_000 });
