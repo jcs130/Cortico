@@ -166,6 +166,26 @@ describe('mc_visual scene observation', () => {
     }
   });
 
+  it('passes the observed biome separately from dimension and an obsolete focus location', async () => {
+    const { host, tool, ctx, bot } = rig();
+    Object.assign(bot, { registry: { biomes: { 7: { name: 'cave_example' } } } });
+    bot.blockAt.mockReturnValue({ name: 'air', biome: { id: 7 } } as { name: string });
+    let material = '';
+    Object.assign(host, { cognition: { request: async (request: CognitionRequest) => {
+      material = request.brief;
+      return { text: '此维度内可以存在洞穴生物群系；出口尚未核实。' };
+    } } });
+    const result = await tool.handler({ focus: '旧地点 cave_old 的出口' }, ctx) as ToolOutcome;
+    for (const text of ['维度：overworld；生物群系：cave_example', '生物群系与维度不是同一字段']) {
+      expect(material).toContain(text);
+      expect(result.text).toContain(text);
+    }
+    bot.blockAt.mockReturnValue(null);
+    const unread = await tool.handler({ raw: true }, ctx) as ToolOutcome;
+    expect(unread.text).toContain('维度：overworld；生物群系：unknown');
+    expect(unread.text).not.toContain('生物群系：cave_example');
+  });
+
   it('returns the real image and failure reason when focused observation is unavailable', async () => {
     const { host, tool, ctx } = rig();
     Object.assign(host, { cognition: { request: async () => ({ error: '图片判断通道忙' }) } });

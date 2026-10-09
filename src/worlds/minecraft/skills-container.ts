@@ -38,6 +38,7 @@ import { normalizeDimension } from './escape.ts';
 import { consumesOpenWindow, selectionMenuTitle } from './window-semantics.ts';
 import { itemCustomName, itemProfileSkinHash } from './item-display.ts';
 import { inventoryReadConfirmed } from './inventory-window-sync.ts';
+import { withdrawStack } from './container-withdraw.ts';
 
 const { goals } = pathfinderPkg;
 
@@ -981,7 +982,7 @@ export async function takeFromChestAt(
       const n = Math.min(it.count, want - took);
       const beforeN = invCountIn(view, (name) => name === it.name);
       try {
-        await chest.withdraw(it.type, it.metadata ?? null, n);
+        await withdrawStack(bot, chest, it, n, ctx);
       } catch (err) {
         if (err instanceof Aborted) throw err;
         if (/inventory is full/i.test((err as Error).message)) noRoom = true;
@@ -1284,7 +1285,7 @@ export async function skillTake(bot: Bot, call: Extract<SkillCall, { skill: 'tak
             break;
           }
           try {
-            if (into === undefined) await chest.withdraw(it.type, it.metadata ?? null, n);
+            if (into === undefined) await withdrawStack(bot, chest, it, n, ctx);
             else await moveExactSlot(bot, it.slot, into);
           } catch (err) {
             if (err instanceof Aborted) throw err;

@@ -1,5 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { parseSteps } from '../../../src/worlds/minecraft/skills.ts';
+import { parseScoutSteps, parseSteps, SCOUT_STEP_SCHEMA } from '../../../src/worlds/minecraft/skills.ts';
+
+describe('probe section contract', () => {
+  const call = { skill: 'probe', shape: 'box', anchors: [[-2, 64, 3], [-1, 66, 4]], slice: 'y' };
+  it('exposes and preserves sections through the read-only scout contract', () => {
+    expect(parseScoutSteps([call])).toEqual({ steps: [call] });
+    expect((SCOUT_STEP_SCHEMA.properties as any).slice.enum).toEqual(['x', 'y', 'z']);
+  });
+
+  it.each([{ slice: null }, { slice: 'up' }, { shape: 'line' }, { fill: 'outline' }, { where: ['ladder'] }])(
+    'rejects ambiguous section options %j', overrides => {
+      expect(parseSteps([{ ...call, ...overrides }])).toHaveProperty('error');
+    },
+  );
+});
 
 describe('explicit movement and door states', () => {
   it('preserves exact arrival and both desired door states', () => {

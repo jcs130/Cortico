@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "id": "project-faq",
+  "title": "可米 Cormy 项目技术问答",
+  "updatedAt": "2026-10-09T17:03:27+08:00",
+  "source": "操作员命名确认与代码、部署配置、现役服务采样；2026-10-09",
+  "reading": "按问题只读相关问答，用白话简短解释。注明时间的模型、音色与服务配置是部署快照，当前情况需核对现役配置；服务健康接口不能单独证明播音或制歌质量。sources 用于内部核对，介绍时省去本机路径和地址。",
+  "questions": [
+    {
+      "question": "你叫什么，名字有什么来历？",
+      "answer": "我是可米 Cormy，基于 Cortico 框架、由萌悦持续开发的 AI 虚拟主播。Cor 保留 Cortico 的渊源，MY 对应萌悦的首字母。操作员于 2026-10-09 确认使用这个名字；可缇、Corti、可缇Corti 是历史名字，改名前后的经历属于同一个自己。",
+      "sources": ["操作员于 2026-10-09 确认 Cormy（可米）", "bots/cortiv/persona/CONSTITUTION.seed.md"]
+    },
+    {
+      "question": "可米使用什么框架？",
+      "answer": "使用 Cortico，一个用 TypeScript 编写、在 Node.js 上运行的事件驱动 Agent 框架。它把运行调度、人格与上下文、记忆、外部环境分开组织。可米在这个框架上持续定制和开发。",
+      "sources": ["package.json", "PHILOSOPHY.md", "bots/cortiv/index.ts"]
+    },
+    {
+      "question": "她怎么自主玩游戏、接弹幕和聊天？",
+      "answer": "游戏状态、玩家聊天和弹幕作为事件进入框架。她结合当前目标与记忆选择工具，连续动作交给执行队列，之后读取执行结果调整下一步。游戏任务执行期间仍可以处理交流。",
+      "sources": ["bots/cortiv/persona/persona.ts", "src/worlds/minecraft/README.md"]
+    },
+    {
+      "question": "她用什么模型？为什么分快慢系统？",
+      "answer": "2026-10-09 的现役采样中，前台模型名称是 qwen3.8-27b。日常判断与交流走前台，较重的规划和整理有异步后台通道；轻量选择器可以辅助注意力和资料主题选择。模型及各通道可按部署配置更换，介绍当前模型时应核对现役状态。",
+      "observedAt": "2026-10-09T17:01:40+08:00",
+      "sources": ["现役控制台 /api/status 的 modelConnection", "bots/cortiv/persona/planning-review.ts", "bots/cortiv/index.ts"]
+    },
+    {
+      "question": "她能看画面、评价建筑吗？",
+      "answer": "可以按需要读取游戏画面截图做视觉观察，并结合位置、方块、库存等现场读数判断。复杂看图可以在后台进行，结果回来后再继续依赖这张图的步骤。",
+      "sources": ["src/worlds/minecraft/visual-capture.ts", "bots/cortiv/persona/focused-cognition.ts"]
+    },
+    {
+      "question": "她怎么记住观众、经历和技术资料？",
+      "answer": "记忆保存在文件工作区中，包含观众档案、交流记录、进展和经验，并有 Git 历史与后台整理。按目录、关键词和相关段落检索；当前事实需要用较新的记录与现场结果核对。技术资料在问到时读取相关内容。外部向量服务是否启用，以部署配置和实际检索证据为准。",
+      "sources": ["bots/cortiv/README.md", "bots/cortiv/persona/persona.ts", "bots/cormini/persona/memory.ts"]
+    },
+    {
+      "question": "说话用什么语音和音色？支持流式吗？",
+      "answer": "口播接入 IndexTTS 2.5，2026-10-09 采样时使用桃子音色。语音适配器由演出扩展管理，接收文本并支持音频边生成边播放。该次部署的前台文本预切片已关闭，音频流式开关开启；底层分段方式和发音处理仍取决于适配器版本。",
+      "observedAt": "2026-10-09T17:03:27+08:00",
+      "sources": ["部署 worlds.vtuber 配置：incrementalSpeech=false、streamEnabled=true、ttsSpeech.voice=taozi", "现役语音适配器 /health：backend=indextts-8087、version=25-context-homographs", "cortico-world-vtuber/adapters/indextts/README.md"]
+    },
+    {
+      "question": "她的歌是怎么生成的？唱歌和说话是同一个功能吗？",
+      "answer": "歌曲由后台音乐流程制作：ACE-Step 根据歌词和风格生成歌曲，分离人声后用 Seed-VC 参考授权录音转换歌声，再与伴奏混合并核验音频和歌词。口播与歌曲使用各自的处理流程；新歌在后台制作，完成后择时播放。",
+      "observedAt": "2026-10-09T17:03:27+08:00",
+      "sources": ["cortico-world-vtuber/src/MUSIC_VOICE.md", "现役制歌服务 /health：generationMode=text-to-music、voiceConversionEnabled=true"]
+    },
+    {
+      "question": "为什么生成歌之后还要识别歌词？",
+      "answer": "创作时先有歌词和风格，再生成歌曲。生成后的语音识别用于核对实际唱出的内容、覆盖率和时间轴；歌词字幕采用核验后的创作歌词。2026-10-09 的制歌服务采样中，核验识别后端是 Qwen3。",
+      "observedAt": "2026-10-09T17:03:27+08:00",
+      "sources": ["cortico-world-vtuber/src/music-generation-gateway.md", "现役制歌服务 /health：asrConfigured=true、asrBackend=qwen3"]
+    }
+  ]
+}

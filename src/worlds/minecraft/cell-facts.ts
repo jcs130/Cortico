@@ -123,6 +123,11 @@ export function shapeCells(
   if (!Array.isArray(resolved)) throw new SkillBlocked(resolved.error);
   // 不写形状 = 就这些格,各是各的,不连成片(build 一步放 N 处走的就是这条)
   if (!shape) return resolved;
+  if (shape === 'box' && (fill === undefined || fill === 'solid') && resolved.length === 2) {
+    const [a, b] = resolved;
+    const volume = (Math.abs(a.x - b.x) + 1) * (Math.abs(a.y - b.y) + 1) * (Math.abs(a.z - b.z) + 1);
+    if (volume > cap) throw new SkillBlocked(`这个${SHAPE_ZH[shape]}有 ${volume} 格,一单上限 ${cap}`);
+  }
   const cells = rasterize(shape, resolved, fill ?? 'solid');
   if (!Array.isArray(cells)) throw new SkillBlocked(cells.error);
   if (cells.length > cap) {

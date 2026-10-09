@@ -348,6 +348,25 @@ describe('pathfinder 性能补丁', () => {
     expect(after.cost).toBeLessThan(before.cost);
   });
 
+  it('挖掘成本重读时区块已卸载，排除该边且下一次搜索可重新挖掘', () => {
+    installPathfinderPerf();
+    const bot = makeBot(makeWorld());
+    const blockAt = bot.blockAt as (position: unknown) => { type: number } | null;
+    // 搜索特征仍读得到墙，物化完整 Block 时客户端已丢掉对应区块。
+    bot.blockAt = (position: unknown) => {
+      const block = blockAt(position);
+      return block?.type === registry.blocksByName.stone.id ? null : block;
+    };
+    const missing = search(bot, [0, 64, 0], [14, 64, 0]);
+    expect(missing.breaks.some((position) => position.x === 8)).toBe(false);
+    expect(Number.isFinite(missing.cost)).toBe(true);
+
+    bot.blockAt = blockAt;
+    const restored = search(bot, [0, 64, 0], [14, 64, 0]);
+    expect(restored.status).toBe('success');
+    expect(restored.breaks.some((position) => position.x === 8)).toBe(true);
+  });
+
   it('compute 之外 getBlock 不走缓存,读到的是新鲜世界', () => {
     const world = makeWorld();
     const bot = makeBot(world);
@@ -408,6 +427,33 @@ describe('pathfinder 性能补丁', () => {
     expect(m.safeToBreak(block)).toBe(true);
     zones = [];
     expect(m.safeToBreak(block)).toBe(true);
+  });
+
+  it.each([
+    ['west', -1, 0], ['east', 1, 0], ['north', 0, -1], ['south', 0, 1],
+  ] as const)('auto-navigation preserves a %s-facing ladder and its attached wall', (facing, dx, dz) => {
+    installPathfinderPerf();
+    const world = makeWorld();
+    const ladder = registry.blocksByName.ladder;
+    let state = ladder.defaultState;
+    for (let id = ladder.minStateId; id <= ladder.maxStateId; id++) {
+      const properties = Block.fromStateId(id, 0).getProperties();
+      if (properties.facing === facing && properties.waterlogged === false) { state = id; break; }
+    }
+    const wall = new Vec3(8, 65, 0);
+    const rung = wall.offset(dx, 0, dz);
+    world.setBlockStateId(rung, state);
+    const bot = makeBot(world);
+    const movements = new Movements(bot as never);
+    const safe = (at: InstanceType<typeof Vec3>) => movements.safeToBreak(world.getBlock(at));
+    expect(safe(wall)).toBe(false);
+    expect(safe(rung)).toBe(false);
+    expect(safe(wall.offset(0, -1, 0))).toBe(true);
+    const route = search(bot, [0, 64, 0], [14, 64, 0]);
+    expect(route.status).toBe('success');
+    expect(route.breaks.some(p => p.x === wall.x && p.y === wall.y && p.z === wall.z)).toBe(false);
+    world.setBlockStateId(rung, registry.blocksByName.air.defaultState);
+    expect(safe(wall)).toBe(true);
   });
 
   it('成果登记:不往登记格自己、也不往它头顶垫;走与挖照旧', () => {

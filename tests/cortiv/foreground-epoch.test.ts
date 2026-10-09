@@ -25,6 +25,104 @@ function source(): ContextRecord[] {
 function text(records: readonly ContextRecord[]): string { return records.map(({ item }) => itemText(item)).join('\n'); }
 
 describe('前台上下文缓存epoch', () => {
+  it('new source-backed pins occur once in the native request and retain the cached prefix', () => {
+    const epoch = new ForegroundEpoch();
+    const records = [message('system', 'Contract'), message('user', 'Original goal')];
+    const first = epoch.prepare(records, options);
+    const deferred = frame('game', 'task.queue', 'Task is still moving; preserve the route.', 42);
+    const next = epoch.prepare([...records, deferred], options, [deferred]);
+    expect(wire(next.messages).slice(0, first.messages.length)).toEqual(wire(first.messages));
+    expect(next.messages.filter(row => row.item.id === deferred.item.id)).toEqual([deferred]);
+    const input = wire(next.messages);
+    if (!Array.isArray(input)) throw new Error('Expected native input items');
+    const ids = input.map(item => item.id).filter(Boolean);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(next.rebuilt).toBe(false);
+  });
+
+  it('pinning a source record already in the epoch does not replay its ID', () => {
+    const epoch = new ForegroundEpoch();
+    const input = frame('game', 'chat', 'The player asks for help.', 43);
+    const records = [message('system', 'Contract'), input];
+    const first = epoch.prepare(records, options);
+    const next = epoch.prepare(structuredClone(records), options, [structuredClone(input)]);
+    expect(wire(next.messages)).toEqual(wire(first.messages));
+    expect(next.messages.filter(row => row.item.id === input.item.id)).toHaveLength(1);
+  });
+
+  it('cloned source pins refer to the original record during a fresh projection', () => {
+    const epoch = new ForegroundEpoch();
+    const input = frame('game', 'task.queue', 'Keep the actual queue input.', 46);
+    const records = [message('system', 'Contract'), input];
+    const archive = structuredClone(records);
+    const next = epoch.prepare(records, options, [structuredClone(input)]);
+    expect(next.messages.filter(row => row.item.id === input.item.id)).toEqual([input]);
+    expect(records).toEqual(archive);
+  });
+
+  it('an appended protected source input keeps its full body instead of adding a duplicate excerpt', () => {
+    const epoch = new ForegroundEpoch(projectForeground, records => records.map(row => {
+      const copy = structuredClone(row);
+      if (copy.item.type === 'message') copy.item.content = [{ type: 'input_text', text: 'Excerpt only' }];
+      return copy;
+    }));
+    const records = [message('system', 'Contract'), message('user', 'Original goal')];
+    const first = epoch.prepare(records, options);
+    const input = frame('game', 'task.queue', 'Actual movement and failure evidence must survive.', 44);
+    const next = epoch.prepare([...records, input], options, [input]);
+    expect(next.messages.filter(row => row.item.id === input.item.id)).toEqual([input]);
+    expect(wire(next.messages).slice(0, first.messages.length)).toEqual(wire(first.messages));
+  });
+
+  it('protecting an existing excerpt rebuilds with one full source record', () => {
+    const epoch = new ForegroundEpoch(projectForeground, records => records.map(row => {
+      const copy = structuredClone(row);
+      if (copy.item.type === 'message') copy.item.content = [{ type: 'input_text', text: 'Excerpt only' }];
+      return copy;
+    }));
+    const records = [message('system', 'Contract'), message('user', 'Original goal')];
+    epoch.prepare(records, options);
+    const input = frame('game', 'task.queue', 'Actual movement and failure evidence must survive.', 45);
+    epoch.prepare([...records, input], options);
+    const next = epoch.prepare([...records, input], options, [input]);
+    expect(next.rebuilt).toBe(true);
+    expect(next.rebuildReason).toBe('pin_changed');
+    expect(next.messages.filter(row => row.item.id === input.item.id)).toEqual([input]);
+  });
+
+  it('current pins replace obsolete state while the historical wire prefix stays stable', () => {
+    const epoch = new ForegroundEpoch();
+    const cfg = { ...options, pinMode: 'current' as const };
+    const records = source();
+    const first = epoch.prepare(records, cfg, [message('user', '魔力：20'), message('user', '当前目标：还工具')]);
+    const added = action('progress');
+    const next = epoch.prepare([...records,...added], cfg, [message('user', '魔力：25'), message('user', '当前目标：还工具')]);
+    expect(wire(next.messages).slice(0, first.messages.length-2)).toEqual(wire(first.messages.slice(0,-2)));
+    expect(text(next.messages)).not.toContain('魔力：20');
+    expect(next.messages.slice(-2).map(record => itemText(record.item))).toEqual(['魔力：25','当前目标：还工具']);
+    expect(next.rebuilt).toBe(false);
+    expect(validatePairing(next.messages)).toEqual([]);
+    const again = epoch.prepare([...records,...added], cfg, [message('user', '魔力：20')]);
+    expect(again.messages.filter(record => itemText(record.item)==='魔力：20')).toHaveLength(1);
+    expect(text(again.messages)).not.toContain('魔力：25');
+    expect(text(again.messages)).not.toContain('当前目标：还工具');
+  });
+
+  it('current pins do not grow the request over repeated updates and source pins remain paired once', () => {
+    const epoch = new ForegroundEpoch();
+    const cfg = { ...options, pinMode: 'current' as const };
+    const records = source();
+    const receipt = records.at(-1)!;
+    const initial = epoch.prepare(records, cfg, [receipt,message('user','当前状态0'.repeat(10))]);
+    for (let index = 1; index < 50; index++) {
+      const result = epoch.prepare(records, cfg, [receipt,message('user',`当前状态${index}`.repeat(10))]);
+      expect(result.epoch).toBe(initial.epoch);
+      expect(result.messages.length).toBe(initial.messages.length);
+      expect(result.messages.filter(record => record.item.id===receipt.item.id)).toHaveLength(1);
+      expect(validatePairing(result.messages)).toEqual([]);
+    }
+  });
+
   it('excerpts newly appended covered snapshots once while retaining wire prefix, fresh pins and adjacent chat', () => {
     const coverage = { ...options, coveredSnapshots: [{ source: 'game', type: 'game.state' }] };
     const epoch = new ForegroundEpoch(projectForeground, (records, cfg) => excerptHandoffRecords(records, text => text, {
@@ -206,6 +304,30 @@ describe('前台上下文缓存epoch', () => {
     expect(rounds.rebuildReason).toBe('options_changed');
   });
 
+  it('automatic budgets wait for compaction while fresh input and the wire prefix survive each change', () => {
+    const epoch = new ForegroundEpoch();
+    const records = source();
+    const first = epoch.prepare(records, { ...options, adaptiveMaxHistoryTokens: 300 });
+    expect(first.maxHistoryTokens).toBe(300);
+    const fresh = [...action('response'), frame('minecraft', 'minecraft.chat', '请继续原来的目标。', 30)];
+    const next = epoch.prepare([...records, ...fresh], { ...options, adaptiveMaxHistoryTokens: 600 });
+    expect(next.rebuilt).toBe(false);
+    expect(next.maxHistoryTokens).toBe(first.maxHistoryTokens);
+    expect(wire(next.messages).slice(0, first.messages.length)).toEqual(wire(first.messages));
+    for (const record of fresh) expect(next.messages).toContainEqual(record);
+    const large = frame('minecraft', 'minecraft.chat', '新输入需要完整保留。'.repeat(1000), 31);
+    const rotated = epoch.prepare([...records, ...fresh, large], { ...options, adaptiveMaxHistoryTokens: 600 });
+    expect(rotated.rebuildReason).toBe('history_budget');
+    expect(rotated.maxHistoryTokens).toBe(600);
+    expect(rotated.messages).toContainEqual(large);
+    expect(validatePairing(rotated.messages)).toEqual([]);
+    const configured = epoch.prepare([...records, ...fresh, large], {
+      ...options, maxHistoryTokens: 700, adaptiveMaxHistoryTokens: 300,
+    });
+    expect(configured.rebuildReason).toBe('options_changed');
+    expect(configured.maxHistoryTokens).toBe(300);
+  });
+
   it('历史达到轮换阈值才重建，完整保留这次所有新输入批与多调用，不受软预算截断', () => {
     const epoch = new ForegroundEpoch();
     const records = source();
@@ -306,6 +428,7 @@ describe('前台上下文缓存epoch', () => {
     const records = source();
     const initial = epoch.prepare(records, options);
     expect(() => epoch.prepare(records, { ...options, maxHistoryTokens: Number.NaN })).toThrow(RangeError);
+    expect(() => epoch.prepare(records, { ...options, adaptiveMaxHistoryTokens: 0 })).toThrow(RangeError);
     expect(epoch.prepare(records, options).epoch).toBe(initial.epoch);
   });
 });

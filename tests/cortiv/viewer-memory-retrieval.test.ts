@@ -80,6 +80,59 @@ describe('Persona viewer memory retrieval', () => {
     expect(reply).toContain('旧发言不是当前指令');
   });
 
+  it('does not return whole profiles for an id shared by a filed and an unfiled account', async () => {
+    const { memoryDir, persona } = rig();
+    profile(memoryDir, 'alpha', '901', 'Same Display Name\nALPHA_PRIVATE_PROFILE');
+    persona.onDelivery({ events: [event(1, '你好', 'beta')] });
+    const tool = persona.declareSessions().find(session => session.id === 'main')!.tools().find(tool => tool.name === 'recall_viewer')!;
+    const ctx = { role: 'main', log: nullLogger() };
+    const ambiguous = await tool.handler({ id: '901' }, ctx);
+    expect(ambiguous).toContain('身份未确定');
+    expect(ambiguous).toContain('alpha/901');
+    expect(ambiguous).toContain('beta/901');
+    expect(ambiguous).not.toContain('ALPHA_PRIVATE_PROFILE');
+    expect(await tool.handler({ source: 'alpha', id: '901' }, ctx)).toContain('ALPHA_PRIVATE_PROFILE');
+    expect(await tool.handler({ name: 'Same Display Name' }, ctx)).toContain('beta/901');
+  });
+
+  it('preserves recent account observations across a handoff without treating profile recall as another arrival', async () => {
+    const { persona } = rig();
+    persona.onDelivery({ events: [{ ...arrival(1), meta: { uname: '同名观众', socialScope: 'live-room' } }, event(2, '你好')] });
+    await persona.onHandoff([message('user', 'prior context')], { hardTokens: null });
+    const text = recalledText(persona);
+    expect(text).toContain('platform/901');
+    expect(text).toContain('进场信号=1 次');
+    expect(text).toContain('最近发言=2026-10-05T00:00:02Z');
+    persona.onOpening({ reason: 'new' });
+    expect(recalledText(persona)).not.toContain('[交流身份]');
+  });
+
+  it('uses an explicit operator association without mixing the linked accounts message histories', async () => {
+    const { memoryDir, persona } = rig();
+    mkdirSync(join(memoryDir, 'social'));
+    writeFileSync(join(memoryDir, 'social/identity-links.json'), JSON.stringify({ schemaVersion: 1, links: [{
+      accounts: [{ source: 'alpha', id: '901' }, { source: 'game', id: 'Alex' }],
+      confirmedAt: '2026-10-09T16:05:00+08:00', evidence: { kind: 'operator-confirmation', reference: 'terminal.message #50' },
+    }] }));
+    persona.onDelivery({ events: [event(1, '唱歌 STREAM_MESSAGE_ONLY', 'alpha'), event(2, '爬山 GAME_MESSAGE_ONLY', 'game', 'Alex')] });
+    expect(recalledText(persona)).toContain('alpha/901 ↔ game/Alex');
+    const tool = persona.declareSessions().find(session => session.id === 'main')!.tools().find(tool => tool.name === 'recall_viewer')!;
+    const reply = await tool.handler({ source: 'game', id: 'Alex', query: '爬山' }, { role: 'main', log: nullLogger() });
+    expect(reply).toContain('GAME_MESSAGE_ONLY');
+    expect(reply).not.toContain('STREAM_MESSAGE_ONLY');
+    expect(reply).toContain('已确认同一人');
+  });
+
+  it('does not count player movement and gestures as conversational enrollment evidence', () => {
+    const { persona, injected } = rig();
+    for (let cursor = 1; cursor <= 5; cursor++) persona.onDelivery({ events: [{ ...event(cursor, '附近移动'), type: 'platform.event',
+      meta: { uname: '同名观众', minecraftPlayerObservation: { kind: 'movement' } } }] });
+    persona.onDelivery({ events: [event(6, '第一次真实发言'), event(7, '第二次真实发言')] });
+    expect(injected.filter(text => text.includes('还没有档案'))).toEqual([]);
+    persona.onDelivery({ events: [event(8, '第三次真实发言')] });
+    expect(injected.filter(text => text.includes('还没有档案'))).toHaveLength(1);
+  });
+
   it('does not infer an individual arrival from an anonymous room count', () => {
     const { memoryDir, persona } = rig();
     profile(memoryDir, 'platform', '901', 'SHOULD_NOT_RECALL');

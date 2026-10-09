@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,14 +6,18 @@ import { CortiV } from '../../bots/cortiv/persona/persona.ts';
 import { FOREGROUND_CONTEXT_DEFAULTS } from '../../bots/cortiv/persona/foreground-context.ts';
 import { PLANNING_DEFAULTS } from '../../bots/cortiv/persona/planning-review.ts';
 import { DREAM_DEFAULTS } from '../../bots/cortiv/persona/dream-context.ts';
+import { FAST_FOREGROUND_DEFAULTS } from '../../bots/cortiv/persona/foreground-adviser.ts';
 import { functionCall, functionResult, itemText, message, type ContextRecord } from '../../src/protocol/open-responses/context.ts';
 import { estimateMessagesTokens, estimateTokens, nullLogger } from '../../src/core/util.ts';
 import { validatePairing } from '../../src/core/truncate.ts';
-import type { World, WorldRequestFacts } from '../../src/core/types.ts';
+import type { EventEnvelope, World, WorldRequestFacts } from '../../src/core/types.ts';
 import { makeFakeHarnessApi } from '../core/helpers.ts';
 
 const dirs: string[] = [];
-afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => {
+  vi.useRealTimers(); vi.unstubAllGlobals();
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
 function rig(worlds: World[] = [], agendaEnabled = false) {
   const memoryDir = mkdtempSync(join(tmpdir(), 'foreground-persona-'));
   dirs.push(memoryDir);
@@ -32,6 +36,107 @@ function rig(worlds: World[] = [], agendaEnabled = false) {
 }
 
 describe('CortiV foreground request context', () => {
+  function adaptiveRig() {
+    const memoryDir = mkdtempSync(join(tmpdir(), 'adaptive-foreground-')); dirs.push(memoryDir);
+    const cfg = { ...FAST_FOREGROUND_DEFAULTS, enabled: true, endpoint: 'http://fixture/decision',
+      minIntervalMs: 0, focusedHistoryTokens: 1024, deferQueueTail: true, maxDeferMs: 50 };
+    let reading = 'focused';
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ answers: {
+      reading: { choice: reading, confidence: .98, probabilities: Object.fromEntries(['focused','connected']
+        .map(key => [key, key === reading ? .98 : .02])) },
+      timing: { choice: 'continue', confidence: .98, probabilities: { continue: .98, respond: .02 } },
+    } })));
+    const records = [message('system', 'Environment contract'), message('assistant', 'Existing response', { responseId: 'before' })];
+    const injected: Array<{ text: string; kind?: string }> = [];
+    const diagnostics: unknown[] = [];
+    const api = { ...makeFakeHarnessApi({
+      injectInternal: (text, kind) => { injected.push({ text, kind }); },
+      log: { ...nullLogger(), emit: (_level, _text, options) => { if (options?.event === 'foreground-context') diagnostics.push(options.data); } },
+    }), sessionInfo: (id: string) => ({ id, running: 0, snapshot: records, estTokens: null, hardTokens: null }) };
+    const persona = new CortiV({ memoryDir, tickDelayMs: () => null,
+      foreground: () => ({ ...FOREGROUND_CONTEXT_DEFAULTS, enabled: true, maxHistoryTokens: 6000, minRecentRounds: 1 }),
+      fastForeground: () => cfg,
+    });
+    persona.attach(api);
+    const event: EventEnvelope = { origin: 'external', source: 'game', type: 'game.task.queue', cursor: 42,
+      ts: new Date().toISOString(), text: 'Moving to the bridge; still executing.', tags: ['snapshot'],
+      meta: { minecraftQueueTail: { schemaVersion: 1, taskId: 7, stepIndex: 0, stepCount: 1 } } };
+    const frame = message('user', event.text, { frame: { events: [{ source: event.source, type: event.type,
+      cursor: event.cursor, ts: event.ts, tags: event.tags, start: 0, chars: event.text.length }] } });
+    records.push(frame);
+    return { persona, cfg, records, event, frame, injected, diagnostics, reading: (value: string) => { reading = value; } };
+  }
+
+  it('deferred input survives compact requests and failed generations, then releases after an actual response', async () => {
+    const { persona, records, event, frame, diagnostics } = adaptiveRig();
+    expect(await persona.beforeDecision({ events: [event], messages: records })).toBe(false);
+    persona.onTurnEnded(); // A failed generation produced no model record.
+    for (let index = 0; index < 8; index++) records.push(functionCall(`read-${index}`, 'inspect', '{}', { responseId: `read-${index}` }),
+      functionResult(`read-${index}`, 'Old local observation. '.repeat(200)));
+    const fresh = message('user', 'Meet the player at the bridge; do not change that goal.'); records.push(fresh);
+    const archive = structuredClone(records);
+    const view = persona.prepareRequest({ sessionId: 'main', round: 1, messages: records })!;
+    expect(view).toContainEqual(frame); expect(view).toContainEqual(fresh);
+    expect(validatePairing(view)).toEqual([]); expect(records).toEqual(archive);
+    expect(diagnostics.at(-1)).toMatchObject({ reading: 'focused', maxHistoryTokens: 1024, deferredInputRecords: 1 });
+    persona.onTurnEnded();
+    persona.prepareRequest({ sessionId: 'main', round: 2, messages: records });
+    expect(diagnostics.at(-1)).toMatchObject({ deferredInputRecords: 0 });
+    persona.stopRhythm();
+  });
+
+  it('a queue input deferred after an established epoch occurs once through failed generations', async () => {
+    const { persona, records, event, frame } = adaptiveRig();
+    persona.prepareRequest({ sessionId: 'main', round: 1, messages: records.slice(0, -1) });
+    expect(await persona.beforeDecision({ events: [event], messages: records })).toBe(false);
+    const archive = structuredClone(records);
+    for (const round of [2, 3]) {
+      const view = persona.prepareRequest({ sessionId: 'main', round, messages: structuredClone(records) })!;
+      expect(view.filter(row => row.item.id === frame.item.id)).toEqual([frame]);
+      const ids = view.map(row => row.item.id).filter(Boolean);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(validatePairing(view)).toEqual([]);
+      persona.onTurnEnded(); // No successful model output; the queue input must stay protected.
+    }
+    expect(records).toEqual(archive);
+    persona.stopRhythm();
+  });
+
+  it('deferral has a deadline and new substantive input or shutdown cancels the deadline', async () => {
+    vi.useFakeTimers();
+    const { persona, records, event, injected } = adaptiveRig();
+    expect(await persona.beforeDecision({ events: [event], messages: records })).toBe(false);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(injected.filter(row => row.kind === 'foreground-check')).toHaveLength(1);
+    event.ts = new Date().toISOString();
+    expect(await persona.beforeDecision({ events: [event], messages: records })).toBe(false);
+    persona.onDelivery({ events: [{ ...event, type: 'game.chat', text: 'Please answer.', tags: [], meta: undefined }] });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(injected.filter(row => row.kind === 'foreground-check')).toHaveLength(1);
+    event.ts = new Date().toISOString();
+    expect(await persona.beforeDecision({ events: [event], messages: records })).toBe(false);
+    persona.stopRhythm();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(injected.filter(row => row.kind === 'foreground-check')).toHaveLength(1);
+  });
+
+  it('automatic reading changes keep the current prefix and full expansion remains immediate', async () => {
+    const { persona, records, event, reading, diagnostics } = adaptiveRig();
+    await persona.beforeDecision({ events: [event], messages: records });
+    const first = persona.prepareRequest({ sessionId: 'main', round: 1, messages: records })!;
+    expect(diagnostics.at(-1)).toMatchObject({ maxHistoryTokens: 1024 });
+    reading('connected');
+    expect(await persona.beforeDecision({ events: [{ ...event, type: 'game.chat', meta: undefined }], messages: records })).toBe(true);
+    const next = persona.prepareRequest({ sessionId: 'main', round: 2, messages: records })!;
+    expect(diagnostics.at(-1)).toMatchObject({ reading: 'connected', maxHistoryTokens: 1024,
+      requestedMaxHistoryTokens: 6000, rebuilt: false });
+    expect(next.slice(0, first.length)).toEqual(first);
+    const expand = persona.declareSessions().find(session => session.id === 'main')!.tools().find(tool => tool.name === 'expand_context')!;
+    await expand.handler({ reason: 'Review earlier agreement.' }, { role: 'main', log: nullLogger() });
+    expect(persona.prepareRequest({ sessionId: 'main', round: 3, messages: records })).toBeNull();
+    persona.stopRhythm();
+  });
+
   it('carries recent causal evidence into a new session after a real handoff, with original provenance and no old tool partners', async () => {
     const memoryDir = mkdtempSync(join(tmpdir(), 'causal-handoff-')); dirs.push(memoryDir);
     const options = { memoryDir, tickDelayMs: () => null,
@@ -216,6 +321,7 @@ describe('CortiV foreground request context', () => {
         text: parts.map(part => part.text).join('\n'), parts, snapshotTypes: ['game.state'],
       }) };
     const { persona, config, messages } = rig([world]);
+    config.currentStateOnly = false;
     const archive = structuredClone(messages);
     const first = persona.prepareRequest({ sessionId: 'main', round: 1, messages })!;
     parts = [parts[0], parts[1], { key: 'health', text: '生命 8/20' }, { key: 'nearby', text: '' }];
@@ -244,7 +350,9 @@ describe('CortiV foreground request context', () => {
     const first = persona.prepareRequest({ sessionId: 'main', round: 1, messages })!;
     messages.push(message('assistant', 'An additional local observation.', { responseId: 'next' }));
     const next = persona.prepareRequest({ sessionId: 'main', round: 2, messages })!;
-    expect(next.slice(0, first.length)).toStrictEqual(first);
+    const sourceIds = new Set(messages.slice(0,-1).map(record => record.item.id));
+    const base = first.filter(record => sourceIds.has(record.item.id) || itemText(record.item).startsWith('[即时调用]'));
+    expect(next.slice(0, base.length)).toStrictEqual(base);
     expect(JSON.stringify(next)).toContain('当前没有等待中或待复核的事项');
   });
 
@@ -357,7 +465,9 @@ describe('CortiV foreground request context', () => {
     expect(records).toEqual(archive);
     const nextRecords = [...records, message('assistant', 'Continue the current activity.', { responseId: 'continued' })];
     const next = persona.prepareRequest({ sessionId: 'main', round: 3, messages: nextRecords })!;
-    expect(next.slice(0, projected.length)).toEqual(projected);
+    const sourceIds = new Set(records.map(record => record.item.id));
+    const base = projected.filter(record => sourceIds.has(record.item.id) || itemText(record.item).startsWith('[即时调用]'));
+    expect(next.slice(0, base.length)).toEqual(base);
     const rotatedRecords = [...nextRecords, message('assistant', 'New observed activity. '.repeat(8000), { responseId: 'rotation' })];
     const rotated = persona.prepareRequest({ sessionId: 'main', round: 4, messages: rotatedRecords })!;
     const rotatedReceipt = rotated.find(({ item }) => item.type === 'function_call_output' && item.call_id === 'handoff-batch')!;

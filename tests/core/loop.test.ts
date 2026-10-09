@@ -53,7 +53,7 @@ interface RigOptions {
   /** 对模型隐藏但仍挂载运行的 World id。 */
   hiddenWorlds?: string[];
   /** 时机钩子,直接装到假Persona上 */
-  hooks?: Pick<Persona, 'onTurnEnded' | 'onIdle' | 'onStallsRecovered' | 'onDelivery' | 'onToolOutcome'>;
+  hooks?: Pick<Persona, 'onTurnEnded' | 'onIdle' | 'onStallsRecovered' | 'onDelivery' | 'onToolOutcome' | 'beforeDecision'>;
   /** 记录 schedule_wake 对 timers 原语的调用。 */
   onTimerSet?: (atIso: string, payload: Record<string, unknown>) => void;
   /** fork 工具的执行函数。 */
@@ -3693,6 +3693,61 @@ describe('MainLoop RunPhase', () => {
     expect(retryInMs).toBeLessThanOrEqual(delayMs);
     // 定时器按毫秒取整,允许早 1 毫秒。
     expect(Date.parse(retry.enteredAt)).toBeGreaterThanOrEqual(Date.parse(backoff.retryAt!) - 1);
+  });
+});
+
+describe('MainLoop optional response deferral', () => {
+  let rig: ReturnType<typeof makeRig>;
+  afterEach(async () => { if (rig) await rig.cleanup(); });
+
+  it('defers one response while keeping its records for the next input', async () => {
+    rig = makeRig({ hooks: { beforeDecision: ({ events }) => !events.some(event => event.text === 'ordinary progress') } });
+    rig.start();
+    await until(() => rig.session.messages.at(-1)?.role === 'assistant');
+    const calls = rig.llm.calls.length;
+    rig.pushEvent('ordinary progress');
+    await until(() => rig.session.messages.some(message => message.role === 'tool' && message.content.includes('ordinary progress')));
+    await sleep(25);
+    expect(rig.llm.calls.length).toBe(calls);
+    rig.pushEvent('a player asks a new question');
+    await until(() => rig.llm.calls.length > calls);
+    const request = JSON.stringify(rig.llm.calls.at(-1)!.messages);
+    expect(request).toContain('ordinary progress');
+    expect(request).toContain('a player asks a new question');
+    assertPairing(rig.session.messages);
+  });
+
+  it('new waking input overrides a deferral made while the hook was waiting', async () => {
+    let release!: () => void;
+    let waiting = false;
+    rig = makeRig({ hooks: { beforeDecision: async ({ events }) => {
+      if (!events.some(event => event.text === 'ordinary progress')) return true;
+      waiting = true;
+      await new Promise<void>(resolve => { release = resolve; });
+      return false;
+    } } });
+    rig.start();
+    await until(() => rig.session.messages.at(-1)?.role === 'assistant');
+    const calls = rig.llm.calls.length;
+    rig.pushEvent('ordinary progress');
+    await until(() => waiting);
+    rig.pushEvent('urgent new input');
+    release();
+    await until(() => rig.llm.calls.length > calls);
+    expect(JSON.stringify(rig.llm.calls.at(-1)!.messages)).toContain('urgent new input');
+  });
+
+  it('an unavailable timing hook continues the normal response', async () => {
+    rig = makeRig({ hooks: { beforeDecision: ({ events }) => {
+      if (events.some(event => event.origin === 'external')) throw new Error('unavailable');
+      return true;
+    } } });
+    rig.start();
+    await until(() => rig.session.messages.at(-1)?.role === 'assistant');
+    const calls = rig.llm.calls.length;
+    rig.pushEvent('important observation');
+    await until(() => rig.llm.calls.length > calls);
+    expect(JSON.stringify(rig.llm.calls.at(-1)!.messages)).toContain('important observation');
   });
 });
 

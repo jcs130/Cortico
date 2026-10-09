@@ -41,6 +41,7 @@ import { beginTemporaryScaffold, closeTemporaryScaffold, reclaimTemporaryScaffol
   type TemporaryScaffoldScope } from './temporary-scaffold.ts';
 import pathfinderPkg from 'mineflayer-pathfinder';
 import { blockIdOf, isAirState, normalizeBlockName } from './blueprint.ts';
+import { PROBE_SLICE_CELL_CAP, renderSpatialSlices } from './spatial-slices.ts';
 
 const { goals } = pathfinderPkg;
 
@@ -1563,12 +1564,18 @@ export async function skillTrade(
 
 /* ========== 锚点几何技能族:probe / build / excavate / tunnel ========== */
 
-/** 作物、耕地和液体附服务端属性，属性未读到时不推断。 */
+/** 附可影响使用、种植或通行的方块属性；属性未读到时不推断。 */
 export function probeStateText(bot: Bot, c: Cell): string {
   const block = blockAtCell(bot, c);
   if (block?.name === 'water' || block?.name === 'lava') {
     const level = blockProp(block, 'level');
     return level === null ? '(level未读,source未知)' : `(level=${level},source=${level === '0'})`;
+  }
+  if (block && (block.name === 'ladder' || block.name === 'scaffolding'
+    || /_(?:stairs|slab|door|trapdoor|fence_gate)$/.test(block.name))) {
+    const properties = ['facing', 'half', 'type', 'open', 'waterlogged', 'bottom', 'distance']
+      .flatMap(key => { const value = blockProp(block, key); return value === null ? [] : [`${key}=${value}`]; });
+    return properties.length ? `(${properties.join(',')})` : '(通行属性未读)';
   }
   const age = cropAgeOfCell(bot, c);
   if (age) return `(age ${age.value}/${age.max})`;
@@ -1659,14 +1666,28 @@ export function probeWhereText(
 export async function skillProbe(bot: Bot, call: Extract<SkillCall, { skill: 'probe' }>, ctx: SkillContext): Promise<string> {
   checkAbort(ctx);
   const locating = call.where !== undefined && call.where.length > 0;
+  if (call.slice && (call.shape !== 'box' || (call.fill !== undefined && call.fill !== 'solid') || locating)) {
+    throw new SkillBlocked('probe.slice 须用 box、fill:solid(可省略)，且不与 where 同用');
+  }
+  const observedAt = new Date().toISOString();
   const cells = shapeCells(
-    bot, call.shape, call.anchors, call.fill, locating ? PROBE_WHERE_CELL_CAP : PROBE_CELL_CAP,
+    bot, call.shape, call.anchors, call.fill,
+    call.slice ? PROBE_SLICE_CELL_CAP : locating ? PROBE_WHERE_CELL_CAP : PROBE_CELL_CAP,
   );
   const pre = cells.map((c) => {
     const b = blockAtCell(bot, c);
     return { c, name: b?.name ?? null, state: b ? probeStateText(bot, c) : '',
+      ...(call.slice ? { air: b !== null && b !== undefined && AIR_NAMES.has(b.name), collision: b?.shapes } : {}),
       fluidLevel: b?.name === 'water' || b?.name === 'lava' ? blockProp(b, 'level') : null };
   });
+  // Each requested section is complete within its bounds, including after context handoff.
+  if (call.slice) {
+    const text = renderSpatialSlices({ axis: call.slice, observedAt,
+      dimension: bot.game?.dimension === undefined ? null : String(bot.game.dimension), feet: feetOf(bot),
+      cells: pre.map(e => ({ ...e, air: e.air ?? false })) });
+    if (typeof text !== 'string') throw new SkillBlocked(text.error);
+    return text;
+  }
   const unloaded = pre.filter((e) => e.name === null).length;
   const memo = ctx.probeMemo;
   const geoKey = fnv32(`${locating ? `where:${call.where!.join('|')}` : 'all'}|${call.shape}|${cells.map((c) => `${c.x},${c.y},${c.z}`).join(';')}`);
@@ -1704,7 +1725,8 @@ export async function skillProbe(bot: Bot, call: Extract<SkillCall, { skill: 'pr
     if (listed.length === 0) {
       lines.push(`${head}: 全是空气。`);
     } else {
-      const airTail = airCells.length > 0 ? `;其余 ${airCells.length} 格是空气` : '';
+      const airTail = airCells.length > 0 ? call.shape === 'line'
+        ? `;空气:${airCells.map(cellText).join('、')}` : `;其余 ${airCells.length} 格是空气` : '';
       lines.push(`${head},逐格: ${listed.map((e) => `(${e.c.x},${e.c.y},${e.c.z}):${zhName(e.name!)}${e.state}`).join('、')}${airTail}。`);
     }
     pushPocketLine(bot, lines, cells, airCells);

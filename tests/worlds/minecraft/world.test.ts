@@ -12,6 +12,7 @@ import { parseGoalPlan, recordGoalJudgment } from '../../../src/worlds/minecraft
 import { SET_SPAWN_TRANSLATE } from '../../../src/worlds/minecraft/escape.ts';
 import { parseScoutSteps, parseSteps, renderQueue, QUEUE_MODES } from '../../../src/worlds/minecraft/executor.ts';
 import { Bridge } from '../../../src/worlds/minecraft/bridge.ts';
+import { AgentFriendProtection } from '../../../src/worlds/minecraft/agentfriend-protection.ts';
 import { MinecraftServerManager, type MinecraftServerState } from '../../../src/worlds/minecraft/server.ts';
 import { FakeHost } from '../../helpers/fake-host.ts';
 import { combatBot, makeExecutor, makeExecutorOn } from './executor-harness.ts';
@@ -56,6 +57,56 @@ function idleBot(): unknown {
 function stub(m: MinecraftWorld, parts: Record<string, unknown>): void {
   Object.assign(m, parts);
 }
+
+describe('Minecraft login messages', () => {
+  it('receives pre-spawn rules and titles without an entity, preserving origin and avoiding duplicate hooks at spawn', async () => {
+    const world = new MinecraftWorld({ cfg: cfg({ host: 'test-server', port: 25565, username: 'Self' }) });
+    const host = new FakeHost();
+    const bot = Object.assign(new EventEmitter(), { _client: new EventEmitter() });
+    stub(world, { host, bridge: { bot: null, connected: false } });
+    const hooks = world as unknown as { hookMessageEvents(bot: unknown): void; hookBotEvents(bot: unknown): void };
+    hooks.hookMessageEvents(bot);
+    const guide = { toString: () => '欢迎加入测试服，玩法说明请用 /help 查看。' };
+    bot.emit('message', guide, 'system');
+    bot.emit('title', { text: '冒险者欢迎来到这里' });
+    await Promise.resolve();
+    expect(host.events).toMatchObject([
+      { source: 'minecraft', type: 'minecraft.event', text: expect.stringContaining('冒险者欢迎来到这里') },
+      { source: 'minecraft', type: 'minecraft.chat', text: `[MC 登录消息] ${guide.toString()}`,
+        meta: { phase: 'login', server: 'test-server:25565' }, ts: expect.any(String) },
+    ]);
+    expect(host.pushOpts[1]?.deliver).not.toBe(false);
+    Object.assign(bot, idleBot());
+    stub(world, { bridge: { bot, connected: true } });
+    hooks.hookBotEvents(bot);
+    hooks.hookBotEvents(bot);
+    bot.emit('message', { toString: () => '出生后补发的玩法说明。' }, 'system');
+    const chat = { toString: () => '<Alex> 你好' };
+    bot.emit('message', chat, 'chat');
+    bot.emit('chat', 'Alex', '你好', '', chat);
+    await Promise.resolve();
+    expect(host.events.filter(event => event.type === 'minecraft.chat').map(event => event.text)).toEqual([
+      `[MC 登录消息] ${guide.toString()}`, '[MC] Alex: 你好', '[MC 系统] 出生后补发的玩法说明。',
+    ]);
+    expect(bot.listenerCount('message')).toBe(1);
+  });
+
+  it('installs login listeners on each new connection and still filters machine permission replies', async () => {
+    const world = new MinecraftWorld({ cfg: cfg(), agentFriendEnabled: true });
+    const host = new FakeHost();
+    stub(world, { host });
+    for (const text of ['第一次登录的说明。', '重连后的新版说明。']) {
+      const bot = Object.assign(new EventEmitter(), { _client: new EventEmitter() });
+      (world as any).hookMessageEvents(bot);
+      bot.emit('message', { toString: () => text }, 'system');
+      bot.emit('message', { toString: () => 'MC_PROTECT {"action":"break","dimension":"overworld","x":0,"y":64,"z":0,"status":"deny","reason":"protected"}' }, 'system');
+      await Promise.resolve();
+    }
+    expect(host.events.map(event => event.text)).toEqual([
+      '[MC 登录消息] 第一次登录的说明。', '[MC 登录消息] 重连后的新版说明。',
+    ]);
+  });
+});
 
 describe('Minecraft player presence identity', () => {
   it('carries each player identity across arrival and departure without treating chat as arrival', () => {
@@ -460,7 +511,7 @@ describe('MinecraftWorld World 面(未连接状态)', () => {
     expect(Object.keys(byName).sort())
       .toEqual([
         'mc_bag', 'mc_blocked', 'mc_blueprint', 'mc_check', 'mc_do', 'mc_escape',
-        'mc_flight_plan', 'mc_goal', 'mc_help', 'mc_map', 'mc_policy', 'mc_queue', 'mc_scout', 'mc_stop', 'mc_view_map', 'mc_visual',
+        'mc_flight_plan', 'mc_goal', 'mc_help', 'mc_map', 'mc_policy', 'mc_queue', 'mc_scout', 'mc_script', 'mc_stop', 'mc_view_map', 'mc_visual',
       ]);
     // 三个只读原语与 mc_check 同一档:纯读、不进队列、不该进只读 fork 的禁区;
     // 回执是此刻读数,另打 snapshot(交接笔记同名只留最后一次)
@@ -476,6 +527,7 @@ describe('MinecraftWorld World 面(未连接状态)', () => {
     expect(byName.mc_scout.barrierAfter).toBeUndefined();
     // 这三个改的是世界,不是她的嘴:标成 speak 会让"禁言"连挖矿一起禁掉
     expect(byName.mc_do.tags).toContain('act');
+    expect(byName.mc_script.tags).toContain('act');
     expect(byName.mc_stop.tags).toContain('act');
     expect(byName.mc_escape.tags).toContain('act');
     // 规矩改的是常驻内部状态,不是外部世界也不是记忆:write 是唯一说得通的那一档,
@@ -1016,7 +1068,7 @@ describe('MinecraftWorld World 面(未连接状态)', () => {
     const scout = m.tools().find((t) => t.name === 'mc_scout')!;
     const props = scout.parameters.properties as Record<string, { items?: { properties?: Record<string, { enum?: string[] }> } }>;
     const names = props.steps.items!.properties!.skill.enum!;
-    expect(names).toEqual(['goto', 'flight', 'tunnel', 'build', 'excavate', 'probe']);
+    expect(names).toEqual(['goto', 'flight', 'tunnel', 'build', 'excavate', 'probe', 'observe']);
     expect(names).not.toContain('collect');
     expect(names).not.toContain('chat');
   });
@@ -2457,6 +2509,25 @@ describe('Minecraft 聊天框消息', () => {
       '[MC 系统] 领地保护已开启',
     ]);
     expect(host.pushOpts.map((o) => o?.trigger)).toEqual(['flush', 'piggyback']);
+  });
+
+  it('两种保护协议仍进入权限缓存，原始 JSON 不进入聊天与记忆事件', async () => {
+    const { bot, host } = hooked(true);
+    const protection = new AgentFriendProtection(Object.assign(bot, { chat: () => undefined }));
+    for (const [index, prefix] of ['MC_PROTECT', 'MC_PROTECTION'].entries()) {
+      const reply = { schemaVersion: 1, action: 'break', world: 'minecraft:overworld',
+        x: index, y: 64, z: 2, status: index === 0 ? 'deny' : 'allow_likely', reason: 'test' };
+      bot.emit('message', { toString: () => `${prefix} ${JSON.stringify(reply)}` }, 'system');
+      expect(protection.verdict('break', 'overworld', reply)).toBe(reply.status);
+    }
+    bot.emit('message', { toString: () => '你没有权限破坏这里的方块' }, 'system');
+    bot.emit('chat', 'Alex', 'MC_PROTECTION 是什么意思？', null,
+      { toString: () => '<Alex> MC_PROTECTION 是什么意思？' });
+    await Promise.resolve();
+    expect(host.events.filter((event) => event.type === 'minecraft.chat').map((event) => event.text).sort()).toEqual([
+      '[MC 系统] 你没有权限破坏这里的方块',
+      '[MC] Alex: MC_PROTECTION 是什么意思？',
+    ].sort());
   });
 });
 

@@ -57,7 +57,7 @@ describe('Persona progressive reference integration', () => {
       + 'Recorded plan with several preparatory steps. '.repeat(30)
       + 'Execution rejected: the selected material is not usable here. Consult the operation reference.' });
     await router.observe([outcome, event({ cursor: 21, tags: ['snapshot'], text: 'Unrelated current position.' }),
-      event({ cursor: 22, tags: ['snapshot'], text: 'The queue is idle.' })], [],
+      event({ cursor: 22, tags: ['snapshot'], text: 'The queue is idle.' })], [{ source: 'scene', text: 'Current inventory has no usable material.' }],
     makeFakeHarnessApi({ injectInternal: text => notices.push(text) }), {
       tool: 'scene_do', arguments: JSON.stringify({ steps: ['prepare'.repeat(200)] }),
       receipt: 'Accepted into the queue. ' + 'Planning details. '.repeat(30) + 'Execution has not been verified.',
@@ -69,6 +69,7 @@ describe('Persona progressive reference integration', () => {
     expect(state.observations[0].text).toContain('Execution rejected');
     expect(state.observations[0].text).toContain('[中间未展开]');
     expect(state.recentIntent.receipt).toContain('Execution has not been verified');
+    expect(state.worldFacts).toEqual([{ source: 'scene', text: 'Current inventory has no usable material.' }]);
     expect(JSON.stringify(state).length).toBeLessThanOrEqual(2400);
     expect(r.library.selected()?.topicKey).toBe(r.topics[0].key);
     expect(notices[0]).toContain('不是新目标或行动指令');

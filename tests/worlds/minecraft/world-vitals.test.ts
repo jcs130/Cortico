@@ -61,6 +61,23 @@ function observing(rig: ReturnType<typeof nativeVitals>) {
 }
 
 describe('Minecraft authoritative initial body readings', () => {
+  it('keeps offhand food quantities separate from the main inventory and projects both reserves', () => {
+    const rig = nativeVitals();
+    rig.inventory.updateSlot(36, new rig.Item(rig.registry.itemsByName.bread.id, 2));
+    rig.inventory.updateSlot(45, new rig.Item(rig.registry.itemsByName.golden_apple.id, 3));
+    const snapshot = rig.snapshot();
+    expect(snapshot.inventory.some(item => item.name === 'golden_apple')).toBe(false);
+    expect(snapshot.equipment.find(item => item.slot === 'offhand')).toMatchObject({ name: 'golden_apple', count: 3 });
+    const { world } = observing(rig);
+    Object.assign(world, { snapshot: () => ({ ...rig.snapshot(), invSynced: true }) });
+    const project = () => (world as unknown as { renderSnapshotEvent(): string | null }).renderSnapshotEvent();
+    expect(project()).toContain('特殊食物：金苹果×3');
+    expect((world as unknown as { requestFactsCache: { text: string } }).requestFactsCache.text).toContain('常规 2 个');
+    const before = snapshotFingerprint(rig.snapshot());
+    rig.inventory.updateSlot(45, new rig.Item(rig.registry.itemsByName.golden_apple.id, 2));
+    expect(snapshotFingerprint(rig.snapshot())).not.toBe(before);
+  });
+
   it('keeps native first-spawn readings unknown and displays already received armor', () => {
     const rig = nativeVitals();
     rig.inventory.updateSlot(6, new rig.Item(rig.registry.itemsByName.iron_chestplate.id, 1));

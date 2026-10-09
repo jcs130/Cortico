@@ -3,7 +3,7 @@
  *
  * 每个技能在 `SKILLS` 里声明一次字段(名/类型/必填/范围/默认值/一行文档)与文档段落,
  * 出口全部由这一份生成:`SKILL_NAMES`、mc_do / mc_scout 的 schema 与技能表、
- * `parseSteps` / `parseScoutSteps`。mc_scout 是同一张表的只读切片:probe,以及
+ * `parseSteps` / `parseScoutSteps`。mc_scout 是同一张表的只读切片:probe/observe,以及
  * 声明了 dryRun 的技能(入队时一律按试算跑)。结构约束只有一个家,长出新技能时同步。
  *
  * 横向规则(build 的 shape-锚点数、use 的 at/target 互斥、craft 的 item/grid 二选一)
@@ -16,6 +16,8 @@ import {
 import { DIRECTIONS, type Direction } from './terrain.ts';
 import { normalizeDimension } from './escape.ts';
 import type { PositionXYZ } from './blueprint.ts';
+import { PROBE_SLICE_CELL_CAP, SPATIAL_SLICE_AXES, type SpatialSliceAxis } from './spatial-slices.ts';
+import { parseSpatialObservation, SPATIAL_OBSERVATION_LIMITS, type SpatialObserveInput } from './spatial-observation.ts';
 
 /** 步骤依赖与验收的可选覆写；省略时使用执行器推导的因果依赖和验收规则。 */
 export interface StepBounds {
@@ -115,7 +117,8 @@ export type SkillCall = StepBounds & (
     }
   | { skill: 'excavate'; shape: ShapeName; anchors: Anchor[]; fill?: BoxFill; dryRun?: boolean; tool?: string }
   | { skill: 'tunnel'; at: Anchor; spiral?: boolean; dryRun?: boolean; until?: string[]; tool?: string }
-  | { skill: 'probe'; shape: ShapeName; anchors: Anchor[]; fill?: BoxFill; where?: string[] }
+  | { skill: 'probe'; shape: ShapeName; anchors: Anchor[]; fill?: BoxFill; where?: string[]; slice?: SpatialSliceAxis }
+  | ({ skill: 'observe' } & SpatialObserveInput)
   | { skill: 'craft'; item?: string; count: number; grid?: string[][] }
   | { skill: 'smelt'; input: string; count: number; fuel: string; at?: Anchor }
   | { skill: 'brew'; at?: Anchor; input: string; bottle: string; count: number; fuel: string }
@@ -660,10 +663,20 @@ function parseShaped(skill: 'build' | 'excavate' | 'probe') {
     }
     const where = nameListOf(c.where, at, 'probe 的 where');
     if (where !== null && 'error' in where) return { error: where.error };
+    let slice: SpatialSliceAxis | undefined;
+    if (c.slice !== undefined) {
+      if (!SPATIAL_SLICE_AXES.includes(c.slice as SpatialSliceAxis)) {
+        return { error: `${at} probe 的 slice 只认 x/y/z` };
+      }
+      if (shape !== 'box' || (fill !== undefined && fill !== 'solid') || where) {
+        return { error: `${at} probe.slice 须用 box、fill:solid(可省略)，且不与 where 同用` };
+      }
+      slice = c.slice as SpatialSliceAxis;
+    }
     return {
       step: {
         skill, shape: shape as ShapeName, anchors,
-        ...(fill ? { fill } : {}), ...(where ? { where: where.names } : {}),
+        ...(fill ? { fill } : {}), ...(where ? { where: where.names } : {}), ...(slice ? { slice } : {}),
       },
     };
   };
@@ -1075,7 +1088,8 @@ ground 使用普通物理，飞行悬停时先 land 或改用 flight。flight �
                                                  at 也收 mc_map 的路标名:{"skill":"goto","at":"家"}。
                                                  赶路可能挖方块或搭路；已绑定蓝图范围内不生成这些动作，完工后仍生效。
                                                  walkOnly:true 只沿现有通路走，不挖掘或垫脚；只靠走试算可达时，可用同一目标加此字段实际执行。与 dryRun 同用时只试算这条走法。
-                                                 走不通时核对门洞、通道与落点；改结构用显式 dig/build，按现场和权限核验。`,
+                                                 梯子用可达下端进入，再沿连续梯段到出口平台；use 右键不爬梯。看见一格梯子不证明它已接到地面或通向顶部，probe 可核对整段。
+                                                 走不通时核对门洞、通道与落点；改结构用显式 excavate/build，按现场和权限核验。`,
     parse: parseGoto,
     fields: [
       {
@@ -1161,6 +1175,7 @@ ground 使用普通物理，飞行悬停时先 land 或改用 flight。flight �
                                                  路径和身位须已加载且无遮挡。取得权限的方法由当前服务器说明提供。
                                                  dryRun:true 在施法前从当前位置试算碰撞、落点和单段耗时；不施法、不移动，不要求已有许可。
                                                  整段路线用 mc_flight_plan(points,budgetMs?)；依次投影各段起点、累计耗时并核验末段落点，施法前比较实际可用时长。
+                                                 远目标加 subdivide:true 自动分成客户端12格内的斜向/垂直段，回传可整体提交的steps及needs；总耗时仍须符合服务端许可。起点改变后重算。
                                                  限时许可的已知后续移动可与授予许可的 chat 命令同单排队，用 needs 连接各段；不在施法后逐段等模型。
 {"skill":"land"}                                从悬停位置沿下方已加载、安全的落脚面下降落地，再进行普通地面寻路。`,
     fields: [
@@ -1176,7 +1191,7 @@ ground 使用普通物理，飞行悬停时先 land 或改用 flight。flight �
     doc: `{"skill":"collect","block":"oak_log","count":3}  采集方块,只挖看得见的——埋在石头里的看不见,得先挖开或者找暴露的。
                                                  加 "buried":true = 看得见但走不过去时,允许挖条路过去(最多 4 次)。
                                                  作物默认只收 age 到顶的,没长成的留着；mature:true 也可显式写出。
-                                                 已开工蓝图中材质已对上的非作物格不作为采集来源；明确拆改用精确坐标的 dig。
+                                                 已开工蓝图中材质已对上的非作物格不作为采集来源；明确拆改用 excavate 指定形状和 anchors；单格用 shape:"box" 加两个相同坐标。
                                                  tool 不写=节约耐久;"fastest"=本步最快;物品 id=本步精确指定,都不改长期设置`,
     fields: [
       { key: 'block', kind: 'string', required: true, hint: '方块英文 id' },
@@ -1320,8 +1335,12 @@ ground 使用普通物理，飞行悬停时先 land 或改用 flight。flight �
     name: 'probe',
     doc: `{"skill":"probe","shape":"line","anchors":[["~","~2","~"],["~","~80","~"]]}
                                                  只看不动:读出你圈的这片形状里的材质构成与液体;27 格以内
-                                                 逐格报「(x,y,z):方块」,作物带 age，耕地带 moisture，水/岩浆带 level/source。
+                                                 逐格报「(x,y,z):方块」,作物带 age，耕地带 moisture，水/岩浆带 level/source；梯子、台阶、门等带朝向、开合等已读通行属性。短 line 同时列空气坐标，可核对梯段或支撑的断档。
                                                  大区域与 where 另列 level=0 的源方块坐标；空桶装液体先核对源格。圈哪片由你定
+{"skill":"probe","shape":"box","anchors":[["~-2","~","~-2"],["~2","~4","~2"]],"slice":"y"}
+                                                 slice 保留每格位置：y=水平各层，z=各正截面，x=各侧截面；世界坐标轴，不随镜头转。
+                                                 须用 box、fill:solid(可省略)，不与 where 同用，每次最多 ${PROBE_SLICE_CELL_CAP} 格；过长时缩小范围。
+                                                 附读取时间、维度、脚下坐标和碰撞箱；.. 是已读空气，?? 是未加载。直接读区块，不检查视线。
 {"skill":"probe","shape":"box","anchors":[[-40,40,-120],[-8,60,-88]],"where":["spawner","#chests"]}
                                                  加 "where" = 只报这几样在这片里的坐标(按远近,每样最多 ${PROBE_WHERE_SHOWN} 处)。
                                                  这一档直接读区块,不看视线也不管挡没挡着 —— 封在结构里的刷怪笼、
@@ -1338,6 +1357,7 @@ ground 使用普通物理，飞行悬停时先 land 或改用 flight。flight �
         doc: '数量由 shape 定',
       },
       { key: 'fill', kind: 'enum', values: ['solid', 'outline', 'edges'], error: 'fill 只认 solid/outline/edges', doc: '只对 box 有意义' },
+      { key: 'slice', kind: 'enum', values: SPATIAL_SLICE_AXES, error: 'slice 只认 x/y/z', doc: `box 空间切片，最多 ${PROBE_SLICE_CELL_CAP} 格，不与 where 同用` },
       {
         key: 'where', kind: 'names', hint: `方块英文 id 或类别 ${UNTIL_CATEGORY_DOC};实体 id 按收到的实体表报`,
         doc: '只报这几样在这片里的坐标(不看视线)',
@@ -1345,9 +1365,34 @@ ground 使用普通物理，飞行悬停时先 land 或改用 flight。flight �
     ],
   },
   {
+    name: 'observe',
+    doc: `{"skill":"observe","mode":"voxels","bounds":[-2,-1,-2,2,3,2]}
+                                                 按 MineDojo 的局部体素观测方式，直接读当前连接已加载方块，不需图像估深。
+                                                 bounds 是相对执行时脚下格的 [xmin,ymin,zmin,xmax,ymax,zmax]，含端点；省略为 [-1,-1,-1,1,2,1]。
+                                                 每项 ±${SPATIAL_OBSERVATION_LIMITS.offset}，最多 ${SPATIAL_OBSERVATION_LIMITS.cells} 格；返回绝对坐标范围、读取时间、维度、眼位、朝向。
+                                                 palette 保留方块状态、属性与真实格内碰撞箱；cells 按 y,z,x 展开(x 最快)，-1 是未知；无碰撞不证明安全可走或有支撑。
+{"skill":"observe","mode":"rays","rays":[[0,0,24],[15,30,16],[-15,-30,16]]}
+                                                 从执行时眼位发射碰撞射线，每组 [相对pitch角,相对yaw角,最大距离]；角度用度，pitch 正值向上，yaw 正值向左，yaw=0 朝北。
+                                                 最多 ${SPATIAL_OBSERVATION_LIMITS.rays} 条，每条 ≤${SPATIAL_OBSERVATION_LIMITS.range} 格；省略 rays 为三行五列、24 格的扇面。
+                                                 terrain 报首个方块碰撞或未知，entity 报本连接已知实体的最近包围箱交点，first 比较两者；未知区不能当无遮挡。
+                                                 计入相邻格延伸的碰撞形状，邻格未知也停止确认；液体和纹理不遮挡碰撞射线，实体箱不是皮肤模型深度。
+                                                 两种模式均只读，按需缩小范围；数据只在本次调用复用，不常驻全量地图。`,
+    parse: (c, at) => {
+      const parsed = parseSpatialObservation(c);
+      return 'error' in parsed ? { error: `${at} ${parsed.error}` } : { step: { skill: 'observe', ...parsed } };
+    },
+    fields: [
+      { key: 'mode', kind: 'enum', values: ['voxels', 'rays'], required: true, error: 'mode 要 voxels/rays' },
+      { key: 'bounds', kind: 'opaque', schema: { type: 'array', minItems: 6, maxItems: 6,
+        items: { type: 'integer', minimum: -SPATIAL_OBSERVATION_LIMITS.offset, maximum: SPATIAL_OBSERVATION_LIMITS.offset } }, doc: 'voxels 相对脚下格的六个边界，含端点' },
+      { key: 'rays', kind: 'opaque', schema: { type: 'array', minItems: 1, maxItems: SPATIAL_OBSERVATION_LIMITS.rays,
+        items: { type: 'array', minItems: 3, maxItems: 3, items: { type: 'number' } } }, doc: 'rays 的 [pitch角,yaw角,距离] 列表' },
+    ],
+  },
+  {
     name: 'use',
     doc: `{"skill":"use","at":[103,64,-31]}
-                                                 空手右键世界里已有的那一格:开门、拉杆、按钮、开箱子看一眼、点床睡觉。
+                                                 右键世界里已有的那一格:开门、拉杆、按钮、开箱子看一眼、点床睡觉。优先空手；满包时功能方块可用普通无自定义名称的工具，不丢主手物品。
                                                  门、活板门或栅栏门可给 open:true 开启、open:false 关闭；已符合就保持，不反复翻转。回执核验期望状态。
                                                  at 是要点击的方块坐标；item 是从背包拿在手里的物品，不是被点击方块的名字。
                                                  点击已有方块不要求包里有同名物品。查看方块容器后会关窗；要取物直接用 take at 点名方块。
@@ -1689,7 +1734,7 @@ ground 使用普通物理，飞行悬停时先 land 或改用 flight。flight �
 const SKILL_INDEX = new Map(SKILLS.map((s) => [s.name as string, s]));
 
 function specIsScout(s: SkillSpec): boolean {
-  return s.name === 'probe' || s.fields.some((f) => f.key === 'dryRun');
+  return s.name === 'probe' || s.name === 'observe' || s.fields.some((f) => f.key === 'dryRun');
 }
 
 const SCOUT_SKILLS = SKILLS.filter(specIsScout);
@@ -2025,7 +2070,7 @@ export function parseScoutSteps(
   const steps: SkillCall[] = [];
   for (const [i, step] of parsed.steps.entries()) {
     if (!scout.has(step.skill)) {
-      return { error: `第 ${i + 1} 步「${step.skill}」会动世界,试算只收 probe 和带 dryRun 的技能` };
+      return { error: `第 ${i + 1} 步「${step.skill}」会动世界,试算只收 probe/observe 和带 dryRun 的技能` };
     }
     steps.push(asScoutStep(step));
   }

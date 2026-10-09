@@ -43,7 +43,7 @@ import { itemMatchesPick } from './item-pick.ts';
 import { itemCustomName } from './item-display.ts';
 import { windowSnapshot } from './viewer-state.ts';
 import { consumesOpenWindow, selectionMenuTitle, storageWindow } from './window-semantics.ts';
-import { clearHandForBlockInteraction, withPreparedInteractionHand } from './hand-interaction.ts';
+import { clearHandForBlockInteraction, needsBareHandToInteract, withPreparedInteractionHand } from './hand-interaction.ts';
 import { farmingClickCell, floodedCropSpace } from './farming-target.ts';
 import { cellTarget, type BowShotResult } from './ranged.ts';
 import { rangedBlockedText } from './melee.ts';
@@ -823,7 +823,7 @@ export async function useOnce(bot: Bot, call: Extract<SkillCall, { skill: 'use' 
   }
   let label = bareBlockUse ? '空手'
     : selected ? itemCustomName(selected) ?? zhName(held ?? selected.name) : held ? zhName(held) : '空手';
-  const hand = useHandOf(bareBlockUse ? null : selected ?? null);
+  let hand = useHandOf(bareBlockUse ? null : selected ?? null);
   const activateBlock = (block: NonNullable<ReturnType<Bot['blockAt']>>, direction?: Vec3): Promise<void> =>
     dispatchUse(bot, hand, ctx, { kind: 'block', position: block.position },
       () => withPreparedInteractionHand(bot, () => bot.activateBlock(block, direction)));
@@ -946,9 +946,10 @@ export async function useOnce(bot: Bot, call: Extract<SkillCall, { skill: 'use' 
       return `${cellText(cell)} 的${zhName(target.name)}已经打开，保持开启，继续赶路`;
     }
     if (bareBlockUse) {
-      await clearHandForBlockInteraction(bot, true);
+      await clearHandForBlockInteraction(bot, !needsBareHandToInteract(target.name));
+      hand = useHandOf(bot.heldItem);
       held = null;
-      label = '空手';
+      label = hand ? zhName(hand.name) : '空手';
     }
     // 船由 BoatItem 的 use 沿玩家视线生成，不能通过 use_item_on 放置。
     if (held && isBoat(held)) return await useBoat(bot, cell, held, label, activateItem);
@@ -1081,7 +1082,11 @@ export async function useOnce(bot: Bot, call: Extract<SkillCall, { skill: 'use' 
             + `要踏入并等待维度切换，用 {"skill":"transit","at":[${cell.x},${cell.y},${cell.z}]}`
           : `；实测维度从${zhDimension(beforeDimension)}变为${zhDimension(dimensionOf(bot))}，后续坐标须按当前维度核对`
         : '';
-      return `${head}${changed}。${note || '包里一样没动'}${placementReadback?.() ?? ''}${seen}${portalNote}${frameNote}`;
+      const climbNote = target.name === 'ladder' || target.name === 'vine' || target.name === 'scaffolding'
+        ? `；本次只右键，没有执行攀爬；实测脚格 ${cellText(feetOf(bot))}。攀爬需进入可攀爬方块并移动，`
+          + '先用 probe 核对下端、连续性、朝向与出口；右键回执不证明登高'
+        : '';
+      return `${head}${changed}。${note || '包里一样没动'}${placementReadback?.() ?? ''}${seen}${portalNote}${frameNote}${climbNote}`;
     }
     const v = await settleProbe(probe);
     // 失败路径与成功路径报同一份背包增减:存量事实往往就是病因所在

@@ -720,6 +720,34 @@ describe('BilibiliWorld', () => {
     expect(await host.deferred[0].spec.render()).toBe('[直播间] 刚才 1 人进场');
   });
 
+  it.each([false, true])('merges paired arrival effects and entry messages while preserving both source receipts (reversed=%s)', async reversed => {
+    const host = new BatchCandidateHost();
+    const { module, feed } = await mount({}, host);
+    const pair = [{ cmd: 'ENTRY_EFFECT', data: { uid: 41, copy_writing: '欢迎 <%同名观众%> 进入直播间' } },
+      { cmd: 'INTERACT_WORD', data: { msg_type: 1, uid: 41, uname: '同名观众' } }];
+    for (const message of reversed ? pair.reverse() : pair) feed(message);
+    await module.stop(); host.projectBatch();
+    expect(host.archivedEvents).toHaveLength(2);
+    expect(host.events).toHaveLength(1);
+    expect(host.events[0]).toMatchObject({ type: 'bilibili.enter', senderKey: '41', meta: {
+      uname: '同名观众', socialScope: 'live-room', sourceCursors: [1, 2],
+    } });
+    expect(host.events[0].meta?.arrivalSignalTypes).toEqual(expect.arrayContaining(['bilibili.enter', 'bilibili.enter-guard']));
+  });
+
+  it('keeps different UIDs and later entry signals separate even with identical display names', async () => {
+    vi.useFakeTimers();
+    const host = new BatchCandidateHost();
+    const { module, feed } = await mount({}, host);
+    feed({ cmd: 'ENTRY_EFFECT', data: { uid: 41, copy_writing: '欢迎 <%同名观众%>' } });
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1, uid: 42, uname: '同名观众' } });
+    vi.setSystemTime(Date.now() + 30 * 60_000);
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1, uid: 41, uname: '同名观众' } });
+    await module.stop(); host.projectBatch();
+    expect(host.events.map(event => event.senderKey)).toEqual(['41', '42', '41']);
+    expect(host.archivedEvents).toHaveLength(3);
+  });
+
   it('archives named arrivals before crowded-room context selection', async () => {
     const host = new BatchCandidateHost();
     const { module, feed } = await mount({

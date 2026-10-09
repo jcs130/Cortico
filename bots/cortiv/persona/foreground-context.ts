@@ -7,13 +7,15 @@ export interface ForegroundContextConfig {
   enabled: boolean;
   maxHistoryTokens: number;
   minRecentRounds: number;
+  /** Replace cached current-state pins on each request while retaining the history prefix. */
+  currentStateOnly?: boolean;
   /** Newline-separated Memory indexes, independently retained across rolling note rewrites. */
   memoryFiles?: string;
 }
 
 /** Optional deployment fallback for models whose routine calls benefit from shorter history. */
 export const FOREGROUND_CONTEXT_DEFAULTS: ForegroundContextConfig = {
-  enabled: false, maxHistoryTokens: 6_000, minRecentRounds: 2, memoryFiles: '',
+  enabled: false, maxHistoryTokens: 6_000, minRecentRounds: 2, currentStateOnly: true, memoryFiles: '',
 };
 
 export interface ForegroundProjection {

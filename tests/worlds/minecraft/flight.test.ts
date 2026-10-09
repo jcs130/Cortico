@@ -8,6 +8,8 @@ import type { Block } from 'prismarine-block';
 import { describeSkill, parseSteps, Executor, type TaskReport } from '../../../src/worlds/minecraft/executor.ts';
 import { parseScoutSteps } from '../../../src/worlds/minecraft/skills.ts';
 import { parseFlightPlan, previewFlightPlan } from '../../../src/worlds/minecraft/flight-preview.ts';
+import { watchAgentFriendFlight } from '../../../src/worlds/minecraft/agentfriend-flight.ts';
+import { publishViewerCastCommand } from '../../../src/worlds/minecraft/viewer-cast.ts';
 import { MinecraftWorld } from '../../../src/worlds/minecraft/world.ts';
 import { MINECRAFT_DEFAULTS } from '../../../src/worlds/minecraft/config.ts';
 import { log, nextTaskId } from './executor-harness.ts';
@@ -18,6 +20,7 @@ const require = createRequire(import.meta.url);
 const dependency = createRequire(require.resolve('mineflayer'));
 const registry = require('minecraft-data')('1.20.6') as Bot['registry'];
 const Blocks = dependency('prismarine-block')('1.20.6') as typeof Block;
+const ChatMessage = dependency('prismarine-chat')('1.20.6');
 const releases: Array<() => void> = [];
 
 function block(name: string, properties?: Record<string, string>) {
@@ -58,6 +61,168 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2025-01-01T00:
 afterEach(() => { releases.splice(0).forEach(release => release()); vi.useRealTimers(); });
 
 describe('server-granted flight movement', () => {
+  it('uses a private duration reply for the local cast without adding reply latency or renewing on duplicate replies', async () => {
+    const { bot, client } = flightBot();
+    releases.push(watchAgentFriendFlight(bot));
+    const startedAt = Date.now();
+    publishViewerCastCommand(bot, '/mycli cast flight');
+    await vi.advanceTimersByTimeAsync(300);
+    client.emit('abilities', { flags: 6, flyingSpeed: 0.035 });
+    bot.emit('message', new ChatMessage({ text: '✦ 飞行术持续 21 秒；若未立即起飞，可双按跳跃键。结束后会缓降（10 魔力；90 秒冷却）。' }), 'system');
+    expect(flightState(bot).expiresAtMs).toBe(startedAt + 21_000);
+    await vi.advanceTimersByTimeAsync(18_700);
+    const plan = previewFlightPlan(bot, [{ skill: 'flight', at: [0, 73, 0], land: false }]);
+    expect(plan).toMatchObject({ budgetSource: 'server-expiry', budgetMs: 2_000, fitsBudget: false, steps: null });
+    bot.emit('message', new ChatMessage({ text: '✦ 飞行术持续 21 秒；若未立即起飞，可双按跳跃键。' }), 'system');
+    expect(flightState(bot).expiresAtMs).toBe(startedAt + 21_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(flightState(bot).allowed).toBe(false);
+    expect(client.write).not.toHaveBeenCalled();
+  });
+
+  it('does not treat player chat, help, unrelated commands or late replies as a fresh flight deadline', async () => {
+    const { bot, client } = flightBot();
+    releases.push(watchAgentFriendFlight(bot));
+    client.emit('abilities', { flags: 4 });
+    const reply = new ChatMessage({ text: '✦ 飞行术持续 21 秒；若未立即起飞，可双按跳跃键。' });
+    bot.emit('message', reply, 'system');
+    publishViewerCastCommand(bot, '/mycli cast flight');
+    bot.emit('message', reply, 'chat');
+    bot.emit('message', new ChatMessage({ text: '帮助：飞行术持续 21 秒；结束会缓降。' }), 'system');
+    expect(flightState(bot).expiresAtMs).toBeUndefined();
+    publishViewerCastCommand(bot, '/mycli cast leap');
+    bot.emit('message', reply, 'system');
+    expect(flightState(bot).expiresAtMs).toBeUndefined();
+    publishViewerCastCommand(bot, '/mycli cast flight');
+    await vi.advanceTimersByTimeAsync(3_001);
+    bot.emit('message', reply, 'system');
+    expect(flightState(bot).expiresAtMs).toBeUndefined();
+  });
+
+  it('keeps ability packets authoritative and drops pending duration replies after failure, respawn or disposal', () => {
+    const { bot, client } = flightBot();
+    client.emit('abilities', { flags: 0 });
+    const detach = watchAgentFriendFlight(bot);
+    releases.push(detach);
+    const reply = new ChatMessage({ text: '✦ 飞行术持续 21 秒；若未立即起飞，可双按跳跃键。' });
+    publishViewerCastCommand(bot, '/mycli cast flight');
+    bot.emit('message', new ChatMessage({ text: '冷却中，无法施放飞行术' }), 'system');
+    bot.emit('message', reply, 'system');
+    expect(flightState(bot).expiresAtMs).toBeUndefined();
+    publishViewerCastCommand(bot, '/mycli cast flight');
+    bot.emit('respawn');
+    bot.emit('message', reply, 'system');
+    expect(flightState(bot).expiresAtMs).toBeUndefined();
+    client.emit('abilities', { flags: 0 });
+    publishViewerCastCommand(bot, '/mycli cast flight');
+    bot.emit('message', reply, 'system');
+    expect(flightState(bot).allowed).toBe(false);
+    client.emit('abilities', { flags: 4 });
+    expect(flightState(bot).allowed).toBe(true);
+    expect(flightState(bot).expiresAtMs).toBe(Date.now() + 21_000);
+    client.emit('abilities', { flags: 0 });
+    expect(flightState(bot).allowed).toBe(false);
+    detach();
+    publishViewerCastCommand(bot, '/mycli cast flight');
+    bot.emit('message', reply, 'system');
+    expect(flightState(bot).expiresAtMs).toBeUndefined();
+  });
+
+  it('compiles a distant diagonal endpoint into executable dependent legs and lands at the requested platform', async () => {
+    const { bot, client, positions } = flightBot();
+    const parsed = parseFlightPlan({ points: [{ at: [18, 64, 18] }], subdivide: true, budgetMs: 15_000 });
+    if ('error' in parsed) throw new Error(parsed.error);
+    const result = previewFlightPlan(bot, parsed.steps, parsed.budgetMs, parsed.subdivide);
+    expect(result).toMatchObject({ complete: true, fitsBudget: true, endsOnSupport: true });
+    expect(result.segments.length).toBeGreaterThan(1);
+    expect(result.segments.every(segment => segment.distance <= MAX_FLIGHT_DISTANCE)).toBe(true);
+    expect(result.segments.slice(0, -1).every(segment => !segment.land)).toBe(true);
+    expect(positions).toHaveLength(0);
+    expect(client.write.mock.calls).toHaveLength(0);
+    const execution = parseSteps(result.steps);
+    if ('error' in execution) throw new Error(execution.error);
+    expect(execution.notes).toBeUndefined();
+    expect(execution.steps.map(step => step.needs)).toEqual(execution.steps.map((_, index) => index ? [index] : undefined));
+    expect(execution.steps.every(step => step.skill === 'flight' && !step.dryRun)).toBe(true);
+    client.emit('abilities', { flags: 4 });
+    for (const [index, segment] of result.segments.entries()) {
+      const move = flyToPosition(bot, { x: segment.at[0], y: segment.at[1], z: segment.at[2] }, () => false, { land: segment.land });
+      await vi.advanceTimersByTimeAsync(segment.estimatedDurationMs);
+      await move;
+      expect(bot.entity.position).toEqual(new Vec3(...result.segments[index].at));
+    }
+    expect(bot.entity.position).toEqual(new Vec3(18.5, 64, 18.5));
+    expect(flightState(bot).controlActive).toBe(false);
+    expect(bot.physicsEnabled).toBe(true);
+  });
+
+  it('withholds compiled execution for an over-budget route or an unverified tail', () => {
+    const { bot, set, client, positions } = flightBot();
+    const parsed = parseFlightPlan({ points: [{ at: [30, 64, 0] }], subdivide: true, budgetMs: 1_000 });
+    if ('error' in parsed) throw new Error(parsed.error);
+    expect(previewFlightPlan(bot, parsed.steps, parsed.budgetMs, parsed.subdivide))
+      .toMatchObject({ complete: true, fitsBudget: false, steps: null });
+    for (let x = 0; x <= 32; x++) set(new Vec3(x, 65, 0), null);
+    const blocked = previewFlightPlan(bot, parsed.steps, 30_000, parsed.subdivide);
+    expect(blocked).toMatchObject({ complete: false, estimatedDurationMs: null, steps: null });
+    expect(blocked.reason).toContain('未加载');
+    expect(positions).toHaveLength(0);
+    expect(client.write.mock.calls).toHaveLength(0);
+  });
+
+  it('subdivides relative points from the observed fractional origin and bounds generated work', () => {
+    const { bot, client } = flightBot();
+    bot.entity.position = new Vec3(0.98, 64.2, 0.01);
+    const parsed = parseFlightPlan({ points: [
+      { at: ['~18', '~6', '~18'], land: false }, { at: ['~0', '~2', '~0'], land: false },
+    ], subdivide: true });
+    if ('error' in parsed) throw new Error(parsed.error);
+    const result = previewFlightPlan(bot, parsed.steps, undefined, parsed.subdivide);
+    expect(result).toMatchObject({ complete: true, from: [0.98, 64.2, 0.01], fitsBudget: null, endsOnSupport: false });
+    expect(result.segments.every(segment => segment.distance <= MAX_FLIGHT_DISTANCE)).toBe(true);
+    expect(result.segments.at(-1)?.at).toEqual([18.5, 72, 18.5]);
+    const large = parseFlightPlan({ points: [{ at: [1_000_000, 64, 0] }], subdivide: true });
+    if ('error' in large) throw new Error(large.error);
+    expect(previewFlightPlan(bot, large.steps, undefined, large.subdivide)).toMatchObject({ complete: false, steps: null });
+    expect(client.write.mock.calls).toHaveLength(0);
+    expect(parseFlightPlan({ points: [{ at: [1, 64, 1] }], subdivide: 'true' })).toHaveProperty('error');
+  });
+
+  it.each([false, true])('runs World-generated dependent steps through the executor and rechecks a changed origin: %s', async (changedOrigin) => {
+    const { bot, client, positions } = flightBot();
+    Object.assign(bot, { inventory: { items: () => [] }, pathfinder: { stop() {}, setGoal() {} } });
+    const reports: TaskReport[] = [];
+    const executor = new Executor({ getBot: () => bot, log, nextId: nextTaskId(), precheck: () => false,
+      report: report => reports.push(report) });
+    releases.push(() => executor.shutdown());
+    const world = new MinecraftWorld({ cfg: structuredClone({ ...MINECRAFT_DEFAULTS, enabled: true }) });
+    Object.assign(world, { bridge: { bot }, executor });
+    const tool = world.tools().find(tool => tool.name === 'mc_flight_plan')!;
+    const reply = await tool.handler({ points: [{ at: [18, 64, 18] }], subdivide: true, budgetMs: 15_000 }, {} as never);
+    const text = typeof reply === 'string' ? reply : reply.text;
+    const plan = JSON.parse(text.slice(text.indexOf('{"sampledAt":')));
+    expect(plan).toMatchObject({ complete: true, fitsBudget: true });
+    expect(reports).toHaveLength(0);
+    expect(client.write.mock.calls).toHaveLength(0);
+    const parsed = parseSteps(plan.steps);
+    if ('error' in parsed) throw new Error(parsed.error);
+    client.emit('abilities', { flags: 4 });
+    if (changedOrigin) bot.entity.position = new Vec3(100.5, 64, 100.5);
+    const positionsBefore = positions.length;
+    executor.submit(parsed.steps);
+    await vi.advanceTimersByTimeAsync(plan.estimatedDurationMs + 1_000);
+    expect(reports).toHaveLength(1);
+    if (changedOrigin) {
+      expect(positions).toHaveLength(positionsBefore);
+      expect(reports[0].text).toContain('没跑');
+      expect(reports[0].text).toContain('客户端飞行单段');
+    } else {
+      expect(bot.entity.position).toEqual(new Vec3(18.5, 64, 18.5));
+      expect(flightState(bot).controlActive).toBe(false);
+      expect(reports[0].text).toContain('完成');
+    }
+  });
+
   it('keeps the reason for a completed hover ending until the next real takeoff', async () => {
     const { bot, client } = flightBot();
     client.emit('abilities', { flags: 4 });

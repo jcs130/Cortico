@@ -12,8 +12,8 @@ function serviceReply(overrides: Record<string, unknown> = {}): Response {
     answers: {
       next: {
         choice: 'inspect',
-        confidence: 0.7,
-        probabilities: { inspect: 0.7, replan: 0.2, resupply: 0.08, pause: 0.02 },
+        confidence: 0.8,
+        probabilities: { inspect: 0.8, replan: 0.1, resupply: 0.08, pause: 0.02 },
       },
       risk: { score: 1.5, probabilities: { 0: 0.1, 1: 0.3, 2: 0.5, 3: 0.1 } },
     },
@@ -40,8 +40,8 @@ describe('createDecisionAdviser', () => {
       kind: 'advice',
       advice: {
         choice: 'inspect',
-        confidence: 0.7,
-        probabilities: { inspect: 0.7, replan: 0.2, resupply: 0.08, pause: 0.02 },
+        confidence: 0.8,
+        probabilities: { inspect: 0.8, replan: 0.1, resupply: 0.08, pause: 0.02 },
         riskScore: 1.5,
         riskProbabilities: { 0: 0.1, 1: 0.3, 2: 0.5, 3: 0.1 },
         latencyMs: 43,
@@ -51,6 +51,23 @@ describe('createDecisionAdviser', () => {
     expect(requests[0]?.init.method).toBe('POST');
     expect(requests[0]?.init.headers).toEqual({ 'content-type': 'application/json' });
     expect(JSON.parse(String(requests[0]?.init.body))).toEqual({ state, questions: DECISION_QUESTIONS });
+  });
+
+  it('accepts above-chance confidence and uses the selected probability for the configured threshold', async () => {
+    const adviser = createDecisionAdviser({ endpoint, fetchImpl: async () => serviceReply({ answers: {
+      next: { choice: 'inspect', confidence: (0.8 - 0.25) / 0.75,
+        probabilities: { inspect: 0.8, replan: 0.1, resupply: 0.08, pause: 0.02 } }, risk: { score: 1 },
+    } }) });
+    expect(await adviser.advise({}, 'new-confidence')).toMatchObject({ kind: 'advice', advice: { confidence: 0.8 } });
+  });
+
+  it('keeps ambiguous choices observational without emitting an actionable suggestion', async () => {
+    const adviser = createDecisionAdviser({ endpoint, fetchImpl: async () => serviceReply({ answers: {
+      next: { choice: 'pause', confidence: 0.43,
+        probabilities: { inspect: 0.3, replan: 0.2, resupply: 0.07, pause: 0.43 } }, risk: { score: 1.7 },
+    } }) });
+    expect(await adviser.advise({}, 'ambiguous')).toMatchObject({ kind: 'skipped', reason: 'uncertain',
+      advice: { choice: 'pause', confidence: 0.43 } });
   });
 
   it('shares one in-flight request for the same scene and skips a different scene while busy', async () => {

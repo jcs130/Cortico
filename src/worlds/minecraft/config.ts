@@ -68,6 +68,7 @@ export const MINECRAFT_DEFAULTS = {
     endpoint: '',
     timeoutMs: 500,
     minIntervalMs: 5_000,
+    minConfidence: 0.75,
   },
   /** 空闲时授权的小动作；占用身体的任务与事件可随时取消。 */
   idle: {
@@ -217,7 +218,7 @@ export interface MinecraftConfigSection {
     enabled: boolean; skillsCsv: string; maxSuccesses: number; windowMinutes: number;
   };
   /** 受阻任务的异步辅助判断。 */
-  decision: { enabled: boolean; endpoint: string; timeoutMs: number; minIntervalMs: number };
+  decision: { enabled: boolean; endpoint: string; timeoutMs: number; minIntervalMs: number; minConfidence?: number };
   idle: {
     enabled: boolean; selector: 'random' | 'decision'; endpoint: string; timeoutMs: number;
     decisionPolicy?: 'choice' | 'sample';
@@ -382,6 +383,10 @@ export const MINECRAFT_RHYTHM_CONFIG_GROUP: ConfigGroup = {
       },
       'worlds.minecraft.decision.minIntervalMs': {
         type: 'integer', title: '辅助判断最短间隔', minimum: 0, maximum: 60000, 'x-suffix': 'ms', 'x-hot': true,
+      },
+      'worlds.minecraft.decision.minConfidence': {
+        type: 'number', title: '辅助建议最低首选概率', minimum: 0, maximum: 1, 'x-hot': true,
+        description: '低于此值保留原任务回执，只记录不确定的判断，不追加行动建议。',
       },
       'worlds.minecraft.idle.enabled': {
         type: 'boolean', title: '空闲小动作', 'x-hot': true,

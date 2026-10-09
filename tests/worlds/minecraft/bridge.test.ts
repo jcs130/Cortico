@@ -1182,6 +1182,29 @@ describe('bridge 死亡重生通知', () => {
     expect(bridge.bot).toBeNull();
   });
 
+  it('installs the message receiver at connection creation, before the first spawn, and only once per connection', () => {
+    const messages: string[] = [];
+    const created = vi.fn((bot: mineflayer.Bot) => {
+      bot.on('message', (message) => { messages.push(message.toString()); });
+    });
+    const bridge = new Bridge({
+      host: '127.0.0.1', port: 25565, username: 'tester', version: '1.20.6', viewerPort: 0,
+      log: nullLogger(), onSpawn: () => {}, onDisconnect: () => {}, onBotCreated: created,
+    });
+    bridges.push(bridge);
+    inner(bridge).installSpawnGear = () => {};
+    bridge.start();
+    const bot = inner(bridge)._bot as EventEmitter;
+    bot.emit('message', { toString: () => '欢迎说明在出生前发送' }, 'system');
+    expect(bridge.bot).toBeNull();
+    expect(messages).toEqual(['欢迎说明在出生前发送']);
+    bot.emit('spawn');
+    bot.emit('spawn');
+    expect(created).toHaveBeenCalledTimes(1);
+    bot.emit('message', { toString: () => '出生后的正常消息' }, 'system');
+    expect(messages).toEqual(['欢迎说明在出生前发送', '出生后的正常消息']);
+  });
+
   it('第二次及以后的 spawn 走 onRespawn,首次仍只走 onSpawn', () => {
     const { bridge, events, bot } = rig();
     const gen = inner(bridge).generation;

@@ -256,8 +256,8 @@ describe('走不到与挖不动:失败要说出来,不能静默挂着', () => {
     exec.submit([{ skill: 'collect', block: 'coal_ore', count: 8 }]);
     await waitUntil(() => reports.length === 1);
     expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('走不过去');
-    expect(reports[0].text).toContain('找不到可行路线');
+    expect(reports[0].text).toContain('寻路停止但尚未满足到达条件');
+    expect(reports[0].text).toContain('实测脚格 (0, 63, 0)');
     // 非物品类受阻不贴全量背包:这一步卡在路上,不是卡在东西上
     expect(reports[0].text).not.toContain('[背包]');
     // 三段式:结论之外带现场事实——目标坐标、我在哪、相对方位高差
@@ -1122,9 +1122,27 @@ describe('expect:在场时即为裁决', () => {
     expect(reports[1].text).toContain('该步按「(~,~,~) 为箱子」核验:落空(实测 空气,读于 ');
   });
 
+  it('精确 goto 不把下一层的短暂攀爬误报为到达，并回传实际高度', async () => {
+    const bot = combatBot({});
+    bot.pathfinder.goto = async () => {
+      bot.entity.position = new V(10.5, 65.75, 10.5);
+      Object.assign(bot.entity, { onGround: false });
+    };
+    const { exec, reports } = makeExecutorOn(bot);
+    exec.submit([{ skill: 'goto', at: [10, 66, 10], exact: true }]);
+    await waitUntil(() => reports.length === 1, 5000);
+    expect(reports[0].kind).toBe('blocked');
+    expect(reports[0].text).toContain('这一段目标 (10, 66, 10)');
+    expect(reports[0].text).toContain('实测脚格 (10, 65, 10)，脚高 65.750，未确认着地');
+    expect(reports[0].text).not.toContain('已满足精确落脚格');
+  });
+
   it('goto 半砖落脚按实际寻路目标报告到达', async () => {
     const bot = combatBot({});
-    bot.pathfinder.goto = async () => { bot.entity.position = new V(10.5, 64.5625, 10.5); };
+    bot.pathfinder.goto = async () => {
+      bot.entity.position = new V(10.5, 64.5625, 10.5);
+      Object.assign(bot.entity, { onGround: true });
+    };
     const { exec, reports } = makeExecutorOn(bot);
     exec.submit([{ skill: 'goto', at: [10, 66, 10] }]);
     await waitUntil(() => reports.length === 1, 5000);
@@ -1710,7 +1728,8 @@ describe('抢占之后的寻路目标要活下来', () => {
     const { exec, reports } = makeExecutorOn(bot);
     exec.submit([{ skill: 'goto', at: [10, 64, 10] }]);
     await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].text).toContain('找不到可行路线');
+    expect(reports[0].kind).toBe('blocked');
+    expect(reports[0].text).toContain('寻路停止但尚未满足这一段目标 (10, 64, 10)');
     expect(pf.goal).toBeNull();
   });
 

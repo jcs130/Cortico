@@ -77,6 +77,8 @@ const GUARD_DEDUP_WINDOW_MS = 8_000;
 
 /** WS 与轮询共用状态变化去重窗口；窗口长于轮询间隔。 */
 const ROOM_EDGE_DEDUP_MS = 180_000;
+/** The two protocol descriptions of one entry arrive about a second apart. */
+const ARRIVAL_PAIR_WINDOW_MS = 3_000;
 
 /** 中断超过此窗口才告警并投递事件；每段中断只报告一次，恢复时报告持续时长。 */
 const FEED_OUTAGE_MS = 60_000;
@@ -952,15 +954,33 @@ export class BilibiliWorld implements World {
 
   private readonly projectAudienceCandidates: CandidateProjector = (sourceCandidates) => {
     this.admission.updateTuning(this.audienceTuning());
-    const candidates: LiveAdmissionCandidate[] = sourceCandidates.map((source) => {
+    // ENTRY_EFFECT and INTERACT_WORD can describe one UID's same entry. Keep both
+    // archived sources, but expose one observation when the pair arrives together.
+    const groups: Array<{ item: LiveEvent; indexes: number[]; at: number; types: Set<string> }> = [];
+    const recentArrivals = new Map<string, typeof groups[number]>();
+    const arrival = (type: string): boolean => type === 'bilibili.enter' || type === 'bilibili.enter-guard';
+    sourceCandidates.forEach((source, index) => {
       const value = source.value as LiveCandidateValue;
+      const at = Date.parse(source.sourceEvents[0]?.ts ?? '');
+      const previous = arrival(value.item.type) && value.item.senderKey ? recentArrivals.get(value.item.senderKey) : undefined;
+      if (previous && !previous.types.has(value.item.type) && Math.abs(at - previous.at) <= ARRIVAL_PAIR_WINDOW_MS) {
+        previous.indexes.push(index);
+        previous.types.add(value.item.type);
+        if (value.item.type === 'bilibili.enter') previous.item = value.item;
+      } else {
+        const group = { item: value.item, indexes: [index], at, types: new Set([value.item.type]) };
+        groups.push(group);
+        if (arrival(value.item.type) && value.item.senderKey) recentArrivals.set(value.item.senderKey, group);
+      }
+    });
+    const candidates: LiveAdmissionCandidate[] = groups.map(({ item, indexes }) => {
       return {
-        stableKey: source.sourceEvents.map((event) => event.cursor).join(','),
-        text: value.item.text,
-        type: value.item.type,
-        senderKeys: audienceSenderKeys(value.item),
-        critical: criticalAudienceEvent(value.item),
-        meta: value,
+        stableKey: indexes.flatMap(index => sourceCandidates[index].sourceEvents.map(event => event.cursor)).join(','),
+        text: item.text,
+        type: item.type,
+        senderKeys: audienceSenderKeys(item),
+        critical: criticalAudienceEvent(item),
+        meta: { item },
       };
     });
     const projected = this.admission.project(candidates);
@@ -980,13 +1000,15 @@ export class BilibiliWorld implements World {
       const item = selection.candidate.meta!.item;
       const importantParticipants = audienceParticipantDetails(item, selection.importantParticipants);
       return {
-        candidateIndexes: [selection.index],
+        candidateIndexes: groups[selection.index].indexes,
         event: {
           type: item.type,
           text: item.text,
           ...(item.senderKey ? { senderKey: item.senderKey } : {}),
           meta: {
             ...item.meta,
+            socialScope: 'live-room',
+            ...(groups[selection.index].types.size > 1 ? { arrivalSignalTypes: [...groups[selection.index].types] } : {}),
             audienceAdmission: {
               limitingActive: projected.metrics.limitingActive,
               lane: selection.lane,

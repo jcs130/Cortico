@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CortiV, renderDreamTranscript } from '../../bots/cortiv/persona/persona.ts';
 import { RecentSpeech } from '../../bots/cortiv/persona/recent-speech.ts';
+import { FOREGROUND_CONTEXT_DEFAULTS } from '../../bots/cortiv/persona/foreground-context.ts';
+import { itemText } from '../../src/protocol/open-responses/context.ts';
 import { records } from '../core/fixture-protocol.ts';
 import { makeFakeHarnessApi } from '../core/helpers.ts';
 import type { ChatMessage } from '../core/fixture-types.ts';
@@ -35,6 +37,29 @@ afterEach(() => {
 });
 
 describe('CortiV recent speech', () => {
+  it('refreshes accepted speech before the next tool round without waiting for turn end', () => {
+    const dir = memoryDir();
+    const at = new Date().toISOString();
+    const persona = new CortiV({ memoryDir: dir,
+      foreground: () => ({ ...FOREGROUND_CONTEXT_DEFAULTS, enabled: true }),
+    });
+    const messages = records([
+      ...exchange('accepted-in-round', '【微笑】你刚才说要帮我修高塔，对吗？', '已排入演出。', at),
+      ...exchange('not-accepted', '再欢迎一次新朋友。', '[未排入] 积压。', at),
+    ]);
+    const before = structuredClone(messages);
+
+    persona.prepareRequest({ sessionId: 'planning', round: 1, messages });
+    expect(new RecentSpeech(dir).note()).toBe('');
+    const view = persona.prepareRequest({ sessionId: 'main', round: 2, messages })!;
+    const reminder = view.map(record => itemText(record.item)).find(text => text.startsWith('[memory] 最近交给演出的台词'));
+    expect(reminder).toContain('你刚才说要帮我修高塔，对吗？');
+    expect(reminder).toContain('这句已问过');
+    expect(reminder).not.toContain('再欢迎一次新朋友');
+    expect(new RecentSpeech(dir).note()).toContain('你刚才说要帮我修高塔，对吗？');
+    expect(messages).toEqual(before);
+  });
+
   it('renders speech evidence without performance metadata or a future execution claim', () => {
     const ledger = new RecentSpeech(memoryDir());
     const at = new Date().toISOString();

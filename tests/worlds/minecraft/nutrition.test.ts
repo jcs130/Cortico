@@ -48,7 +48,7 @@ describe('routine nutrition', () => {
     expect(chooseRoutineFood(Number.NaN, [{ name: 'bread', count: 1 }], foods)).toBeNull();
   });
 
-  it('requests a safe handoff for routine food and does not duplicate a pending meal', () => {
+  it.each(['main', 'offhand'])('requests a safe handoff for %s food and does not duplicate a pending meal', (source) => {
     const submitDetailed = vi.fn(() => ({ accepted: true, receipt: 'queued' }));
     const executor = { status: () => ({ running: { id: 1 }, waiting: [], hold: null }),
       hasPendingEat: vi.fn(() => false), submitDetailed };
@@ -58,7 +58,9 @@ describe('routine nutrition', () => {
     });
     const bot = { food: 16, entity: { onGround: true, position: new Vec3(0, 64, 0) },
       blockAt: () => ({ name: 'air' }), registry: { foodsByName: foods },
-      inventory: { items: () => [{ name: 'rotten_flesh', count: 1 }, { name: 'bread', count: 2 }] } };
+      inventory: { items: () => [{ name: 'rotten_flesh', count: 1 },
+        ...(source === 'main' ? [{ name: 'bread', count: 2 }] : [])],
+      slots: Object.assign([], { 45: source === 'offhand' ? { name: 'bread', count: 2 } : null }) } };
     (world as unknown as { autoEatTick(bot: unknown): void }).autoEatTick(bot);
     expect(submitDetailed).toHaveBeenCalledWith([{ skill: 'eat', item: 'bread' }], 'afterCheckpoint');
 

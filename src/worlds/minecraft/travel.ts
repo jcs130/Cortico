@@ -733,16 +733,20 @@ export async function gotoGoalOnce(bot: Bot, goal: InstanceType<typeof goals.Goa
   if (stalled) throw stallError(stalled);
   if (!travelGoalReached(bot, goal)) {
     dropGoal(bot, 'task', '收尾校验没到目标格', ctx.diag);
-    throw new SkillBlocked('走不过去: 找不到可行路线(目标被封住,或者中间没有能走的路)');
+    const target = goalCell(goal);
+    throw new SkillBlocked(`走不过去: 寻路停止但尚未满足${target ? `这一段目标 ${cellText(target)}` : '到达条件'}；`
+      + `实测脚格 ${cellText(feetOf(bot))}，脚高 ${bot.entity.position.y.toFixed(3)}，`
+      + `${bot.entity.onGround === true ? '已着地' : '未确认着地'}；核对高度、支撑与通路后再选动作`);
   }
 }
 
-/** 部分方块的分数脚高可对应上方寻路格；整层落脚不能借上一格通过校验。 */
+/** 精确目标按实测脚格验收；站稳在部分方块上时，邻近目标可沿用寻路器的上格表示。 */
 export function travelGoalReached(bot: Bot, goal: InstanceType<typeof goals.Goal>): boolean {
   const at = bot.entity.position;
   const p = new Vec3(at.x, at.y, at.z).floored();
   return goal.isEnd(p as never)
-    || (at.y - p.y > 0.001 && goal.isEnd(p.offset(0, 1, 0) as never));
+    || (!(goal instanceof goals.GoalBlock) && bot.entity.onGround === true
+      && at.y - p.y > 0.001 && goal.isEnd(p.offset(0, 1, 0) as never));
 }
 
 /** 看门狗跳闸时记录控制、寻路与持有权的结构化快照；只进诊断日志，不进回执。 */

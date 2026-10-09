@@ -11,7 +11,7 @@ import { gridText, zhErrorText } from './receipt.ts';
 import {
   CRAFT_SETTLE_MS, INVENTORY_SLOTS, awaitCraftGain, invCount, invCountById, invGains,
   invItemNamed, invSnapshot, invVariantGains, invVariantSnapshot,
-  namedLike, noSuchItem, offHandItem,
+  itemsInReach, namedLike, noSuchItem, offHandItem,
 } from './inventory.ts';
 import { CRAFTING_STATION, ensureStation, type Station } from './placement.ts';
 import {
@@ -436,7 +436,7 @@ export async function skillEat(bot: Bot, itemName: string): Promise<string> {
     }
   }
   // eat 的 item 是完整物品 id。这里不做后缀或模糊匹配，避免把另一样食物替换进来。
-  const food = bot.inventory.items().find((item) => item.name === itemName && item.count > 0);
+  const food = itemsInReach(bot).find((item) => item.name === itemName && item.count > 0);
   if (!food) {
     // 手边还有什么能吃是她下一单要用的事实;一样都没有就是「包里没有任何食物」那一句
     throw new SkillBlocked(`包里没有点名的${zhName(itemName)};${edibleInBag(bot) ?? '包里没有任何食物'}`);

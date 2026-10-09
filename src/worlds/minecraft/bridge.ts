@@ -72,6 +72,8 @@ interface BridgeOptions {
   showTempo?: () => ShowTempo | null;
   /** spawn 完成(含重连后) */
   onSpawn: () => void;
+  /** 连接创建后立即接收聊天和欢迎信息；此时实体及背包可能尚未就绪。 */
+  onBotCreated?: (bot: mineflayer.Bot) => void;
   /** 同一连接内的死亡重生；连接代次和资源保持不变。 */
   onRespawn?: () => void;
   /** 断线后通知；attempt 为本次断线前连续连接失败次数，连接成功归零。 */
@@ -416,6 +418,7 @@ export class Bridge {
       return;
     }
     this._bot = bot;
+    this.opts.onBotCreated?.(bot);
     this.bagFor(gen).register('flight-abilities', watchFlightAbilities(bot));
     this.agentMana = undefined;
     const onAgentState = (packet: { channel?: unknown; data?: unknown }) => {

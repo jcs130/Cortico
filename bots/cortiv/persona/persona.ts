@@ -3,9 +3,9 @@ import { withBlobLines } from 'cortico/core/blobs.ts';
 import { itemText, message, withText, type ContextRecord } from 'cortico/protocol/open-responses/context.ts';
 import { hasRole, textOf } from 'cortico/protocol/open-responses/context-helpers.ts';
 /**
- * CortiV(可缇Corti)——AI VTuber 实时系统的Persona。
+ * AI VTuber 实时系统的 Persona。
  *
- * 继承 Cormini(可缇mini)的最小骨架(平铺工作区/文件三件套/四时机钩子),
+ * 继承 Cormini 的最小骨架(平铺工作区/文件三件套/四时机钩子),
  * 把直播场景的 memory 系统**内建为类行为**(不走构造开关):
  *  - 人物档案 `viewers/<来源>/<账号键>.md`:首行=一句话摘要,senderKey 在当前
  *    上下文窗口首次出现时在投递刻机械唤起(注入收编同批,原子到达);同一句摘要
@@ -55,12 +55,14 @@ import { causalReviewTail, PeriodicPlanningReview, PLANNING, PLANNING_DEFAULTS, 
 import { ActivityAgenda, AGENDA_FILE, AGENDA_MAX_ITEMS } from './activity-agenda.ts';
 import { CortiVSocialAttention, FAST_ATTENTION_DEFAULTS, type FastAttentionConfig } from './attention-adviser.ts';
 import { ActionFailureReflection, FAILURE_REFLECTION_ADVICE } from './failure-reflection.ts';
+import { combatReviewEvidence, COMBAT_REFLECTION_ADVICE } from './combat-reflection.ts';
 import { RecentSpeech } from './recent-speech.ts';
 import { actionEvidence } from './action-evidence.ts';
 import { FocusedCognition, FOCUSED_COGNITION } from './focused-cognition.ts';
 import { projectForeground, FOREGROUND_CONTEXT_DEFAULTS, type ForegroundContextConfig } from './foreground-context.ts';
 import { excerptHandoffRecords } from './context-excerpts.ts';
 import { ForegroundEpoch } from './foreground-epoch.ts';
+import { ForegroundAdviser, FAST_FOREGROUND_DEFAULTS, type FastForegroundConfig } from './foreground-adviser.ts';
 import { DreamContext, DREAM_DEFAULTS, dreamHistoryWithinBudget, normalizeDreamConfig, renderDreamHistory, type DreamConfig, type DreamHistory } from './dream-context.ts';
 import { DreamTaskQueue, DreamTaskStoppedError, dreamAbortable, dreamDelay } from './dream-task-queue.ts';
 import { DreamMemory, dreamWorkspaceTools } from './dream-memory.ts';
@@ -81,6 +83,8 @@ import {
   PENDING_WORK_SELECTOR_MAX_CHARS, PENDING_WORK_LIST_MAX_ENTRIES,
 } from './pending-work.ts';
 import { VIEWERS_DIR, VIEWER_MEMORY_NOTE_FILE, viewerMemoryNote } from './viewers.ts';
+import { ViewerEncounters } from './viewer-encounters.ts';
+import { ViewerIdentityLinks } from './viewer-identity-links.ts';
 
 export { HANDOFF_DIR, VIEWERS_DIR, VIEWER_MEMORY_NOTE_FILE, viewerMemoryNote };
 
@@ -388,6 +392,7 @@ export const BLUEPRINT_COGNITION_DEFAULTS: BlueprintCognitionConfig = {
 };
 
 export interface CortiVOptions extends CorminiOptions {
+  fastForeground?: () => FastForegroundConfig;
   /** Optional compact semantic classification; never owns player actions. */
   fastAttention?: () => FastAttentionConfig;
   references?: () => ReferenceLibraryConfig;
@@ -424,7 +429,9 @@ export class CortiV extends Cormini {
   private readonly dreamQueue = new DreamTaskQueue();
   private readonly socialMemoryReview: SocialMemoryReview;
   private readonly viewerConversationRecall: ViewerConversationRecall;
+  private readonly viewerIdentityLinks: ViewerIdentityLinks;
   private readonly viewerRecallContext = new ViewerRecallContext();
+  private readonly viewerEncounters = new ViewerEncounters();
   private readonly recalledConversation = new Map<string, string>();
   private readonly viewerArrivalHistory = new Map<string, string>();
   private viewerHistoryReadsRemaining = 0;
@@ -464,6 +471,12 @@ export class CortiV extends Cormini {
   private foregroundMemoryState = '';
   private planningReview: PeriodicPlanningReview | null = null;
   private readonly foregroundConfig: () => ForegroundContextConfig;
+  private readonly fastForegroundConfig: () => FastForegroundConfig;
+  private readonly foregroundAdviser: ForegroundAdviser;
+  private foregroundReading: 'focused' | 'connected' | undefined;
+  private deferredInputIds = new Set<string>();
+  private deferredModelBaseline: string | null = null;
+  private foregroundDeadline: ReturnType<typeof setTimeout> | undefined;
   private readonly toolCallRecoveryConfig: () => ToolCallRecoveryConfig;
   private readonly toolCallRecovery = new ToolCallRecoveryFallback();
   private fullContextRequested = false;
@@ -496,6 +509,8 @@ export class CortiV extends Cormini {
     this.dreamConfig = opts.dream ?? (() => DREAM_DEFAULTS);
     this.sleepReviewConfig = opts.sleepReview ?? (() => SLEEP_REVIEW_DEFAULTS);
     this.foregroundConfig = opts.foreground ?? (() => FOREGROUND_CONTEXT_DEFAULTS);
+    this.fastForegroundConfig = opts.fastForeground ?? (() => FAST_FOREGROUND_DEFAULTS);
+    this.foregroundAdviser = new ForegroundAdviser(this.fastForegroundConfig);
     this.toolCallRecoveryConfig = opts.toolCallRecovery ?? (() => TOOL_CALL_RECOVERY_DEFAULTS);
     this.cognitionHistoryTokens = opts.cognitionHistoryTokens ?? (() => 4000);
     this.blueprintCognition = opts.blueprintCognition ?? (() => BLUEPRINT_COGNITION_DEFAULTS);
@@ -503,6 +518,7 @@ export class CortiV extends Cormini {
     this.recentSpeech = new RecentSpeech(this.memoryDir);
     this.socialMemoryReview = new SocialMemoryReview(this.memoryDir);
     this.viewerConversationRecall = new ViewerConversationRecall(this.socialMemoryReview);
+    this.viewerIdentityLinks = new ViewerIdentityLinks(this.memoryDir);
     this.timezone = opts.timezone ?? (() => 'UTC');
     this.socialAttention = new CortiVSocialAttention(opts.fastAttention ?? (() => FAST_ATTENTION_DEFAULTS));
     this.referenceConfig = opts.references ?? (() => REFERENCE_LIBRARY_DEFAULTS);
@@ -547,6 +563,8 @@ export class CortiV extends Cormini {
   }
 
   override stopRhythm(): void {
+    clearTimeout(this.foregroundDeadline);
+    this.foregroundAdviser.reset();
     this.referenceRouting.reset();
     this.dreamQueue.stop();
     this.planningReview?.stop();
@@ -557,6 +575,12 @@ export class CortiV extends Cormini {
    * 摘要指纹按 session 生存。onOpening 的 restarted 分支恢复指纹；new/cleared 分支清空内存与持久化指纹。
    */
   override onOpening(ctx: { reason: SessionOpeningReason }): void {
+    clearTimeout(this.foregroundDeadline);
+    this.foregroundDeadline = undefined;
+    this.foregroundAdviser.reset();
+    this.foregroundReading = undefined;
+    this.deferredInputIds.clear();
+    this.deferredModelBaseline = null;
     this.viewerRecallContext.clear();
     this.recalledConversation.clear();
     this.socialAttention.reset();
@@ -568,6 +592,7 @@ export class CortiV extends Cormini {
     if (ctx.reason === 'restarted') {
       this.restoreRecalledSummary();
     } else {
+      this.viewerEncounters.clear();
       this.recalledSummary.clear();
       this.viewerNames.clear();
       this.viewerHits.clear();
@@ -690,7 +715,7 @@ export class CortiV extends Cormini {
         + 'read pages open stages by default; includeCompleted:true adds completed history, includeClosed:true adds completed and cancelled history; id reads only that stage or candidate with its dated metadata. Closed evidence does not occupy open-stage capacity. '
         + 'Read and verify a background proposal before adopt. adopt with id adds that new candidate while preserving '
         + 'existing progress; omit id to merge the whole proposal only when its revision is current, retaining omitted goals and evidence. focus selects a current stage. update records actual progress '
-        + 'or marks a stage done/deferred/queued/cancelled with evidence or an explicit cancellation reason in note. update can revise when/ifBlocked with fresh evidence in note while preserving the objective and completion criteria. Adoption preserves existing stage conditions and evidence. Cancelled is not completed; neither closed status can be reopened by an old proposal. Plans do not execute World actions; '
+        + 'or marks a stage done/deferred/queued/cancelled with evidence or an explicit cancellation reason in note. update can revise when/ifBlocked with fresh evidence in note while preserving the objective and completion criteria. update with why corrects an obsolete premise using the exact expected_revision from read and evidence in note; it retains dated premise history and the original objective. A changed premise retires dependent proposals, including late results captured before that correction; review requests a fresh proposal. Adoption preserves existing stage conditions and evidence. Cancelled is not completed; neither closed status can be reopened by an old proposal. Plans do not execute World actions; '
          + 'amend corrects the note of a closed stage using the expected_revision from read; it preserves status and prior note history. '
          + 'reopen corrects a mistaken completion using the exact expected_revision from read and fresh contradictory evidence in note. It returns that done stage to queued, preserves its prior closure and objective, and keeps the current active stage. Cancelled stages cannot reopen. '
          + 'completion is never inferred from time or task acceptance. Details and references are loaded only when needed.',
@@ -699,7 +724,7 @@ export class CortiV extends Cormini {
         type: 'object', additionalProperties: false,
         properties: {
           operation: { type: 'string', enum: ['read', 'review', 'adopt', 'focus', 'update', 'amend', 'reopen'] },
-          expected_revision: { type: 'integer', minimum: 0, description: 'amend/reopen: exact current agenda revision from read. amend preserves closed status; reopen returns a mistakenly done stage to queued and preserves its prior closure.' },
+          expected_revision: { type: 'integer', minimum: 0, description: 'Exact current agenda revision from read; required for amend/reopen and update with why. Stale premise corrections leave the agenda unchanged.' },
           question: { type: 'string', minLength: 1, maxLength: 1200,
             description: 'review: focused question about evidence, a difficult strategy or an uncertain cause; selects the reflection profile. Omit for a routine agenda proposal.' },
           publicTopic: { type: 'string', minLength: 1, maxLength: 120,
@@ -711,6 +736,7 @@ export class CortiV extends Cormini {
           includeClosed: { type: 'boolean', description: 'read: include completed and explicitly cancelled history, default false.' },
           status: { type: 'string', enum: ['queued', 'deferred', 'done', 'cancelled'], description: 'update: cancelled explicitly abandons a goal without claiming completion; omit to retain the current stage status.' },
           note: { type: 'string', minLength: 1, maxLength: 400, description: 'update: actual evidence, progress, blocker or explicit reason for cancellation; amend: corrected closure evidence; reopen: fresh evidence contradicting the completion.' },
+          why: { type: 'string', minLength: 1, maxLength: 240, description: 'update: corrected premise with verification evidence in note and the exact expected_revision from read; retains prior values and timestamps. Does not change the objective or completion criteria.' },
           when: { type: 'string', minLength: 1, maxLength: 240, description: 'update: revised execution or resumption conditions, with fresh supporting evidence in note; omit to retain existing conditions.' },
           ifBlocked: { type: 'string', minLength: 1, maxLength: 240, description: 'update: revised response to a blocker, with fresh supporting evidence in note; objective id and completion criteria stay unchanged.' },
         }, required: ['operation'],
@@ -724,7 +750,13 @@ export class CortiV extends Cormini {
   }
 
   onTurnEnded(): void {
+    clearTimeout(this.foregroundDeadline);
+    this.foregroundDeadline = undefined;
     const snapshot = this.core?.sessionInfo(MAIN).snapshot ?? [];
+    if (this.latestModelRecord(snapshot) !== this.deferredModelBaseline) {
+      this.deferredInputIds.clear();
+      this.deferredModelBaseline = null;
+    }
     this.captureRecentSpeech(snapshot);
     this.planningReview?.noteSnapshot(snapshot);
     if (this.core && this.toolCallRecoveryConfig().enabled) {
@@ -747,6 +779,7 @@ export class CortiV extends Cormini {
 
   prepareRequest(ctx: { sessionId: string; round: number; messages: readonly ContextRecord[] }): ContextRecord[] | null {
     const original = ctx.messages;
+    if (ctx.sessionId === MAIN) this.captureRecentSpeech(ctx.messages);
     if (ctx.sessionId === MAIN && this.toolCallRecoveryConfig().enabled)
       ctx = { ...ctx, messages: projectToolCallRecovery(ctx.messages, this.recoveryTools()) };
     this.stateMemory.observeRecords(ctx.messages, this.stateEvidenceTools());
@@ -788,7 +821,8 @@ export class CortiV extends Cormini {
       ...(recentSpeech ? ['recent_speech'] : []), ...(this.pendingWork ? ['pending_work'] : []),
       ...(agenda ? ['activity_plan', ...(this.planningConfig().agendaEnabled ? ['planning'] : [])] : []),
     ];
-    const pins = [...[recentMemory, index].filter(Boolean).map(text => message('user', text)), ...facts.pins, ...[recentSpeech, this.actionEvidence(ctx.messages), pending, agenda, this.viewerRecallContext.text(), this.referenceLibrary.context()].filter(Boolean)
+    const pins = [...ctx.messages.filter(record => !!record.item.id && this.deferredInputIds.has(record.item.id)),
+      ...[recentMemory, index].filter(Boolean).map(text => message('user', text)), ...facts.pins, ...[recentSpeech, this.actionEvidence(ctx.messages), pending, agenda, this.viewerEncounters.text(), this.viewerRecallContext.text(), this.referenceLibrary.context()].filter(Boolean)
       .map((text) => message('user', text))];
     const handoffSources = new Map<string, { digest: string; original: boolean }>();
     this.foregroundCurrentHandoffs = ctx.messages.flatMap((record) => {
@@ -802,8 +836,12 @@ export class CortiV extends Cormini {
       return original ? events.filter((event) => event.source === 'persona' && event.type === HANDOFF_NOTE_TYPE
         && estimateTokens(text.slice(event.start, event.start + event.chars)) > cfg.maxHistoryTokens) : [];
     });
+    const maxHistoryTokens = this.fastForegroundConfig().enabled && this.foregroundReading === 'focused'
+      ? Math.min(cfg.maxHistoryTokens, Math.max(1024, this.fastForegroundConfig().focusedHistoryTokens)) : cfg.maxHistoryTokens;
     const view = this.foregroundEpoch.prepare(ctx.messages, {
       maxHistoryTokens: cfg.maxHistoryTokens, minRecentRounds: cfg.minRecentRounds,
+      ...(this.fastForegroundConfig().enabled ? { adaptiveMaxHistoryTokens: maxHistoryTokens } : {}),
+      pinMode: cfg.currentStateOnly === false ? 'append' : 'current',
       coveredSnapshots: facts.coveredSnapshots,
       coveredCheckpoints,
     }, pins, this.foregroundNotice);
@@ -814,10 +852,45 @@ export class CortiV extends Cormini {
       storedRecords: ctx.messages.length, requestRecords: view.messages.length,
       historyTokens: view.historyTokens, protectedTokens: view.protectedTokens,
       appendedRecords: view.appendedRecords, appendedPins: view.appendedPins,
+      reading: this.foregroundReading ?? 'standard', maxHistoryTokens: view.maxHistoryTokens,
+      requestedMaxHistoryTokens: maxHistoryTokens,
+      currentStateOnly: cfg.currentStateOnly !== false, deferredInputRecords: this.deferredInputIds.size,
       coveredSnapshots: facts.coveredSnapshots,
       coveredCheckpoints,
     } });
     return view.messages;
+  }
+
+  async beforeDecision(ctx: { events: readonly EventEnvelope[]; messages: readonly ContextRecord[] }): Promise<boolean> {
+    const core = this.core;
+    if (!core) return true;
+    const facts = this.worlds.flatMap(world => {
+      try { const current = world.requestFacts?.(); return current ? [{ source: world.id, text: current.text }] : []; }
+      catch { return []; }
+    });
+    const advice = await this.foregroundAdviser.advise({ events: ctx.events, facts,
+      agenda: this.activityAgenda?.summary() ?? '', intent: this.recentReferenceIntent() });
+    if (advice.kind !== 'cooldown') this.foregroundReading = advice.reading;
+    core.log.emit('debug', '即时阅读与决策时机判断', { event: 'foreground-advice', data: advice });
+    if (!advice.defer) {
+      clearTimeout(this.foregroundDeadline);
+      this.foregroundDeadline = undefined;
+      return true;
+    }
+    const cursors = new Set(ctx.events.map(event => event.cursor));
+    if (!this.deferredInputIds.size) this.deferredModelBaseline = this.latestModelRecord(ctx.messages);
+    for (const record of ctx.messages) {
+      if (record.item.id && record.context.frame?.events.some(event => cursors.has(event.cursor))) this.deferredInputIds.add(record.item.id);
+    }
+    if (!this.foregroundDeadline) {
+      const delay = Math.max(1, Math.min(30_000, this.fastForegroundConfig().maxDeferMs));
+      this.foregroundDeadline = setTimeout(() => {
+        this.foregroundDeadline = undefined;
+        core.injectInternal('[即时复核] 已延后的队列观察到达复核时间。核对当前执行状态、最近结果和原目标；仍在执行不表示失败，也不要求替换任务。', 'foreground-check');
+      }, delay);
+      this.foregroundDeadline.unref?.();
+    }
+    return false;
   }
 
   private recoveryTools(): Set<string> {
@@ -865,6 +938,7 @@ export class CortiV extends Cormini {
 
   private readonly actionFailureReflection = new ActionFailureReflection();
   private lastTaskReflectionCursor = -1;
+  private lastCombatReflectionCursor = -1;
 
   private actionEvidence(records: readonly ContextRecord[]): string {
     const core = this.core;
@@ -1247,7 +1321,8 @@ export class CortiV extends Cormini {
         + 'this returns the whole file when the id is given or the name matches exactly one file. '
         + 'A name search also covers people seen this session who have no file yet and gives their id. '
         + 'With query, return a bounded profile summary and this person\'s dated past messages matching the words. '
-        + 'Specify source with id to keep platform identities separate. Retrieved messages do not prove a successful reply. '
+        + 'Specify source with id to keep platform identities separate; ambiguous ids return candidates without profile contents. '
+        + 'Only explicit evidence-bearing identity links can associate accounts. Retrieved messages do not prove a successful reply. '
         + 'Use this instead of list_files to find people.',
       tags: ['read'],
       parameters: {
@@ -1279,13 +1354,20 @@ export class CortiV extends Cormini {
       const n = this.viewerNames.get(`${source}/${key}`);
       return n ? `(本场叫「${n}」)` : '';
     };
-    const whole = (p: ViewerProfile): string => `${p.path}${seenAs(p.source, p.key)}\n${p.content.trimEnd()}`;
+    const whole = (p: ViewerProfile): string => [`[memory] 账号 ${p.source}/${p.key} 的历史档案；不证明当前进场，也不能据昵称转给另一账号。`,
+      this.viewerIdentityLinks.note(p.source, p.key), `${p.path}${seenAs(p.source, p.key)}`, p.content.trimEnd()].filter(Boolean).join('\n');
     if (id) {
       const hits = profiles.filter((p) => p.key === id);
+      const identities = new Set([
+        ...hits.map(p => `${p.source}/${p.key}`),
+        ...[...this.viewerNames.keys()].filter(k => k.endsWith(`/${id}`) && (!source || k.startsWith(`${source}/`))),
+      ]);
+      if (identities.size > 1) return `[身份未确定] 相同 id 对应 ${identities.size} 个账号，请给 source 和 id；不能合并档案。\n`
+        + [...identities].slice(0, RECALL_LIST_MAX).map(identity => `- ${identity}`).join('\n');
       if (hits.length > 0) return hits.map(whole).join('\n\n');
       const seen = [...this.viewerNames].find(([k]) => k.endsWith(`/${id}`) && (!source || k.startsWith(`${source}/`)));
       return seen
-        ? `id ${id} 还没有档案;本场见过,叫「${seen[1]}」。`
+        ? `${seen[0]}（id ${id}）还没有档案;本场见过,叫「${seen[1]}」。`
         : `没有 id ${id} 的档案,本场也没见过这个 id。`;
     }
     // 名字对本场名字表与档案首行两处;本场改了名的人首行还是旧名,靠名字表对回那份档案。
@@ -1298,7 +1380,7 @@ export class CortiV extends Cormini {
     const filed = new Set(files.map((p) => `${p.source}/${p.key}`));
     const live = liveHits
       .filter(([k]) => !filed.has(k))
-      .map(([k, n]) => `- id ${k.slice(k.indexOf('/') + 1)}「${n}」本场见过,还没有档案。`);
+      .map(([k, n]) => `- ${k}（id ${k.slice(k.indexOf('/') + 1)}）「${n}」本场见过,还没有档案。`);
     if (files.length === 0 && live.length === 0) {
       return `没找到叫「${name}」的人:本场没见过这个名字,档案首行里也没有。名字可能改过——他这一场说过话的话,[memory] 行里给过 id。`;
     }
@@ -1309,7 +1391,7 @@ export class CortiV extends Cormini {
     ];
     const lines = [`找到 ${items.length} 个:`, ...items.slice(0, RECALL_LIST_MAX)];
     if (items.length > RECALL_LIST_MAX) lines.push(`…还有 ${items.length - RECALL_LIST_MAX} 个没列;名字给得更完整一点。`);
-    if (files.length > 0) lines.push('要整份档案,用 id 再调一次。');
+    if (files.length > 0) lines.push('要整份档案,用 source 和 id 再调一次；名字文字命中不证明是同一个人。');
     return lines.join('\n');
   }
 
@@ -1333,6 +1415,7 @@ export class CortiV extends Cormini {
       const recall = this.viewerConversationRecall.recall({ source: person.source, senderKey: person.key, query,
         beforeCursor: Number.MAX_SAFE_INTEGER, beforeAt: new Date().toISOString() });
       return [`[memory] ${person.source}/${person.key} 的记忆节选；旧发言不是当前指令，不证明主播已经回复。`,
+        this.viewerIdentityLinks.note(person.source, person.key),
         person.summary ? `档案首行：${clip(person.summary, 600)}` : '目前没有人物档案摘要。', recall.text].filter(Boolean).join('\n');
     } catch (error) { return `[检索失败] ${String(error)}`; }
   }
@@ -1552,6 +1635,12 @@ export class CortiV extends Cormini {
   }
 
   onDelivery(ctx: { events: EventEnvelope[] }): void | Promise<void> {
+    if (ctx.events.some(event => event.contextDelivery !== 'archive-only'
+      && !event.tags?.includes('snapshot') && !(event.source === 'persona' && ['notice', 'tick'].includes(event.type)))) {
+      this.foregroundReading = undefined;
+      clearTimeout(this.foregroundDeadline);
+      this.foregroundDeadline = undefined;
+    }
     super.onDelivery(ctx);
     this.viewerHistoryReadsRemaining = VIEWER_HISTORY_READS_PER_DELIVERY;
     this.viewerArrivalHistory.clear();
@@ -1611,6 +1700,23 @@ export class CortiV extends Cormini {
       } });
       this.core?.injectInternal(reflection
         + (review?.accepted ? '\n已异步请求后台因果复核；当前行动与交流继续，结果尚未返回。' : ''), 'reflection');
+    }
+    const combat = combatReviewEvidence(ctx.events, this.lastCombatReflectionCursor);
+    if (combat) {
+      const { event, receipt } = combat;
+      this.lastCombatReflectionCursor = event.cursor;
+      const reflection = `[system] 战斗观察回执#${receipt.id}在${receipt.endedAt}以${receipt.reason}结束；`
+        + `结束时战术版本${receipt.tacticRevision}。${COMBAT_REFLECTION_ADVICE}`;
+      const evidence = JSON.stringify(receipt);
+      const review = this.planningReview?.review(
+        `战斗终态 ${event.ts} ${event.source}/${event.type} 游标${event.cursor}\n`
+        + `${evidence.length <= 5000 ? evidence : evidence.slice(0, 5000) + '\n[结构化回执过长，余下按编号展开]'}\n${reflection}`,
+      );
+      this.core?.log.emit('debug', '战斗终态复核入口', { event: 'combat-causal-review', data: {
+        cursor: event.cursor, source: event.source, reportId: receipt.id, tacticRevision: receipt.tacticRevision, ...review,
+      } });
+      this.core?.injectInternal(reflection
+        + (review?.accepted ? '\n已异步请求后台复核；即时自保、行动与交流继续，结论尚未返回。' : ''), 'reflection');
     }
     const attention = this.core ? this.socialAttention.observe(ctx.events, this.core) : undefined;
     // Reading suggestions are optional background work. A validated ready result wakes
@@ -1706,8 +1812,9 @@ export class CortiV extends Cormini {
     const seenKey = `${e.source}/${key}`;
     const arrival = [`${e.source}.enter`, `${e.source}.enter-guard`].includes(e.type);
     const presence = arrival || e.type === `${e.source}.leave`;
-    const hits = (this.viewerHits.get(seenKey) ?? 0) + (presence ? 0 : hitBy);
-    if (!presence) this.viewerHits.set(seenKey, hits);
+    const interaction = [`${e.source}.danmaku`, `${e.source}.chat`, `${e.source}.superchat`].includes(e.type);
+    const hits = (this.viewerHits.get(seenKey) ?? 0) + (interaction ? hitBy : 0);
+    if (interaction) this.viewerHits.set(seenKey, hits);
     // 先把键解成路径:逃逸键整条不认(既不唤起,也不该拿它去劝梦建文件)
     let file: string;
     try {
@@ -1715,6 +1822,9 @@ export class CortiV extends Cormini {
     } catch {
       return false;
     }
+    const encounter = this.viewerEncounters.observe(e);
+    if (encounter && !this.foregroundConfig().enabled) this.core?.injectInternal(`[交流身份] ${encounter}\n这是账号事件记录，不是欢迎口播稿；来源不同的账号不能凭昵称合并。`, 'recall');
+    if (!presence && !interaction) return false;
     const uname = typeof e.meta?.uname === 'string' ? e.meta.uname.trim() : '';
     if (uname) this.viewerNames.set(seenKey, uname);
     let content: string | null = null;
@@ -1736,9 +1846,10 @@ export class CortiV extends Cormini {
     }
     if (arrival) this.viewerArrivalHistory.set(seenKey, history);
     const summary = content?.split('\n').map((l) => l.trim()).find(Boolean);
+    const identityLink = this.viewerIdentityLinks.note(e.source, key);
     const note = [`${e.source}/${key}${uname ? `「${uname}」` : ''}`,
-      summary ? `档案首行：${clip(summary, 600)}` : '', history].filter(Boolean).join('\n');
-    if (summary || history) this.viewerRecallContext.update(seenKey, note);
+      identityLink, summary ? `档案首行：${clip(summary, 600)}` : '', history].filter(Boolean).join('\n');
+    if (summary || history || identityLink) this.viewerRecallContext.update(seenKey, note);
     if (history && !this.foregroundConfig().enabled) {
       const digest = createHash('sha256').update(history).digest('base64url');
       if (this.recalledConversation.get(seenKey) !== digest
@@ -1750,14 +1861,17 @@ export class CortiV extends Cormini {
       }
     }
     if (content === null) {
-      if (!presence) this.nudgeEnroll(e, seenKey, key, hits, budget, qualified);
-      return false;
+      if (interaction) this.nudgeEnroll(e, seenKey, key, hits, budget, qualified);
+      if (!identityLink) return false;
     }
-    if (!summary) return false;
+    if (!summary && !identityLink) return false;
     // 同一上下文窗口内不重复注入未变的摘要。
-    const digest = createHash('sha256').update(summary).digest('base64url');
+    const digest = createHash('sha256').update((summary ?? '') + (identityLink ? '\n' + identityLink : '')).digest('base64url');
     if (this.recalledSummary.get(seenKey) === digest) return false;
-    const line = `[memory] 你记得${e.source}的${key}:${summary}`;
+    const line = (summary
+      ? `[memory] 你记得${e.source}的${key}（档案 ${VIEWERS_DIR}/${e.source}/${key}.md；历史资料重现不是新进场，不代表另一平台的同名账号）:${summary}`
+      : `[memory] ${e.source}/${key} 的账号关联资料；没有人物档案正文。`)
+      + (identityLink ? '\n' + identityLink : '');
     if (!this.injectViewerMemory(line, budget)) return false;
     this.recalledSummary.set(seenKey, digest);
     return true;

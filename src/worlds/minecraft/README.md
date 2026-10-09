@@ -1,9 +1,15 @@
-<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/flight.ts, src/worlds/minecraft/flight-preview.ts, src/worlds/minecraft/terrain.ts, src/worlds/minecraft/executor.ts, src/worlds/minecraft/skills.ts, src/worlds/minecraft/skills-control.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts, src/worlds/minecraft/chests.ts, src/worlds/minecraft/inventory.ts, src/worlds/minecraft/inventory-click-sync.ts, src/worlds/minecraft/equipment.ts, src/worlds/minecraft/check.ts -->
+<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/method-runner.ts, src/worlds/minecraft/method-worker.mjs, src/worlds/minecraft/flight.ts, src/worlds/minecraft/flight-preview.ts, src/worlds/minecraft/agentfriend-flight.ts, src/worlds/minecraft/terrain.ts, src/worlds/minecraft/executor.ts, src/worlds/minecraft/combat.ts, src/worlds/minecraft/skills.ts, src/worlds/minecraft/skills-control.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts, src/worlds/minecraft/chests.ts, src/worlds/minecraft/inventory.ts, src/worlds/minecraft/inventory-click-sync.ts, src/worlds/minecraft/equipment.ts, src/worlds/minecraft/check.ts, src/worlds/minecraft/spatial-slices.ts, src/worlds/minecraft/spatial-observation.ts, src/worlds/minecraft/cell-facts.ts -->
 
 # worlds/minecraft
 
+`mc_script` 执行模型编写的 JavaScript 异步函数体，独立 Worker 内使用 SES Compartment；只提供 JSON `params` 与 `mc.state()`、`mc.flightPlan(args)`、`mc.do(steps)`，不提供原始 bot、模块导入、文件、网络或进程入口。`mc.do` 共用普通受理检查、执行器与身体优先级，并等待对应任务的实际终态；返回受理状态、任务编号、各步结果、完整回执与新采样。语法校验不执行脚本。源码上限12000字符，参数4096字符，单次JSON消息24000字符；最多32次串行SDK调用、16组动作，默认60秒、最多120秒（含排队）。超时、取消、死亡、断线、World停止或新的已受理身体任务撤销方法及其自己的一单，保留其他工作和救生冻结。最近八次运行仅在本进程保留，含源码哈希、时间及调用链；Persona 自行保存源码、经验与验证证据。脚本完成不等于原目标已实现。
+
+`mc.state()` 返回 `{sampledAt, connectionGeneration, snapshot, flight, queue, combatActive, combat, method}`。位置、维度、生命、饥饿、物品与装备在 `snapshot.position/dimension/health/food/inventory/equipment`；`snapshot` 可为 `null`。实体是 `snapshot.entities` 数组，字段为 `entityId?`、`name`、`kind`、`distance`、`direction`、`dy`、`visible`，`entitiesOmitted` 表示未列出的数量。该调用不扫描方块或地形，`blocksScanned:false`，空列表不能证明水域深度或通路。字段缺失表示未观察到。首次使用某类 SDK 回执时，展开 `{runId,call}` 核对实际结构，再比较方法目标与观测结果、保存已验证范围。
+
 实时游戏 World：以 mineflayer 玩家客户端连原版服务器，把"游戏状态 → 文字观察"
 与"高层意图 → 游戏操作"接通。
+
+保护协议的 `MC_PROTECT`、`MC_PROTECTION` 原始系统回执由 Bridge 更新权限缓存，不作为聊天投递到 Persona。网页显示端过滤机器系统消息；原生 Fabric 1.20.6 客户端可安装 [显示过滤器](native-chat-filter/README.md)，保留普通聊天、任务公告和权限错误提示。
 
 **症状跟服务端版本有关就先读 [ADAPT.md](ADAPT.md)。** 那里按版本记着已知的服务端判据
 差异、在日志里认出它的特征、以及客户端这边的改法。
@@ -16,6 +22,8 @@
 
 `control` 在 `mc_do` 的同一身体队列内提供 50–2000 毫秒的方向、跳跃、潜行、疾跑与相对视角输入。地面模式保留 Mineflayer 普通物理；飞行模式依据服务端许可和速度读数逐帧移动，每帧核对已加载的身位碰撞。输入结束、中断、死亡、断线或位置修正时释放；接管先撤旧输入，旧异步收尾不清新持有者的按键。它没有目的地寻路，终态报告实际起终点、位移、耗时及飞行状态；被打断后不自动重放。已知动作可用 `needs` 同单连接，用 `expect` 检查结果。
 
+`flee`、`surface` 与进食持有身体期间，自动战斗的近敌巡检和受击处理保留当前任务。低血仍可尝试不占身体的治疗技能；任务到达、受阻或取消后，战斗恢复通常的自卫判据。
+
 动作目录与完整文档由 `skills.ts` 的注册表生成。`mc_do` 常驻参数说明携带全部技能的字段签名、通用坐标规则和容器窗口的任务生命周期；`mc_help {}` 返回同一目录，`mc_help {"skill":"use"}` 或 `{"skills":["build","take"]}` 按需读取最多四项的完整示例、条件与限制。帮助工具只读，不发游戏命令，也不占任务队列。字段 schema 和 `parseSteps` 的校验保持同源。自定义容器的开窗和 `from/into:"open"` 搬运须在同一 `mc_do.steps` 内；每单结束都会关窗。
 
 蓝图设计请求以 `hint.kind: 'blueprint'` 声明任务类别，provider 和认知预算由 Persona 选择。设计说明要求按用途逐项核验布局、通路、功能和外观，并在交稿说明中列出施工阶段与完成判据。材料账单按施工物品统计；先核对库存和配方，选择采原料加工或已获许可的来源，从既有结构拆取须确认授权。设计验收由模型判断，格式、方块状态、版本身份和施工回读由 World 核验。
@@ -24,7 +32,13 @@
 
 `requestFacts()` 同步提供已有世界快照的完整读数，并标明采样时刻。事件流可以只发背包变化，请求事实始终包含当次采样的完整背包、队列、目标和路标。`parts` 保留完整分段及稳定键，采样时刻和最近执行终态各自成段；未变化的背包或路标无需随位置更新重新加入请求。引擎在已有快照采样时刷新缓存，借每秒状态帧传给代理；请求读取不扫描方块、不发 RPC、不推进快照基线。尚未采样、断线或引擎退出时返回 `null`，新连接不能沿用上一代读数。
 
+`decision` 的受阻辅助请求保留原任务回执的开头与末尾、采样时间、登记目标的下一步、队列及少量随身资源；未同步或未展开的物品保持未知。`minConfidence` 默认0.75，比较首选选项概率，低于门槛只写诊断，原失败回执照常投递。服务 confidence 支持首选概率和相对均匀分布归一化两种定义；候选与概率分布仍完整校验。连接、维度、执行实例、生命、资源或配置变化，以及移动超过2格，使在途建议失效。有效建议携带采样时间和首选概率，只针对原受阻分支，不直接执行或暂停任务。
+
 `Bridge.bot` 在登录握手中返回 `null`，收到玩家实体后才提供可操作的连接。断线立即清除旧 Bot；尚未收到玩家实体时，执行器按没有连接处理，不读取临时空背包或不存在的实体位置。
+
+聊天、私聊、系统提示与屏幕大字从连接创建时即开始接收，覆盖早于首次 `spawn` 的欢迎信息。
+登录阶段系统消息带服务器地址及 `phase: login` 元数据，与接收时间一起进入通常的外界事件上下文；
+出生后不重复安装监听器，机器权限回执仍单独消费。公告内容保持服务器来源，不升为操作员指令。
 
 视线、移动与目标方位共用北为 −Z、东为 +X 的坐标约定。`terrain.ts` 按 Mineflayer 的角度转换文字事实：`yaw=0` 朝北，水平视线为 `(-sin(yaw), -cos(yaw))`，`pitch` 为正时抬头。罗盘度数从北顺时针递增；不能直接套用原版网络协议的角度正负号。方向回归测试安装真实 Mineflayer 转头插件，核对 `lookAt` 目标与快照方位一致。
 快照与请求事实分别报告饱食度和随身口粮储备。储备按当前注册表分类并合并堆叠，列出常规、风险或特殊副作用、特殊食物；未同步物品栏与不可用注册表表示未知，不推定库存为零。统计不计仓库或食物原料，不自动决定制作、施法或采购。
@@ -128,7 +142,13 @@ console/         控制台面板两侧:服务器、存档、权限、客户端�
 
 ## 土地探查与生长
 
+`observe` 参照 [MineDojo 的体素与射线观测](https://docs.minedojo.org/sections/customization/privileged_obs.html)，按需从当前连接读取几何数据。`mode:voxels` 的六个 bounds 为相对执行时脚下格的 xmin/ymin/zmin/xmax/ymax/zmax（含端点），默认 `[-1,-1,-1,1,2,1]`，各偏移 ±16、最多512格。回执附绝对范围、时间、维度、眼位和朝向；palette 保存方块状态、属性及格内碰撞箱，cells 按 y/z/x 展开（x 最快），-1 为未加载，collision:null 为碰撞形状未读。液体单独标记，无碰撞箱不证明有支撑或安全可通行；实体带本连接的坐标与包围箱。
+
+`mode:rays` 的每组参数为 `[相对pitch角,相对yaw角,最大距离]`，单位为度/格，正 pitch 向上、正 yaw 向左，世界 yaw=0 朝北。默认三行五列、24格；每次最多64条、每条64格。terrain 返回沿眼位射线的首个碰撞或未知区，entity 返回已知实体包围箱的最近交点，first 比较两者，entityBeforeTerrain 标明是否在已核对的遮挡之前（未知遮挡之后为 null）。使用真实形状，检查一格邻域以涵盖栅栏等越格形状；邻域未加载或碰撞数据未读时停止确认。液体和纹理不遮挡这种碰撞射线，实体包围箱不等于渲染模型。客户端没收到的区块/实体无法读取，超过512个实体则拒绝不完整观测。单次最多16384格读取，耗尽后返回未知；24,000字符上限要求缩小范围，不返回截断数据。缓存仅在一次调用内复用，不自动注入全量地图。
+
 普通 `probe` 在区域超过 27 格时，汇总数量最多的 10 种材质并报告各自离玩家最近的样本坐标；样本来自本次读取的已加载方块，不证明其上方可种植或具有施工权限。指定 `where` 的探查仍列匹配坐标。相同区域的重复读数标为上次摘要，移动后需要新的精确读数时可点查目标格。
+
+`probe.slice` 按世界 x/y/z 轴返回小范围 box 的完整截面，保留每格材质、已读通行状态与格内碰撞箱。y 切片为水平各层，x/z 切片为竖直截面；列坐标递增，竖直截面的行从高到低。`..` 表示已读空气，`??` 表示未加载，碰撞箱未读不会当成空箱。每次附读取时间、维度、脚下格和绝对边界；直接读取客户端区块，不检查视线。仅支持 solid box，与 where 互斥；每次最多 512 格、12000 字符，超限要求缩小范围，不返回截断地图。相同请求仍返回本次完整地图，普通聚合摘要的重复缓存不应用于切片。
 
 水和岩浆逐格报告服务端 `level` 与 `source`。大区域和 `where` 另列源方块数量及最近坐标，源格不受流动液体的最近样本数量限制；未知 `level` 不计作源格或流动格。液体状态变化会更新探查摘要。空桶使用仍须核对源格并按背包中的满桶增量验收。
 
@@ -212,16 +232,16 @@ Persona 决定何时观察入口、路线、物品与菜单、玩家动作、战
 方块状态、模型、画作表也来自同一 JAR。`minecraft-renderer` 的模型与图集在构建时
 替换为这套数据。JAR、资源包和浏览器 bundle 的 SHA-256 / 版本均会校验。
 
-在已装有 Python Pillow 的环境下运行（路径按实际安装位置调整）：
+网页源码、素材与构建工具由独立项目 [mc-visual-console](https://github.com/jcs130/mc-visual-console) 的 `main` 分支维护。共享素材包含对应版本的原始模型、贴图和图标；以下命令逐文件校验后构建（路径按实际安装位置调整）：
 
 ```powershell
-python scripts/export-minecraft-viewer-assets.py I:\mc-1206\versions\1.20.6\1.20.6.jar I:\Cortico\deployments\runtimes\modern-viewer-1.20.6
-node scripts/build-minecraft-viewer-client.mjs D:\workspace\mengyue-world-platform\packages\minecraft-modern-viewer I:\Cortico\deployments\runtimes\modern-viewer-1.20.6
-node scripts/verify-minecraft-viewer-assets.mjs I:\mc-1206\versions\1.20.6\1.20.6.jar I:\Cortico\deployments\runtimes\modern-viewer-1.20.6
+$viewerSourceDir = 'C:\path\to\mc-visual-console'
+$viewerOutputDir = 'I:\Cortico\deployments\runtimes\modern-viewer-1.20.6'
+npm ci --prefix "$viewerSourceDir\packages\modern-viewer\renderer-src"
+node "$viewerSourceDir\tools\prepare-viewer-assets.mjs" java-1.20.6 $viewerOutputDir
 ```
 
-校验完成后设置 `worlds.minecraft.viewerAssetsDir` 为上述输出目录，重启 World 才会
-切换网页 viewer。`worlds.minecraft.host/port` 仍按原部署配置连接游戏服务器。
+首次接入或切换目录时设置 `worlds.minecraft.viewerAssetsDir` 并重启 World。已有目录更新画面时，从共享源码重新构建、同步产物，核对 `viewer-client.json` 的 `browserBundleSha256` 与页面 `/index.js` 的实际哈希，再刷新页面；无需因同路径静态文件更新重启游戏连接。`worlds.minecraft.host/port` 仍按原部署配置连接游戏服务器。不同 Minecraft 版本与预设分别构建；服务器专用视觉预设由使用者显式选择。
 
 客户端窗口出现后，World 将其标题设置为该客户端的账号名，供 OBS 按标题区分。直连进服后再次更新标题。
 
@@ -253,6 +273,10 @@ bot 死亡、重连及 `client.resyncSec` 周期触发重新附身。
 限时移动许可的命令可与已规划的 `flight`、`land` 一起提交，用 `needs` 串联依赖。
 `flight` 等待至多两秒接收真实飞行许可；未获准或移动失败时，依赖该步的尾部不会执行。
 路线上各段须在限时内完成，试算、查资料和规划应在发送授予许可的命令之前完成。
+
+`minecraft.task.queue` 的尾步观察说明当前任务仍在执行，并提供 `queue:"append"` 续接入口。成文时重新核对执行实例、待办和战斗冻结；观察不要求停止或替换当前工作，也不证明任务已完成。
+
+顶部状态条按协议 `entityUUID` 保留进度档位，标题中的倒计时变化不重新建立进度基线。同标题的不同状态条独立记录；删除或建立新连接时清理旧档位。进度每下降一个25%档位提供一次观察，技能经验浮条仍仅供画面显示。
 
 ### 启动前的设置调整
 
@@ -320,8 +344,8 @@ World 将所选文件保存在部署的 `data/minecraft-skin-{bot,player}.png`�
 |---|---|
 | `mc_cast(spell, arguments?)` | 向支持该命令的服务端立即发送一次 `/mycli cast <技能ID> [参数…]`；`arguments` 是按顺序分开的字符串数组，例如造物目标。战斗或撤退中也不排队、不抢移动控制；发送成功不等于生效，须核对服务端回执和现场状态 |
 | `mc_do(steps, queue?)` | 提交任务。立即返回带时刻与任务号（#N）的受理回执；后台依次执行，结果以同一任务号的 `minecraft.task` 事件返回。`queue` 模式见「队列」 |
-| `mc_scout(steps, queue?)` | `tags:['read']`。与 `mc_do` 共用队列和回执，执行 probe，以及按 dryRun 入队的 goto / flight / build / excavate / tunnel。后续操作仍可入队 |
-| `mc_flight_plan(points, budgetMs?)` | `tags:['read']`。施法前从当前观察位置依次投影最多16段飞行，回报逐段碰撞、累计耗时、调用者时长预算与末段支撑；不入队、不移动、不授予许可 |
+| `mc_scout(steps, queue?)` | `tags:['read']`。与 `mc_do` 共用队列和回执，执行 probe / observe，以及按 dryRun 入队的 goto / flight / build / excavate / tunnel。后续操作仍可入队 |
+| `mc_flight_plan(points, budgetMs?, subdivide?)` | `tags:['read']`。施法前从当前观察位置依次投影最多16个目标，可自动分为最多64段；回报逐段碰撞、累计耗时、时长预算与末段支撑；不入队、不移动、不授予许可 |
 | `mc_check(checks)` | `tags:['read']`。提交至多 16 条断言（单格 `at/is`、区域 `count/all/air/sealed`、背包 `inv`、蓝图 `blueprint`、路标 `mark`），对照世界后只报差异。同步返回、不进队列、不移动，只读已加载区块；未加载单独报告。`sealed` 按流入通路判断，水和岩浆算通路 |
 | `mc_view_map(id?)` | `tags:['read']`。看身上一张已开图的地图：回执带 512×512 的 PNG 画面（上北右东）与文字读数：编号、比例、已探索比例、图标位置。本机服务端能读到存档 `data/map_<id>.dat` 时再给中心坐标和图标的世界坐标。画面来自服务端推给包里地图的像素包 |
 | `mc_policy(六格，全可选)` | `tags:['write']`。设置垫脚/照明名单、照明场合、赶路取向、保留工具、主动交战条件。不进队列、不占任务号，同步回执；空调用只回读。见「策略面」 |
@@ -438,8 +462,11 @@ agent 可以在同一轮发出多次调用以提交已确定的后续任务。
 试算不发送能力包、不移动，也不模拟前序步骤的未来位置或材料；`needs` 仅按前步试算结果放行。每步回执标明只读试算及当时真实起点，纯试算任务的结局写“试算结束”，成功部分写“已返回的试算”。执行时按实际位置、速度、地形重新检查。
 
 `mc_flight_plan` 依次用上一段假定终点解析下一段坐标，复用实际飞行的几何与速度计算。
+`subdivide:true` 将远端目标自动拆成客户端单段范围内的斜向或垂直移动，最多64段；中途悬停，每个请求点保留其落地选择。格中心取整后仍逐段检查三维距离、碰撞和实际速度。12格是客户端单段边界，服务端技能总航程由实际许可、速度与期限决定。
+完整几何核验且未超过已知预算时，`steps` 返回可整体提交的绝对坐标和依赖；否则为null。它不包含施法；合并前置步骤须重编号needs。执行起点变化后重新试算，运行时仍重验。未声明期限的路线保持时间未知。
 每段估时含500毫秒余量，累计估时只包含列出的移动；返程和落地须显式列入。
 调用者提供的 `budgetMs` 标为 caller，已知当前许可期限也会参与预算，调用者不能延长它。
+AgentFriend 模式通过 `agentfriend-flight.ts` 接收本人最近三秒内发送的 flight 命令及私有系统持续时间回执，按命令发送时间计算保守截止；重复回执不续期，玩家聊天和帮助文本不参与。实际能力包仍决定许可，断线、重生及失败回执清除尚未匹配的请求。
 期限未知时 `fitsBudget:null`，末段悬停时 `endsOnSupport:false`；两者都不能证明可安全飞完整程。
 任何一段受阻时返回段号、原因与已核验前缀，未核验尾部和完整估时保持未知；执行仍按当时现场重验。
 
@@ -656,6 +683,7 @@ collect **只挖看得见的**：`collectVisible` 经 `canSeeBlockAt` 检查视�
 - **tunnel 横向位移为零**：向下逐格挖竖井，待挖格下方无支撑时停止；向上逐格垫塔。竖井是单程的，返回可搭塔；两者到达终点才完成，回执分别报告到底或到顶。
 - **probe**：只读指定形状内的材质构成、矿石最近坐标、液体与空气连通性；`pocketScan` 报封闭空气容积。27 格以内逐格报告坐标和方块，作物附 age，耕地附 moisture；属性变化会更新探查回执。近处作物快照同时报告该株正下方的土壤坐标与水分，未加载时明确未读到。这些单格读数不代表整片农田。必须给出形状和锚点，不提供以自身为圆心的 target/radius 搜索。
   `where` 可在明确圈定区域中列出指定方块的位置，最多 8192 格；它直接读取已加载区块，不受遮挡与视线限制，回执明确标注此口径。
+  `slice:"y"` 保留水平层的三维排列，`slice:"x"`/`"z"` 返回竖直截面；上限与读取口径见土地探查。solid box 在栅格化前核对体积上限。
 - **dryRun**：build/excavate/tunnel 共用规划路径，运行至栅格化和读取世界为止，报告格数、材料缺口和无掉落工具条件。goto 仅探路不移动，报告三种走法的步数、垫块数、挖块数和开门等交互次数；交互不计入垫块数量和材料代价。
 
 collect 认名字分三层：整名、类别名（`log` → 各树种原木）、**掉落物反查**。第三

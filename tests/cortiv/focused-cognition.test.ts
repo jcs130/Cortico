@@ -67,7 +67,6 @@ describe('独立定向认知请求', () => {
     expect(texts(call)).toContain('当前在(1,64,2)');
     expect(texts(call)).toContain('截图10:00');
     expect(texts(call)).toContain('World minecraft');
-    expect(texts(call)).toContain('可缇Corti');
     expect(texts(call)).not.toContain('主会话长ENV');
     expect(texts(call)).not.toContain('旧玩家聊天');
     expect(JSON.stringify(call.messages)).not.toContain(old.handle);

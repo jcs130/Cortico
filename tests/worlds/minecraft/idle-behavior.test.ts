@@ -71,6 +71,18 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(0); });
 afterEach(() => vi.useRealTimers());
 
 describe('IdleBehaviorController', () => {
+  it('selects an action with above-chance confidence and records its probability', async () => {
+    const probabilities = Object.fromEntries([...candidates.map(candidate => candidate.id), 'wait']
+      .map(id => [id, id === 'look-around' ? 0.8 : 0.04]));
+    const r = rig({ config: { selector: 'decision' }, fetchImpl: async () => new Response(JSON.stringify({
+      answers: { action: { type: 'choice', choice: 'look-around', confidence: (0.8 - 1 / 6) / (1 - 1 / 6), probabilities } },
+    })) });
+    await begin(r.controller);
+    expect(r.executed.map(action => action.id)).toEqual(['look-around']);
+    expect(r.events.find(event => event.event === 'action-started')).toMatchObject({ confidence: 0.8 });
+    expect(r.events.some(event => event.event === 'decision-fallback')).toBe(false);
+  });
+
   it('starts one arrival look immediately and resumes ordinary intervals afterwards', async () => {
     const r = rig({ config: { afterArrival: true, minIdleMs: 60_000 } });
     r.controller.tick();

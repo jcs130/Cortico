@@ -298,11 +298,17 @@ function flightRoute(bot: Bot, start: Vec3, target: Vec3): Vec3[] {
 function flightPlan(bot: Bot, start: Vec3, target: Vec3, options: FlightMoveOptions): Vec3[] {
   if (![target.x, target.y, target.z].every(Number.isFinite)) throw new SkillBlocked('飞行目标坐标必须是有限数字');
   const distance = start.distanceTo(target);
-  if (distance > MAX_FLIGHT_DISTANCE) throw new SkillBlocked(`飞行单段最多 ${MAX_FLIGHT_DISTANCE} 格；目标的三维直线距离 ${distance} 格`);
+  if (distance > MAX_FLIGHT_DISTANCE) throw new SkillBlocked(flightDistanceNote(start, target));
   if (options.land && !hasSupport(bot, target)) throw new SkillBlocked('飞行目标下方没有已加载的安全落脚方块；当前 land:true 要求落地；空中悬停用 land:false，落地须选已核实的平台');
   const targetObstruction = spaceObstruction(bot, target);
   if (targetObstruction) throw new SkillBlocked(`飞行目标空间${targetObstruction}`);
   return flightRoute(bot, start, target);
+}
+
+function flightDistanceNote(start: Vec3, target: Vec3): string {
+  return `客户端飞行单段最多 ${MAX_FLIGHT_DISTANCE} 格；目标的三维直线距离 ${start.distanceTo(target)} 格；`
+    + `实际起点 (${start.x},${start.y},${start.z})。整段飞行试算可用 subdivide:true 自动分段并返回连续步骤，`
+    + '总航程另由服务端实际许可、速度和期限决定，须核对总耗时';
 }
 
 /** Inspect loaded geometry from the observed or explicitly projected origin without side effects. */
@@ -336,12 +342,12 @@ export async function flyToPosition(bot: Bot, targetAt: { x: number; y: number; 
     const target = new Vec3(targetAt.x, targetAt.y, targetAt.z);
     let start = bot.entity.position.clone();
     let distance = start.distanceTo(target);
-    if (distance > MAX_FLIGHT_DISTANCE) throw new SkillBlocked(`飞行单段最多 ${MAX_FLIGHT_DISTANCE} 格；目标的三维直线距离 ${distance} 格`);
+    if (distance > MAX_FLIGHT_DISTANCE) throw new SkillBlocked(flightDistanceNote(start, target));
     if (options.land && !hasSupport(bot, target)) throw new SkillBlocked('飞行目标下方没有已加载的安全落脚方块；当前 land:true 要求落地；空中悬停用 land:false，落地须选已核实的平台');
     await awaitFlightPermission(bot, aborted);
     start = bot.entity.position.clone();
     distance = start.distanceTo(target);
-    if (distance > MAX_FLIGHT_DISTANCE) throw new SkillBlocked(`等待飞行许可时位置已变化；目标现在的三维直线距离 ${distance} 格，超过单段 ${MAX_FLIGHT_DISTANCE} 格`);
+    if (distance > MAX_FLIGHT_DISTANCE) throw new SkillBlocked(`等待飞行许可时位置已变化；${flightDistanceNote(start, target)}`);
     const route = flightPlan(bot, start, target, options);
     const expiresAt = abilities.get(bot)?.expiresAtMs;
     if (expiresAt !== undefined && expiresAt - Date.now() < route.length * FLIGHT_TICK_MS + 500) {
