@@ -12,6 +12,7 @@ import { parseGoalPlan, recordGoalJudgment } from '../../../src/worlds/minecraft
 import { SET_SPAWN_TRANSLATE } from '../../../src/worlds/minecraft/escape.ts';
 import { parseScoutSteps, parseSteps, renderQueue, QUEUE_MODES } from '../../../src/worlds/minecraft/executor.ts';
 import { Bridge } from '../../../src/worlds/minecraft/bridge.ts';
+import { AgentFriendProtection } from '../../../src/worlds/minecraft/agentfriend-protection.ts';
 import { MinecraftServerManager, type MinecraftServerState } from '../../../src/worlds/minecraft/server.ts';
 import { FakeHost } from '../../helpers/fake-host.ts';
 import { combatBot, makeExecutor, makeExecutorOn } from './executor-harness.ts';
@@ -2440,6 +2441,25 @@ describe('Minecraft 聊天框消息', () => {
       '[MC 系统] 领地保护已开启',
     ]);
     expect(host.pushOpts.map((o) => o?.trigger)).toEqual(['flush', 'piggyback']);
+  });
+
+  it('两种保护协议仍进入权限缓存，原始 JSON 不进入聊天与记忆事件', async () => {
+    const { bot, host } = hooked(true);
+    const protection = new AgentFriendProtection(Object.assign(bot, { chat: () => undefined }));
+    for (const [index, prefix] of ['MC_PROTECT', 'MC_PROTECTION'].entries()) {
+      const reply = { schemaVersion: 1, action: 'break', world: 'minecraft:overworld',
+        x: index, y: 64, z: 2, status: index === 0 ? 'deny' : 'allow_likely', reason: 'test' };
+      bot.emit('message', { toString: () => `${prefix} ${JSON.stringify(reply)}` }, 'system');
+      expect(protection.verdict('break', 'overworld', reply)).toBe(reply.status);
+    }
+    bot.emit('message', { toString: () => '你没有权限破坏这里的方块' }, 'system');
+    bot.emit('chat', 'Alex', 'MC_PROTECTION 是什么意思？', null,
+      { toString: () => '<Alex> MC_PROTECTION 是什么意思？' });
+    await Promise.resolve();
+    expect(host.events.filter((event) => event.type === 'minecraft.chat').map((event) => event.text).sort()).toEqual([
+      '[MC 系统] 你没有权限破坏这里的方块',
+      '[MC] Alex: MC_PROTECTION 是什么意思？',
+    ].sort());
   });
 });
 

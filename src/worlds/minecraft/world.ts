@@ -24,6 +24,7 @@ import type { Bot } from 'mineflayer';
 import { nowIso } from '../../core/util.ts';
 import { observeStatusEffects } from './status-effects.ts';
 import { Bridge } from './bridge.ts';
+import { parseProtectReply } from './agentfriend-protection.ts';
 import { captureMinecraftView, closeMinecraftViewCapture, warmMinecraftViewCapture } from './visual-capture.ts';
 import { PlayerObservations, playerObservationMeta, renderPlayerObservation, type PlayerObservation } from './player-observation.ts';
 import { precheckEmptyUseTarget } from './precheck.ts';
@@ -7045,7 +7046,7 @@ export class MinecraftWorld implements World {
       if (position === 'system') {
         const reply = jsonMsg.toString().trim();
         // AgentFriend 的机器可读权限回执由 Bridge 消费，避免注入主播聊天与记忆。
-        if (this.agentFriendEnabled && reply.includes('MC_PROTECT ')) return;
+        if (this.agentFriendEnabled && parseProtectReply(reply)) return;
         unchangedQueryFeedback = this.serverActionWait.noteFeedback(reply);
         if (this.agentFriendEnabled) {
           this.combatSpells.noteServerMessage(reply);
