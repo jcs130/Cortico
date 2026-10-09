@@ -9,6 +9,14 @@ const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const root = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')) as RootPackageJson;
 
 describe('publish-worlds', () => {
+  it('Minecraft 脚本 worker 的源码和 SES 依赖进入扩展包', () => {
+    const plan = planWorldPackage('minecraft');
+    expect(plan.sources.get('method-worker.mjs')).toBe(
+      readFileSync(join(REPO_ROOT, 'src/worlds/minecraft/method-worker.mjs'), 'utf8'),
+    );
+    expect(plan.externals).toContain('ses');
+  });
+
   for (const { id } of WORLD_PACKAGES) {
     it(`${id}: 跳出 World 目录的引用都指向 src 下存在的文件,第三方包都是运行时依赖`, () => {
       const plan = planWorldPackage(id);

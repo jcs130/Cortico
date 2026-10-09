@@ -1,4 +1,4 @@
-<!-- Owner: package.json, vitest.config.ts, tsconfig.json, tsconfig.web.json, .github/workflows/ -->
+<!-- Owner: package.json, vitest.config.ts, tsconfig.json, tsconfig.web.json, .github/workflows/, scripts/publish-worlds.ts -->
 
 # 开发
 
@@ -68,6 +68,9 @@ Node 侧与浏览器侧分别配置类型库:`tsconfig.json` 排掉 `src/web/cli
 | `scratch/`、`deprecated/`、`deployments/`、`extensions/` | 都不进版本控制 |
 
 ## 发布
+
+内建 World 的打包扫描 TS/JS 源码（包括 `.mjs` worker）的 import,把第三方包写入生成清单的
+`dependencies`;面板源码只进入浏览器 bundle。
 
 `package.json` 的版本号改动走 PR 合进 `main`,之后在 `main` 上发 release,tag 为 `v<版本号>`:
 

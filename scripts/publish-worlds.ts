@@ -62,6 +62,7 @@ const OUT_ROOT = join(REPO_ROOT, 'dist', 'worlds');
 const REPO_URL = 'https://github.com/Pal-AI-Lab/Cortico';
 /** 面板源码只进 bundle,不随包发。 */
 const CONSOLE_DIR = 'console';
+const SOURCE_FILE_RE = /\.(?:[cm]?ts|[cm]?js)$/;
 
 export const packageNameOf = (id: string): string => `cortico-world-${id}`;
 
@@ -70,7 +71,7 @@ const RELATIVE_RE = /(\bfrom\s*|\bimport\s*|\bimport\(\s*|new URL\(\s*)(['"])(\.
 const BARE_RE = /(?:\bfrom\s*|\bimport\s*|\bimport\(\s*)['"]([^'"./\s][^'"\s]*)['"]/g;
 
 export interface WorldPackagePlan {
-  /** 包内路径(正斜杠)→ 改写后的文本;只含 `.ts`,其余文件原样复制。 */
+  /** 包内路径(正斜杠)→ 改写后的 TS/JS 源码;其余文件原样复制。 */
   sources: Map<string, string>;
   /** 源码 import 到的第三方包。 */
   externals: string[];
@@ -94,7 +95,7 @@ function packageOf(spec: string): string {
   return spec.startsWith('@') ? parts.slice(0, 2).join('/') : (parts[0] as string);
 }
 
-/** 读 `src/worlds/<id>/` 的 `.ts`,改写跳出目录的 import,并收集第三方包。 */
+/** 读 `src/worlds/<id>/` 的 TS/JS 源码,改写跳出目录的 import,并收集第三方包。 */
 export function planWorldPackage(id: string): WorldPackagePlan {
   const worldDir = join(SRC_DIR, 'worlds', id);
   const consoleDir = join(worldDir, CONSOLE_DIR);
@@ -102,7 +103,7 @@ export function planWorldPackage(id: string): WorldPackagePlan {
   const externals = new Set<string>();
   const problems: string[] = [];
   for (const file of walk(worldDir)) {
-    if (!file.endsWith('.ts') || file.startsWith(consoleDir + sep)) continue;
+    if (!SOURCE_FILE_RE.test(file) || file.startsWith(consoleDir + sep)) continue;
     const rel = posix(relative(worldDir, file));
     const text = readFileSync(file, 'utf8').replace(RELATIVE_RE, (whole, head: string, quote: string, spec: string) => {
       const target = resolve(dirname(file), spec);
@@ -169,7 +170,7 @@ async function stageWorld(spec: WorldPackageSpec, root: RootPackageJson): Promis
   rmSync(out, { recursive: true, force: true });
   cpSync(worldDir, join(out, 'src'), {
     recursive: true,
-    filter: (src) => src !== join(worldDir, CONSOLE_DIR) && !src.endsWith('.ts'),
+    filter: (src) => src !== join(worldDir, CONSOLE_DIR) && !SOURCE_FILE_RE.test(src),
   });
   for (const [rel, text] of plan.sources) {
     const target = join(out, 'src', rel);
