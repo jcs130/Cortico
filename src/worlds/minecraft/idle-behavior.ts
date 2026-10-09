@@ -1,3 +1,5 @@
+import { parseTypedChoice } from '../../protocol/typed-decision.ts';
+
 /** Optional idle presentation owns one cancellable action and never publishes model context. */
 export interface IdleBehaviorConfig {
   enabled: boolean;
@@ -77,26 +79,16 @@ function object(value: unknown): Record<string, unknown> | null {
     ? value as Record<string, unknown> : null;
 }
 
-function probability(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
-}
-
 function answer(value: unknown, choices: readonly string[]): Selection {
   const root = object(value);
-  const action = object(object(root?.answers)?.action);
-  const probabilities = object(action?.probabilities);
-  if (!root || !action || !probabilities || typeof action.choice !== 'string'
-    || !choices.includes(action.choice) || !probability(action.confidence)
-    || Object.keys(probabilities).length !== choices.length
-    || !choices.every(key => probability(probabilities[key]))
-    || Math.abs(Number(probabilities[action.choice]) - action.confidence) > 0.01
-    || Math.abs(choices.reduce((sum, key) => sum + Number(probabilities[key]), 0) - 1) > 0.02
+  const action = parseTypedChoice(object(root?.answers)?.action, choices);
+  if (!root || !action
     || (root.latency_ms !== undefined && (typeof root.latency_ms !== 'number'
       || !Number.isFinite(root.latency_ms) || root.latency_ms < 0))) {
     return { kind: 'error', reason: 'invalid-response' };
   }
-  return { kind: 'choice', choice: action.choice, confidence: action.confidence,
-    probabilities: Object.fromEntries(choices.map(key => [key, Number(probabilities[key])])),
+  return { kind: 'choice', choice: action.choice, confidence: action.choiceProbability,
+    probabilities: action.probabilities,
     ...(typeof root.latency_ms === 'number' ? { latencyMs: root.latency_ms } : {}) };
 }
 

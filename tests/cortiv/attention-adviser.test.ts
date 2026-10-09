@@ -55,6 +55,14 @@ describe('CortiV bounded social attention', () => {
     }
     expect(fetchImpl).not.toHaveBeenCalled();
   });
+
+  it('accepts normalised service confidence without lowering the selected-probability threshold', async () => {
+    const injected: string[] = [];
+    await new CortiVSocialAttention(config, async () => response('interaction', (0.9 - 1 / 3) / (1 - 1 / 3)), () => NOW)
+      .observe([event()], makeFakeHarnessApi({ injectInternal: text => injected.push(text) }));
+    expect(injected).toHaveLength(1);
+    expect(injected[0]).toContain('90%');
+  });
   it('keeps low confidence, inconsistent probabilities and outages neutral', async () => {
     const injected = vi.fn();
     for (const answer of [new Response(JSON.stringify({ answers: { attention: { choice: 'interaction',

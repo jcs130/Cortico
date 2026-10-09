@@ -7,8 +7,8 @@ function adviserResponse(): Response {
   return new Response(JSON.stringify({
     answers: {
       next: {
-        choice: 'inspect', confidence: 0.7,
-        probabilities: { inspect: 0.7, replan: 0.2, resupply: 0.08, pause: 0.02 },
+        choice: 'inspect', confidence: 0.8,
+        probabilities: { inspect: 0.8, replan: 0.1, resupply: 0.08, pause: 0.02 },
       },
       risk: { score: 1.5 },
     },
@@ -83,7 +83,7 @@ describe('受阻任务辅助判断', () => {
       return new Promise<Response>((resolve) => { resolveFetch = resolve; });
     });
     const { world, host, report } = rig();
-    const receipt = '受阻：' + '障'.repeat(2000);
+    const receipt = '目标：采集材料。' + '障'.repeat(2000) + '实际失败：服务器保护拒绝，背包材料数量未增加。';
     report('blocked', 7, receipt);
     expect(host.events).toHaveLength(1);
     expect(host.events[0].type).toBe('minecraft.task');
@@ -95,6 +95,10 @@ describe('受阻任务辅助判断', () => {
       queue: { waitingCount: 7, running: { id: 8, stepIndex: 1, stepCount: 3 } },
     });
     expect(body.state?.task.receipt.length).toBe(1200);
+    expect(body.state?.task.receipt).toContain('目标：采集材料');
+    expect(body.state?.task.receipt).toContain('实际失败：服务器保护拒绝');
+    expect(body.state?.task.receipt).toContain('[中间未展开]');
+    expect(body.state?.sampledAt).toEqual(expect.any(String));
     expect(body.state?.queue.waiting).toHaveLength(4);
     expect(body.state?.queue.waiting[0].label.length).toBe(120);
     resolveFetch(adviserResponse());
@@ -102,10 +106,40 @@ describe('受阻任务辅助判断', () => {
     expect(host.events[1].type).toBe('minecraft.event');
     expect(host.events[1].text).toContain('小模型辅助判断，未经核验');
     expect(host.events[1].text).toContain('建议先核对现场');
+    expect(host.events[1].text).toContain('首选概率80%');
+    expect(host.events[1].text).toContain('只针对该受阻分支');
     expect(host.events[1].text).not.toContain(receipt);
     expect(host.pushOpts[1]?.trigger).toBe('piggyback');
     const log = world.logConsole().entries().find((entry) => entry.event === 'decision-advice');
-    expect(log).toMatchObject({ taskId: 7, durMs: 43, data: { choice: 'inspect', confidence: 0.7, riskScore: 1.5, latencyMs: 43 } });
+    expect(log).toMatchObject({ taskId: 7, durMs: 43, data: { choice: 'inspect', confidence: 0.8, riskScore: 1.5, latencyMs: 43 } });
+  });
+
+  it('keeps uncertain pause advice in diagnostics while preserving the original failure event', async () => {
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ answers: {
+      next: { choice: 'pause', confidence: 0.43, probabilities: { inspect: 0.3, replan: 0.2, resupply: 0.07, pause: 0.43 } },
+      risk: { score: 1.7 },
+    }, latency_ms: 40 })));
+    const r = rig();
+    r.report('blocked', 7, '原始失败原因');
+    await vi.waitFor(() => expect(r.world.logConsole().entries().some(entry => entry.event === 'decision-uncertain')).toBe(true));
+    expect(r.host.events).toHaveLength(1);
+    expect(r.host.events[0].text).toContain('原始失败原因');
+  });
+
+  it('provides sampled inventory and registered goal steps without claiming omitted items are absent', async () => {
+    const body: Record<string, any> = {};
+    vi.stubGlobal('fetch', async (_url: string, init: RequestInit) => {
+      Object.assign(body, JSON.parse(String(init.body))); return adviserResponse();
+    });
+    const r = rig();
+    Object.assign(r.world, { snapshot: () => ({ invSynced: true, heldItem: 'stone_axe', equipment: [],
+      inventory: Array.from({ length: 15 }, (_, i) => ({ name: `item_${i}`, count: i + 1 })) }),
+      goals: () => ({ list: [{ slot: 1, text: '制作并放置火把', plan: { steps: [{ do: '合成火把', state: 'pending' }] } }] }) });
+    r.report('blocked');
+    await vi.waitFor(() => expect(r.host.events).toHaveLength(2));
+    expect(body.state.player).toMatchObject({ inventoryOmitted: 3, heldItem: 'stone_axe' });
+    expect(body.state.player.inventory).toHaveLength(12);
+    expect(body.state.registeredGoals).toEqual([{ slot: 1, intention: '制作并放置火把', nextStep: '合成火把' }]);
   });
 
   it('服务失败只写诊断，旧配置缺子段时仍保留原任务回执', async () => {
@@ -142,6 +176,11 @@ describe('受阻任务辅助判断', () => {
     ['更新同一任务终态', (r: ReturnType<typeof rig>) => r.report('done', 7), 'task-updated'],
     ['换连接', (r: ReturnType<typeof rig>) => { (r.world as any).connectionGeneration++; }, 'connection-changed'],
     ['换维度', (r: ReturnType<typeof rig>) => { r.bot.game.dimension = 'the_nether'; }, 'dimension-changed'],
+    ['同维度移动', (r: ReturnType<typeof rig>) => { r.bot.entity.position.x += 4; }, 'position-changed'],
+    ['生命读数变化', (r: ReturnType<typeof rig>) => { r.bot.health -= 2; }, 'health-changed'],
+    ['新任务接管', (r: ReturnType<typeof rig>) => { (r.world as any).executor.status = () => ({ running: { id: 99 } }); }, 'queue-changed'],
+    ['修改置信门槛', (r: ReturnType<typeof rig>) => { r.cfg.decision.minConfidence = 0.9; }, 'config-changed'],
+    ['库存变化', (r: ReturnType<typeof rig>) => { (r.world as any).snapshot = () => ({ invSynced: true, inventory: [], equipment: [] }); }, 'resources-changed'],
     ['World 停止', (r: ReturnType<typeof rig>) => { (r.world as any).shuttingDown = true; }, 'stopped'],
   ])('%s 后丢弃迟到建议', async (_title, change, reason) => {
     let resolveFetch!: (response: Response) => void;

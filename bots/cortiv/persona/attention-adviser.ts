@@ -1,4 +1,5 @@
 import type { CoreApi, EventEnvelope } from '../../../src/core/types.ts';
+import { parseTypedChoice } from '../../../src/protocol/typed-decision.ts';
 
 /** Optional semantic advice; geometric player observations remain World facts. */
 export interface FastAttentionConfig {
@@ -41,15 +42,9 @@ function observation(event: EventEnvelope): Observation | null {
 function readAnswer(value: unknown): { choice: Choice; confidence: number; latencyMs?: number } | null {
   if (!value || typeof value !== 'object') return null;
   const root = value as Record<string, any>;
-  const answer = root.answers?.attention;
-  if (!answer || typeof answer.choice !== 'string' || !Object.hasOwn(CRITERIA, answer.choice) || typeof answer.confidence !== 'number'
-    || !Number.isFinite(answer.confidence) || answer.confidence < 0 || answer.confidence > 1) return null;
-  const probabilities = answer.probabilities;
-  if (!probabilities || Object.keys(CRITERIA).some(key => typeof probabilities[key] !== 'number'
-    || !Number.isFinite(probabilities[key]) || probabilities[key] < 0 || probabilities[key] > 1)) return null;
-  if (Math.abs(probabilities[answer.choice] - answer.confidence) > 0.01
-    || Math.abs(Object.keys(CRITERIA).reduce((sum, key) => sum + probabilities[key], 0) - 1) > 0.02) return null;
-  return { choice: answer.choice, confidence: answer.confidence,
+  const answer = parseTypedChoice(root.answers?.attention, Object.keys(CRITERIA) as Choice[]);
+  if (!answer) return null;
+  return { choice: answer.choice, confidence: answer.choiceProbability,
     ...(typeof root.latency_ms === 'number' && Number.isFinite(root.latency_ms)
       && root.latency_ms >= 0 ? { latencyMs: root.latency_ms } : {}) };
 }

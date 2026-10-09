@@ -1,7 +1,10 @@
+import { parseTypedChoice } from '../../protocol/typed-decision.ts';
+
 export type DecisionChoice = 'inspect' | 'replan' | 'resupply' | 'pause';
 
 export interface DecisionAdvice {
   choice: DecisionChoice;
+  /** Probability of the selected option, independent of the service confidence convention. */
   confidence: number;
   probabilities: Record<DecisionChoice, number>;
   riskScore: number;
@@ -12,23 +15,27 @@ export interface DecisionAdvice {
 export type DecisionAdviserResult =
   | { kind: 'advice'; advice: DecisionAdvice }
   | { kind: 'skipped'; reason: 'busy' | 'duplicate' | 'throttled'; retryAfterMs?: number }
+  | { kind: 'skipped'; reason: 'uncertain'; advice: DecisionAdvice }
   | { kind: 'error'; reason: 'invalid-state' | 'timeout' | 'transport' | 'http' | 'invalid-response'; status?: number };
 
 export interface DecisionAdviserOptions {
   endpoint: string;
   timeoutMs?: number;
   minIntervalMs?: number;
+  /** Minimum selected-option probability. */
+  minConfidence?: number;
   fetchImpl?: typeof fetch;
   now?: () => number;
 }
 
 export const DECISION_TIMEOUT_MS = 2_000;
 export const DECISION_MIN_INTERVAL_MS = 5_000;
+export const DECISION_MIN_CONFIDENCE = 0.75;
 
 export const DECISION_QUESTIONS = {
   next: {
     type: 'choice',
-    instructions: '根据当前状态，选择下一步最有帮助的任务建议。只选一项；建议不会自动执行。',
+    instructions: '结合当前目标、已有资源和真实失败回执，选择最有帮助的下一步建议。缺少材料证据不能推定需要补给；暂缓只针对受阻分支，不代表停止全部活动。建议不会自动执行。',
     criteria: {
       inspect: '先观察现场或补充事实，再决定如何行动。',
       replan: '当前目标、顺序或路线需要重新规划。',
@@ -59,14 +66,9 @@ function probability(value: unknown): value is number {
 function parseAdvice(value: unknown): DecisionAdvice | null {
   const root = record(value);
   const answers = record(root?.answers);
-  const next = record(answers?.next);
+  const next = parseTypedChoice(answers?.next, CHOICES);
   const risk = record(answers?.risk);
-  const probabilities = record(next?.probabilities);
-  if (!root || !next || !risk || !probabilities) return null;
-  if (!CHOICES.includes(next.choice as DecisionChoice)) return null;
-  if (!probability(next.confidence)) return null;
-  if (!CHOICES.every((choice) => probability(probabilities[choice]))) return null;
-  if (Math.abs(next.confidence - (probabilities[next.choice as DecisionChoice] as number)) > 0.01) return null;
+  if (!root || !next || !risk) return null;
   if (typeof risk.score !== 'number' || !Number.isFinite(risk.score)
     || risk.score < 0 || risk.score > RISK_LEVELS.length - 1) return null;
   const riskProbabilities = risk.probabilities === undefined ? null : record(risk.probabilities);
@@ -74,9 +76,9 @@ function parseAdvice(value: unknown): DecisionAdvice | null {
     && (!riskProbabilities || !RISK_LEVELS.every((level) => probability(riskProbabilities[level])))) return null;
   if (typeof root.latency_ms !== 'number' || !Number.isFinite(root.latency_ms) || root.latency_ms < 0) return null;
   return {
-    choice: next.choice as DecisionChoice,
-    confidence: next.confidence,
-    probabilities: Object.fromEntries(CHOICES.map((choice) => [choice, probabilities[choice]])) as Record<DecisionChoice, number>,
+    choice: next.choice,
+    confidence: next.choiceProbability,
+    probabilities: next.probabilities,
     riskScore: risk.score,
     ...(riskProbabilities ? {
       riskProbabilities: Object.fromEntries(RISK_LEVELS.map((level) => [level, riskProbabilities[level]])) as Record<'0' | '1' | '2' | '3', number>,
@@ -99,6 +101,7 @@ export function createDecisionAdviser(options: DecisionAdviserOptions): {
   const now = options.now ?? (() => performance.now());
   const timeoutMs = duration(options.timeoutMs, DECISION_TIMEOUT_MS, false);
   const minIntervalMs = duration(options.minIntervalMs, DECISION_MIN_INTERVAL_MS, true);
+  const minConfidence = options.minConfidence ?? DECISION_MIN_CONFIDENCE;
   let lastStartedAtMs = -Infinity;
   let lastAdvisedSceneKey: string | null = null;
   let inFlight: { sceneKey: string; promise: Promise<DecisionAdviserResult> } | null = null;
@@ -132,7 +135,9 @@ export function createDecisionAdviser(options: DecisionAdviserOptions): {
         return { kind: 'error', reason: 'invalid-response' };
       }
       const advice = parseAdvice(payload);
-      return advice ? { kind: 'advice', advice } : { kind: 'error', reason: 'invalid-response' };
+      if (!advice) return { kind: 'error', reason: 'invalid-response' };
+      return advice.confidence < minConfidence
+        ? { kind: 'skipped', reason: 'uncertain', advice } : { kind: 'advice', advice };
     })();
     try {
       return await Promise.race([operation, timeout]);

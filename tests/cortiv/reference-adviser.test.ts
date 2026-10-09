@@ -58,6 +58,13 @@ describe('ReferenceAdviceClient', () => {
       } });
   });
 
+  it('preserves probability thresholds when the service reports above-chance confidence', async () => {
+    const value = payload();
+    value.answers.topic.confidence = (0.9 - 1 / 3) / (1 - 1 / 3);
+    expect(await new ReferenceAdviceClient(config, async () => reply(value)).advise({}, topics, 'normalised'))
+      .toMatchObject({ kind: 'advice', advice: { confidence: 0.9 } });
+  });
+
   it('rejects invalid catalogues and oversized or circular state without a request', async () => {
     const fetchImpl = vi.fn(async () => reply());
     const client = new ReferenceAdviceClient(config, fetchImpl);

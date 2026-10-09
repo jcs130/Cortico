@@ -32,7 +32,7 @@ import { blockAtCell, resolveAt } from './cell-facts.ts';
 import { FLIGHT_PLAN_MAX_POINTS, parseFlightPlan, previewFlightPlan } from './flight-preview.ts';
 import { MethodRunner, METHOD_LIMITS, type MethodOperation, type MethodRun } from './method-runner.ts';
 import { flightState } from './flight.ts';
-import { createDecisionAdviser, type DecisionAdvice } from './decision-adviser.ts';
+import { createDecisionAdviser, DECISION_MIN_CONFIDENCE, type DecisionAdvice } from './decision-adviser.ts';
 import { IdleBehaviorController, type IdleBehaviorScene } from './idle-behavior.ts';
 import { sampleIdleActions, executeIdleAction } from './idle-actions.ts';
 import { RejectedRouteLedger, sameRejectedRouteOrigin, type RejectedRouteScope } from './rejected-route-ledger.ts';
@@ -8138,25 +8138,42 @@ export class MinecraftWorld implements World {
     const endpoint = config?.endpoint?.trim() ?? '';
     const host = this.host;
     if (!config?.enabled || !endpoint || !host || this.shuttingDown) return;
-    const adviserKey = `${endpoint}\0${config.timeoutMs}\0${config.minIntervalMs}`;
+    const adviserKey = `${endpoint}\0${config.timeoutMs}\0${config.minIntervalMs}\0${config.minConfidence}`;
     if (!this.decisionAdviser || this.decisionAdviserKey !== adviserKey) {
       this.decisionAdviser = createDecisionAdviser({
-        endpoint, timeoutMs: config.timeoutMs, minIntervalMs: config.minIntervalMs,
+        endpoint, timeoutMs: config.timeoutMs, minIntervalMs: config.minIntervalMs, minConfidence: config.minConfidence,
       });
       this.decisionAdviserKey = adviserKey;
     }
     const generation = this.connectionGeneration;
     const bot = this.bridge?.bot;
     const bounded = (value: string, max: number): string => value.slice(0, max);
+    const excerptMarker = '\n[中间未展开]\n';
+    const receiptExcerpt = receipt.length <= 1200 ? receipt
+      : receipt.slice(0, 390) + excerptMarker + receipt.slice(-(1200 - 390 - excerptMarker.length));
+    const sampledAt = new Date().toISOString();
+    const snapshot = this.snapshot({ scanBlocks: false });
     const dimension = bot?.game?.dimension ? bounded(normalizeDimension(bot.game.dimension), 80) : null;
     const position = bot?.entity?.position;
     const finite = (value: unknown): number | null => typeof value === 'number' && Number.isFinite(value) ? value : null;
+    const sampledPosition = position ? { x: finite(position.x), y: finite(position.y), z: finite(position.z) } : null;
+    const sampledHealth = finite(bot?.health);
+    const resources = (snapshot: WorldSnapshot | null) => ({
+      inventory: snapshot?.invSynced ? snapshot.inventory.slice(0, 12).map(item => ({ name: item.name, count: item.count })) : null,
+      inventoryOmitted: snapshot?.invSynced ? Math.max(0, snapshot.inventory.length - 12) : null,
+      heldItem: snapshot?.heldItem ?? null,
+      equipment: snapshot?.equipment.map(item => ({ slot: item.slot, name: item.name })) ?? null,
+    });
+    const sampledResources = resources(snapshot);
     const state: Record<string, unknown> = {
-      task: { id: taskId, receipt: bounded(receipt, 1200), outcome: 'blocked' },
+      sampledAt,
+      task: { id: taskId, receipt: receiptExcerpt, outcome: 'blocked' },
       player: {
-        health: finite(bot?.health), food: finite(bot?.food), dimension,
-        position: position ? { x: finite(position.x), y: finite(position.y), z: finite(position.z) } : null,
+        health: sampledHealth, food: finite(bot?.food), dimension, position: sampledPosition, ...sampledResources,
       },
+      registeredGoals: this.goals().list.slice(0, 3).map(goal => ({ slot: goal.slot,
+        intention: bounded(goal.text, 120), nextStep: bounded(goalPlanSummary(goal.plan).next?.do ?? '', 120) })),
+      boundary: '目标是登记意图；仅列出部分随身物品，缺项不等于没有。回执是过去的执行结果，不代表新任务仍然受阻。',
       queue: (() => {
         const status = this.executor?.status();
         if (!status) return null;
@@ -8174,10 +8191,12 @@ export class MinecraftWorld implements World {
         };
       })(),
     };
-    const receiptKey = createHash('sha256').update(bounded(receipt.replace(/#\d+/g, '#'), 1200))
+    const receiptKey = createHash('sha256').update(receiptExcerpt.replace(/#\d+/g, '#'))
       .digest('hex').slice(0, 16);
+    const resourceKey = JSON.stringify([sampledResources, state.registeredGoals]);
     const sceneKey = `${dimension ?? 'unknown'}:${position
-      ? `${Math.round(position.x)},${Math.round(position.y)},${Math.round(position.z)}` : 'unknown'}:${receiptKey}`;
+      ? `${Math.round(position.x)},${Math.round(position.y)},${Math.round(position.z)}` : 'unknown'}:${receiptKey}:${createHash('sha256').update(resourceKey).digest('hex').slice(0, 12)}`;
+    const runningTaskId = this.executor?.status().running?.id ?? null;
     const staleReason = (): string | null => {
       if (this.shuttingDown || this.host !== host) return 'stopped';
       if (this.taskReportVersions.get(taskId) !== reportVersion) return 'task-updated';
@@ -8185,7 +8204,15 @@ export class MinecraftWorld implements World {
       const currentDimension = this.bridge?.bot?.game?.dimension
         ? bounded(normalizeDimension(this.bridge.bot.game.dimension), 80) : null;
       if (currentDimension !== dimension) return 'dimension-changed';
-      if (!this.cfg.decision?.enabled || this.cfg.decision.endpoint.trim() !== endpoint) return 'disabled';
+      if ((this.executor?.status().running?.id ?? null) !== runningTaskId) return 'queue-changed';
+      const currentPosition = bot?.entity?.position;
+      if (sampledPosition && currentPosition && Math.hypot(currentPosition.x - Number(sampledPosition.x),
+        currentPosition.y - Number(sampledPosition.y), currentPosition.z - Number(sampledPosition.z)) > 2) return 'position-changed';
+      if (finite(bot?.health) !== sampledHealth) return 'health-changed';
+      if (JSON.stringify(resources(this.snapshot({ scanBlocks: false }))) !== JSON.stringify(sampledResources)) return 'resources-changed';
+      const currentConfig = this.cfg.decision;
+      if (!currentConfig?.enabled || currentConfig.endpoint.trim() !== endpoint) return 'disabled';
+      if (`${endpoint}\0${currentConfig.timeoutMs}\0${currentConfig.minIntervalMs}\0${currentConfig.minConfidence}` !== adviserKey) return 'config-changed';
       return null;
     };
     try {
@@ -8196,7 +8223,13 @@ export class MinecraftWorld implements World {
           msg: `辅助判断迟到: ${stale}`, data: { sceneKey, reason: stale, result: result.kind } });
         return;
       }
-      if (result.kind === 'skipped') return;
+      if (result.kind === 'skipped') {
+        if (result.reason === 'uncertain') this.diag.write({ lane: 'task', event: 'decision-uncertain', taskId,
+          msg: '辅助判断证据不足，保留原任务回执', durMs: result.advice.latencyMs,
+          data: { sceneKey, sampledAt, choice: result.advice.choice, confidence: result.advice.confidence,
+            probabilities: result.advice.probabilities, minConfidence: config.minConfidence ?? DECISION_MIN_CONFIDENCE } });
+        return;
+      }
       if (result.kind === 'error') {
         this.diag.write({ lane: 'task', event: 'decision-error', taskId,
           msg: `辅助判断失败: ${result.reason}`,
@@ -8208,23 +8241,25 @@ export class MinecraftWorld implements World {
       this.lastDecisionAdviceSceneKey = sceneKey;
       this.diag.write({ lane: 'task', event: 'decision-advice', taskId,
         msg: '辅助判断已返回建议', durMs: advice.latencyMs,
-        data: { sceneKey, choice: advice.choice, confidence: advice.confidence,
+        data: { sceneKey, sampledAt, choice: advice.choice, confidence: advice.confidence, probabilities: advice.probabilities,
           riskScore: advice.riskScore, latencyMs: advice.latencyMs } });
-      this.emit('minecraft.event', this.renderDecisionAdvice(taskId, advice), false, { trigger: 'piggyback' });
+      this.emit('minecraft.event', this.renderDecisionAdvice(taskId, advice, sampledAt), false, { trigger: 'piggyback' });
     } catch (error) {
       this.diag.write({ lane: 'task', event: 'decision-error', taskId,
         msg: `辅助判断失败: ${String(error)}`, data: { sceneKey, reason: 'unexpected' } });
     }
   }
 
-  private renderDecisionAdvice(taskId: number, advice: DecisionAdvice): string {
+  private renderDecisionAdvice(taskId: number, advice: DecisionAdvice, sampledAt: string): string {
     const suggestion = {
       inspect: '核对现场和受阻原因',
       replan: '重新规划当前路线或步骤',
       resupply: '补足当前任务所需资源',
       pause: '暂缓当前任务',
     }[advice.choice];
-    return `[Minecraft][小模型辅助判断，未经核验] 任务#${taskId}建议先${suggestion}；估计继续原任务的风险 ${advice.riskScore.toFixed(1)}/3。`;
+    return `[Minecraft][小模型辅助判断，未经核验] 依据${sampledAt}的采样，任务#${taskId}建议先${suggestion}；`
+      + `首选概率${Math.round(advice.confidence * 100)}%，估计继续原任务的风险 ${advice.riskScore.toFixed(1)}/3。`
+      + '只针对该受阻分支；结合较新现场、目标和回执自行决定，不能据此停止全部活动。';
   }
 
   private lastHealth: number | null = null;

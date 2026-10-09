@@ -1,3 +1,5 @@
+import { parseTypedChoice } from '../../../src/protocol/typed-decision.ts';
+
 export interface FastReferenceConfig {
   enabled: boolean;
   endpoint: string;
@@ -43,40 +45,17 @@ function object(value: unknown): Record<string, unknown> | null {
     ? value as Record<string, unknown> : null;
 }
 
-function probability(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
-}
-
-function distribution(value: unknown, keys: readonly string[]): Record<string, number> | null {
-  const values = object(value);
-  if (!values || Object.keys(values).length !== keys.length
-    || !keys.every(key => Object.hasOwn(values, key) && probability(values[key]))
-    || Math.abs(keys.reduce((sum, key) => sum + Number(values[key]), 0) - 1) > 0.02) return null;
-  return Object.fromEntries(keys.map(key => [key, Number(values[key])]));
-}
-
-function choice(value: unknown, keys: readonly string[]): {
-  choice: string; confidence: number; probabilities: Record<string, number>;
-} | null {
-  const answer = object(value);
-  if (!answer || answer.type !== 'choice' || typeof answer.choice !== 'string'
-    || !keys.includes(answer.choice) || !probability(answer.confidence)) return null;
-  const probabilities = distribution(answer.probabilities, keys);
-  if (!probabilities || Math.abs(probabilities[answer.choice] - answer.confidence) > 0.01) return null;
-  return { choice: answer.choice, confidence: answer.confidence, probabilities };
-}
-
 function parseAdvice(value: unknown, topicKeys: readonly string[], sampledAtMs: number): ReferenceAdvice | null {
   const root = object(value);
   const answers = object(root?.answers);
   if (!root || !answers) return null;
-  const topic = choice(answers.topic, topicKeys);
+  const topic = parseTypedChoice(answers.topic, topicKeys);
   if (!topic) return null;
   if (root.latency_ms !== undefined && (typeof root.latency_ms !== 'number'
     || !Number.isFinite(root.latency_ms) || root.latency_ms < 0)) return null;
   return {
     topicKey: topic.choice === 'none' ? null : topic.choice,
-    confidence: topic.confidence,
+    confidence: topic.choiceProbability,
     topicProbabilities: topic.probabilities,
     sampledAtMs,
     ...(typeof root.latency_ms === 'number' ? { latencyMs: root.latency_ms } : {}),
