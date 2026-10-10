@@ -27,6 +27,9 @@ import { loadViewerSoundRegistry } from './viewer-sound-registry.ts';
 import { observeViewerFishingCatch, viewerDroppedItem } from './viewer-fishing.ts';
 import { viewerPageCss, viewerPageHtml } from './viewer-page-assets.ts';
 import { serveViewerAsset } from './viewer-asset-server.ts';
+import { createViewerContentBridge } from './viewer-content.mjs';
+import { createViewerAppearanceBridge } from './viewer-appearance.mjs';
+import { viewerPhotoPage } from './viewer-photo-page.mjs';
 import { minecraftTextComponent } from './text-component.ts';
 import type { EventEmitter } from 'node:events';
 import { isRaining } from './terrain.ts';
@@ -439,6 +442,8 @@ export async function startModernViewer(bot: mineflayer.Bot, options: ModernView
   const speakerScript = speechBubbleScript.replace("'__VIEWER_SPEAKER_NAME__'",
     JSON.stringify(options.speakerName || bot.username));
   const speechRelay = new ViewerSpeechRelay(options.speechSourceId || bot.username);
+  const content = bot.version === '1.20.6' ? createViewerContentBridge(bot) : null;
+  const appearance = bot.version === '1.20.6' ? createViewerAppearanceBridge(bot) : null;
 
   const origin = `http://127.0.0.1:${options.port}`;
   const sessions = new Set<() => void>();
@@ -569,7 +574,7 @@ export async function startModernViewer(bot: mineflayer.Bot, options: ModernView
   let particleWindowAt = 0;
   let particleCount = 0;
   const onParticle = (packet: unknown) => {
-    if (closed || !viewerSockets.size) return;
+    if (content || closed || !viewerSockets.size) return;
     const now = Date.now();
     if (now - particleWindowAt >= 1_000) { particleWindowAt = now; particleCount = 0; }
     if (++particleCount > 96) return;
@@ -687,13 +692,17 @@ export async function startModernViewer(bot: mineflayer.Bot, options: ModernView
       const pathname = new URL(req.url ?? '/', origin).pathname;
       if ((req.method !== 'GET' && !(req.method === 'DELETE' && pathname === '/capture-lease'))
           || req.headers.host !== `127.0.0.1:${options.port}`) { res.writeHead(403); res.end(); return; }
-      if (pathname === '/' || pathname === '/third/' || pathname === '/dungeon/') {
+      if (pathname === '/' || pathname === '/third/' || pathname === '/dungeon/' || pathname === '/photo/') {
         const viewMode = pathname === '/third/' ? 'third' : pathname === '/dungeon/' ? 'dungeon' : 'first';
-        const page = await viewerPageHtml(root, viewMode, PAGE,
+        const photo = pathname === '/photo/';
+        const page = photo ? await viewerPhotoPage(root) : await viewerPageHtml(root, viewMode, PAGE,
           '<iframe class="corti-speech-bubble" id="corti-speech-bubble" title="主播语音气泡" aria-label="主播语音气泡" hidden></iframe>',
           '<script src="/speech-bubble.js" defer></script>');
+        const readyScript = photo ? page.match(/<script>([\s\S]*?)<\/script>/)?.[1] : undefined;
+        const scriptPolicy = "'self' 'unsafe-eval'" + (readyScript
+          ? ` 'sha256-${createHash('sha256').update(readyScript).digest('base64')}'` : '');
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store',
-          'content-security-policy': "default-src 'self' data: blob:; connect-src 'self' data: blob: ws://127.0.0.1:* http://127.0.0.1:*; frame-src 'self' http://127.0.0.1:*; img-src 'self' data: blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-eval'" });
+          'content-security-policy': "default-src 'self' data: blob:; connect-src 'self' data: blob: ws://127.0.0.1:* http://127.0.0.1:*; frame-src 'self' http://127.0.0.1:*; img-src 'self' data: blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src " + scriptPolicy });
         res.end(page); return;
       }
       if (pathname === '/viewer.css') {
@@ -708,7 +717,8 @@ export async function startModernViewer(bot: mineflayer.Bot, options: ModernView
       if (await speechRelay.handle(req, res, pathname)) return;
       if (pathname === '/healthz') {
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-        res.end(JSON.stringify({ ok: !closed, version: bot.version, ...sessionSlots.status() })); return;
+        res.end(JSON.stringify({ ok: !closed, version: bot.version, ...sessionSlots.status(), content: content?.stats() ?? null,
+          appearance: appearance ? { states: appearance.snapshot().length } : null })); return;
       }
       if (pathname === '/capture-lease') {
         const key = req.headers['x-mc-viewer-capture-key'];
@@ -793,6 +803,8 @@ export async function startModernViewer(bot: mineflayer.Bot, options: ModernView
       socket.emit('viewerBusy', { maximum: capture ? MAX_CAPTURE_SESSIONS : MAX_SESSIONS });
       socket.disconnect(true); return;
     }
+    const stopContent = content?.subscribeSocket(socket);
+    const stopAppearance = appearance?.subscribeSocket(socket);
     // WorldView owns chunks and block updates. Its stock entity packets omit villager
     // metadata, so the bounded stream below publishes entities separately.
     const biomeIds = biomeIdMap(bot.registry, vanillaBiomes);
@@ -925,7 +937,7 @@ export async function startModernViewer(bot: mineflayer.Bot, options: ModernView
     const lightTimer = setInterval(publishLight, 500);
     const pendingEntities = new Map<string, { entity: ViewerEntity; full: boolean }>();
     const knownEntities = new Set<string>();
-    const nearby = (entity: ViewerEntity) => entity !== bot.entity && entity.position && bot.entity?.position &&
+    const nearby = (entity: ViewerEntity) => entity !== bot.entity && entity.name !== 'text_display' && entity.position && bot.entity?.position &&
       Math.hypot(entity.position.x - bot.entity.position.x, entity.position.z - bot.entity.position.z) <= VIEW_DISTANCE * 16;
     const removeEntity = (entity: ViewerEntity) => {
       const id = String(entity.id);
@@ -1125,6 +1137,8 @@ export async function startModernViewer(bot: mineflayer.Bot, options: ModernView
     const stop = () => {
       if (!active) return;
       active = false;
+      stopContent?.();
+      stopAppearance?.();
       captureLease?.stop();
       if (captureKey && captureLeases.get(captureKey) === captureLease) captureLeases.delete(captureKey);
       releaseSlot();
@@ -1205,6 +1219,8 @@ export async function startModernViewer(bot: mineflayer.Bot, options: ModernView
       server.listen(options.port, '127.0.0.1', () => { server.off('error', reject); resolve(); });
     });
   } catch (error) {
+    content?.dispose();
+    appearance?.dispose();
     first.close(); third.close();
     throw error;
   }
@@ -1284,6 +1300,8 @@ export async function startModernViewer(bot: mineflayer.Bot, options: ModernView
     async close() {
       if (closed) return;
       closed = true;
+      content?.dispose();
+      appearance?.dispose();
       speechRelay.close();
       stopInventoryPreview();
       (bot as unknown as EventEmitter).off('path_update', onPathUpdate);
