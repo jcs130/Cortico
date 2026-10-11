@@ -37,12 +37,15 @@ import { trackWindowProps } from './containers.ts';
 import { installTreadWater } from './travel.ts';
 import { trackMaps } from './map-view.ts';
 import { trackDamageSources } from './damage-source.ts';
+import { installServerLogin } from './server-login.mjs';
 
 interface BridgeOptions {
   host: string;
   port: number;
   username: string;
   version: string;
+  /** Private account configuration, reread for every network connection. Empty disables automatic login. */
+  loginConfigFile?: () => string;
   /** prismarine-viewer 网页端口;0=不开 viewer */
   viewerPort: number;
   viewerAssetsDir?: string;
@@ -424,6 +427,10 @@ export class Bridge {
     this._bot = bot;
     this.spawnedBot = null;
     this.opts.onBotCreated?.(bot);
+    const login = installServerLogin(bot, { server: `${host}:${port}`, username,
+      configFile: this.opts.loginConfigFile?.(),
+      report: status => log.info(`minecraft authentication ${status.status}`, { username, server: `${host}:${port}` }) });
+    this.bagFor(gen).register('server-login', login.stop);
     this.bagFor(gen).register('flight-abilities', watchFlightAbilities(bot));
     this.agentMana = undefined;
     const onAgentState = (packet: { channel?: unknown; data?: unknown }) => {

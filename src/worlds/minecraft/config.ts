@@ -9,6 +9,8 @@ export const MINECRAFT_DEFAULTS = {
   port: 25565,
   /** 游戏内用户名(offline 模式直接生效) */
   username: 'corti',
+  /** Private scoped account file; only encrypted credential references are read by the client. */
+  loginConfigFile: '',
   /**
    * 全链路的版本约定:服务器(Paper)、观察者客户端(Fabric+SpectatorPlus)、
    * mineflayer 协议必须使用同一版本。1.20.6 是 SpectatorPlus(观察者附身时补渲
@@ -200,6 +202,7 @@ export interface MinecraftConfigSection {
   host: string;
   port: number;
   username: string;
+  loginConfigFile: string;
   version: string;
   viewerPort: number;
   viewerAssetsDir: string;
@@ -278,6 +281,9 @@ export const MINECRAFT_CONFIG_GROUP: ConfigGroup = {
       'worlds.minecraft.host': { type: 'string', title: '服务器地址', 'x-hot': false },
       'worlds.minecraft.port': { type: 'integer', title: '端口', minimum: 1, maximum: 65535, 'x-hot': false },
       'worlds.minecraft.username': { type: 'string', title: '游戏内用户名', 'x-hot': false },
+      'worlds.minecraft.loginConfigFile': { type: 'string', title: '自动登录配置文件', 'x-hot': true,
+        description: '仅匹配账号与服务器的系统认证提示触发，每次连接提交一次；文件只保存加密凭据路径。留空关闭，下次自然重连读取。',
+        'x-path': { kind: 'file', extensions: ['.json'] } },
       'worlds.minecraft.version': {
         type: 'string', title: '协议版本', 'x-hot': false,
         description: 'mineflayer 按此版本连接,要与服务器一致。',

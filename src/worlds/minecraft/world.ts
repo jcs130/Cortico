@@ -4095,6 +4095,7 @@ export class MinecraftWorld implements World {
       port: this.cfg.port,
       username: this.cfg.username || this.botName,
       version: this.cfg.version,
+      loginConfigFile: () => this.cfg.loginConfigFile,
       viewerPort: this.cfg.viewerPort,
       viewerAssetsDir: this.cfg.viewerAssetsDir,
       viewerSpeakerName: this.cfg.viewerSpeakerName,
