@@ -4,7 +4,7 @@
  * protected 成员供变体继承，不属于公共 API。
  */
 import { existsSync, readFileSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { renderSections, renderTemplate } from 'cortico/core/template.ts';
 import { pick, type Language } from 'cortico/core/language.ts';
@@ -13,6 +13,7 @@ import { HANDOFF_NOTE_TYPE, handoffNoteStamp, renderHandoffNote } from './handof
 import { saveBlobTool } from './blobs.ts';
 import { BLOBS_DIR, GitWorkspaceMemory, type WorkspaceBlobStore } from './memory.ts';
 import { workspaceTools } from './workspaceTools.ts';
+import { ProcedureMemory, PROCEDURES_DIR, managedProcedurePath } from './procedures.ts';
 import { Heartbeat, quietLine } from './heartbeat.ts';
 import type { ContextRecord, Item } from 'cortico/protocol/open-responses/context.ts';
 import type {
@@ -202,6 +203,7 @@ export class Cormini implements Persona {
   readonly memory: GitWorkspaceMemory;
   /** 工作区二进制附件；mem: 句柄保存相对路径。 */
   readonly blobs: WorkspaceBlobStore;
+  private readonly procedures: ProcedureMemory;
 
   constructor(opts: CorminiOptions) {
     this.memory = new GitWorkspaceMemory({
@@ -215,6 +217,8 @@ export class Cormini implements Persona {
     });
     this.memoryDir = this.memory.memoryDir;
     this.blobs = this.memory.blobs;
+    this.procedures = new ProcedureMemory({ memory: this.memory, core: () => this.core,
+      guard: (path, role) => this.writeGuard('write', path, role) });
     this.context = opts.context ?? ((): ContextStagePolicy => CORMINI_CONTEXT_DEFAULTS);
     this.caps = opts.rounds ?? { soft: 6, hard: 12 };
     this.orientationFile = opts.orientationFile ?? CORMINI_ORIENTATION_FILE;
@@ -519,6 +523,7 @@ export class Cormini implements Persona {
         prefix: BLOBS_DIR,
         line: (n) => `${BLOBS_DIR} (${n} 份二进制;list_files 指定 dir 为 ${BLOBS_DIR.replace(/\/$/, '')} 可列出全部,read_file 看图)`,
       },
+      { prefix: PROCEDURES_DIR, line: () => `${PROCEDURES_DIR} (procedure_find 按目的和条件检索可执行方法；procedure_help 读组合与验证指南)` },
     ];
   }
 
@@ -537,6 +542,10 @@ export class Cormini implements Persona {
   }
 
   onDelivery(ctx: { events: EventEnvelope[] }): void {
+    for (const event of ctx.events) {
+      try { this.procedures.observe(event); }
+      catch (error) { this.core?.log.warn('方法执行证据未保存', { cursor: event.cursor, error: String(error) }); }
+    }
     const externals = ctx.events.filter((e) => e.origin === 'external');
     if (externals.length === 0) return;
     // Deferred snapshots ride along with a tick. They are observations, not
@@ -715,15 +724,16 @@ export class Cormini implements Persona {
     return [
       ...workspaceTools({
         memory: this.memory,
-        writeGuard: (op, path, role) => this.writeGuard(op, path, role),
+        writeGuard: (op, path, role) => this.workspaceWriteGuard(op, path, role),
         readOverride: (path) => this.readOverride(path),
         prefixResidentFiles: () => this.prefixResidentFiles(),
       }),
       saveBlobTool({
         blobs: this.blobs,
         core: () => this.core,
-        guard: (path, role) => this.writeGuard('write', path, role),
+        guard: (path, role) => this.workspaceWriteGuard('write', path, role),
       }),
+      ...this.procedures.tools(),
     ];
   }
 
@@ -733,6 +743,14 @@ export class Cormini implements Persona {
    */
   protected writeGuard(_op: 'write' | 'append' | 'rename' | 'delete', _path: string, _role: string): string | null {
     return null;
+  }
+
+  private workspaceWriteGuard(op: 'write' | 'append' | 'rename' | 'delete', path: string, role: string): string | null {
+    try {
+      const rel = relative(this.memoryDir, this.memory.insideWorkspace(path));
+      if (managedProcedurePath(rel)) return 'procedures/ 由方法管理器维护；用 procedure_save/review/adopt 保存版本、证据评价和采用记录。';
+    } catch (error) { return error instanceof Error ? error.message : String(error); }
+    return this.writeGuard(op, path, role);
   }
 
   /** read_file 的虚拟文件:返回正文就不读盘(如随软件走的机制说明);null 走正常读取。 */

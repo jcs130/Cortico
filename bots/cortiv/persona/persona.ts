@@ -1316,7 +1316,10 @@ export class CortiV extends Cormini {
             : t.name === 'delete_file' ? this.committed(t, 'delete', '[deleted] ')
               : t.name === 'append_file' ? this.committed(t, 'append', '[appended] ')
                 : t.name === 'save_blob' ? this.committed(t, 'save', '[saved] ')
-                  : t)),
+                  : t.name === 'procedure_save' ? this.committed(t, 'save', '[procedure saved] ')
+                    : t.name === 'procedure_review' ? this.committed(t, 'save', '[procedure reviewed] ')
+                      : t.name === 'procedure_adopt' ? this.committed(t, 'save', '[procedure adopted] ')
+                        : t)),
       ...this.historyTools(),
       this.stateMemory.tool(),
       this.recallTool(),

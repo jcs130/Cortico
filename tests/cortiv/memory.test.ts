@@ -613,7 +613,8 @@ describe('CortiV 并行梦', () => {
     expect(dream.tools().map((t) => t.name).sort())
       .toEqual([
         'append_file', 'delete_file', 'edit_file', 'git_log', 'git_show', 'glob_files', 'grep_files',
-        'list_files', 'memory_record', 'read_file', 'recall_viewer', 'save_blob', 'write_file',
+        'list_files', 'memory_record', 'procedure_find', 'procedure_help',
+        'read_file', 'recall_viewer', 'save_blob', 'write_file',
       ]);
   });
 

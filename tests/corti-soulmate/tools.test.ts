@@ -32,11 +32,13 @@ describe('工具集(按认知路径)', () => {
   it('主 session = Cormini 文件工具 + save_blob + move_file + end_turn + schedule_wake;梦没有闹钟与收工', () => {
     expect(names(main)).toEqual([
       'append_file', 'delete_file', 'edit_file', 'end_turn', 'glob_files', 'grep_files', 'list_files',
-      'move_file', 'read_file', 'save_blob', 'schedule_wake', 'write_file',
+      'move_file', 'procedure_adopt', 'procedure_find', 'procedure_help', 'procedure_review', 'procedure_save',
+      'read_file', 'save_blob', 'schedule_wake', 'write_file',
     ]);
     expect(names(dream)).toEqual([
       'append_file', 'delete_file', 'edit_file', 'glob_files', 'grep_files', 'list_files',
-      'move_file', 'read_file', 'save_blob', 'write_file',
+      'move_file', 'procedure_adopt', 'procedure_find', 'procedure_help', 'procedure_review', 'procedure_save',
+      'read_file', 'save_blob', 'write_file',
     ]);
   });
 
