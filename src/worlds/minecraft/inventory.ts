@@ -115,8 +115,11 @@ export function noSuchItem(
     const targets = same.map((i) => pickTargetOf(i, bot.registry as never));
     return new SkillBlocked(pickMissText('包里', item, pick, targets));
   }
-  const available = [...new Set(bot.inventory.items().map((i) => i.name))];
-  return new SkillBlocked(`包里没有${zhName(item)}${itemIdHint(bot, item, bot.inventory.items())}${available.length > 0 ? `；可用工具物品名: ${available.join('、')}` : ''}`);
+  const stock = itemsInReach(bot);
+  const hint = itemIdHint(bot, item, stock);
+  const missing = hint ? `物品选择器「${item}」未命中当前库存${hint}` : `包里没有${zhName(item)}`;
+  const available = [...new Set(stock.map((i) => i.name))];
+  return new SkillBlocked(`${missing}${available.length > 0 ? `；可用工具物品名: ${available.join('、')}` : ''}`);
 }
 
 /** 「附魔书(带「无限」的)」:点名到具体一件时,受阻话里也要带上挑选词 */

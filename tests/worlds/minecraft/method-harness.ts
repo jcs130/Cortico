@@ -35,7 +35,7 @@ export function methodHarness() {
     game: { dimension: 'overworld', gameMode: 'survival' }, entities: {}, players: {}, health: 20, food: 20,
     time: { timeOfDay: 1000 }, rainState: 0, oxygenLevel: 20,
     entity: { id: 1, position: new Vec3(0.5, 64, 0.5), velocity: new Vec3(0, 0, 0), yaw: 0, pitch: 0,
-      onGround: true, height: 1.8, effects: {}, attributes: {} },
+      onGround: true, height: 1.8, eyeHeight: 1.62, effects: {}, attributes: {} },
     inventory: { slots: Array(46).fill(null), items: () => [] }, heldItem: null, currentWindow: null,
     controlState: keys, jumpTicks: 0, jumpQueued: false, physicsEnabled: true,
     physics: Physics(registry, blockWorld), blockAt, findBlocks: () => [],
@@ -51,7 +51,8 @@ export function methodHarness() {
     report: report => internals.onTaskReport(report), log: host.log, nextId: nextTaskId() });
   Object.assign(world, { host, executor: exec, bridge: { bot, invSynced: true } });
   const timer = setInterval(() => {
-    if (bot.physicsEnabled) { const state = new PlayerState(bot, keys); bot.physics.simulatePlayer(state, blockWorld); state.apply(bot); }
+    if (bot.physicsEnabled) { const state = new PlayerState(bot, bot.controlState); bot.physics.simulatePlayer(state, blockWorld); state.apply(bot); }
+    bot.emit('physicsTick');
   }, 50);
   const detach = watchFlightAbilities(bot as unknown as Bot);
   return { world, exec, bot, said, keys, host, runner: internals.methods,

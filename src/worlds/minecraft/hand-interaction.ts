@@ -56,12 +56,12 @@ export async function clearHandForBlockInteraction(bot: Bot, requireEmpty = fals
 /** 寻路器的 useOne 开门直接调用 bot.activateBlock，也须走同一条腾手规则。 */
 export function installNavigationBareHand(bot: Bot): void {
   const original = bot.activateBlock.bind(bot);
-  bot.activateBlock = async (block, direction) => {
+  bot.activateBlock = async (block, direction, cursorPos) => {
     if (preparedInteractionHand.getStore() !== bot
       && block && /(^|_)(?:door|fence_gate)$/.test(block.name)
       && needsBareHandToInteract(block.name, bot.heldItem?.name)) {
       await clearHandForBlockInteraction(bot);
     }
-    return original(block, direction);
+    return original(block, direction, cursorPos);
   };
 }

@@ -1168,12 +1168,14 @@ describe('bridge 死亡重生通知', () => {
     return { bridge, events, bot: inner(bridge)._bot as EventEmitter };
   }
 
-  it('握手中的 Bot 不交给执行器；实体到达后可用，断线后再次不可用', () => {
+  it('握手中的 Bot 不交给执行器；实体先到也须等首次出生，断线后再次不可用', () => {
     const { bridge, bot } = rig();
     expect(inner(bridge)._bot).toBe(bot);
     expect(bridge.connected).toBe(false);
     expect(bridge.bot).toBeNull();
     (bot as EventEmitter & { entity?: unknown }).entity = { position: new Vec3(0.5, 64, 0.5) };
+    expect(bridge.connected).toBe(false);
+    expect(bridge.bot).toBeNull();
     bot.emit('spawn');
     expect(bridge.connected).toBe(true);
     expect(bridge.bot).toBe(bot);

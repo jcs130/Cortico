@@ -51,12 +51,12 @@ export async function equipSlotConfirmed(bot: Bot, item: Item, dest: EquipmentDe
 }
 
 /** The caller checks storage capacity; cursor recovery never drops the item. */
-export async function clearOffHandConfirmed(bot: Bot): Promise<void> {
+export async function unequipSlotConfirmed(bot: Bot, dest: EquipmentDestination): Promise<void> {
   requirePlayerInventory(bot);
-  const slot = bot.getEquipmentDestSlot('off-hand');
+  const slot = bot.getEquipmentDestSlot(dest);
   await equipmentMove(bot, slot, async () => {
     if (bot.supportFeature?.('stateIdUsed') !== true) {
-      await bot.unequip('off-hand');
+      await bot.unequip(dest);
       return;
     }
     await resumeInventoryCursor(bot);
@@ -64,6 +64,8 @@ export async function clearOffHandConfirmed(bot: Bot): Promise<void> {
     await resumeInventoryCursor(bot);
   });
   if (bot.inventory.slots[slot] || bot.inventory.selectedItem) {
-    throw new SkillBlocked(`腾空后副手回读为${itemText(bot.inventory.slots[slot])}，未确认收回背包`, [], 'server');
+    throw new SkillBlocked(`腾空后${dest === 'off-hand' ? '副手' : dest}回读为${itemText(bot.inventory.slots[slot])}，未确认收回背包`, [], 'server');
   }
 }
+
+export const clearOffHandConfirmed = (bot: Bot): Promise<void> => unequipSlotConfirmed(bot, 'off-hand');

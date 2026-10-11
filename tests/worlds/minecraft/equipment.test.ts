@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 import type { Bot } from 'mineflayer';
-import { clearOffHandConfirmed, equipSlotConfirmed } from '../../../src/worlds/minecraft/equipment.ts';
+import { clearOffHandConfirmed, equipSlotConfirmed, unequipSlotConfirmed } from '../../../src/worlds/minecraft/equipment.ts';
 import { skillEquip } from '../../../src/worlds/minecraft/skills-craft.ts';
 import { installInventoryClickSync, INVENTORY_CLICK_CONFIRM_MS } from '../../../src/worlds/minecraft/inventory-click-sync.ts';
 
@@ -56,6 +56,22 @@ function equipmentServer(options: { denySwap?: boolean; denyPickup?: boolean; si
 afterEach(() => vi.useRealTimers());
 
 describe('equipment server confirmation', () => {
+  it('returns armor to inventory only after server pickup and cursor recovery are confirmed', async () => {
+    vi.useFakeTimers();
+    const rig = equipmentServer();
+    rig.seed(5, 'iron_helmet');
+    let finished = false;
+    const remove = unequipSlotConfirmed(rig.bot, 'head').then(() => { finished = true; });
+    await vi.advanceTimersByTimeAsync(165);
+    expect(finished).toBe(false);
+    expect(rig.server.slots[5]).toBeNull();
+    await vi.runAllTimersAsync(); await remove;
+    expect(finished).toBe(true);
+    expect(rig.server.items().map((item: { name: string }) => item.name)).toContain('iron_helmet');
+    expect(rig.server.selectedItem).toBeNull();
+    expect(rig.sent).not.toContain(-999);
+  });
+
   it('finishes a shield swap only after pickup, placement and cursor return are confirmed', async () => {
     vi.useFakeTimers();
     const rig = equipmentServer();

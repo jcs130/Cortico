@@ -31,6 +31,7 @@ import { precheckEmptyUseTarget } from './precheck.ts';
 import { blockAtCell, resolveAt } from './cell-facts.ts';
 import { FLIGHT_PLAN_MAX_POINTS, parseFlightPlan, previewFlightPlan } from './flight-preview.ts';
 import { MethodRunner, METHOD_LIMITS, type MethodOperation, type MethodRun } from './method-runner.ts';
+import { MineflayerMethod, NATIVE_API, nativeApiHelp } from './method-mineflayer.ts';
 import { flightState } from './flight.ts';
 import { createDecisionAdviser, DECISION_MIN_CONFIDENCE, type DecisionAdvice } from './decision-adviser.ts';
 import { IdleBehaviorController, type IdleBehaviorScene } from './idle-behavior.ts';
@@ -2227,7 +2228,10 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
       + 'A sent server command still needs observed effects; done is the executor result, not proof of an external quest. '
       + 'await mc.flightPlan(args) uses the same read-only geometry/budget contract as mc_flight_plan. '
       + 'Use JavaScript conditions, calculations and bounded loops to adapt to feedback. Prepare a timed route before casting; combine already-known cast/movement/blink steps with needs in one mc.do to avoid model delays. '
-      + 'No imports, process, filesystem, network or raw bot access. Calls must be awaited serially. '
+      + 'bot and Vec3 expose a bounded asynchronous transport for Mineflayer public primitives; use {api:"index"} then {api:"blockAt"}, {api:"activateItem"}, etc. for native signatures and differences. '
+      + 'Native calls preserve the current hand and do not navigate or select tools. bot.blockAt returns Block|null with getProperties() for your own JavaScript result checks. '
+      + 'The first native body call queues a body lease held until program end; after it, mc.do is unavailable in that program. Read calls do not acquire the body. '
+      + 'No imports, process, filesystem, network or private raw bot access. Calls must be awaited serially. '
       + `Limits: ${METHOD_LIMITS.sourceChars} source chars, ${METHOD_LIMITS.calls} SDK calls, ${METHOD_LIMITS.actions} action groups, default ${METHOD_LIMITS.durationMs}ms including queue waits, maximum ${METHOD_LIMITS.maxDurationMs}ms. `
       + 'Only one program runs at a time. New admitted body work, stop, death, disconnect, World stop or timeout revoke it and its own pending task. '
       + 'Returns a run id immediately; {runId} reads result and call summaries, {runId,call} expands one complete SDK call; {} lists the last eight run summaries, {stop:true} cancels the current run. '
@@ -2240,6 +2244,7 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
       params: { type: 'object', additionalProperties: true },
       durationMs: { type: 'integer', minimum: 1000, maximum: METHOD_LIMITS.maxDurationMs },
       validate: { type: 'boolean' }, runId: { type: 'integer', minimum: 1 },
+      api: { type: 'string', description: 'index lists the exposed Mineflayer public API; a method name returns only its signature, transport differences and result contract.' },
       call: { type: 'integer', minimum: 1, maximum: METHOD_LIMITS.calls }, stop: { type: 'boolean' },
     }, required: [] },
   },
@@ -2714,9 +2719,11 @@ export class MinecraftWorld implements World {
   private readonly methodTasks = new Map<number, (report: TaskReport) => void>();
   private readonly methodTerminals = new Map<number, TaskReport>();
   private readonly methods = new MethodRunner({
+    nativeMethods: Object.keys(NATIVE_API),
     call: (method, args, signal) => this.methodCall(method, args, signal),
     onFinish: (run) => this.onMethodFinish(run),
   });
+  private nativeMethod: { runId: number; session: MineflayerMethod } | null = null;
   private idleBehavior: IdleBehaviorController | null = null;
   private idleActivityVersion = 0;
   private idleQuietUntil = 0;
@@ -4243,6 +4250,10 @@ export class MinecraftWorld implements World {
       mc_combat_tactic: async (args) => this.setCombatTactic(args),
       mc_script: async (args) => {
         try {
+          if (args.api !== undefined) {
+            if (typeof args.api !== 'string' || ['code', 'runId', 'call', 'stop', 'validate'].some(key => args[key] !== undefined)) throw new Error('api 须单独使用');
+            return this.toolLog('mc_script', args, nativeApiHelp(args.api));
+          }
           if (args.validate !== undefined && typeof args.validate !== 'boolean') throw new Error('validate须为布尔值');
           if (args.stop !== undefined && typeof args.stop !== 'boolean') throw new Error('stop须为布尔值');
           if (args.stop === true) {
@@ -4321,11 +4332,25 @@ export class MinecraftWorld implements World {
     const bot = this.bridge?.bot;
     if (!bot?.entity || !this.executor) throw new Error('Minecraft尚未连接');
     if (method === 'state') return this.methodState();
+    if (method === 'mineflayer') {
+      if (typeof args.name !== 'string' || !Array.isArray(args.args)) throw new Error('原生调用须包含 name 与 args 数组');
+      const run = this.methods.current;
+      if (!run) throw new Error('自主程序权限已撤销');
+      if (this.nativeMethod?.runId !== run.id) {
+        this.nativeMethod = { runId: run.id, session: new MineflayerMethod({ executor: this.executor,
+          name: `方法#${run.id}「${run.name}」`, signal, getBot: () => this.bridge?.bot ?? null,
+          successful: () => this.methods.read(run.id)[0]?.status === 'completed',
+          revoke: reason => { if (this.methods.current?.id === run.id) this.methods.stop(reason); },
+          beforeEnqueue: () => this.interruptIdle('native-program') }) };
+      }
+      return this.nativeMethod.session.call(args.name, args.args);
+    }
     if (method === 'flightPlan') {
       const parsed = parseFlightPlan(args, this.markLookup());
       if ('error' in parsed) throw new Error(parsed.error);
       return previewFlightPlan(bot, parsed.steps, parsed.budgetMs, parsed.subdivide);
     }
+    if (this.nativeMethod?.session.ownsBody) throw new Error('当前原生程序已持有身体；mc.do 会等待自身，改用 bot 原生调用或结束后另起方法');
     let decision: TaskAdmissionDecision | undefined;
     // Explicit append keeps a method's single outstanding group behind existing work.
     // Plain chat also follows the executor so its receipt has a real task identity.
@@ -4358,6 +4383,7 @@ export class MinecraftWorld implements World {
   }
 
   private onMethodFinish(run: MethodRun): void {
+    if (this.nativeMethod?.runId === run.id) this.nativeMethod = null;
     this.diag.write({ lane: 'task', event: 'method-terminal', msg: `方法#${run.id}「${run.name}」${run.status}`,
       data: { runId: run.id, sourceHash: run.sourceHash, status: run.status, calls: run.trace.length,
         startedAt: run.startedAt, endedAt: run.endedAt, error: run.error } });

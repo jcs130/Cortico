@@ -4,7 +4,7 @@ import { Worker } from 'node:worker_threads';
 export const METHOD_LIMITS = Object.freeze({ sourceChars: 12_000, paramsChars: 4_096,
   calls: 32, actions: 16, messageChars: 24_000, durationMs: 60_000, maxDurationMs: 120_000 });
 
-export type MethodOperation = 'state' | 'do' | 'flightPlan';
+export type MethodOperation = 'state' | 'do' | 'flightPlan' | 'mineflayer';
 export interface MethodTrace {
   call: number; method: MethodOperation; args: unknown; startedAt: string;
   endedAt?: string; result?: unknown; error?: string;
@@ -18,6 +18,7 @@ export interface MethodRequest {
   name: string; code: string; params?: Record<string, unknown>; durationMs?: number; validate?: boolean;
 }
 export interface MethodHost {
+  nativeMethods?: string[];
   call: (method: MethodOperation, args: Record<string, unknown>, signal: AbortSignal) => unknown | Promise<unknown>;
   onFinish: (run: MethodRun) => void;
 }
@@ -81,7 +82,7 @@ export class MethodRunner {
       startedAt: new Date().toISOString(), status: 'running', trace: [] };
     const controller = new AbortController();
     const worker = new Worker(new URL('./method-worker.mjs', import.meta.url), {
-      workerData: { code: request.code, params, validate: request.validate === true },
+      workerData: { code: request.code, params, validate: request.validate === true, nativeMethods: this.host.nativeMethods },
       env: {}, execArgv: [], resourceLimits: { maxOldGenerationSizeMb: 64, stackSizeMb: 4 },
     });
     let finished = false;
@@ -119,7 +120,7 @@ export class MethodRunner {
         catch (error) { finish('failed', String(error)); }
         return;
       }
-      if (message.kind !== 'call' || !['state', 'do', 'flightPlan'].includes(message.method)) {
+      if (message.kind !== 'call' || !['state', 'do', 'flightPlan', 'mineflayer'].includes(message.method)) {
         finish('failed', '脚本协议包含未知操作'); return;
       }
       if (request.validate) { finish('failed', '语法校验不可调用World'); return; }

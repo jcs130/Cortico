@@ -228,6 +228,8 @@ export class Bridge {
   private agentFriendProtection: AgentFriendProtection | null = null;
   private agentMana: { current: number; max: number } | null | undefined;
   private _bot: mineflayer.Bot | null = null;
+  /** An entity can exist before login/first spawn; it is not yet an operable body. */
+  private spawnedBot: mineflayer.Bot | null = null;
   private started = false;
   private stopped = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -294,7 +296,8 @@ export class Bridge {
   }
 
   get connected(): boolean {
-    return this._bot !== null && (this._bot as unknown as { entity?: unknown }).entity !== undefined;
+    return this._bot !== null && this.spawnedBot === this._bot
+      && (this._bot as unknown as { entity?: unknown }).entity !== undefined;
   }
 
   /** 连接生命周期已启用；不要求当前已经完成登录。 */
@@ -356,6 +359,7 @@ export class Bridge {
     }
     const bot = this._bot;
     this._bot = null;
+    this.spawnedBot = null;
     this.agentMana = undefined;
     this._invSynced = false;
     this.liveMovements = null;
@@ -418,6 +422,7 @@ export class Bridge {
       return;
     }
     this._bot = bot;
+    this.spawnedBot = null;
     this.opts.onBotCreated?.(bot);
     this.bagFor(gen).register('flight-abilities', watchFlightAbilities(bot));
     this.agentMana = undefined;
@@ -594,6 +599,7 @@ export class Bridge {
 
     bot.once('spawn', () => {
       if (this.stopped || this._bot !== bot || this.generation !== gen) return;
+      this.spawnedBot = bot;
       this.reconnectAttempt = 0;
       this.refusedStreak = 0;
       this.installSpawnGear(bot, gen);
@@ -609,6 +615,7 @@ export class Bridge {
     const onGone = (reason: string) => {
       if (this._bot !== bot || this.generation !== gen) return;
       this._bot = null;
+      this.spawnedBot = null;
       this.agentMana = undefined;
       this._invSynced = false;
       this.viewer = null;

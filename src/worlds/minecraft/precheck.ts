@@ -11,13 +11,13 @@ import type { Bot } from 'mineflayer';
 import type { SkillCall } from './skills.ts';
 import type { BlockFace, Cell } from './geometry.ts';
 import { matchItemName, type ChestBook } from './chests.ts';
-import { equippedAlready } from './tools.ts';
+import { equipDestOf, equippedAlready } from './tools.ts';
 import { itemsInReach, offHandItem } from './inventory.ts';
 import { DRINKABLES } from './item-facts.ts';
 import { RISKY_FOODS } from './nutrition.ts';
 import { itemMatchesPick, pickMissText, pickTargetOf } from './item-pick.ts';
 import { zhDimension, zhEntity, zhName } from './names.ts';
-import { invItemNamed } from './inventory.ts';
+import { invItemNamed, noSuchItem } from './inventory.ts';
 import { itemCustomName } from './item-display.ts';
 import { bestRangedWeapon, hasRangedLos, hasUsableArrows, type RangedTarget } from './ranged.ts';
 import { taggedCraftChoice } from './tagged-crafting.ts';
@@ -41,7 +41,7 @@ interface PrecheckNote {
 function hasItem(bot: Bot, name: string, pick?: string): number {
   let n = 0;
   for (const it of bot.inventory.items()) {
-    if ((matchItemName(name, it.name, bot?.registry) || zhName(it.name) === name)
+    if (matchItemName(name, it.name, bot?.registry)
       && itemMatchesPick(pick, it, bot.registry as never)) n += it.count;
   }
   return n;
@@ -50,7 +50,7 @@ function hasItem(bot: Bot, name: string, pick?: string): number {
 /** 副手挂着的那件合不合这个名字与挑选词;equip 能把它换到主手 */
 function offHandHas(bot: Bot, name: string, pick?: string): boolean {
   const off = offHandItem(bot);
-  return !!off && (matchItemName(name, off.name, bot?.registry) || zhName(off.name) === name)
+  return !!off && matchItemName(name, off.name, bot?.registry)
     && itemMatchesPick(pick, off, bot.registry as never);
 }
 
@@ -246,7 +246,10 @@ function precheckHasItem(
   bot: Bot, item: string, verb: string, rule: string, pick?: string, allowCustomName = false,
 ): PrecheckNote | null {
   if (!item) return null;
-  if (hasItem(bot, item, pick) > 0 || (allowCustomName && invItemNamed(bot, item, pick))) return null;
+  if (allowCustomName ? invItemNamed(bot, item, pick) : hasItem(bot, item, pick) > 0) return null;
+  if (!inventoryReadConfirmed(bot)) {
+    return { level: 'soft', text: `背包玩家槽还没完整同步，${verb}之前需确认有没有${zhName(item)}`, rule: `${rule}.inventorySync` };
+  }
   // 有同 id 的几件而挑选词一件没中:那几件各自是什么,当场摆出来
   if (pick && hasItem(bot, item) > 0) {
     const same = bot.inventory.items()
@@ -258,7 +261,7 @@ function precheckHasItem(
   const hint = near.length > 0 ? `;名字带这几个字的有:${near.join('、')}` : '';
   const custom = allowCustomName ? [...new Set(bot.inventory.items().map((i) => itemCustomName(i)).filter(Boolean))].slice(0, 4) : [];
   const customHint = custom.length > 0 ? `;自定义物品请用背包显示名:${custom.join('、')}` : '';
-  return { level: 'hard', text: `包里没有${zhName(item)},${verb}不了${hint}${customHint}`, rule };
+  return { level: 'hard', text: `${allowCustomName ? noSuchItem(bot, item, pick).message : `包里没有${zhName(item)},${verb}不了`}${hint}${customHint}`, rule };
 }
 
 /** 五个「从包里拿东西下手」的技能:判据同一条,只有动词不同 */
@@ -755,6 +758,14 @@ export function precheckSteps(bot: Bot, steps: SkillCall[], deps: PrecheckDeps):
   let projectedStart: Cell | null | undefined;
   for (let i = 0; i < steps.length; i++) {
     const current = steps[i];
+    const previous = steps[i - 1];
+    if (current.skill === 'use' && current.at !== undefined && !current.item
+      && previous?.skill === 'equip' && previous.item && previous.hand !== 'off'
+      && (previous.hand === 'main' || equipDestOf(previous.item, bot.registry) === 'hand')) {
+      out.push({ index: i, note: { level: 'soft', rule: 'use.clearsEquippedHand',
+        text: `use.at 省略 item 会先清空主手，不会沿用前一步装备的「${previous.item}」。`
+          + `若要拿它右键，本步显式填写 item:"${previous.item}"；空手交互可保留原写法。` } });
+    }
     const relativeTunnelAfterMove = current.skill === 'tunnel' && projectedStart !== undefined
       && (!Array.isArray(current.at) || !current.at.every((n) => typeof n === 'number'));
     const note = precheckStep(bot, current, deps, relativeTunnelAfterMove ? null : projectedStart);

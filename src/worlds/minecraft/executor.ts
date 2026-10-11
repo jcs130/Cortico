@@ -1030,6 +1030,7 @@ interface TaskObservation {
 interface QueuedTask {
   id: number;
   steps: SkillCall[];
+  program?: ExecutorProgram;
   /** 受理时的维度、站位和完整参数；失败回顾不能借用另一地点或方法的原因。 */
   priorContext?: string;
   startObservation?: TaskObservation;
@@ -1076,6 +1077,13 @@ interface QueuedTask {
   checkpointContinuation?: boolean;
   /** 断点坐标属于让位时的维度，短任务不能把它改投另一维度。 */
   resumeDimension?: string;
+}
+
+/** A program holds the same body as a skill task; cancellation revokes its host capability. */
+export interface ExecutorProgram {
+  name: string;
+  run(bot: Bot, context: SkillContext): Promise<void>;
+  cancel(reason: string): void;
 }
 
 /**
@@ -1236,6 +1244,7 @@ export function freezeFirstStep(
 
 /** 技能序列渲染成的一句话,回执与心跳里都用它指代这件事 */
 function labelOf(task: QueuedTask): string {
+  if (task.program) return task.program.name;
   return task.steps.map((c) => describeSkill(c)).join(';');
 }
 
@@ -1246,6 +1255,7 @@ function cancelledNote(
   step: number | null,
   phase: 'running' | 'frozen',
 ): string {
+  if (task.program) return `已叫停${who}「${task.program.name}」；原生程序不自动重放`;
   const done = (task.stepLog ?? []).filter((entry) => entry.outcome === 'ok').length;
   const head = `已叫停${who},已做成 ${done}/${task.steps.length} 步`;
   if (step === null) return head;
@@ -1958,9 +1968,9 @@ export class Executor {
         ? {
             id: t.id,
             label: labelOf(t),
-            step: describeSkill(t.steps[Math.min(t.stepIndex, t.steps.length - 1)]),
+            step: t.program?.name ?? describeSkill(t.steps[Math.min(t.stepIndex, t.steps.length - 1)]),
             stepIndex: t.stepIndex,
-            stepCount: t.steps.length,
+            stepCount: t.program ? 1 : t.steps.length,
             elapsedMs: Date.now() - t.stepStartedAt,
             taskElapsedMs: Date.now() - t.startedAt,
             count: t.count,
@@ -2052,6 +2062,16 @@ export class Executor {
     const decision = this.submitDetailed(steps, mode, wrote, beforeEnqueue);
     onDecision?.(decision.accepted, decision.retryAfterMs, decision.completedImmediately, decision.rejection, decision.taskId);
     return decision.receipt;
+  }
+
+  enqueueProgram(program: ExecutorProgram): number {
+    if (this.stopped) throw new Error('World 未启动');
+    const id = this.opts.nextId();
+    this.queue.push({ id, steps: [], program, enqueuedAt: Date.now() });
+    this.opts.diag?.write({ lane: 'task', event: 'enqueue', taskId: id,
+      msg: `受理原生程序「${program.name}」`, data: { mode: 'append' } });
+    this.pump();
+    return id;
   }
 
   submitDetailed(steps: SkillCall[], mode: QueueMode = 'replace', wrote?: unknown,
@@ -4253,6 +4273,7 @@ export class Executor {
     const boundary = this.checkpointDrain?.task === t && this.checkpointDrain.boundary
       ? this.checkpointDrain.resumeFrom : null;
     this.abortTask(t, by);
+    if (t.program) { this.reportCancelled(t, by, null); return; }
     const idem = reRunnable(t.steps[t.stepIndex]);
     this.frozen = {
       id: t.id, steps: t.steps, enqueuedAt: t.enqueuedAt, startedAt: t.startedAt,
@@ -4419,7 +4440,7 @@ export class Executor {
     const task = this.task;
     if (!task) return false;
     const at = Date.now();
-    const step = describeSkill(task.steps[Math.min(task.stepIndex, task.steps.length - 1)]);
+    const step = task.program?.name ?? describeSkill(task.steps[Math.min(task.stepIndex, task.steps.length - 1)]);
     const label = labelOf(task);
     const text = `[场上拒绝] 任务#${task.id}「${label}」第 ${task.stepIndex + 1}/${task.steps.length} 步「${step}」没做成:服务端提示 ${reason}；后续步骤未执行。`;
     this.abortTask(task, reason);
@@ -4836,8 +4857,9 @@ export class Executor {
     by: string,
     progress: { step: number; count: { done: number; total: number } | null } | null,
   ): void {
+    task.program?.cancel(by);
     const head = task.steps.length > 1 ? `任务#${task.id}「${labelOf(task)}」` : `任务#${task.id}`;
-    const where = progress
+    const where = task.program ? '原生程序已撤销，不自动重放' : progress
       ? `做到第 ${progress.step}/${task.steps.length} 步` +
         `${progress.count ? `(进度 ${progress.count.done}/${progress.count.total})` : ''}`
       : '一步都没开始';
@@ -4905,6 +4927,7 @@ export class Executor {
     if (this.checkpointDrain?.task === t) this.checkpointDrain.continuation = null;
     this.task = null;
     releaseBody(this.opts.getBot(), `中止任务#${t.id}(${by})`, this.opts.diag);
+    t.program?.cancel(by);
   }
 
   /** 停止后丢弃所有任务;迟到回调不得修改状态或发送报告。 */
@@ -4966,6 +4989,7 @@ export class Executor {
     if (flag.aborted || this.stopped || flag.epoch !== this.executionEpoch) return;
     const bot = this.opts.getBot();
     if (!bot) {
+      task.program?.cancel('Minecraft 连接已结束，原生程序未执行');
       this.finish(flag, { kind: 'blocked', text: `${span()}${label()}执行不了:当前没连上服务器。`, taskId: id });
       return;
     }
@@ -5051,6 +5075,21 @@ export class Executor {
       blueprints: this.opts.blueprints,
       marks: this.opts.marks,
     };
+    if (task.program) {
+      let error: unknown;
+      try { await task.program.run(bot, ctx); checkAbort(ctx); }
+      catch (caught) { error = caught; }
+      finally {
+        bot.off('windowClose', onWindowClose);
+        if (!ctx.aborted() && this.task === task) {
+          closeHeldWindow();
+          releaseBody(bot, `原生程序#${id}结束`, this.opts.diag);
+        }
+      }
+      if (!ctx.aborted()) this.finish(flag, { taskId: id, kind: error ? 'blocked' : 'done',
+        text: `${span()}原生程序「${task.program.name}」${error ? `受阻：${String(error)}` : '结束；具体效果以原生调用读数和程序返回值核验'}` });
+      return;
+    }
     const results: string[] = [];
     /** 同一根因导致的连续跳步合并为一条回执，保留最早失败步骤的编号。 */
     interface SkipRun { from: number; to: number; root: number; rootOutcome: string; whys: string[]; calls: SkillCall[] }

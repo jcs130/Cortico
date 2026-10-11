@@ -448,7 +448,7 @@ export async function skillEat(bot: Bot, itemName: string): Promise<string> {
 /** 按名字拿到手上 */
 export async function equipNamed(bot: Bot, name: string): Promise<string> {
   const item = invItemNamed(bot, name);
-  if (!item) throw new SkillBlocked(`包里没有${zhName(name)}`);
+  if (!item) throw noSuchItem(bot, name);
   await bot.equip(item, 'hand');
   return item.name;
 }
@@ -516,9 +516,8 @@ export async function skillEquip(bot: Bot, call: Extract<SkillCall, { skill: 'eq
     const same = items.filter((i) => namedLike(want, i.name, bot?.registry));
     if (call.pick && same.length > 0) throw noSuchItem(bot, want, call.pick, same);
     const near = items.filter((i) => i.name.includes(want)).map((i) => zhName(i.name));
-    throw new SkillBlocked(
-      `包里没有${zhName(want)}` + (near.length > 0 ? `;名字带这几个字的有:${near.join('、')}` : ''),
-    );
+    throw new SkillBlocked(noSuchItem(bot, want).message
+      + (near.length > 0 ? `;名字带这几个字的有:${near.join('、')}` : ''));
   }
   const dest = call.hand === 'off' ? 'off-hand' : call.hand === 'main' ? 'hand' : equipDestOf(item.name, bot.registry);
   if (dest === 'hand') await bot.equip(item, dest);
