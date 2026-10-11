@@ -35,13 +35,14 @@ const TIMING = {
 const REASONING = {
   immediate: '急需接话、处理危险或即将结束的动作；下一步已经明确的短动作、核验和工具衔接也优先立刻回应，无需额外推理',
   routine: '普通交流、几何解释或少量步骤衔接，需要简短核对，低思考即可；证据不足时不要假定有长时间空档',
-  deliberate: '确有复杂空间约束、自主脚本设计或多步方案比较，且没有急需回应的输入，值得中等思考。现场确认身体任务正常推进且仍有较长执行时间时可利用这段时间规划；仅受理、无进展移动或单纯正在走路不足以选此项',
+  deliberate: '确有复杂空间约束、自主脚本设计或多步方案比较，且没有急需回应的输入，值得较深思考。新鲜现场确认身体任务正常推进或歌曲实际在播、仍有较长剩余时间时，可利用这段时间规划；仅受理、无进展移动、单纯走路或播歌本身不足以选此项',
 };
 
 export interface ForegroundScene {
   events: readonly EventEnvelope[];
   facts: readonly { source: string; text: string; parts?: readonly { key: string; text: string }[] }[];
   agenda: string;
+  performance?: { source: string; text: string };
   intent?: { tool: string; arguments: string; receipt?: string; at?: string };
 }
 
@@ -117,10 +118,14 @@ export class ForegroundAdviser {
       observations: scene.events.filter(event => event.contextDelivery !== 'archive-only'
         && !(event.source === 'persona' && event.type === 'notice')).slice(-3)
         .map(event => ({ source: event.source, type: event.type, cursor: event.cursor, at: event.ts, text: excerpt(event.text, 200) })),
-      facts: scene.facts.slice(0, 2).map(fact => ({ source: fact.source, text: excerpt(fact.text, 300),
+      facts: scene.facts.filter(fact => !cfg.reasoningEnabled || fact.source !== scene.performance?.source).slice(0, 2)
+        .map(fact => ({ source: fact.source, text: excerpt(fact.text, 300),
         ...(cfg.reasoningEnabled && fact.parts?.length ? { parts: fact.parts.slice(0, 24)
           .map(part => ({ key: part.key, text: excerpt(part.text, 80) })) } : {}) })),
       agenda: excerpt(scene.agenda, 240),
+      ...(cfg.reasoningEnabled && scene.performance ? { performance: {
+        source: scene.performance.source, text: excerpt(scene.performance.text, 400),
+      } } : {}),
       recentRequest: scene.intent ? { ...scene.intent, arguments: excerpt(scene.intent.arguments, 140),
         receipt: excerpt(scene.intent.receipt ?? '', 240) } : null,
       queueTail: opportunity?.meta?.minecraftQueueTail ?? null,

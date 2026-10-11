@@ -10,7 +10,7 @@ import { makeFakeHarnessApi } from '../core/helpers.ts';
 
 const dirs: string[] = [];
 afterEach(() => { vi.unstubAllGlobals(); for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
-function rig() {
+function rig(extraWorlds: World[] = []) {
   const memoryDir = mkdtempSync(join(tmpdir(), 'adaptive-reasoning-')); dirs.push(memoryDir);
   const cfg = { ...FAST_FOREGROUND_DEFAULTS, enabled: true, endpoint: 'http://fixture/decision',
     reasoningEnabled: true, reasoningModel: 'local-model', minIntervalMs: 10000 };
@@ -32,7 +32,7 @@ function rig() {
       { key: 'lastTask', text: 'Previous tool was accepted; not evidence that the task finished.' },
     ] }) };
   const records = [message('system', 'Environment contract'), message('user', 'Compare possible supports during this journey.')];
-  const persona = new CortiV({ memoryDir, worlds: [world], fastForeground: () => cfg });
+  const persona = new CortiV({ memoryDir, worlds: [world, ...extraWorlds], fastForeground: () => cfg });
   persona.attach({ ...makeFakeHarnessApi(), sessionInfo: id => ({ id, running: 0, snapshot: records, estTokens: null, hardTokens: null }) });
   const event: EventEnvelope = { source: 'game', origin: 'external', type: 'game.chat', cursor: 42,
     ts: new Date().toISOString(), text: 'During the journey, compare how to support the bridge.' };
@@ -42,6 +42,27 @@ function rig() {
 }
 
 describe('request-local reasoning fallback', () => {
+  it('retains actual music occupancy beyond the first two worlds and uses the configured deeper level', async () => {
+    let audio = '[演出当前读数；观察 ' + new Date().toISOString() + ']\n正在播放歌曲「Example」；在播及排队约 90 秒';
+    const world = (id: string, text: () => string): World => ({ id, start: async () => {}, stop: async () => {},
+      tools: () => [], envPromptVars: () => ({}), requestFacts: () => ({ text: text(), snapshotTypes: [] }) });
+    const r = rig([world('other', () => 'A different current observation'), world('vtuber', () => audio)]);
+    r.cfg.minIntervalMs = 0; r.cfg.reasoningDeliberateEffort = 'xhigh';
+    await r.persona.beforeDecision({ events: [r.event], messages: r.records });
+    expect(await r.select()).toEqual({ thinking: true, reasoningEffort: 'xhigh' });
+    expect(r.requests[0].state.performance.text).toContain('90 秒');
+    expect(r.requests[0].state.facts.map((fact: any) => fact.source)).toEqual(['game', 'other']);
+    expect(JSON.stringify(r.requests[0]).length).toBeLessThan(5000);
+    audio = '[演出当前读数；观察 ' + new Date().toISOString() + ']\n安静';
+    const event = { ...r.event, cursor: 43, text: 'Please respond now.' };
+    r.persona.onDelivery({ events: [event] }); r.choice('immediate');
+    await r.persona.beforeDecision({ events: [event], messages: r.records });
+    expect(await r.select()).toEqual({ thinking: false });
+    expect(r.requests.at(-1).state.performance.text).toContain('安静');
+    expect(r.requests.at(-1).state.performance.text).not.toContain('Example');
+    r.persona.stopRhythm();
+  });
+
   it('reuses a fresh batch classification once, then inherits configuration during cooldown', async () => {
     const r = rig();
     expect(await r.persona.beforeDecision({ events: [r.event], messages: r.records })).toBe(true);

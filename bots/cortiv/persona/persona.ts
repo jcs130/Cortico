@@ -919,7 +919,7 @@ export class CortiV extends Cormini {
     });
     const outcome = this.foregroundOutcome;
     const age = Date.now() - Date.parse(outcome?.at ?? '');
-    return { events, facts, agenda: this.activityAgenda?.summary() ?? '',
+    return { events, facts, performance: facts.find(fact => fact.source === 'vtuber'), agenda: this.activityAgenda?.summary() ?? '',
       intent: outcome && age >= 0 && age <= 60_000 ? outcome : this.recentReferenceIntent() };
   }
 
