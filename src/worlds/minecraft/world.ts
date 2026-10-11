@@ -121,6 +121,9 @@ import { ItemBreakDecoder, type ItemBreakFact } from './item-break.ts';
 import { WorksBook } from './works.ts';
 import { CombatSession } from './combat.ts';
 import { CombatSpells, type CombatSpell } from './combat-spells.ts';
+import { BattlefieldObserver } from './battlefield.ts';
+import { CombatDecisionLoop, type CombatCandidate, type CombatDecisionConfig, type CombatDecisionFrame } from './combat-decision.ts';
+import { combatReactions } from './combat-reactions.ts';
 import { CombatTacticBook } from './combat-tactics.ts';
 import { COMBAT_RULES_SCHEMA, validCombatRules, type CombatRule } from './combat-rules.ts';
 import { chooseRoutineFood, renderFoodReserveReadout } from './nutrition.ts';
@@ -2179,6 +2182,7 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
       + '{enabled:false} clears it. A spell list of server-listed combat spell IDs sets priority order while fighting; '
       + 'healAtOrBelow casts selfheal at that health or lower before another attack. '
       + 'Nonempty rules replace the unconditional spell priority: ordered observed conditions are rechecked each combat tick and the first ready match wins; no match means no automatic offensive cast. rules:[] restores spells/default priority. '
+       + 'When combatDecision is enabled, rules with intent may be selected asynchronously from direct battlefield facts. {battlefield:true} reads that bounded input without waiting for the main model. '
       + 'The World checks observed spell availability, mana, targets and announced cooldowns; '
       + 'server replies still decide success. Settings and the last five observed combat receipts persist per world across restarts. '
       + '{} also reads current capability constraints and recent receipt IDs; {report:id} expands one receipt. '
@@ -2191,6 +2195,7 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
           items: { type: 'string', pattern: '^[a-z][a-z0-9_:-]{0,63}$' } },
         healAtOrBelow: { type: 'integer', minimum: 1, maximum: 20 },
         rules: COMBAT_RULES_SCHEMA,
+        battlefield: { type: 'boolean', description: 'Read the current programmatic battlefield, abilities and eligible choices; use alone. Missing health or party identity stays unknown.' },
         report: { type: 'integer', minimum: 1, description: 'Read one observed combat receipt by its returned ID; do not combine with setting fields.' },
       },
       required: [],
@@ -2810,6 +2815,9 @@ export class MinecraftWorld implements World {
   /** 服务端本连接明确列出的自愈能力；重连后必须重新确认。 */
   private selfHealAvailable = false;
   private readonly combatSpells: CombatSpells;
+  private readonly battlefield = new BattlefieldObserver();
+  private combatDecision: CombatDecisionLoop | null = null;
+  private lastCombatDecision: { atMs: number; generation: number; outcome: unknown; elapsedMs: unknown } | null = null;
   private arenaFloor: { floor: number; total: number } | null = null;
   /** 每次真实 spawn 递增；断线前后的工具、事件与连接日志据此分代。 */
   private connectionGeneration = 0;
@@ -4580,6 +4588,12 @@ export class MinecraftWorld implements World {
   private setCombatTactic(args: Record<string, unknown>): string {
     const tool = 'mc_combat_tactic';
     this.syncRealm();
+    if (args.battlefield === true) {
+      if (Object.keys(args).length !== 1) return this.toolLog(tool, args, '未读取：battlefield须单独使用。');
+      const frame = this.sampleCombatDecision();
+      return this.toolLog(tool, args, frame ? '[直接游戏战场采样；null是未知，发送与命中仍须回执]\n' + JSON.stringify(frame)
+        : '未连接或没有有效的当前实体读数；未返回旧战场。');
+    }
     if (args.report !== undefined) {
       if (Object.keys(args).length !== 1 || !Number.isInteger(args.report) || (args.report as number) < 1)
         return this.toolLog(tool, args, '未读取：report 必须是回执编号，且不能与战术设置混用。');
@@ -4592,7 +4606,8 @@ export class MinecraftWorld implements World {
           + `生命线 ${tactic.healAtOrBelow ?? '未设置'}/20。`
         : '当前使用默认即时战斗法术；低血撤退时尝试圣愈术。')
         + (tactic?.rules?.length ? `\n条件分支启用，共${tactic.rules.length}项；上述法术列表仅为停用分支后的备用顺序。` : '')
-        + '\n' + this.combatSpells.readout(undefined, Date.now(), this.bridge?.bot ?? undefined));
+        + '\n' + this.combatSpells.readout(undefined, Date.now(), this.bridge?.bot ?? undefined)
+        + '\n' + this.combatDecisionReadout());
     }
     if (args.enabled === false) {
       this.combatSpells.setTactic(null);
@@ -4670,20 +4685,92 @@ export class MinecraftWorld implements World {
       this.tryAutoSelfHeal(bot);
       return;
     }
+    const cfg = this.combatDecisionConfig();
+    if (cfg.enabled && cfg.endpoint) {
+      this.combatDecision ??= new CombatDecisionLoop({
+        config: () => this.combatDecisionConfig(), sample: () => this.sampleCombatDecision(),
+        apply: candidate => this.applyCombatDecision(candidate),
+        fallback: () => {
+          const current = this.sampleCombatDecision();
+          if (!current || current.battlefield.action.emergency || !current.battlefield.action.fighting) return;
+          const liveBot = this.bridge?.bot;
+          if (!liveBot) return;
+          const fallback = this.combatSpells.next(liveBot, true);
+          if (fallback) this.sendAutoCombatSpell(liveBot, fallback);
+        },
+        report: (event, data) => {
+          if (event !== 'requested') this.lastCombatDecision = { atMs: Date.now(), generation: data.connectionGeneration as number,
+            outcome: data.outcome ?? data.reason, elapsedMs: data.elapsedMs };
+          this.diag.write({ lane: 'combat', event: `decision-${event}`, msg: `异步战斗选择 ${event}`, data });
+        },
+      });
+      const pending = this.combatDecision.tick();
+      if (cfg.mode === 'act' && pending) return;
+    }
     const spell = this.combatSpells.next(bot, fighting);
     if (!spell) return;
     this.sendAutoCombatSpell(bot, spell);
   }
 
-  private sendAutoCombatSpell(bot: Bot, spell: CombatSpell): void {
+  private combatDecisionConfig(): CombatDecisionConfig {
+    return this.cfg.combatDecision ?? MINECRAFT_DEFAULTS.combatDecision;
+  }
+
+  private combatDecisionReadout(): string {
+    const cfg = this.combatDecisionConfig(), last = this.lastCombatDecision;
+    return `[快速战术] ${cfg.enabled && cfg.endpoint ? cfg.mode : '关闭'}；直接从游戏时钟采样；接敌 ${cfg.allowEngage ? cfg.engageScope : '关闭'}，短步 ${cfg.allowMovement ? '开启' : '关闭'}。`
+      + (last ? ` 最近选择 ${String(last.outcome)}，${String(last.elapsedMs)}ms，连接代次 ${last.generation}，时间 ${new Date(last.atMs).toISOString()}。` : ' 尚无选择回执。');
+  }
+
+  private sampleCombatDecision(): CombatDecisionFrame | null {
+    const bot = this.bridge?.bot;
+    if (!bot?.entity || !this.bridge?.connected || this.shuttingDown || (bot.health ?? 0) <= 0) return null;
+    const cfg = this.combatDecisionConfig(), now = Date.now();
+    const queue = this.executor?.status();
+    const reaction = this.combat?.reactionState();
+    const fighting = (this.combat?.fighting ?? false) || (this.executor?.attacking ?? false);
+    const emergency = (this.reflexes?.envActive ?? false) || now < this.escapeHoldUntil
+      || (this.executor?.escaping ?? false) || (reaction?.retreating ?? false)
+      || (bot.health ?? 0) <= this.cfg.reflex.fleeHealth
+      || (this.selfHealAvailable && this.combatSpells.wantsHeal(bot.health ?? 0));
+    const battlefield = this.battlefield.sample(bot, this.connectionGeneration, { fighting, emergency,
+      taskId: queue?.running?.id ?? null, step: queue?.running?.step.slice(0, 120) ?? null }, cfg.maxEntities, now);
+    const frame = this.combatSpells.decisionFrame(bot, battlefield, cfg.maxCandidates, now);
+    if (!fighting) frame.candidates = [];
+    const reactions = combatReactions(bot, battlefield, cfg, {
+      bodyFree: !this.combat?.active && !queue?.running && !queue?.waiting.length && !queue?.hold
+        && !this.methods.current && !bot.currentWindow && !(this.executor?.eating ?? false),
+      canStep: (reaction?.canStep ?? false) && !bot.currentWindow && !(this.executor?.eating ?? false),
+      targetId: reaction?.targetId ?? null, sinceHitMs: reaction?.sinceHitMs ?? null,
+      fight: this.policy.get().fight, fleeHealth: this.cfg.reflex.fleeHealth, chaseMax: this.cfg.combat.chaseMax,
+    });
+    const choices = [...reactions, ...frame.candidates];
+    frame.omittedCandidates += Math.max(0, choices.length - cfg.maxCandidates);
+    frame.candidates = choices.slice(0, cfg.maxCandidates);
+    return frame;
+  }
+
+  private applyCombatDecision(candidate: CombatCandidate): boolean {
+    const current = this.sampleCombatDecision(), bot = this.bridge?.bot;
+    if (!current || !bot || current.battlefield.action.emergency
+      || !current.candidates.some(c => c.id === candidate.id && c.kind === candidate.kind)) return false;
+    if (candidate.kind === 'cast') {
+      if (!current.battlefield.action.fighting || this.combatSpells.manualCastBlock(candidate.spell)) return false;
+      return this.sendAutoCombatSpell(bot, candidate.spell, candidate.ruleId);
+    }
+    this.interruptIdle('combat-decision');
+    return this.combat?.react(candidate) ?? false;
+  }
+
+  private sendAutoCombatSpell(bot: Bot, spell: CombatSpell, ruleId?: string): boolean {
     const command = `/mycli cast ${spell}`;
     try {
       bot.chat(command);
     } catch (error) {
       this.diag.write({ lane: 'combat', event: 'auto-spell-send-failed', msg: `${spell}: ${String(error)}` });
-      return;
+      return false;
     }
-    this.combatSpells.noteSent(spell);
+    this.combatSpells.noteSent(spell, Date.now(), 'automatic', ruleId);
     publishViewerCastCommand(bot, command);
     this.diag.write({
       lane: 'combat', event: 'auto-spell', msg: `交战中尝试 ${spell}；效果待服务端确认`,
@@ -4691,6 +4778,7 @@ export class MinecraftWorld implements World {
     });
     this.emit('minecraft.event', `[Minecraft] 试着施放 ${spell}，是否生效等服务端回执确认。`,
       false, { trigger: 'piggyback' });
+    return true;
   }
 
   private recoveryFoodFact(bot: Bot): string {
@@ -6278,6 +6366,7 @@ export class MinecraftWorld implements World {
     const connectionGeneration = ++this.connectionGeneration;
     this.selfHealAvailable = false;
     this.combatSpells.reset();
+    this.battlefield.reset();
     this.arenaFloor = null;
     this.resetBodyOwners();
     this.bodyLease.bindGeneration(connectionGeneration, Date.now());
@@ -6914,6 +7003,7 @@ export class MinecraftWorld implements World {
   private hookBotEvents(bot: any): void {
     if (this.hookedBots.has(bot)) return;
     this.hookedBots.add(bot);
+    this.battlefield.bind(bot);
     this.bossQuarter.clear();
     observeStatusEffects(bot);
     if (this.agentFriendEnabled) watchAgentFriendFlight(bot);

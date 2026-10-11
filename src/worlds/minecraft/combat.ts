@@ -40,6 +40,7 @@ import { zhEntity, zhName } from './names.ts';
 import { zhErrorText } from './receipt.ts';
 import { BURNING_BLOCKS, SCORCHING_FLOOR, bodyInWater, canSeeEntity, findBankCell, headInWater } from './terrain.ts';
 import { piglinIsHostile } from './piglin.ts';
+import { corridorSafe } from './idle-actions.ts';
 import { consumeHeldFood } from './skills-craft.ts';
 import { itemsInReach } from './inventory.ts';
 import { RISKY_FOODS } from './nutrition.ts';
@@ -368,6 +369,7 @@ export class CombatSession {
   private trajectoryAt = 0;
   private trajectoryPos: { x: number; y: number; z: number } | null = null;
   private movementIntent: { x: number; z: number } | null = null;
+  private tacticalMove: { origin: Vec3; destination: Vec3; expiresAtMs: number } | null = null;
   private stallSince = 0;
   private stallMode = '';
   private pathRetryAfter = 0;
@@ -423,6 +425,38 @@ export class CombatSession {
   /** 只在实际交战时允许进攻法术；撤退和 mc_stop 不主动施放。 */
   get fighting(): boolean {
     return this.state === 'fighting';
+  }
+
+  reactionState(): { targetId: number | null; canStep: boolean; sinceHitMs: number | null; retreating: boolean } {
+    return { targetId: this.targetId >= 0 ? this.targetId : null,
+      canStep: this.fighting && !this.eating && !this.pathing && this.swingPhase === 'idle' && this.hybridWeapon === 'melee',
+      sinceHitMs: this.fighting ? Date.now() - Math.max(this.lastLandedAt, this.startedAt) : null,
+      retreating: this.state === 'retreating' };
+  }
+
+  /** Reuses the combat body's existing lease, health gates and retreat controller. */
+  react(action: { kind: 'engage'; targetId: number } | { kind: 'retreat' }
+    | { kind: 'step'; destination: [number, number, number] }): boolean {
+    const bot = this.opts.getBot();
+    if (!bot?.entity || (bot.health ?? 0) <= 0 || this.opts.envBusy() || this.opts.taskEscaping?.() || this.opts.taskFighting?.()) return false;
+    if (action.kind === 'retreat') {
+      if (!this.fighting) return false;
+      this.tacticalMove = null; this.beginRetreat('flee'); return true;
+    }
+    if (action.kind === 'step') {
+      const to = new Vec3(...action.destination);
+      if (!this.reactionState().canStep || !corridorSafe(bot, bot.entity.position, to)) return false;
+      this.tacticalMove = { origin: bot.entity.position.clone(), destination: to, expiresAtMs: Date.now() + 700 };
+      return true;
+    }
+    const t = this.opts.tuning();
+    if (this.active || !t.enabled || t.fight === 'off'
+      || (bot.health ?? 0) < t.fleeHealth + ENGAGE_MARGIN
+      || (t.fight === 'armed' && !bestWeapon(bot) && !this.rangedReady(bot))) return false;
+    const foe = this.scan(bot, t, t.chaseMax).find(f => f.id === action.targetId && f.visible && !NO_FIGHT.has(f.name));
+    if (!foe || !this.engage(foe.name, false)) return false;
+    if (this.fighting) this.targetId = foe.id;
+    return true;
   }
 
   /** 这只怪的死由战斗会话来说,World 的「它死了」播报让位 */
@@ -1164,6 +1198,13 @@ export class CombatSession {
   // —— v7 移动:上下文图 ————————————————————————————————————————
 
   private driveContext(bot: Bot, t: CombatTuning, target: Foe, mode: 'crit' | 'kb' | 'sweep', now: number, foes: Foe[]): void {
+    const shortMove = this.tacticalMove;
+    if (shortMove) {
+      const remaining = shortMove.destination.minus(bot.entity.position);
+      if (now >= shortMove.expiresAtMs || remaining.norm() < 0.22
+        || !corridorSafe(bot, shortMove.origin, shortMove.destination)) this.tacticalMove = null;
+      else { this.pressToward(bot, remaining.x, remaining.z, false); return; }
+    }
     // 横扫要求出手那一 tick 几乎没动:站定期间任何移动都不许写
     if (this.swingPhase === 'settle') {
       for (const k of ['forward', 'back', 'left', 'right', 'sprint'] as const) bot.setControlState(k, false);
@@ -1573,6 +1614,7 @@ export class CombatSession {
 
     if (mode === 'crit') {
       if (bot.entity.onGround) {
+        this.tacticalMove = null;
         bot.setControlState('sprint', false);
         bot.setControlState('jump', true);
         this.swingPhase = 'hop';
@@ -1582,6 +1624,9 @@ export class CombatSession {
       return;
     }
     if (mode === 'sweep') {
+      this.tacticalMove = null;
+      for (const k of ['forward', 'back', 'left', 'right', 'sprint'] as const) bot.setControlState(k, false);
+      this.movementIntent = null;
       this.swingPhase = 'settle';
       this.phaseTargetId = target.id;
       this.phaseUntil = now + 100;
@@ -1998,6 +2043,7 @@ export class CombatSession {
   }
 
   private release(bot: Bot): void {
+    this.tacticalMove = null;
     this.movementIntent = null;
     // sneak 也在名单里:寻路器交互放置失败时是**故意**留着它的
     // (index.js:557-566 只在放成那一支才 sneak=false),战斗夺手正好夹在中间,

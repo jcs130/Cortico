@@ -4,6 +4,8 @@ import { manaSnapshotFromText } from './viewer-state.ts';
 import { viewerCastResult } from './viewer-cast.ts';
 import { CombatTacticBook, type CombatCastAttempt, type CombatResult, type CombatReceipt } from './combat-tactics.ts';
 import { combatRuleBlock, type CombatRule, type CombatRuleFacts } from './combat-rules.ts';
+import type { Battlefield } from './battlefield.ts';
+import type { CombatDecisionFrame } from './combat-decision.ts';
 
 export type CombatSpell = string;
 export interface CombatTactic {
@@ -66,6 +68,33 @@ export class CombatSpells {
     return structuredClone(this.tactic);
   }
 
+  /** Builds model choices from current game facts without consuming a combat tick or issuing a command. */
+  decisionFrame(bot: Bot, battlefield: Battlefield, maxCandidates: number, now = Date.now()): CombatDecisionFrame {
+    const rules = this.tactic?.rules ?? [];
+    const skills = [...new Set(rules.map(r => r.spell))].map(spell => ({ spell,
+      available: this.available.has(spell), manaCost: this.costs.get(spell) ?? null,
+      cooldownRemainingMs: this.serverReadyAt.has(spell) ? Math.max(0, this.serverReadyAt.get(spell)! - now,
+        this.lastSent.has(spell) ? this.cooldownOf(spell) - (now - this.lastSent.get(spell)!) : 0) : null,
+      block: !this.available.has(spell) ? 'ability-not-observed'
+        : !this.costs.has(spell) ? 'mana-cost-unknown'
+        : !this.serverReadyAt.has(spell) ? 'cooldown-unknown'
+        : this.mana === null || this.manaLoading ? 'mana-unknown' : this.manualCastBlock(spell, now) }));
+    const facts: Omit<CombatRuleFacts, 'cost'> = { ...this.ruleFacts(bot),
+      enemies: battlefield.actors.flatMap(e => e.relation === 'hostile' && e.distance !== null
+        && e.distance <= 16 && e.health.current !== 0 ? [{ type: e.type ?? '', distance: e.distance }] : []) };
+    const candidates = rules.flatMap(rule => {
+      const skill = skills.find(s => s.spell === rule.spell)!;
+      const target = battlefield.actors.some(e => e.relation === 'hostile' && e.health.current !== 0
+        && e.lineOfSight === true && e.distance !== null && e.distance <= (rule.when.within ?? 12)
+        && (!rule.when.enemyTypes || rule.when.enemyTypes.includes(e.type ?? '')));
+      if (!rule.intent || skill.block || skill.manaCost === null || !target
+        || combatRuleBlock(rule, { ...facts, cost: skill.manaCost })) return [];
+      return [{ id: rule.id, kind: 'cast' as const, ruleId: rule.id, spell: rule.spell, intent: rule.intent, manaCost: skill.manaCost }];
+    });
+    return { battlefield, tacticRevision: this.book.current().revision, mana: this.mana, skills,
+      candidates: candidates.slice(0, maxCandidates), omittedCandidates: Math.max(0, candidates.length - maxCandidates) };
+  }
+
   wantsHeal(health: number): boolean {
     const line = this.tactic?.healAtOrBelow ?? 10;
     return health > 0 && health <= line;
@@ -110,8 +139,10 @@ export class CombatSpells {
       if (ability.cooldownMs !== null) this.cooldowns.set(spell, ability.cooldownMs);
       if (ability.cooldownRemainingMs !== undefined && ability.cooldownRemainingMs !== null)
         this.serverReadyAt.set(spell, now + ability.cooldownRemainingMs);
+      else if (ability.cooldownRemainingMs === null) this.serverReadyAt.delete(spell);
       if (ability.manaCost !== undefined && ability.manaCost !== null)
         this.costs.set(spell, ability.manaCost);
+      else if (ability.manaCost === null) this.costs.delete(spell);
     }
   }
 
@@ -203,9 +234,9 @@ export class CombatSpells {
     return null;
   }
 
-  noteSent(spell: CombatSpell, now = Date.now(), source: CombatCastAttempt['source'] = 'automatic'): void {
-    const ruleId = source === 'automatic' && this.decision?.spell === spell
-      && now >= this.decision.at && now - this.decision.at <= CHECK_GAP_MS ? this.decision.ruleId : undefined;
+  noteSent(spell: CombatSpell, now = Date.now(), source: CombatCastAttempt['source'] = 'automatic', selectedRuleId?: string): void {
+    const ruleId = selectedRuleId ?? (source === 'automatic' && this.decision?.spell === spell
+      && now >= this.decision.at && now - this.decision.at <= CHECK_GAP_MS ? this.decision.ruleId : undefined);
     this.casts.push({ spell, sentAt: new Date(now).toISOString(), source,
       tacticRevision: this.book.current().revision, manaBefore: this.mana, ...(ruleId ? { ruleId } : {}) });
     this.decision = null;

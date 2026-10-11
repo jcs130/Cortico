@@ -1,4 +1,5 @@
 import type { ConfigGroup } from '../../core/types.ts';
+import type { CombatDecisionConfig } from './combat-decision.ts';
 
 export const MINECRAFT_DEFAULTS = {
   // enabled 由Persona的装配层显式开启。
@@ -69,6 +70,12 @@ export const MINECRAFT_DEFAULTS = {
     timeoutMs: 500,
     minIntervalMs: 5_000,
     minConfidence: 0.75,
+  },
+  combatDecision: {
+    enabled: false, mode: 'shadow' as const, endpoint: '', timeoutMs: 250,
+    minIntervalMs: 750, minConfidence: 0.75, maxAgeMs: 500, maxEntities: 12, maxCandidates: 2,
+    allowMovement: false, allowEngage: false, engageScope: 'party' as const,
+    movementStallMs: 1_500,
   },
   /** 空闲时授权的小动作；占用身体的任务与事件可随时取消。 */
   idle: {
@@ -219,6 +226,7 @@ export interface MinecraftConfigSection {
   };
   /** 受阻任务的异步辅助判断。 */
   decision: { enabled: boolean; endpoint: string; timeoutMs: number; minIntervalMs: number; minConfidence?: number };
+  combatDecision?: CombatDecisionConfig;
   idle: {
     enabled: boolean; selector: 'random' | 'decision'; endpoint: string; timeoutMs: number;
     decisionPolicy?: 'choice' | 'sample';
@@ -387,6 +395,55 @@ export const MINECRAFT_RHYTHM_CONFIG_GROUP: ConfigGroup = {
       'worlds.minecraft.decision.minConfidence': {
         type: 'number', title: '辅助建议最低首选概率', minimum: 0, maximum: 1, 'x-hot': true,
         description: '低于此值保留原任务回执，只记录不确定的判断，不追加行动建议。',
+      },
+      'worlds.minecraft.combatDecision.enabled': {
+        type: 'boolean', title: '战斗快速策略选择', 'x-hot': true,
+        description: '直接从游戏时钟采样战场并异步选择已编排法术；规则须填写 intent，攻击与移动继续运行。默认关闭。',
+      },
+      'worlds.minecraft.combatDecision.mode': {
+        type: 'string', enum: ['shadow', 'act'], title: '战斗选择模式', 'x-hot': true,
+        description: 'shadow 只记录选择，原战术继续；act 可发送通过现场复核的法术。低血自救先执行。',
+      },
+      'worlds.minecraft.combatDecision.endpoint': {
+        type: 'string', title: '战斗选择接口', 'x-hot': true,
+        description: '接收 state/questions 的 JSON POST 地址；留空不启用选择。',
+      },
+      'worlds.minecraft.combatDecision.timeoutMs': {
+        type: 'integer', title: '战斗选择超时', minimum: 50, maximum: 2000, 'x-suffix': 'ms', 'x-hot': true,
+      },
+      'worlds.minecraft.combatDecision.minIntervalMs': {
+        type: 'integer', title: '战斗选择最短间隔', minimum: 250, maximum: 10000, 'x-suffix': 'ms', 'x-hot': true,
+      },
+      'worlds.minecraft.combatDecision.minConfidence': {
+        type: 'number', title: '战斗选择最低首选概率', minimum: 0, maximum: 1, 'x-hot': true,
+      },
+      'worlds.minecraft.combatDecision.maxAgeMs': {
+        type: 'integer', title: '战斗选择最长有效时间', minimum: 50, maximum: 2000, 'x-suffix': 'ms', 'x-hot': true,
+        description: '返回后还须复核连接、战术、血量、魔力、目标、可见性与当前动作；过期结果作废。',
+      },
+      'worlds.minecraft.combatDecision.maxEntities': {
+        type: 'integer', title: '战场实体上限', minimum: 4, maximum: 64, 'x-hot': true,
+        description: '24格内按距离采样玩家和敌对类型，服务端确认的远处队友位置标未知；报告省略数量。',
+      },
+      'worlds.minecraft.combatDecision.maxCandidates': {
+        type: 'integer', title: '战斗候选动作上限', minimum: 1, maximum: 8, 'x-hot': true,
+        description: '受阻时优先提供已检查的移动，其后按已编排规则顺序保留法术，另有继续当前动作；报告省略数量。',
+      },
+      'worlds.minecraft.combatDecision.allowMovement': {
+        type: 'boolean', title: '快速战术短步与撤退', 'x-hot': true,
+        description: '允许战斗控制器执行经过落脚和碰撞检查的1.2格短步，或进入已有撤退控制器；不抢正常身体任务。',
+      },
+      'worlds.minecraft.combatDecision.allowEngage': {
+        type: 'boolean', title: '快速选择主动接敌', 'x-hot': true,
+        description: '身体空闲时可选择交战；仍遵守 fight 策略、装备和生存限制，不取消已有任务或脚本。',
+      },
+      'worlds.minecraft.combatDecision.engageScope': {
+        type: 'string', enum: ['party', 'hostile'], title: '快速接敌范围', 'x-hot': true,
+        description: 'party 只考虑服务端确认正在攻击自己或队友的目标；hostile 允许选择可见敌对生物。',
+      },
+      'worlds.minecraft.combatDecision.movementStallMs': {
+        type: 'integer', title: '无命中后允许战术短步', minimum: 500, maximum: 10000, 'x-suffix': 'ms', 'x-hot': true,
+        description: '正常连续命中时由原战斗控制器继续；超过此时长未命中才提供额外短步与撤退候选。',
       },
       'worlds.minecraft.idle.enabled': {
         type: 'boolean', title: '空闲小动作', 'x-hot': true,

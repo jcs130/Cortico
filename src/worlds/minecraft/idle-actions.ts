@@ -61,7 +61,7 @@ function eye(bot: Bot): Vec3 {
   return bot.entity.position.offset(0, height, 0);
 }
 
-function loadedSight(bot: Bot, to: Point): boolean {
+export function loadedSight(bot: Bot, to: Point): boolean {
   if (typeof bot.blockAt !== 'function' || typeof bot.world?.raycast !== 'function') return false;
   const from = eye(bot);
   const length = distance(from, to);
@@ -100,7 +100,7 @@ function safeFloor(bot: Bot, x: number, y: number, z: number): boolean {
     && shape[3] === 1 && shape[4] === 1 && shape[5] === 1);
 }
 
-function corridorSafe(bot: Bot, from: Point, to: Point): boolean {
+export function corridorSafe(bot: Bot, from: Point, to: Point): boolean {
   if (!bot.entity.onGround || Math.abs(from.y - Math.round(from.y)) > 0.04
     || Math.abs(to.y - from.y) > 0.01) return false;
   const length = distance(from, to);

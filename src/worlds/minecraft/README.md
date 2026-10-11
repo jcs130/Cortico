@@ -1,4 +1,4 @@
-<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/method-runner.ts, src/worlds/minecraft/method-worker.mjs, src/worlds/minecraft/flight.ts, src/worlds/minecraft/flight-preview.ts, src/worlds/minecraft/agentfriend-flight.ts, src/worlds/minecraft/terrain.ts, src/worlds/minecraft/executor.ts, src/worlds/minecraft/combat.ts, src/worlds/minecraft/skills.ts, src/worlds/minecraft/skills-control.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts, src/worlds/minecraft/chests.ts, src/worlds/minecraft/inventory.ts, src/worlds/minecraft/inventory-click-sync.ts, src/worlds/minecraft/equipment.ts, src/worlds/minecraft/check.ts, src/worlds/minecraft/spatial-slices.ts, src/worlds/minecraft/spatial-observation.ts, src/worlds/minecraft/cell-facts.ts -->
+<!-- Owner: src/worlds/minecraft/definition.ts, src/worlds/minecraft/world.ts, src/worlds/minecraft/method-runner.ts, src/worlds/minecraft/method-worker.mjs, src/worlds/minecraft/flight.ts, src/worlds/minecraft/flight-preview.ts, src/worlds/minecraft/agentfriend-flight.ts, src/worlds/minecraft/terrain.ts, src/worlds/minecraft/executor.ts, src/worlds/minecraft/combat.ts, src/worlds/minecraft/battlefield.ts, src/worlds/minecraft/combat-decision.ts, src/worlds/minecraft/combat-reactions.ts, src/worlds/minecraft/combat-spells.ts, src/worlds/minecraft/combat-rules.ts, src/worlds/minecraft/skills.ts, src/worlds/minecraft/skills-control.ts, src/worlds/minecraft/visual-capture.ts, src/worlds/minecraft/modern-viewer.ts, src/worlds/minecraft/chests.ts, src/worlds/minecraft/inventory.ts, src/worlds/minecraft/inventory-click-sync.ts, src/worlds/minecraft/equipment.ts, src/worlds/minecraft/check.ts, src/worlds/minecraft/spatial-slices.ts, src/worlds/minecraft/spatial-observation.ts, src/worlds/minecraft/cell-facts.ts -->
 
 # worlds/minecraft
 
@@ -55,6 +55,8 @@
 转头按角距离安排时长，使用缓入缓出轨迹；侧向看一眼约 1 秒，完整左右环顾约 2.2 秒。注视停留 500 毫秒，让镜头停稳后再转向下一处。协议角度每 50 毫秒更新，按已过去的时间推进，执行延迟不逐帧累积。
 
 视角与姿态通过普通 Minecraft 协议呈现，背包预览通过本地 `viewer_inventory_preview` 事件发送，不更改服务端窗口。可选短步只通过已加载、连续实心平地上的 1.2 格走廊，不挖掘或搭路。动作日志进入 World 诊断，普通小动作不产生模型上下文事件；采集、存取和送礼仍由正式任务执行。
+
+`combatDecision` 直接按游戏时钟采样战场并异步选择，主模型推理期间仍可运行。默认关闭，`shadow` 仅记录，`act` 在返回后复核现场再执行已有规则授权的法术；规则用 `intent` 声明技能作用。可选接敌、短步与撤退复用现有战斗控制器，保留正常任务、脚本、连续出手和环境自救。原版缺失的队友身份、生命与攻击目标保持未知，服务端可通过 `mcagent:battlefield` 补充。协议、有效期和诊断见[战场状态与异步战术选择](../../../docs/minecraft-battlefield-protocol.md)。`mc_combat_tactic` 的 `battlefield:true` 单独读取当前有界战场输入。
 
 ```
 definition.ts / config.ts / world.ts  World 定义、配置段与 World 本体(事件面、工具面、

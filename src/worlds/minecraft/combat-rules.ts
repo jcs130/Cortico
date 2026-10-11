@@ -2,6 +2,8 @@
 export interface CombatRule {
   id: string;
   spell: string;
+  /** Meaning of this choice, authored after reading the server's skill contract. */
+  intent?: string;
   when: {
     within?: number;
     enemyTypes?: string[];
@@ -35,6 +37,8 @@ export const COMBAT_RULES_SCHEMA = {
     properties: {
       id: { type: 'string', pattern: ID.source, description: 'Unique rule ID, retained in cast observations.' },
       spell: { type: 'string', pattern: ID.source, description: 'Server-listed offensive/support spell ID; selfheal uses healAtOrBelow.' },
+      intent: { type: 'string', minLength: 1, maxLength: 160,
+        description: 'Optional concise effect and tactical purpose from the skill documentation. Required to offer this rule to the asynchronous fast selector; does not prove the spell is learned.' },
       when: { type: 'object', additionalProperties: false, properties: {
         within: { type: 'number', minimum: 1, maximum: 16, description: 'Count matching enemies within this 3D distance; default 12. Not a claim about spell range or line of sight.' },
         enemyTypes: { type: 'array', minItems: 1, maxItems: 16, uniqueItems: true, items: { type: 'string', pattern: ID.source }, description: 'Optional exact entity types to count; omitted counts all observed hostiles.' },
@@ -56,9 +60,10 @@ export function validCombatRules(value: unknown): value is CombatRule[] {
   const ids = new Set<string>();
   for (const rule of value) {
     if (!rule || typeof rule !== 'object' || Array.isArray(rule)
-      || Object.keys(rule).some(k => !['id', 'spell', 'when'].includes(k))
+      || Object.keys(rule).some(k => !['id', 'spell', 'intent', 'when'].includes(k))
       || typeof rule.id !== 'string' || !ID.test(rule.id) || ids.has(rule.id)
       || typeof rule.spell !== 'string' || !ID.test(rule.spell) || rule.spell === 'selfheal'
+      || (rule.intent !== undefined && (typeof rule.intent !== 'string' || !rule.intent.trim().length || rule.intent.length > 160))
       || !rule.when || typeof rule.when !== 'object' || Array.isArray(rule.when)) return false;
     ids.add(rule.id);
     const w = rule.when;

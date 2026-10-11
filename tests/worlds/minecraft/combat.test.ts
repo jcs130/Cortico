@@ -1873,3 +1873,68 @@ describe('末地:龙只报不撤,撤退不朝悬崖跑', () => {
     session.stop();
   }, 15_000);
 });
+
+describe('异步战术动作共用战斗控制器', () => {
+  it('在近身自保圈外接敌后持续接近，环境与主动任务仍有优先权', async () => {
+    const { bot, controls } = combatRigBot([foe(7, 'zombie', 5.5)]);
+    const r = rig(bot);
+    r.setTaskFighting(true);
+    expect(r.session.react({ kind: 'engage', targetId: 7 })).toBe(false);
+    r.setTaskFighting(false); r.setEnvBusy(true);
+    expect(r.session.react({ kind: 'engage', targetId: 7 })).toBe(false);
+    r.setEnvBusy(false);
+    expect(r.session.react({ kind: 'engage', targetId: 7 })).toBe(true);
+    await drive(bot as unknown as EventEmitter, 50);
+    expect(r.session.fighting).toBe(true);
+    expect(Object.entries(controls).some(([key, pressed]) => ['forward', 'back', 'left', 'right'].includes(key) && pressed)).toBe(true);
+    expect(r.calls.suspended).toBe(1);
+    r.session.stop();
+  });
+
+  it('战术短步保持出手，危险落脚点与已释放的身体拒绝旧动作', async () => {
+    const { bot, attacks, controls } = combatRigBot([foe(7, 'zombie', 3)]);
+    const cast = bot as unknown as Bot;
+    cast.blockAt = (p => ({ name: p.y < 64 ? 'stone' : 'air', boundingBox: p.y < 64 ? 'block' : 'empty',
+      shapes: p.y < 64 ? [[0, 0, 0, 1, 1, 1]] : [], getProperties: () => ({}) })) as Bot['blockAt'];
+    const r = rig(bot);
+    expect(r.session.react({ kind: 'engage', targetId: 7 })).toBe(true);
+    expect(r.session.react({ kind: 'step', destination: [0.5, 64, 1.7] })).toBe(true);
+    await drive(bot as unknown as EventEmitter, 1000);
+    expect(attacks.length).toBeGreaterThan(0);
+    cast.blockAt = () => null;
+    expect(r.session.react({ kind: 'step', destination: [0.5, 64, 1.7] })).toBe(false);
+    r.session.stop();
+    expect(r.session.react({ kind: 'step', destination: [0.5, 64, 1.7] })).toBe(false);
+    expect(Object.values(controls).every(pressed => !pressed)).toBe(true);
+  });
+
+  it('主动接敌遵守关闭策略和血线，战术撤退交给已有撤退控制器', () => {
+    const b = combatRigBot([foe(7, 'zombie', 3)]);
+    const off = rig(b.bot, { fight: 'off' });
+    expect(off.session.react({ kind: 'engage', targetId: 7 })).toBe(false);
+    off.session.stop();
+    const r = rig(b.bot);
+    (b.bot as unknown as Bot).health = 5;
+    expect(r.session.react({ kind: 'engage', targetId: 7 })).toBe(false);
+    (b.bot as unknown as Bot).health = 20;
+    expect(r.session.react({ kind: 'engage', targetId: 7 })).toBe(true);
+    expect(r.session.react({ kind: 'retreat' })).toBe(true);
+    expect(r.session.reactionState().retreating).toBe(true);
+    r.session.stop();
+  });
+
+  it('短步让出横扫的站定窗口并继续完成攻击', async () => {
+    const { bot, attacks, controls } = combatRigBot([foe(7, 'zombie', 2.5), foe(8, 'zombie', 2.7)]);
+    const cast = bot as unknown as Bot;
+    cast.blockAt = (p => ({ name: p.y < 64 ? 'stone' : 'air', boundingBox: p.y < 64 ? 'block' : 'empty',
+      shapes: p.y < 64 ? [[0, 0, 0, 1, 1, 1]] : [], getProperties: () => ({}) })) as Bot['blockAt'];
+    const r = rig(bot);
+    expect(r.session.react({ kind: 'engage', targetId: 7 })).toBe(true);
+    expect(r.session.react({ kind: 'step', destination: [0.5, 64, 1.7] })).toBe(true);
+    await drive(bot as unknown as EventEmitter, 100);
+    expect(['forward', 'back', 'left', 'right', 'sprint'].every(k => !controls[k])).toBe(true);
+    await drive(bot as unknown as EventEmitter, 100);
+    expect(attacks.length).toBeGreaterThan(0);
+    r.session.stop();
+  });
+});
