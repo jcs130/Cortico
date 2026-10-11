@@ -1,6 +1,32 @@
 import { describe, expect, it } from 'vitest';
 import { ownEntity, recordFishingBobberOwner, viewerEntity, viewerItem, viewerMessageKind } from '../../../src/worlds/minecraft/modern-viewer.ts';
 
+describe('modern viewer own identity', () => {
+  const sessionUuid = '00000000-0000-4000-8000-000000000001';
+  const entityUuid = '00000000-0000-4000-8000-000000000002';
+  const entity = { id: 8, position: { x: 1, y: 64, z: 2 }, width: .6, height: 1.8,
+    yaw: 0, pitch: 0 };
+
+  it('binds the own avatar to the logged-in session when the entity has no UUID', () => {
+    const avatar = ownEntity({ entity, _client: { uuid: sessionUuid }, username: 'Viewer' } as never);
+    expect(avatar).toMatchObject({ id: entity.id, uuid: sessionUuid, isSelf: true });
+  });
+
+  it('keeps session identity authoritative over a stale entity UUID', () => {
+    const avatar = ownEntity({ entity: { ...entity, uuid: entityUuid },
+      _client: { uuid: sessionUuid }, player: { uuid: entityUuid }, username: 'Viewer' } as never);
+    expect(avatar.uuid).toBe(sessionUuid);
+  });
+
+  it('uses player-info or entity identity when the protocol has not provided it', () => {
+    expect(ownEntity({ entity, player: { uuid: sessionUuid }, username: 'Viewer' } as never).uuid)
+      .toBe(sessionUuid);
+    expect(ownEntity({ entity: { ...entity, uuid: entityUuid }, username: 'Viewer' } as never).uuid)
+      .toBe(entityUuid);
+    expect(ownEntity({ entity, username: 'Viewer' } as never).uuid).toBeUndefined();
+  });
+});
+
 describe('modern viewer item state', () => {
   it('sends the selected weapon, offhand and armour with the world avatar', () => {
     const slots: unknown[] = Array(46).fill(null);

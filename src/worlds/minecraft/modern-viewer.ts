@@ -218,6 +218,7 @@ async function requiredAssetsPresent(root: string, version: string): Promise<boo
 
 export function ownEntity(bot: mineflayer.Bot): Record<string, unknown> {
   const entity = bot.entity;
+  const uuid = bot._client?.uuid ?? bot.player?.uuid ?? entity.uuid;
   const inventory = bot.inventory as unknown as { slots?: unknown[]; hotbarStart?: number };
   const slots = inventory?.slots ?? [];
   const selected = Math.max(0, Math.min(8, Number(bot.quickBarSlot) || 0));
@@ -227,8 +228,8 @@ export function ownEntity(bot: mineflayer.Bot): Record<string, unknown> {
     equipped[2], equipped[3], equipped[4], equipped[5]].map(viewerItem);
   return { id: entity.id, name: 'player', type: 'player', pos: entity.position,
     width: entity.width, height: entity.height, yaw: entity.yaw, pitch: entity.pitch,
-    username: bot.username, uuid: entity.uuid, isSelf: true, equipment, skinUrl: null, skinModel: null,
-    ...viewerPlayerSkin(bot, bot.username, entity.uuid),
+    username: bot.username, uuid, isSelf: true, equipment, skinUrl: null, skinModel: null,
+    ...viewerPlayerSkin(bot, bot.username, uuid),
     burning: Boolean((entity as unknown as { isOnFire?: boolean }).isOnFire) ||
       (Number((entity as unknown as { metadata?: unknown[] }).metadata?.[0]) & 1) !== 0 };
 }
