@@ -106,6 +106,22 @@ describe('independent asynchronous combat choices', () => {
     expect(r.sent).toEqual([r.f!.candidates[0]]);
   });
 
+  it('preserves a choice when distance sorting changes actor order', async () => {
+    vi.useFakeTimers(); const r = rig(); r.loop.tick();
+    r.f!.battlefield.actors.reverse();
+    r.resolve(); await vi.advanceTimersByTimeAsync(1);
+    expect(r.sent).toHaveLength(1);
+    expect(r.reports.at(-1)?.data.outcome).toBe('sent');
+  });
+
+  it('preserves an eligible choice across mana regeneration', async () => {
+    vi.useFakeTimers(); const r = rig(); r.f!.mana = 20; r.loop.tick();
+    r.f!.mana = 20.12;
+    r.resolve(); await vi.advanceTimersByTimeAsync(1);
+    expect(r.sent).toHaveLength(1);
+    expect(r.reports.at(-1)?.data.outcome).toBe('sent');
+  });
+
   it.each(['health', 'ally-health', 'mana', 'connection', 'plan', 'target', 'sight', 'task', 'cooldown', 'emergency', 'attack-target', 'body-phase'])
     ('rejects a result after %s changes', async change => {
       vi.useFakeTimers(); const r = rig(); r.loop.tick();

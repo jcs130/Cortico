@@ -33,15 +33,26 @@ export interface CombatDecisionOptions {
   now?: () => number;
 }
 
-function sceneKey(frame: CombatDecisionFrame): string {
+function sceneFacts(frame: CombatDecisionFrame) {
   const f = frame.battlefield;
-  return JSON.stringify([f.connectionGeneration, f.dimension, frame.tacticRevision, frame.mana,
-    f.self.health.current, f.self.health.max, f.self.food,
-    [f.action.fighting, f.action.emergency, f.action.taskId, f.action.step, f.action.targetEntityId, f.action.canStep],
-    frame.skills.map(s => [s.spell, s.available, s.manaCost, s.block,
+  return { connection: [f.connectionGeneration, f.dimension], tactic: frame.tacticRevision,
+    self: [f.self.entityId, f.self.health.current, f.self.health.max, f.self.food],
+    action: [f.action.fighting, f.action.emergency, f.action.taskId, f.action.step, f.action.targetEntityId, f.action.canStep],
+    skills: frame.skills.map(s => [s.spell, s.available, s.manaCost, s.block,
       s.cooldownRemainingMs === null ? null : s.cooldownRemainingMs > 0]),
-    f.actors.map(e => [e.entityId, e.uuid, e.type, e.relation,
-      e.health.current, e.health.max, e.lineOfSight, e.targetEntityId])]);
+    actors: [...f.actors].sort((a, b) => (a.entityId ?? -1) - (b.entityId ?? -1)
+      || (a.uuid ?? '').localeCompare(b.uuid ?? '')).map(e => [e.entityId, e.uuid, e.type, e.relation,
+      e.health.current, e.health.max, e.lineOfSight, e.targetEntityId]) };
+}
+
+function sceneChanges(before: CombatDecisionFrame, after: CombatDecisionFrame): string[] {
+  const prior = sceneFacts(before), current = sceneFacts(after);
+  const changed: string[] = (Object.keys(prior) as Array<keyof typeof prior>)
+    .filter(key => JSON.stringify(prior[key]) !== JSON.stringify(current[key]));
+  // Regeneration preserves a still-eligible choice; spending and unknown readings invalidate it.
+  if (before.mana !== after.mana && !(before.mana !== null && after.mana !== null && after.mana >= before.mana))
+    changed.push('mana');
+  return changed;
 }
 
 export class CombatDecisionLoop {
@@ -100,10 +111,11 @@ export class CombatDecisionLoop {
       const selected = answer.choice === 'keep' ? null : frame.candidates[Number(answer.choice.slice(7))];
       const executable = selected && current?.candidates.find(c => c.id === selected.id && c.kind === selected.kind
         && (selected.kind !== 'cast' || c.intent === selected.intent));
+      const changed = current ? sceneChanges(frame, current) : ['unavailable'];
       let outcome: string;
       if (!liveCfg.enabled || liveCfg.mode !== cfg.mode || liveCfg.endpoint !== cfg.endpoint) outcome = 'configuration-changed';
       else if (elapsedMs > Math.min(cfg.maxAgeMs, liveCfg.maxAgeMs)) outcome = 'expired';
-      else if (!current || sceneKey(current) !== sceneKey(frame)) outcome = 'scene-changed';
+      else if (!current || changed.length) outcome = 'scene-changed';
       else if (Math.hypot(...current.battlefield.self.position.map((v, i) => v - frame.battlefield.self.position[i])) > 1.5) outcome = 'moved';
       else if (answer.choiceProbability < Math.max(cfg.minConfidence, liveCfg.minConfidence)) outcome = 'uncertain';
       else if (!selected) outcome = 'keep';
@@ -114,6 +126,7 @@ export class CombatDecisionLoop {
       if (outcome === 'uncertain' && cfg.mode === 'act') this.options.fallback?.();
       this.options.report('result', { ...scope, elapsedMs, choice: answer.choice,
         probability: answer.choiceProbability, probabilities: answer.probabilities, outcome,
+        sceneChanges: changed,
         modelMs: payload.latency_ms ?? null, usage: payload.usage ?? null,
         candidate: (outcome === 'sent' ? executable : selected) ?? null });
     } catch (error) {
