@@ -1875,6 +1875,36 @@ describe('末地:龙只报不撤,撤退不朝悬崖跑', () => {
 });
 
 describe('异步战术动作共用战斗控制器', () => {
+  it('接敌候选沿用控制器的中立生物、危险目标和距离判据，采样不接管身体', () => {
+    const { bot } = combatRigBot([foe(7, 'enderman', 3), foe(8, 'zombie', 5.5),
+      foe(9, 'warden', 3), foe(10, 'zombie', 20)]);
+    const r = rig(bot);
+    expect(r.session.engagementTargets()).toEqual([8]);
+    expect(r.session.active).toBe(false);
+    expect(r.calls.suspended).toBe(0);
+    expect(r.session.react({ kind: 'engage', targetId: 7 })).toBe(false);
+    expect(r.session.react({ kind: 'engage', targetId: 8 })).toBe(true);
+    expect(r.session.engagementTargets()).toEqual([]);
+    r.session.stop();
+  });
+
+  it('接敌候选在身体占用、低血、未武装和策略关闭时均不提供', () => {
+    const { bot } = combatRigBot([foe(7, 'zombie', 5.5)]);
+    const r = rig(bot, { fight: 'armed' });
+    r.setTaskFighting(true); expect(r.session.engagementTargets()).toEqual([]);
+    r.setTaskFighting(false); r.setEnvBusy(true); expect(r.session.engagementTargets()).toEqual([]);
+    r.setEnvBusy(false); r.setTaskEscaping(true); expect(r.session.engagementTargets()).toEqual([]);
+    r.setTaskEscaping(false); (bot as unknown as Bot).health = 5;
+    expect(r.session.engagementTargets()).toEqual([]);
+    (bot as unknown as Bot).health = 20;
+    (bot as unknown as Bot).inventory.items = () => [];
+    expect(r.session.engagementTargets()).toEqual([]);
+    r.session.stop();
+    const off = rig(bot, { fight: 'off' });
+    expect(off.session.engagementTargets()).toEqual([]);
+    off.session.stop();
+  });
+
   it('在近身自保圈外接敌后持续接近，环境与主动任务仍有优先权', async () => {
     const { bot, controls } = combatRigBot([foe(7, 'zombie', 5.5)]);
     const r = rig(bot);

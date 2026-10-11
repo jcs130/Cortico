@@ -434,6 +434,18 @@ export class CombatSession {
       retreating: this.state === 'retreating' };
   }
 
+  /** Read-only target eligibility shared by candidate construction and execution. */
+  engagementTargets(): number[] {
+    const bot = this.opts.getBot(), t = this.opts.tuning();
+    if (!bot?.entity || this.active || !t.enabled || t.fight === 'off'
+      || this.opts.envBusy() || this.opts.taskEscaping?.() || this.opts.taskFighting?.()
+      || (bot.health ?? 0) < t.fleeHealth + ENGAGE_MARGIN
+      || (t.fight === 'armed' && !bestWeapon(bot) && !this.rangedReady(bot))
+      || Date.now() < this.capCooldownUntil
+      || (!t.arena && this.busyRatioNow() > t.busyRatio / 100)) return [];
+    return this.scan(bot, t, t.chaseMax).filter(f => f.visible && !NO_FIGHT.has(f.name)).map(f => f.id);
+  }
+
   /** Reuses the combat body's existing lease, health gates and retreat controller. */
   react(action: { kind: 'engage'; targetId: number } | { kind: 'retreat' }
     | { kind: 'step'; destination: [number, number, number] }): boolean {
@@ -449,13 +461,9 @@ export class CombatSession {
       this.tacticalMove = { origin: bot.entity.position.clone(), destination: to, expiresAtMs: Date.now() + 700 };
       return true;
     }
-    const t = this.opts.tuning();
-    if (this.active || !t.enabled || t.fight === 'off'
-      || (bot.health ?? 0) < t.fleeHealth + ENGAGE_MARGIN
-      || (t.fight === 'armed' && !bestWeapon(bot) && !this.rangedReady(bot))) return false;
-    const foe = this.scan(bot, t, t.chaseMax).find(f => f.id === action.targetId && f.visible && !NO_FIGHT.has(f.name));
-    if (!foe || !this.engage(foe.name, false)) return false;
-    if (this.fighting) this.targetId = foe.id;
+    const foe = bot.entities[action.targetId];
+    if (!foe || !this.engagementTargets().includes(action.targetId) || !this.engage(foe.name ?? '', false)) return false;
+    if (this.fighting) this.targetId = action.targetId;
     return true;
   }
 

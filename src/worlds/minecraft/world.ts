@@ -4796,10 +4796,13 @@ export class MinecraftWorld implements World {
       targetId: reaction?.targetId ?? null, sinceHitMs: reaction?.sinceHitMs ?? null,
       fight: this.policy.get().fight, fleeHealth: this.cfg.reflex.fleeHealth, chaseMax: this.cfg.combat.chaseMax,
     };
-    const reactions = combatReactions(bot, battlefield, cfg, control);
+    const engagementTargets = new Set(this.combat?.engagementTargets() ?? []);
+    const executableReaction = (candidate: CombatCandidate) => candidate.kind !== 'engage'
+      || engagementTargets.has(candidate.targetId);
+    const reactions = combatReactions(bot, battlefield, cfg, control).filter(executableReaction);
     if (program) {
       frame.program = program;
-      frame.actionPool = [...combatReactions(bot, battlefield, cfg, control, true), ...frame.candidates];
+      frame.actionPool = [...combatReactions(bot, battlefield, cfg, control, true).filter(executableReaction), ...frame.candidates];
     }
     const choices = [...reactions, ...frame.candidates];
     frame.omittedCandidates += Math.max(0, choices.length - cfg.maxCandidates);
