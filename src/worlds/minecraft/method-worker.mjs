@@ -1,15 +1,16 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import 'ses';
 import { Vec3 } from 'vec3';
+import { procedureProgram } from '../../protocol/procedure-program.mjs';
 
 lockdown({ errorTaming: 'unsafe', consoleTaming: 'safe' });
 
 let serial = 0;
 const pending = new Map();
-const rpc = harden((method, args = {}) => new Promise((resolve, reject) => {
+const rpc = harden((method, args = {}, scope) => new Promise((resolve, reject) => {
   const id = ++serial;
   pending.set(id, { resolve, reject, method });
-  parentPort.postMessage({ kind: 'call', id, method, args: JSON.parse(JSON.stringify(args)) });
+  parentPort.postMessage({ kind: 'call', id, method, args: JSON.parse(JSON.stringify(args)), scope });
 }));
 parentPort.on('message', (message) => {
   const request = pending.get(message.id);
@@ -30,22 +31,26 @@ function revive(value) {
   return result;
 }
 
-const bot = workerData.nativeMethods ? Object.fromEntries(workerData.nativeMethods
-  .filter(name => name !== 'inventory.items').map(name => [name, (...args) => rpc('mineflayer', { name, args })])) : undefined;
-if (bot) bot.inventory = { items: () => rpc('mineflayer', { name: 'inventory.items', args: [] }) };
-
-const mc = harden({
-  state: () => rpc('state'),
-  do: (steps) => rpc('do', { steps }),
-  flightPlan: (args) => rpc('flightPlan', args),
-});
+function capabilities(scope) {
+  const bot = workerData.nativeMethods ? Object.fromEntries(workerData.nativeMethods
+    .filter(name => name !== 'inventory.items').map(name => [name, (...args) => rpc('mineflayer', { name, args }, scope)])) : undefined;
+  if (bot) bot.inventory = { items: () => rpc('mineflayer', { name: 'inventory.items', args: [] }, scope) };
+  return { mc: harden({ state: () => rpc('state', {}, scope), do: steps => rpc('do', { steps }, scope),
+    flightPlan: args => rpc('flightPlan', args, scope) }), ...(bot ? { bot: harden(bot), Vec3: harden(Vec3) } : {}) };
+}
 
 try {
-  const compartment = new Compartment({ mc, params: harden(workerData.params),
-    ...(bot ? { bot: harden(bot), Vec3: harden(Vec3) } : {}) });
-  const program = compartment.evaluate(`(async () => {\n${workerData.code}\n})`);
-  if (typeof program !== 'function') throw new Error('code必须是异步函数体');
-  const result = workerData.validate ? { valid: true } : await program();
+  let result;
+  if (workerData.graph) {
+    const program = procedureProgram(workerData.graph, { capabilities, maxInvocations: workerData.maxInvocations,
+      onInvocation: event => parentPort.postMessage({ kind: 'procedure', ...event }) });
+    result = workerData.validate ? program.validate() : await program.run(workerData.params);
+  } else {
+    const compartment = new Compartment({ ...capabilities(), params: harden(workerData.params) });
+    const program = compartment.evaluate(`(async () => {\n${workerData.code}\n})`);
+    if (typeof program !== 'function') throw new Error('code必须是异步函数体');
+    result = workerData.validate ? { valid: true } : await program();
+  }
   parentPort.postMessage({ kind: 'done', value: result === undefined ? null : result });
 } catch (error) {
   parentPort.postMessage({ kind: 'error', error: String(error).slice(0, 1600) });

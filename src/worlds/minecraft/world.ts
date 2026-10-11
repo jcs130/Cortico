@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
   ConfigGroup, World, WorldHost, WorldConsoleDecl, WorldPanelDecl, WorldRequestFacts,
-  EventTag, StoragePart, ToolCallContext, ToolDef, ToolOutcome, TriggerMode,
+  BlobInput, EventTag, StoragePart, ToolCallContext, ToolDef, ToolOutcome, TriggerMode,
 } from '../../core/types.ts';
 import { MAP_SIZE, exploredShare, mapStateOf, renderMapPng } from './map-view.ts';
 import { selfDamageText, takeSelfDamage } from './damage-source.ts';
@@ -30,7 +30,9 @@ import { PlayerObservations, playerObservationMeta, renderPlayerObservation, typ
 import { precheckEmptyUseTarget } from './precheck.ts';
 import { blockAtCell, resolveAt } from './cell-facts.ts';
 import { FLIGHT_PLAN_MAX_POINTS, parseFlightPlan, previewFlightPlan } from './flight-preview.ts';
-import { MethodRunner, METHOD_LIMITS, type MethodOperation, type MethodRun } from './method-runner.ts';
+import { MethodRunner, METHOD_LIMITS, METHOD_ADAPTER, type MethodOperation, type MethodRun } from './method-runner.ts';
+import { resolveProcedure, procedureReference, PROCEDURE_RECEIPT_SCHEMA, PROCEDURE_RECEIPT_MIME,
+  type ProcedureReceipt } from '../../protocol/procedure.ts';
 import { MineflayerMethod, NATIVE_API, nativeApiHelp } from './method-mineflayer.ts';
 import { flightState } from './flight.ts';
 import { createDecisionAdviser, DECISION_MIN_CONFIDENCE, type DecisionAdvice } from './decision-adviser.ts';
@@ -2237,10 +2239,13 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
       + 'Returns a run id immediately; {runId} reads result and call summaries, {runId,call} expands one complete SDK call; {} lists the last eight run summaries, {stop:true} cancels the current run. '
       + '{validate:true,name,code} checks syntax without running any action. Program completion does not certify a learned method. '
       + 'Expand an SDK call to inspect its actual fields before interpreting results; compare the returned observations with the method objective before saving verified claims. '
-      + 'Store source, conditions, version/hash and verified before/after evidence in your own workspace; read relevant methods on demand.',
+      + 'Alternatively use {procedure:{handle,revision},params,validate?} to resolve and run a pinned cortico.procedure/v1 dependency graph for adapter minecraft-method/v1. '
+      + 'await methods.run(alias,params) composes only declared dependency versions; all share this program\'s budgets and body lease. Source is loaded directly from the selected blobs, without copying it through model context. '
+      + 'Procedure terminal events carry an execution UUID and persistent receipt for explicit goal review/adoption by the owning Persona; completion alone is not proof of improvement.',
     parameters: { type: 'object', properties: {
       name: { type: 'string', minLength: 1, maxLength: 80 },
       code: { type: 'string', minLength: 1, maxLength: METHOD_LIMITS.sourceChars },
+      procedure: { type: 'object', properties: { handle: { type: 'string' }, revision: { type: 'string' } }, required: ['handle', 'revision'] },
       params: { type: 'object', additionalProperties: true },
       durationMs: { type: 'integer', minimum: 1000, maximum: METHOD_LIMITS.maxDurationMs },
       validate: { type: 'boolean' }, runId: { type: 'integer', minimum: 1 },
@@ -4252,21 +4257,26 @@ export class MinecraftWorld implements World {
       mc_script: async (args) => {
         try {
           if (args.api !== undefined) {
-            if (typeof args.api !== 'string' || ['code', 'runId', 'call', 'stop', 'validate'].some(key => args[key] !== undefined)) throw new Error('api 须单独使用');
+            if (typeof args.api !== 'string' || ['code', 'procedure', 'runId', 'call', 'stop', 'validate'].some(key => args[key] !== undefined)) throw new Error('api 须单独使用');
             return this.toolLog('mc_script', args, nativeApiHelp(args.api));
           }
           if (args.validate !== undefined && typeof args.validate !== 'boolean') throw new Error('validate须为布尔值');
           if (args.stop !== undefined && typeof args.stop !== 'boolean') throw new Error('stop须为布尔值');
           if (args.stop === true) {
-            if (args.code !== undefined || args.runId !== undefined || args.call !== undefined) throw new Error('stop不能与code、runId或call合用');
+            if (args.code !== undefined || args.procedure !== undefined || args.runId !== undefined || args.call !== undefined) throw new Error('stop不能与code、procedure、runId或call合用');
             return this.toolLog('mc_script', args, this.methods.stop('mc_script明确取消') ? '已取消当前方法' : '当前没有运行中的方法');
           }
-          if (args.code !== undefined) {
+          if (args.code !== undefined || args.procedure !== undefined) {
             if (args.runId !== undefined || args.call !== undefined) throw new Error('code不能与runId或call合用');
+            if (args.code !== undefined && args.procedure !== undefined) throw new Error('code和procedure不能合用');
             if (args.validate !== true && (!this.executor || !this.bridge?.bot?.entity)) throw new Error('Minecraft尚未连接');
-            const run = this.methods.start({ name: args.name as string, code: args.code as string,
+            const reference = args.procedure === undefined ? undefined : procedureReference(args.procedure);
+            const graph = reference ? resolveProcedure(reference, METHOD_ADAPTER, handle => this.host?.blob(handle) ?? null) : undefined;
+            const root = graph?.versions[graph.root];
+            const run = this.methods.start({ name: root?.id ?? args.name as string, code: root?.code ?? args.code as string,
               params: args.params as Record<string, unknown> | undefined,
-              durationMs: args.durationMs as number | undefined, validate: args.validate === true });
+              durationMs: args.durationMs as number | undefined, validate: args.validate === true,
+              ...(graph && reference ? { procedure: { reference, graph } } : {}) });
             return this.toolLog('mc_script', args, `方法#${run.id}已启动，尚无执行终态：${JSON.stringify(run)}`);
           }
           if (args.runId !== undefined && (!Number.isInteger(args.runId) || Number(args.runId) <= 0)) throw new Error('runId须为正整数');
@@ -4388,10 +4398,20 @@ export class MinecraftWorld implements World {
     this.diag.write({ lane: 'task', event: 'method-terminal', msg: `方法#${run.id}「${run.name}」${run.status}`,
       data: { runId: run.id, sourceHash: run.sourceHash, status: run.status, calls: run.trace.length,
         startedAt: run.startedAt, endedAt: run.endedAt, error: run.error } });
+    const procedure = run.procedure;
+    const receipt: ProcedureReceipt | undefined = procedure && run.status !== 'running' ? {
+      schema: PROCEDURE_RECEIPT_SCHEMA, executionId: procedure.executionId, root: procedure.reference,
+      adapter: procedure.adapter, mode: procedure.mode, status: run.status, startedAt: run.startedAt, endedAt: run.endedAt!,
+      invocations: procedure.invocations, trace: run.trace, result: run.result, error: run.error,
+    } : undefined;
+    const blobs: BlobInput[] | undefined = receipt ? [{ bytes: new TextEncoder().encode(JSON.stringify({ ...receipt, versions: procedure!.versions })),
+      mime: PROCEDURE_RECEIPT_MIME, name: 'procedure-run.json', fallbackText: '方法完整执行回执；按执行 UUID 查询摘要，再按调用编号展开。' }] : undefined;
     this.emit('minecraft.method', `方法#${run.id}「${run.name}」终态${run.status}；源码SHA256 ${run.sourceHash}；`
       + `${run.trace.length}次SDK调用。${run.error ?? ''}用 mc_script {runId:${run.id}}读取各次真实回执；`
+      + (receipt ? `执行UUID ${receipt.executionId}，方法版本 ${receipt.root.revision}；完整回执已随事件保存。` : '')
       + '脚本结束不等于原目标已达成。核对执行后状态，修订方法并记录已验证范围。', true,
-    { meta: { runId: run.id, sourceHash: run.sourceHash, status: run.status } });
+    { meta: { runId: run.id, sourceHash: run.sourceHash, status: run.status, ...(receipt ? { procedureReceipt: {
+      schema: receipt.schema, executionId: receipt.executionId, root: receipt.root, status: receipt.status } } : {}) }, blobs });
   }
 
   private visualArgumentFailure(args: Record<string, unknown>): ToolOutcome | undefined {
@@ -8690,7 +8710,7 @@ export class MinecraftWorld implements World {
     type: string,
     text: string,
     urgent: boolean,
-    opts?: { deliver?: boolean; trigger?: TriggerMode; tags?: readonly EventTag[]; meta?: Record<string, unknown> },
+    opts?: { deliver?: boolean; trigger?: TriggerMode; tags?: readonly EventTag[]; meta?: Record<string, unknown>; blobs?: BlobInput[] },
     senderKey?: string,
   ): void {
     if (!this.host) return;
@@ -8714,6 +8734,7 @@ export class MinecraftWorld implements World {
         senderKey: senderKey ?? 'minecraft',
         tags: opts?.tags,
         meta: opts?.meta,
+        blobs: opts?.blobs,
       },
       { trigger, deliver: opts?.deliver },
     ).catch((e) => this.host?.log.warn('事件投递失败', { type, err: String(e) }));

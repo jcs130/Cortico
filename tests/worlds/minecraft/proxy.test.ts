@@ -13,6 +13,8 @@ import { renderWorldEnvPrompt } from '../../../src/core/prefix.ts';
 import { MinecraftWorldProxy } from '../../../src/worlds/minecraft/proxy.ts';
 import { MINECRAFT_DEFAULTS, type MinecraftConfigSection } from '../../../src/worlds/minecraft/config.ts';
 import { minecraftToolDecls } from '../../../src/worlds/minecraft/world.ts';
+import { PROCEDURE_RECEIPT_MIME } from '../../../src/protocol/procedure.ts';
+import { fixtureBlobs, procedureFixture, procedureRef } from '../../protocol/procedure-fixture.ts';
 
 class FakeHost implements WorldHost {
   events: Array<{ e: EventEnvelope; opts?: PushOptions }> = [];
@@ -115,6 +117,29 @@ describe('MinecraftWorldProxy(引擎子进程)', () => {
   it('工具面与真 World 逐字节一致(共用同一份声明)', () => {
     const names = proxy.tools().map((t) => t.name);
     expect(names).toEqual(minecraftToolDecls(false).map((d) => d.name));
+  });
+
+  it('resolves only selected procedure blobs across the child boundary and returns intact terminal evidence bytes', async () => {
+    const child = procedureFixture('child', 'return 1;');
+    const root = procedureFixture('root', 'return await methods.run("child");', {dependencies: {child: procedureRef(child)}});
+    const other = procedureFixture('unselected', 'return "private source";');
+    const blobs = fixtureBlobs([root, child, other]), reads: string[] = [];
+    host.blob = handle => {reads.push(handle);return blobs(handle);};
+    try {
+      const tool = proxy.tools().find(t => t.name === 'mc_script')!;
+      const accepted = await tool.handler({procedure: procedureRef(root), validate: true}, {role: 'main', log: host.log});
+      expect(typeof accepted).toBe('string');
+      await waitFor(() => host.events.some(({e}) => e.type === 'minecraft.method' && e.meta?.procedureReceipt));
+      const event = host.events.find(({e}) => e.type === 'minecraft.method' && e.meta?.procedureReceipt)!.e;
+      const attachment = (event as unknown as Parameters<WorldHost['pushEvent']>[0]).blobs![0];
+      expect(attachment && 'bytes' in attachment && attachment.mime).toBe(PROCEDURE_RECEIPT_MIME);
+      const receipt = JSON.parse(Buffer.from((attachment as {bytes: Uint8Array}).bytes).toString('utf8'));
+      expect(receipt).toMatchObject({status: 'validated', trace: [], root: procedureRef(root), result: {valid: true, versions: 2}});
+      expect(reads.sort()).toEqual([procedureRef(root).handle, procedureRef(child).handle].sort());
+      expect(JSON.stringify(receipt)).not.toContain('private source');
+      expect(await tool.handler({procedure: {...procedureRef(root), revision: 'a'.repeat(64)}, validate: true}, {role: 'main', log: host.log}))
+        .toMatchObject({failed: true, text: expect.stringContaining('hash mismatch')});
+    } finally {host.blob = () => null;}
   });
 
   it('工具调用过界:mc_stop 回队列文本', async () => {

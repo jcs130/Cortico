@@ -6,6 +6,7 @@ import type { LogNote } from '../../core/ipc-logger.ts';
 import type {
   CognitionRequest, CognitionResult, EventEnvelope, EventTag, LLMUsage, WorldConsoleDecl,
   PushOptions, TriggerMode, WorldRequestFacts,
+  WorldHost,
 } from '../../core/types.ts';
 import type { MinecraftConfigSection } from './config.ts';
 
@@ -26,6 +27,8 @@ export type EngineRequest =
   | {
       kind: 'tool'; name: string; args: Record<string, unknown>; role: string;
       callId: string | null; round: number | null;
+      /** Parent resolves only the explicitly selected procedure graph. */
+      selectedBlobs?: Array<{ handle: string; b64: string; mime: string }>;
     }
   | { kind: 'panel'; panel: string; method: string; args: unknown[] }
   | { kind: 'storage-clear'; key: string }
@@ -40,11 +43,12 @@ export type EngineRequest =
 export interface IpcToolOutcome {
   text: string;
   failed?: true;
-  blobs?: Array<
-    | { b64: string; mime: string; name?: string; fallbackText: string }
-    | { handle: string; fallbackText: string }
-  >;
+  blobs?: IpcBlob[];
 }
+
+export type IpcBlob =
+  | { b64: string; mime: string; name?: string; fallbackText: string }
+  | { handle: string; fallbackText: string };
 
 /** 主 → 子:单向投递 */
 export type EngineCast =
@@ -91,7 +95,7 @@ export type EngineNote =
 export type HostRequest =
   | {
       kind: 'push';
-      evt: Omit<EventEnvelope, 'cursor' | 'origin'> & { origin?: EventEnvelope['origin'] };
+      evt: Omit<Parameters<WorldHost['pushEvent']>[0], 'blobs'> & { blobs?: IpcBlob[] };
       opts?: PushOptions;
     }
   | { kind: 'drain' }

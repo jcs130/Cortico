@@ -3,6 +3,8 @@ import { createIpcLogger } from '../../core/ipc-logger.ts';
 import { withAnchors } from '../../core/log-context.ts';
 import { MinecraftWorld } from './world.ts';
 import { DeferredRenders } from './deferred-renders.ts';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { encodeBlobs } from './engine-blobs.ts';
 import type {
   ChildToMain,
   CognitionReply,
@@ -71,9 +73,7 @@ function toolOutcomeOverIpc(out: string | ToolOutcome): string | IpcToolOutcome 
   if (!blobs) return plain;
   return {
     ...plain,
-    blobs: blobs.map((b) => ('bytes' in b
-      ? { b64: Buffer.from(b.bytes).toString('base64'), mime: b.mime, fallbackText: b.fallbackText, ...(b.name ? { name: b.name } : {}) }
-      : b)),
+    blobs: encodeBlobs(blobs),
   };
 }
 
@@ -90,8 +90,9 @@ const cognitionHost: NonNullable<WorldHost['cognition']> = {
   },
 };
 
+const selectedBlobs = new AsyncLocalStorage<ReadonlyMap<string, {bytes: Uint8Array; mime: string}>>();
 const host: WorldHost = {
-  pushEvent: (e, opts) => hostRpc({ kind: 'push', evt: e as Parameters<typeof host.pushEvent>[0] & { blobs?: undefined }, opts }) as Promise<EventEnvelope>,
+  pushEvent: (e, opts) => hostRpc({ kind: 'push', evt: { ...e, blobs: encodeBlobs(e.blobs) }, opts }) as Promise<EventEnvelope>,
   pushDeferred: (e, opts) => {
     const renderId = deferredRenders.arm(e.type, e.render);
     send({
@@ -114,7 +115,7 @@ const host: WorldHost = {
     accepts: () => unavailable('modelFacts.accepts'),
     contextWindow: () => unavailable('modelFacts.contextWindow'),
   },
-  blob: () => unavailable('blob'),
+  blob: handle => selectedBlobs.getStore()?.get(handle) ?? null,
   reportUsage: (usage, opts) => send({ t: 'note', note: { kind: 'usage', usage, opts } }),
   /** 能力随配置消息更新。 */
   get cognition(): WorldHost['cognition'] {
@@ -208,12 +209,13 @@ async function handleRequest(req: EngineRequest): Promise<unknown> {
   if (req.kind === 'tool') {
     const tool = mod.tools().find((t) => t.name === req.name);
     if (!tool) throw new Error(`未知工具「${req.name}」`);
-    const out = await withAnchors({ sess: req.role, ...(req.callId ? { call: req.callId } : {}), ...(req.round !== null ? { round: req.round } : {}) }, () => tool.handler(req.args, {
+    const blobs = new Map(req.selectedBlobs?.map(b => [b.handle, {bytes: Buffer.from(b.b64, 'base64'), mime: b.mime}]));
+    const out = await selectedBlobs.run(blobs, () => withAnchors({ sess: req.role, ...(req.callId ? { call: req.callId } : {}), ...(req.round !== null ? { round: req.round } : {}) }, () => tool.handler(req.args, {
       role: req.role,
       log,
       ...(req.callId ? { callId: req.callId } : {}),
       ...(req.round !== null ? { round: req.round } : {}),
-    }));
+    })));
     return toolOutcomeOverIpc(out);
   }
   if (req.kind === 'storage-clear') {

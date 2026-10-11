@@ -30,6 +30,9 @@ import { roundTokenOf } from './round.ts';
 import { loadExplored, renderExploredLedger } from './explored.ts';
 import { loadPolicy, renderPolicyEnv } from './policy.ts';
 import { worldEnvLine, worldIdentityOf } from './server-config.ts';
+import { decodeBlobs } from './engine-blobs.ts';
+import { resolveProcedure, procedureReference } from '../../protocol/procedure.ts';
+import { METHOD_ADAPTER } from './method-runner.ts';
 
 const ENV_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
 const CAMERA_NOTE_FILE = fileURLToPath(new URL('./ENV_PROMPT_CAMERA.md', import.meta.url));
@@ -60,9 +63,7 @@ function ipcToolOutcome(out: string | IpcToolOutcome): string | ToolOutcome {
   if (typeof out === 'string' || !out.blobs) return out as string | ToolOutcome;
   return {
     ...out,
-    blobs: out.blobs.map((b) => ('b64' in b
-      ? { bytes: Buffer.from(b.b64, 'base64'), mime: b.mime, fallbackText: b.fallbackText, ...(b.name ? { name: b.name } : {}) }
-      : b)),
+    blobs: decodeBlobs(out.blobs),
   };
 }
 
@@ -119,12 +120,23 @@ export class MinecraftWorldProxy implements World {
     return minecraftToolDecls(this.opts.agentFriendEnabled === true).map((decl) => ({
       ...decl,
       handler: async (args, ctx) => {
+        const selected = new Map<string, {handle: string; b64: string; mime: string}>();
+        if (decl.name === 'mc_script' && args.procedure !== undefined) {
+          try {
+            resolveProcedure(procedureReference(args.procedure), METHOD_ADAPTER, handle => {
+              const got = this.host?.blob(handle);
+              if (got) selected.set(handle, {handle, b64: Buffer.from(got.bytes).toString('base64'), mime: got.mime});
+              return got ?? null;
+            });
+          } catch (error) { return {text: `[${decl.name} 失败] ${String(error)}`, failed: true}; }
+        }
         try {
           return ipcToolOutcome((await this.rpc(
             {
               kind: 'tool', name: decl.name, args, role: ctx.role,
               callId: ctx.callId ?? null,
               round: roundTokenOf(ctx),
+              ...(selected.size ? {selectedBlobs: [...selected.values()]} : {}),
             },
             RPC_TIMEOUT_MS,
           )) as string | IpcToolOutcome);
@@ -382,7 +394,7 @@ export class MinecraftWorldProxy implements World {
       if (!host) throw new Error('宿主未接线');
       let value: unknown;
       if (req.kind === 'push') {
-        value = await host.pushEvent(req.evt, req.opts);
+        value = await host.pushEvent({ ...req.evt, blobs: decodeBlobs(req.evt.blobs) }, req.opts);
       } else if (req.kind === 'drain') {
         value = await host.drainPendingEvents((e) => e.source === this.id);
       } else if (req.kind === 'cognition') {

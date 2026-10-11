@@ -12,7 +12,8 @@ describe('publish-worlds', () => {
   it('Minecraft 脚本 worker 的源码和 SES 依赖进入扩展包', () => {
     const plan = planWorldPackage('minecraft');
     expect(plan.sources.get('method-worker.mjs')).toBe(
-      readFileSync(join(REPO_ROOT, 'src/worlds/minecraft/method-worker.mjs'), 'utf8'),
+      readFileSync(join(REPO_ROOT, 'src/worlds/minecraft/method-worker.mjs'), 'utf8')
+        .replace('../../protocol/procedure-program.mjs', 'cortico/protocol/procedure-program.mjs'),
     );
     expect(plan.externals).toContain('ses');
   });
