@@ -52,6 +52,19 @@ describe('UsageLog', () => {
     expect(log.readAll().map((r) => r.promptTokens)).toEqual([100, 200]);
   });
 
+  it('preserves long Unicode rows, deduplication and an unterminated final record', () => {
+    const first = { ...rec(1), version: 2, recordId: 'first', label: '探索与观察🐾'.repeat(20000) };
+    const last = { ...rec(2), version: 2, recordId: 'last', label: '再次出发' };
+    const original = [JSON.stringify(first), 'damaged row', JSON.stringify(first), '', JSON.stringify(last)].join('\r\n');
+    writeFileSync(file, original, 'utf8');
+    const errors: string[] = [];
+    const log = new UsageLog(file, error => errors.push(error));
+    expect(log.readAll()).toEqual([first, last]);
+    expect(errors).toHaveLength(1);
+    expect(log.status().error).toContain('1 damaged ledger lines');
+    expect(readFileSync(file, 'utf8')).toBe(original);
+  });
+
   it('clear 清空并返回条数', () => {
     const log = new UsageLog(file);
     log.append(rec(1)); log.append(rec(2));

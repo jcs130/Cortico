@@ -1,7 +1,31 @@
 /** Append-only usage ledger. Failed writes remain queued and are reported to the operator. */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import type { UsageRecord } from './types.ts';
+
+function* lines(file: string): Generator<string> {
+  const fd = openSync(file, 'r');
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  const decoder = new StringDecoder('utf8');
+  let pending = '';
+  try {
+    let bytes: number;
+    while ((bytes = readSync(fd, buffer, 0, buffer.length, null)) > 0) {
+      const text = pending + decoder.write(buffer.subarray(0, bytes));
+      let start = 0;
+      for (let end = text.indexOf('\n'); end >= 0; end = text.indexOf('\n', start)) {
+        yield text.slice(start, end);
+        start = end + 1;
+      }
+      pending = text.slice(start);
+    }
+    pending += decoder.end();
+    if (pending) yield pending;
+  } finally {
+    closeSync(fd);
+  }
+}
 
 export class UsageLog {
   private pending: UsageRecord[] = [];
@@ -45,7 +69,7 @@ export class UsageLog {
     const out: UsageRecord[] = [];
     const seen = new Set<string>();
     let damaged = 0;
-    for (const line of readFileSync(this.file, 'utf8').split(/\r?\n/)) {
+    for (const line of lines(this.file)) {
       if (!line.trim()) continue;
       let record: UsageRecord;
       try { record = JSON.parse(line) as UsageRecord; } catch { damaged++; continue; }
