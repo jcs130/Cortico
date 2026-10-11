@@ -74,6 +74,38 @@ describe('independent asynchronous combat choices', () => {
     finishMain(); await main;
   });
 
+  it('revalidates the same engagement after a small distance change', async () => {
+    vi.useFakeTimers(); const r = rig(), bot = flatBot(), f = r.f!.battlefield;
+    r.cfg.allowEngage = true; r.cfg.engageScope = 'hostile';
+    f.action.fighting = false; f.action.canStep = false; f.action.targetEntityId = null;
+    const control = { bodyFree: true, canStep: false, targetId: null, sinceHitMs: null,
+      fight: 'armed', fleeHealth: 6, chaseMax: 12 };
+    r.f!.candidates = combatReactions(bot, f, r.cfg, control);
+    const before = r.f!.candidates[0];
+    r.loop.tick();
+    bot.entity.position.x = .25; f.self.position[0] = .25; f.actors[0].distance = 2.75;
+    r.f!.candidates = combatReactions(bot, f, r.cfg, control);
+    expect(r.f!.candidates[0].intent).not.toBe(before.intent);
+    r.resolve(); await vi.advanceTimersByTimeAsync(1);
+    expect(r.sent).toEqual([r.f!.candidates[0]]);
+    expect(r.reports.at(-1)?.data.outcome).toBe('sent');
+  });
+
+  it('uses the freshly checked short-step destination after bounded movement', async () => {
+    vi.useFakeTimers(); const r = rig(), bot = flatBot(), f = r.f!.battlefield;
+    r.cfg.allowMovement = true;
+    const control = { bodyFree: false, canStep: true, targetId: 3, sinceHitMs: 3000,
+      fight: 'armed', fleeHealth: 6, chaseMax: 12 };
+    r.f!.candidates = combatReactions(bot, f, r.cfg, control).slice(0, 1);
+    const before = r.f!.candidates[0];
+    r.loop.tick();
+    bot.entity.position.x = .25; f.self.position[0] = .25; f.actors[0].distance = 2.75;
+    r.f!.candidates = combatReactions(bot, f, r.cfg, control).slice(0, 1);
+    expect(r.f!.candidates[0]).not.toEqual(before);
+    r.resolve(); await vi.advanceTimersByTimeAsync(1);
+    expect(r.sent).toEqual([r.f!.candidates[0]]);
+  });
+
   it.each(['health', 'ally-health', 'mana', 'connection', 'plan', 'target', 'sight', 'task', 'cooldown', 'emergency', 'attack-target', 'body-phase'])
     ('rejects a result after %s changes', async change => {
       vi.useFakeTimers(); const r = rig(); r.loop.tick();

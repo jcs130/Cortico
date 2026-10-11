@@ -98,6 +98,8 @@ export class CombatDecisionLoop {
       const current = this.options.sample();
       const elapsedMs = now() - startedAtMs;
       const selected = answer.choice === 'keep' ? null : frame.candidates[Number(answer.choice.slice(7))];
+      const executable = selected && current?.candidates.find(c => c.id === selected.id && c.kind === selected.kind
+        && (selected.kind !== 'cast' || c.intent === selected.intent));
       let outcome: string;
       if (!liveCfg.enabled || liveCfg.mode !== cfg.mode || liveCfg.endpoint !== cfg.endpoint) outcome = 'configuration-changed';
       else if (elapsedMs > Math.min(cfg.maxAgeMs, liveCfg.maxAgeMs)) outcome = 'expired';
@@ -105,14 +107,15 @@ export class CombatDecisionLoop {
       else if (Math.hypot(...current.battlefield.self.position.map((v, i) => v - frame.battlefield.self.position[i])) > 1.5) outcome = 'moved';
       else if (answer.choiceProbability < Math.max(cfg.minConfidence, liveCfg.minConfidence)) outcome = 'uncertain';
       else if (!selected) outcome = 'keep';
-      else if (!current.candidates.some(c => c.id === selected.id && c.kind === selected.kind && c.intent === selected.intent)) outcome = 'no-longer-executable';
+      else if (!executable) outcome = 'no-longer-executable';
       else if (cfg.mode === 'shadow') outcome = 'shadow';
-      else outcome = this.options.apply(selected) ? 'sent' : 'rejected';
+      // Movement prose includes measured distance; apply the freshly checked candidate.
+      else outcome = this.options.apply(executable) ? 'sent' : 'rejected';
       if (outcome === 'uncertain' && cfg.mode === 'act') this.options.fallback?.();
       this.options.report('result', { ...scope, elapsedMs, choice: answer.choice,
         probability: answer.choiceProbability, probabilities: answer.probabilities, outcome,
         modelMs: payload.latency_ms ?? null, usage: payload.usage ?? null,
-        candidate: selected ?? null });
+        candidate: (outcome === 'sent' ? executable : selected) ?? null });
     } catch (error) {
       const live = this.options.config();
       if (cfg.mode === 'act' && live.enabled && live.mode === cfg.mode && live.endpoint === cfg.endpoint)
