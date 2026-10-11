@@ -36,7 +36,8 @@ export interface CombatDecisionOptions {
 function sceneKey(frame: CombatDecisionFrame): string {
   const f = frame.battlefield;
   return JSON.stringify([f.connectionGeneration, f.dimension, frame.tacticRevision, frame.mana,
-    f.self.health.current, f.self.health.max, f.self.food, f.action,
+    f.self.health.current, f.self.health.max, f.self.food,
+    [f.action.fighting, f.action.emergency, f.action.taskId, f.action.step, f.action.targetEntityId, f.action.canStep],
     frame.skills.map(s => [s.spell, s.available, s.manaCost, s.block,
       s.cooldownRemainingMs === null ? null : s.cooldownRemainingMs > 0]),
     f.actors.map(e => [e.entityId, e.uuid, e.type, e.relation,

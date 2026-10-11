@@ -1,7 +1,7 @@
 <!-- Owner: src/worlds/minecraft/battlefield.ts, src/worlds/minecraft/combat-decision.ts, src/worlds/minecraft/combat-reactions.ts -->
 # 战场状态与异步战术选择
 
-`combatDecision` 从游戏时钟直接采样实体、原版血量元数据、属性、当前位置、视线、动作和本连接能力状态，向 `state/questions` 接口发送有界请求。主模型的排队与推理不参与这条路径。一个选择尚未结束时不再发第二个；攻击和已有导航继续运行。
+`combatDecision` 从游戏时钟直接采样实体、原版血量元数据、属性、当前位置、视线、动作和本连接能力状态，向 `state/questions` 接口发送有界请求。动作包含当前攻击目标、距最近命中的毫秒数及身体是否允许短步；没有控制器读数时目标与命中时长为 `null`。主模型的排队与推理不参与这条路径。一个选择尚未结束时不再发第二个；攻击和已有导航继续运行。
 
 默认关闭。启用后 `shadow` 只记录快模型建议，原战术继续。`act` 可发送已有规则授权的法术；规则填写 `intent`，简述已查阅的技能作用和用途。未知能力、魔力或成本、规则不匹配、目标不可见时不提供该法术。规则顺序决定候选上限内保留的法术；`intent` 不证明已经学会。`selfheal` 与现有低血避险先处理。
 

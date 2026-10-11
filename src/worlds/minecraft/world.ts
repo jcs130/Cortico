@@ -4734,7 +4734,9 @@ export class MinecraftWorld implements World {
       || (bot.health ?? 0) <= this.cfg.reflex.fleeHealth
       || (this.selfHealAvailable && this.combatSpells.wantsHeal(bot.health ?? 0));
     const battlefield = this.battlefield.sample(bot, this.connectionGeneration, { fighting, emergency,
-      taskId: queue?.running?.id ?? null, step: queue?.running?.step.slice(0, 120) ?? null }, cfg.maxEntities, now);
+      taskId: queue?.running?.id ?? null, step: queue?.running?.step.slice(0, 120) ?? null,
+      targetEntityId: reaction?.targetId ?? null, sinceHitMs: reaction?.sinceHitMs ?? null,
+      canStep: reaction?.canStep ?? false }, cfg.maxEntities, now);
     const frame = this.combatSpells.decisionFrame(bot, battlefield, cfg.maxCandidates, now);
     if (!fighting) frame.candidates = [];
     const reactions = combatReactions(bot, battlefield, cfg, {

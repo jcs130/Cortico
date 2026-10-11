@@ -10,7 +10,8 @@ function frame(): CombatDecisionFrame {
   return { battlefield: { sampledAtMs: Date.now(), connectionGeneration: 1, dimension: 'overworld',
     self: { entityId: 1, health: { current: 20, max: 20, source: 'native', updatedAtMs: 0 },
       food: 20, position: [0, 64, 0], scoreboardTeam: null },
-    action: { fighting: true, emergency: false, taskId: null, step: null },
+    action: { fighting: true, emergency: false, taskId: null, step: null,
+      targetEntityId: 3, sinceHitMs: 3000, canStep: true },
     actors: [ { entityId: 3, uuid: '00000000-0000-0000-0000-000000000003', type: 'skeleton', name: null,
       relation: 'hostile', relationSource: 'server', scoreboardTeam: null,
       health: { current: 12, max: 20, source: 'server', updatedAtMs: 0 }, position: [3, 64, 0], distance: 3,
@@ -64,6 +65,8 @@ describe('independent asynchronous combat choices', () => {
       { type: 'skeleton', health: { current: 12 }, targetEntityId: 1 },
       { relation: 'ally', health: { current: 5, max: 30 } },
     ]);
+    expect((r.requests[0].state as CombatDecisionFrame).battlefield.action).toMatchObject({ targetEntityId: 3, sinceHitMs: 3000, canStep: true });
+    r.f!.battlefield.action.sinceHitMs = 3050;
     expect(r.sent).toHaveLength(0);
     r.resolve(); await vi.advanceTimersByTimeAsync(1);
     expect(mainReturned).toBe(false); expect(r.sent).toHaveLength(1);
@@ -71,7 +74,7 @@ describe('independent asynchronous combat choices', () => {
     finishMain(); await main;
   });
 
-  it.each(['health', 'ally-health', 'mana', 'connection', 'plan', 'target', 'sight', 'task', 'cooldown', 'emergency'])
+  it.each(['health', 'ally-health', 'mana', 'connection', 'plan', 'target', 'sight', 'task', 'cooldown', 'emergency', 'attack-target', 'body-phase'])
     ('rejects a result after %s changes', async change => {
       vi.useFakeTimers(); const r = rig(); r.loop.tick();
       const f = r.f!;
@@ -83,6 +86,8 @@ describe('independent asynchronous combat choices', () => {
       if (change === 'target') f.battlefield.actors.shift();
       if (change === 'sight') f.battlefield.actors[0].lineOfSight = false;
       if (change === 'task') f.battlefield.action.taskId = 90;
+      if (change === 'attack-target') f.battlefield.action.targetEntityId = 4;
+      if (change === 'body-phase') f.battlefield.action.canStep = false;
       if (change === 'cooldown') { f.skills[0].block = 'cooldown'; f.candidates = []; }
       if (change === 'emergency') f.battlefield.action.emergency = true;
       r.resolve(); await vi.advanceTimersByTimeAsync(1);
