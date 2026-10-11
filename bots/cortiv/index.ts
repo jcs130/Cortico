@@ -178,6 +178,8 @@ export const CORTIV_FOREGROUND_CONFIG_GROUP: ConfigGroup = {
       'foreground.enabled': { type: 'boolean', title: '启用近期上下文', 'x-hot': true },
       'foreground.maxHistoryTokens': { type: 'integer', minimum: 1024, title: '近期历史预算(token估算)', 'x-hot': true,
         description: '不含完整系统前缀和工具定义；未处理输入和原子调用组超预算时完整保留。' },
+      'foreground.maxGrowthTokens': { type: 'integer', minimum: 0, title: '整理之间的追加预算(token估算)', 'x-hot': true,
+        description: '整理后允许追加多少历史再整理。0沿用本次历史预算；较大值减少前缀重建，也会增加两次整理之间的输入长度。原始账本交接仍由context配置控制。' },
       'foreground.minRecentRounds': { type: 'integer', minimum: 1, maximum: 16, title: '至少保留的近期轮次', 'x-hot': true },
       'foreground.currentStateOnly': { type: 'boolean', title: '仅保留当前状态副本', 'x-hot': true,
         description: '当前事实放在近期历史之后，每轮替换旧副本；原始事件账本不变。' },

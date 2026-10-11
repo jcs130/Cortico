@@ -165,7 +165,10 @@ World 的重复任务事实保留现场变化与整单终态的区别。即使�
 仅按工具声明的 tags 分类，不推断承诺是否兑现、任务完成或身体空闲，也不自动下单或暂停。
 最近请求全是读取时仍保留计数；较早的任务是否在执行继续核对 World 队列与终态。
 近期台词省略演出标记并标明提交时间，历史发言不作为新的待播台本。
-`foreground.maxHistoryTokens` 只限制可选历史，必留记录超预算时仍完整送达。原始 session、
+`foreground.maxHistoryTokens` 只限制投影保留的可选历史，必留记录超预算时仍完整送达。
+`foreground.maxGrowthTokens` 单独控制整理后允许追加的历史量，0沿用该次历史预算；
+调大可减少前缀重建，同时增加两次整理之间的模型输入。实际预算及下次整理阈值见
+`foreground-context` 日志。原始账本的阶段交接由 `context` 配置控制。原始 session、
 事件、交接与 Memory 不改写。`expand_context` 为下一次即时调用恢复当前会话全文，随后继续
 近期投影；较早会话通过工作区交接笔记按需读取。长期规划使用独立 `planning` 请求，
 `planning.agendaEnabled` 可保存模型提出的灵活活动日程。主意识核验候选后用

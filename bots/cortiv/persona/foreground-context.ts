@@ -6,6 +6,8 @@ import { HANDOFF_NOTE_TYPE } from '../../cormini/persona/handoffNote.ts';
 export interface ForegroundContextConfig {
   enabled: boolean;
   maxHistoryTokens: number;
+  /** Growth allowed after projection; zero or unset inherits the applied history budget. */
+  maxGrowthTokens?: number;
   minRecentRounds: number;
   /** Replace cached current-state pins on each request while retaining the history prefix. */
   currentStateOnly?: boolean;
@@ -15,7 +17,7 @@ export interface ForegroundContextConfig {
 
 /** Optional deployment fallback for models whose routine calls benefit from shorter history. */
 export const FOREGROUND_CONTEXT_DEFAULTS: ForegroundContextConfig = {
-  enabled: false, maxHistoryTokens: 6_000, minRecentRounds: 2, currentStateOnly: true, memoryFiles: '',
+  enabled: false, maxHistoryTokens: 6_000, maxGrowthTokens: 0, minRecentRounds: 2, currentStateOnly: true, memoryFiles: '',
 };
 
 export interface ForegroundProjection {

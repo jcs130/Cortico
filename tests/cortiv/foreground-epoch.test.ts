@@ -355,6 +355,55 @@ describe('前台上下文缓存epoch', () => {
     expect(epoch.prepare(structuredClone(records), { maxHistoryTokens: 10, minRecentRounds: 0 }).rebuilt).toBe(false);
   });
 
+  it('a separate growth budget keeps short reading prefixes through routine updates, then compacts complete fresh work', () => {
+    const legacy = new ForegroundEpoch();
+    const cached = new ForegroundEpoch();
+    const cfg = { ...options, maxGrowthTokens: 6000, adaptiveMaxHistoryTokens: 200 };
+    const records = source();
+    const archive = structuredClone(records);
+    let previous = cached.prepare(records, cfg);
+    legacy.prepare(records, { ...options, adaptiveMaxHistoryTokens: 200 });
+    let legacyRotations = 0;
+    for (let round = 0; round < 8; round++) {
+      const input = frame('game', 'chat', `Player ${round}: continue the agreed work. ` + 'Observation. '.repeat(20), 80 + round);
+      records.push(input, ...action(`growth-${round}`));
+      const next = cached.prepare(records, { ...cfg, adaptiveMaxHistoryTokens: round % 2 ? 600 : 200 });
+      if (legacy.prepare(records, { ...options, adaptiveMaxHistoryTokens: 200 }).rebuilt) legacyRotations++;
+      expect(next.maxHistoryTokens).toBe(previous.maxHistoryTokens);
+      expect(next.rebuilt).toBe(false);
+      expect(wire(next.messages).slice(0, previous.messages.length)).toEqual(wire(previous.messages));
+      expect(next.messages).toContainEqual(input);
+      expect(validatePairing(next.messages)).toEqual([]);
+      previous = next;
+    }
+    expect(legacyRotations).toBeGreaterThan(1);
+    const input = frame('game', 'chat', 'Keep this new request intact. '.repeat(1000), 99);
+    const failed = functionResult('fresh-failure', 'Failed: the block did not change.');
+    records.push(input, functionCall('fresh-failure', 'inspect', '{}', { responseId: 'fresh-failure' }), failed);
+    const compact = cached.prepare(records, cfg);
+    expect(compact.rebuildReason).toBe('history_budget');
+    expect(compact.messages).toContainEqual(input);
+    expect(compact.messages).toContainEqual(failed);
+    expect(text(compact.messages)).not.toContain('很久以前的探索记录');
+    expect(validatePairing(compact.messages)).toEqual([]);
+    expect(records.slice(0, archive.length)).toEqual(archive);
+  });
+
+  it('explicit growth changes rotate immediately, and zero retains the existing rotation policy', () => {
+    const records = source();
+    const cached = new ForegroundEpoch();
+    const inherited = new ForegroundEpoch().prepare(records, options);
+    const zero = cached.prepare(records, { ...options, maxGrowthTokens: 0 });
+    expect(wire(zero.messages)).toEqual(wire(inherited.messages));
+    expect(zero.rebuildAtHistoryTokens).toBe(inherited.rebuildAtHistoryTokens);
+    const changed = cached.prepare(records, { ...options, maxGrowthTokens: 4000 });
+    expect(changed.rebuildReason).toBe('options_changed');
+    expect(changed.rebuildAtHistoryTokens).toBeGreaterThan(zero.rebuildAtHistoryTokens);
+    expect(() => cached.prepare(records, { ...options, maxGrowthTokens: -1 })).toThrow(RangeError);
+    expect(() => cached.prepare(records, { ...options, maxGrowthTokens: Number.NaN })).toThrow(RangeError);
+    expect(cached.prepare(records, { ...options, maxGrowthTokens: 4000 }).rebuilt).toBe(false);
+  });
+
   it('显式expand_context reset重新投影完整源账本，旧epoch事实不偷偷保留', () => {
     const epoch = new ForegroundEpoch();
     const records = source();

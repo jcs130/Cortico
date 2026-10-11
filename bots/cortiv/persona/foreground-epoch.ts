@@ -8,6 +8,8 @@ import { projectForeground, type ForegroundProjection } from './foreground-conte
 
 export interface ForegroundEpochOptions {
   maxHistoryTokens: number;
+  /** Additional history between projections; zero or unset inherits the applied history budget. */
+  maxGrowthTokens?: number;
   /** Automatic reading advice takes effect at the next compaction; configured budgets still rebuild immediately. */
   adaptiveMaxHistoryTokens?: number;
   minRecentRounds: number;
@@ -32,6 +34,7 @@ export type ForegroundEpochReason = 'initial' | 'reset' | 'source_changed' | 'op
 export interface ForegroundEpochProjection extends ForegroundProjection {
   /** History budget used when building this epoch. */
   maxHistoryTokens: number;
+  maxGrowthTokens: number;
   epoch: number;
   rebuilt: boolean;
   rebuildReason: ForegroundEpochReason;
@@ -43,6 +46,7 @@ export interface ForegroundEpochProjection extends ForegroundProjection {
 
 interface EpochState {
   maxHistoryTokens: number;
+  maxGrowthTokens: number;
   source: string[];
   optionsKey: string;
   activePins: Set<string>;
@@ -101,6 +105,7 @@ function pinFingerprint(record: ContextRecord): string {
 function optionsKey(options: ForegroundEpochOptions, notice?: ContextRecord): string {
   return fingerprint({
     maxHistoryTokens: options.maxHistoryTokens,
+    maxGrowthTokens: options.maxGrowthTokens ?? 0,
     adaptive: options.adaptiveMaxHistoryTokens !== undefined,
     minRecentRounds: options.minRecentRounds,
     pinMode: options.pinMode ?? 'append',
@@ -152,6 +157,8 @@ export class ForegroundEpoch {
     pins: readonly ContextRecord[] = [], notice?: ContextRecord,
   ): ForegroundEpochProjection {
     if (!Number.isFinite(options.maxHistoryTokens) || options.maxHistoryTokens <= 0
+      || (options.maxGrowthTokens !== undefined
+        && (!Number.isFinite(options.maxGrowthTokens) || options.maxGrowthTokens < 0))
       || (options.adaptiveMaxHistoryTokens !== undefined
         && (!Number.isFinite(options.adaptiveMaxHistoryTokens) || options.adaptiveMaxHistoryTokens <= 0))
       || !Number.isFinite(options.minRecentRounds) || options.minRecentRounds < 0) {
@@ -221,6 +228,7 @@ export class ForegroundEpoch {
     // makes the source cease to be an extension. Identity includes content, not only generated IDs.
     // The projector retains these by original identity and closes their complete response/tool group.
     const maxHistoryTokens = options.adaptiveMaxHistoryTokens ?? options.maxHistoryTokens;
+    const maxGrowthTokens = options.maxGrowthTokens || maxHistoryTokens;
     const candidate = this.project(records, { ...options, maxHistoryTokens }, [...supplied.records, ...introduced]);
     const externalPins = new Set(external.map(fingerprint));
     const base = fixPairing(currentPins
@@ -242,12 +250,12 @@ export class ForegroundEpoch {
     this.epoch++;
     this.resetPending = false;
     this.current = {
-      source, optionsKey: key, maxHistoryTokens, activePins: supplied.keys, base: structuredClone(base), tail: structuredClone(tailPins),
+      source, optionsKey: key, maxHistoryTokens, maxGrowthTokens, activePins: supplied.keys, base: structuredClone(base), tail: structuredClone(tailPins),
       protectedBaseTokens: protectedTokens - (currentPins ? historyTokens(tailPins) : 0),
       view: { ...candidate, messages: structuredClone(messages), historyTokens: tokens,
         protectedTokens, projected: candidate.projected || altered },
       // Mandatory input can already exceed 2x the soft budget; repeated identical cold builds help nobody.
-      rebuildAtHistoryTokens: Math.max(maxHistoryTokens * 2, tokens + maxHistoryTokens),
+      rebuildAtHistoryTokens: Math.max(maxHistoryTokens + maxGrowthTokens, tokens + maxGrowthTokens),
     };
     return this.result(true, reason, 0, 0);
   }
@@ -259,6 +267,7 @@ export class ForegroundEpoch {
     return {
       ...current.view, messages: structuredClone(current.view.messages), epoch: this.epoch,
       maxHistoryTokens: current.maxHistoryTokens,
+      maxGrowthTokens: current.maxGrowthTokens,
       rebuilt, rebuildReason, appendedRecords, appendedPins,
       rebuildAtHistoryTokens: current.rebuildAtHistoryTokens,
     };
