@@ -37,9 +37,11 @@ import type {
   CoreApi,
   EventEnvelope,
   FrameEventRef,
+  ModelSpec,
   PersonaCognition,
   PersonaConsoleDecl,
   PrefixSegment,
+  RequestReasoning,
   SessionDecl,
   SessionOpeningReason,
   ToolDef,
@@ -63,7 +65,7 @@ import { FocusedCognition, FOCUSED_COGNITION } from './focused-cognition.ts';
 import { projectForeground, FOREGROUND_CONTEXT_DEFAULTS, type ForegroundContextConfig } from './foreground-context.ts';
 import { excerptHandoffRecords } from './context-excerpts.ts';
 import { ForegroundEpoch } from './foreground-epoch.ts';
-import { ForegroundAdviser, FAST_FOREGROUND_DEFAULTS, type FastForegroundConfig } from './foreground-adviser.ts';
+import { ForegroundAdviser, FAST_FOREGROUND_DEFAULTS, type FastForegroundConfig, type ForegroundAdvice, type ForegroundScene } from './foreground-adviser.ts';
 import { DreamContext, DREAM_DEFAULTS, dreamHistoryWithinBudget, normalizeDreamConfig, renderDreamHistory, type DreamConfig, type DreamHistory } from './dream-context.ts';
 import { DreamTaskQueue, DreamTaskStoppedError, dreamAbortable, dreamDelay } from './dream-task-queue.ts';
 import { DreamMemory, dreamWorkspaceTools } from './dream-memory.ts';
@@ -476,6 +478,10 @@ export class CortiV extends Cormini {
   private readonly fastForegroundConfig: () => FastForegroundConfig;
   private readonly foregroundAdviser: ForegroundAdviser;
   private foregroundReading: 'focused' | 'connected' | undefined;
+  private foregroundRevision = 0;
+  private foregroundEvents: readonly EventEnvelope[] = [];
+  private foregroundOutcome: ForegroundScene['intent'];
+  private foregroundReasoningAdvice: { advice: ForegroundAdvice; revision: number; config: string; at: number } | undefined;
   private deferredInputIds = new Set<string>();
   private deferredModelBaseline: string | null = null;
   private foregroundDeadline: ReturnType<typeof setTimeout> | undefined;
@@ -593,6 +599,7 @@ export class CortiV extends Cormini {
   override stopRhythm(): void {
     clearTimeout(this.foregroundDeadline);
     this.foregroundAdviser.reset();
+    this.foregroundReasoningAdvice = undefined;
     this.referenceRouting.reset();
     this.dreamQueue.stop();
     this.planningReview?.stop();
@@ -607,6 +614,10 @@ export class CortiV extends Cormini {
     this.foregroundDeadline = undefined;
     this.foregroundAdviser.reset();
     this.foregroundReading = undefined;
+    this.foregroundRevision++;
+    this.foregroundReasoningAdvice = undefined;
+    this.foregroundEvents = [];
+    this.foregroundOutcome = undefined;
     this.deferredInputIds.clear();
     this.deferredModelBaseline = null;
     this.viewerRecallContext.clear();
@@ -846,7 +857,8 @@ export class CortiV extends Cormini {
     const facts = this.requestWorldFacts();
     const recentMemory = this.recentMemoryNote();
     if (recentMemory !== this.foregroundMemoryState) {
-      this.foregroundEpoch.reset();
+      // Current pins are replaced at the tail; a memory revision does not rewrite the stable base.
+      if (cfg.currentStateOnly === false) this.foregroundEpoch.reset();
       this.foregroundMemoryState = recentMemory;
     }
     const index = this.longTermMemoryIndex();
@@ -899,15 +911,27 @@ export class CortiV extends Cormini {
     return view.messages;
   }
 
+  private foregroundScene(events: readonly EventEnvelope[]): ForegroundScene {
+    const facts = this.worlds.flatMap(world => {
+      try { const current = world.requestFacts?.(); return current ? [{ source: world.id, text: current.text, parts: current.parts }] : []; }
+      catch { return []; }
+    });
+    const outcome = this.foregroundOutcome;
+    const age = Date.now() - Date.parse(outcome?.at ?? '');
+    return { events, facts, agenda: this.activityAgenda?.summary() ?? '',
+      intent: outcome && age >= 0 && age <= 60_000 ? outcome : this.recentReferenceIntent() };
+  }
+
   async beforeDecision(ctx: { events: readonly EventEnvelope[]; messages: readonly ContextRecord[] }): Promise<boolean> {
     const core = this.core;
     if (!core) return true;
-    const facts = this.worlds.flatMap(world => {
-      try { const current = world.requestFacts?.(); return current ? [{ source: world.id, text: current.text }] : []; }
-      catch { return []; }
-    });
-    const advice = await this.foregroundAdviser.advise({ events: ctx.events, facts,
-      agenda: this.activityAgenda?.summary() ?? '', intent: this.recentReferenceIntent() });
+    this.foregroundEvents = ctx.events;
+    this.foregroundReasoningAdvice = undefined;
+    const revision = this.foregroundRevision;
+    const config = JSON.stringify(this.fastForegroundConfig());
+    const advice = await this.foregroundAdviser.advise(this.foregroundScene(ctx.events));
+    if (revision === this.foregroundRevision && config === JSON.stringify(this.fastForegroundConfig()))
+      this.foregroundReasoningAdvice = { advice, revision, config, at: Date.now() };
     if (advice.kind !== 'cooldown') this.foregroundReading = advice.reading;
     core.log.emit('debug', '即时阅读与决策时机判断', { event: 'foreground-advice', data: advice });
     if (!advice.defer) {
@@ -929,6 +953,34 @@ export class CortiV extends Cormini {
       this.foregroundDeadline.unref?.();
     }
     return false;
+  }
+
+  async requestReasoning(ctx: { sessionId: string; round: number; spec: Readonly<ModelSpec>; signal: AbortSignal }): Promise<RequestReasoning | null> {
+    const cfg = this.fastForegroundConfig();
+    const pending = this.foregroundReasoningAdvice;
+    this.foregroundReasoningAdvice = undefined; // Each classification can affect only one request.
+    if (ctx.sessionId !== MAIN || !cfg.enabled || !cfg.reasoningEnabled || !cfg.reasoningModel.trim()
+      || cfg.reasoningModel.trim() !== ctx.spec.model || ctx.signal.aborted) return null;
+    const revision = this.foregroundRevision;
+    const config = JSON.stringify(cfg);
+    const reused = pending && pending.revision === revision && pending.config === config && Date.now() - pending.at <= 1000;
+    const advice = reused ? pending.advice : await this.foregroundAdviser.advise(this.foregroundScene(this.foregroundEvents), ctx.signal);
+    const stale = ctx.signal.aborted || revision !== this.foregroundRevision || config !== JSON.stringify(this.fastForegroundConfig());
+    let choice: RequestReasoning | null = null;
+    if (!stale && advice.reasoning) {
+      if (advice.reasoning === 'immediate') choice = { thinking: false };
+      else {
+        const effort = (advice.reasoning === 'routine' ? cfg.reasoningRoutineEffort : cfg.reasoningDeliberateEffort).trim();
+        if (effort) choice = { thinking: true, reasoningEffort: effort };
+      }
+    }
+    this.core?.log.emit('debug', '本次请求思考档位选择', { event: 'foreground-reasoning', data: {
+      round: ctx.round, model: ctx.spec.model, kind: stale ? 'stale' : advice.kind,
+      choice: choice ? advice.reasoning : 'configured', probability: advice.reasoningProbability ?? null,
+      thinking: choice?.thinking ?? ctx.spec.thinking, reasoningEffort: choice ? choice.reasoningEffort ?? null : ctx.spec.reasoningEffort ?? null,
+      reused: !!reused, elapsedMs: reused ? 0 : advice.elapsedMs ?? 0, inputChars: advice.inputChars ?? 0,
+    } });
+    return choice;
   }
 
   private recoveryTools(): Set<string> {
@@ -986,6 +1038,12 @@ export class CortiV extends Cormini {
   }
 
   onToolOutcome(ctx: { role: string; tool: string; args: Readonly<Record<string, unknown>>; outcome: Readonly<ToolOutcome> }): string | null {
+    if (ctx.role === MAIN) {
+      this.foregroundRevision++;
+      this.foregroundReasoningAdvice = undefined;
+      this.foregroundOutcome = { tool: ctx.tool, arguments: JSON.stringify(ctx.args), at: new Date().toISOString(),
+        receipt: `${ctx.outcome.failed ? '[执行失败] ' : ''}${ctx.outcome.text}` };
+    }
     this.sleepReview?.noteOutcome(ctx);
     if (ctx.role === MAIN && this.core?.toolsTagged('speak').has(ctx.tool)) {
       try { this.socialMemoryReview.noteSpeech(ctx.tool, ctx.args, ctx.outcome); }
@@ -1677,6 +1735,9 @@ export class CortiV extends Cormini {
   }
 
   onDelivery(ctx: { events: EventEnvelope[] }): void | Promise<void> {
+    this.foregroundRevision++;
+    this.foregroundReasoningAdvice = undefined;
+    this.foregroundEvents = ctx.events;
     if (ctx.events.some(event => event.contextDelivery !== 'archive-only'
       && !event.tags?.includes('snapshot') && !(event.source === 'persona' && ['notice', 'tick'].includes(event.type)))) {
       this.foregroundReading = undefined;

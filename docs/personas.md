@@ -45,6 +45,11 @@ Persona 工具。Core 通过 `ToolDef.endsTurn` 或执行回执 `ToolOutcome.end
 返回 `null` 或 `undefined` 使用完整视图。返回记录经校验及工具配对修复后用于本轮请求，Session、事件水位、
 交接和 fork 快照保留完整记录。异常退回完整视图并记告警。Persona 负责材料选择与缺失信息的读取方式。
 
+`requestReasoning({ sessionId, round, spec, signal })` 为一次主请求返回 `{ thinking, reasoningEffort? }`，
+`null/undefined` 继承供应商配置。只覆盖这两个字段，配置本身、上下文、工具和 fork 均不变；异常或无效值记告警并继承配置。
+Persona 负责端点档位兼容、等待上限和取消信号；请求取消后 Core 不发出迟到的模型调用。
+该钩子不用于修改模型、输出上限或身体任务。轮次日志的 `requestModel` 记录实际档位与选择耗时。
+
 `CoreApi` 是 Persona 唯一的 Core 入口:`injectInternal` / `injectDeferred` / `injectExternal`、
 `requestContextHandoff`、`spawnFork`、`sessionInfo`、`llm`、`timers`、`deliveryGate`、
 `personaState` / `savePersonaState`(不透明状态,Core 只负责原子持久化)、`toolsTagged`、

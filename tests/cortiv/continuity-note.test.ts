@@ -31,6 +31,23 @@ function rig() {
 function text(records: readonly ContextRecord[]): string { return records.map(row => itemText(row.item)).join('\n'); }
 
 describe('versioned continuity in foreground requests', () => {
+  it('updates current memory at the tail while preserving the stable history prefix', () => {
+    const r = rig();
+    const diagnostics: any[] = [];
+    r.persona.attach(makeFakeHarnessApi({ log: { ...nullLogger(), emit: (_level, _text, options) => {
+      if (options?.event === 'foreground-context') diagnostics.push(options.data);
+    } } }));
+    r.remember('桥梁支撑尚未验收。');
+    const first = r.prepare();
+    r.remember('桥梁支撑已验收，下一步铺桥面。', 1);
+    const next = r.prepare();
+    const current = next.findIndex(row => itemText(row.item).startsWith('[当前记忆记录'));
+    expect(next.slice(0, current)).toEqual(first.slice(0, current));
+    expect(text(next)).toContain('桥梁支撑已验收');
+    expect(text(next)).not.toContain('桥梁支撑尚未验收');
+    expect(diagnostics.at(-1)).toMatchObject({ rebuilt: false, reason: 'append' });
+    expect(validatePairing(next)).toEqual([]);
+  });
   it('retains a dated claim after the rolling note is replaced or removed and after restart', () => {
     const r = rig(); r.remember('桥梁路线已核验，下一步准备桥面。');
     r.persona.memory.writeFileAtomic(RECENT_FILE, '旧记录：路线尚未勘测'); r.prepare();

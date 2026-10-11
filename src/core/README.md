@@ -81,6 +81,10 @@ piggyback 只入队，随后续唤醒一起投递。
 交接和 fork 快照保留完整记录。投影视图的上游用量记入 `lastUsage`，不作为完整 Session 的 token 计数 anchor。
 轮次日志的 `requestContext` 记录完整与实际请求的条数、是否投影及估算输入量。
 
+可选的 `Persona.requestReasoning` 为当前主请求选择 thinking/effort，不改供应商配置、其他模型参数或 fork。
+Core 等待钩子，传递本轮取消信号；Persona 负责有限等待与端点兼容。无选择、异常或无效值继承配置，
+取消后的选择不触发模型请求。轮次日志的 `requestModel` 记录实际档位和 `reasoningSelectionMs`，与 `llmMs` 分开。
+
 `ForkOptions.prepareRequest` 可按轮次生成临时请求视图，默认发送完整上下文；Core 深拷贝输入并校验记录与工具配对，
 无效投影回退到完整上下文。工具执行、归档和重试沿用完整的已完成记录。
 

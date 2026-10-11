@@ -319,6 +319,9 @@ export interface ModelSpec {
   contextWindow?: number;
 }
 
+/** A request-local reasoning choice; all other model settings remain provider-owned. */
+export type RequestReasoning = Pick<ModelSpec, 'thinking' | 'reasoningEffort'>;
+
 /**
  * provider 的推理选项，将 thinking 和 reasoningEffort 合并为一次选择。
  * 空选项表允许操作者填写任意非空 effort；provider 可提供建议值。
@@ -1066,6 +1069,13 @@ export interface Persona {
    * session、事件投递水位、交接和 fork 快照保持完整。钩子不得等待网络。
    */
   prepareRequest?(ctx: { sessionId: string; round: number; messages: readonly ContextRecord[] }): ContextRecord[] | null | undefined;
+  /**
+   * Choose reasoning for one main request. null/undefined inherits the configured spec.
+   * Persona owns the policy, endpoint compatibility, bounded wait and signal handling.
+   * Core applies only thinking/effort, without changing provider configuration, history or tools.
+   */
+  requestReasoning?(ctx: { sessionId: string; round: number; spec: Readonly<ModelSpec>; signal: AbortSignal }):
+    RequestReasoning | null | undefined | Promise<RequestReasoning | null | undefined>;
   /** Memory 实例。Core 不读它的内容;bot 没给 memoryName 时控制台以它的类名作 Memory 页标题。 */
   memory?: object;
   /** Memory 目录的绝对路径。 */

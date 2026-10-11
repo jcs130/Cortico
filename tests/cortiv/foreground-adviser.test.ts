@@ -20,6 +20,45 @@ const scene = (events = [tail()]) => ({ events, facts: [{ source: 'game', text: 
   agenda: '把借来的工具还给原主人，尚未完成。', intent: { tool: 'game_do', arguments: '{"queue":"append"}', receipt: '任务已受理，尚未完成。' } });
 
 describe('foreground reading and timing fallback', () => {
+  it('accepts reasoning independently of reading confidence and does not grant action or timing authority', async () => {
+    let request: any;
+    const adviser = new ForegroundAdviser(() => ({ ...config(), reasoningEnabled: true, reasoningModel: 'local-model' }),
+      (async (_url, init) => { request = JSON.parse(String(init?.body));
+        const raw = answer('connected', 'respond', .55);
+        return new Response(JSON.stringify({ ...raw, answers: { ...raw.answers,
+          reasoning: { choice: 'deliberate', confidence: .97, probabilities: { immediate: .01, routine: .02, deliberate: .97 } } } }));
+      }) as typeof fetch, () => now);
+    const input = scene([tail({ type: 'game.chat', text: 'While travelling normally, compare the supports for the bridge.' })]);
+    const advice = await adviser.advise(input);
+    expect(advice).toMatchObject({ kind: 'advice', reasoning: 'deliberate', reasoningProbability: .97, defer: false });
+    expect(advice.reading).toBeUndefined();
+    expect(request.questions.reasoning.criteria).toHaveProperty('immediate');
+    expect(request.questions).not.toHaveProperty('timing');
+  });
+
+  it('inherits reasoning on a low probability or invalid choice and omits the question by default', async () => {
+    for (const reasoning of [undefined, { choice: 'deliberate', confidence: .5, probabilities: { immediate: .1, routine: .4, deliberate: .5 } },
+      { choice: 'deliberate', confidence: .05, probabilities: { immediate: .9, routine: .05, deliberate: .05 } }]) {
+      const adviser = new ForegroundAdviser(() => ({ ...config(), reasoningEnabled: true, reasoningModel: 'local-model' }),
+        (async () => new Response(JSON.stringify({ answers: { reasoning } }))) as typeof fetch, () => now);
+      expect((await adviser.advise(scene())).reasoning).toBeUndefined();
+    }
+    let request: any;
+    const ordinary = new ForegroundAdviser(config, (async (_url, init) => {
+      request = JSON.parse(String(init?.body)); return new Response(JSON.stringify(answer()));
+    }) as typeof fetch, () => now);
+    await ordinary.advise(scene()); expect(request.questions).not.toHaveProperty('reasoning');
+  });
+
+  it('caller cancellation releases a blocked classifier without waiting for its timeout', async () => {
+    const controller = new AbortController(); let started = false;
+    const adviser = new ForegroundAdviser(config, (async () => {
+      started = true; return new Promise<Response>(() => {});
+    }) as typeof fetch, () => now);
+    const pending = adviser.advise(scene(), controller.signal);
+    expect(started).toBe(true); controller.abort();
+    expect((await pending).kind).toBe('stale');
+  });
   it('only a fresh structured queue tail without other substantive input is eligible', () => {
     expect(queueTailOpportunity([tail()], now)?.cursor).toBe(42);
     for (const event of [tail({ type: 'game.chat', text: '继续等我', tags: ['snapshot'] }),

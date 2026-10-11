@@ -1202,10 +1202,12 @@ export class MainLoop {
       const roundStart = Date.now();
       let ttftMs: number | null = null;
       let llmMs: number | null = null;
+      let reasoningSelectionMs = 0;
       let toolMs = 0;
       const noteRound = (outcome: string, extra: Record<string, unknown> = {}): void => {
         log.emit('debug', '一轮收束', { event: 'round', data: {
-          round: roundNo, outcome, llmMs, ttftMs, outputTokens: meters?.output ?? null, toolMs, requestContext, ...extra,
+          round: roundNo, outcome, llmMs, ttftMs, outputTokens: meters?.output ?? null, toolMs, requestContext,
+          requestModel: { model: spec.model, thinking: spec.thinking, reasoningEffort: spec.reasoningEffort ?? null, reasoningSelectionMs }, ...extra,
         } });
       };
       const tapEvents = tap ? {
@@ -1234,6 +1236,24 @@ export class MainLoop {
       if (projected) this.anchor = null;
       const prefixHash = prefixFingerprint(outbound);
       try {
+        if (this.d.persona.requestReasoning) {
+          const selectionStart = Date.now();
+          try {
+            const choice = await this.d.persona.requestReasoning({ sessionId: decl.id, round: roundNo,
+              spec: structuredClone(spec), signal: flight.controller.signal });
+            if (choice != null) {
+              if (typeof choice.thinking !== 'boolean' || (choice.reasoningEffort !== undefined
+                && (typeof choice.reasoningEffort !== 'string' || !choice.reasoningEffort.trim() || !choice.thinking)))
+                throw new Error('Invalid request reasoning choice');
+              spec = { ...spec, thinking: choice.thinking };
+              delete spec.reasoningEffort;
+              if (choice.reasoningEffort !== undefined) spec.reasoningEffort = choice.reasoningEffort.trim();
+            }
+          } catch (error) {
+            if (!flight.controller.signal.aborted) log.warn('requestReasoning 失败,本轮使用配置档位', { error: String(error) });
+          } finally { reasoningSelectionMs = Date.now() - selectionStart; }
+        }
+        flight.controller.signal.throwIfAborted();
         // role 仅用于故障分类，不写入请求体。
         const llmStart = Date.now();
         let res: Awaited<ReturnType<typeof llm.respond>>;

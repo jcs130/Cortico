@@ -53,7 +53,7 @@ interface RigOptions {
   /** 对模型隐藏但仍挂载运行的 World id。 */
   hiddenWorlds?: string[];
   /** 时机钩子,直接装到假Persona上 */
-  hooks?: Pick<Persona, 'onTurnEnded' | 'onIdle' | 'onStallsRecovered' | 'onDelivery' | 'onToolOutcome' | 'beforeDecision'>;
+  hooks?: Pick<Persona, 'onTurnEnded' | 'onIdle' | 'onStallsRecovered' | 'onDelivery' | 'onToolOutcome' | 'beforeDecision' | 'requestReasoning'>;
   /** 记录 schedule_wake 对 timers 原语的调用。 */
   onTimerSet?: (atIso: string, payload: Record<string, unknown>) => void;
   /** fork 工具的执行函数。 */
@@ -3623,6 +3623,61 @@ describe("MainLoop 重新请求、轮次边界与统计", () => {
     expect(typeof rounds[0].llmMs).toBe('number');
     expect(rounds[0]).toMatchObject({ toolCalls: 1 });
     expect(rows.every((row) => row.event !== 'round' || row.level === 'debug')).toBe(true);
+  });
+
+  it('selects reasoning per request without changing configuration, other parameters or tool execution', async () => {
+    const { log, rows } = captureLog();
+    let enabled = false; let step = 0;
+    const choices = [{ thinking: false }, { thinking: true, reasoningEffort: 'medium' }, null];
+    rig = makeRig({ log, hooks: { requestReasoning: () => enabled ? choices[step++] : null } });
+    rig.start(); await until(() => rig.llm.calls.length >= 1);
+    const configured = structuredClone(activeSpec(rig.cfg));
+    const baseline = rig.llm.calls.length; rows.length = 0; enabled = true;
+    rig.llm.script(toolReply([{ name: 'noop' }]), toolReply([{ name: 'noop' }]), textReply('The handoff is ready.'));
+    rig.pushEvent('Plan the next part while the current operation continues.');
+    await until(() => rows.filter(row => row.event === 'round').length >= 3);
+    const calls = rig.llm.calls.slice(baseline);
+    expect(calls.map(call => [call.spec.thinking, call.spec.reasoningEffort])).toEqual([
+      [false, undefined], [true, 'medium'], [configured.thinking, configured.reasoningEffort],
+    ]);
+    for (const call of calls) expect({ ...call.spec, thinking: configured.thinking,
+      reasoningEffort: configured.reasoningEffort }).toEqual({ ...configured, reasoningEffort: configured.reasoningEffort });
+    expect(activeSpec(rig.cfg)).toEqual(configured);
+    expect(rig.session.messages.filter(row => row.role === 'tool' && row.content === 'ok')).toHaveLength(2);
+    expect(rows.filter(row => row.event === 'round').map(row => (row.data as any).requestModel.thinking))
+      .toEqual([false, true, configured.thinking]);
+    assertPairing(rig.session.messages);
+  });
+
+  it.each(['throw', 'malformed'])('inherits the configured reasoning on a %s selection', async mode => {
+    rig = makeRig({ hooks: { requestReasoning: () => {
+      if (mode === 'throw') throw new Error('Decision service unavailable');
+      return { thinking: false, reasoningEffort: 'medium' };
+    } } });
+    rig.start(); await until(() => rig.llm.calls.length >= 1);
+    expect(rig.llm.calls[0].spec).toEqual(activeSpec(rig.cfg));
+  });
+
+  it('a new preempting input cancels reasoning selection before a stale model request starts', async () => {
+    let select = false; let waiting = false;
+    rig = makeRig({ hooks: { requestReasoning: async ({ signal }) => {
+      if (!select) return null;
+      select = false; waiting = true;
+      await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }));
+      return { thinking: true, reasoningEffort: 'medium' };
+    } } });
+    rig.bus.setPreemptHandler(() => { rig.loop.abortCurrentRound(); });
+    rig.start(); await until(() => rig.llm.calls.length >= 1);
+    const baseline = rig.llm.calls.length;
+    select = true; rig.pushEvent('Consider a long future plan.');
+    await until(() => waiting);
+    const event = rig.store.append({ type: 'qq.message', source: 'qq', origin: 'external',
+      ts: new Date().toISOString(), text: 'Please answer the urgent new question.' });
+    rig.bus.push({ event }, { trigger: 'preempt' });
+    await until(() => rig.llm.calls.length > baseline);
+    expect(rig.llm.calls).toHaveLength(baseline + 1);
+    expect(rig.llm.calls.at(-1)!.spec).toEqual(activeSpec(rig.cfg));
+    expect(rig.llm.calls.at(-1)!.messages.some(row => row.content.includes(event.text))).toBe(true);
   });
 
   it('单条工具回执超过 8k 字符:记 warn,不截断', async () => {
