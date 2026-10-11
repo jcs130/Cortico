@@ -6,6 +6,7 @@ import { CombatTacticBook, type CombatCastAttempt, type CombatResult, type Comba
 import { combatRuleBlock, type CombatRule, type CombatRuleFacts } from './combat-rules.ts';
 import type { Battlefield } from './battlefield.ts';
 import type { CombatDecisionFrame } from './combat-decision.ts';
+import type { CombatProgram } from './combat-program.ts';
 
 export type CombatSpell = string;
 export interface CombatTactic {
@@ -13,6 +14,7 @@ export interface CombatTactic {
   healAtOrBelow: number | null;
   /** Nonempty rules replace the legacy spell list; an empty list restores that fallback. */
   rules?: CombatRule[];
+  program?: CombatProgram | null;
 }
 
 const SPELLS: ReadonlyArray<CombatSpell> = ['golem', 'frostnova', 'flamewave', 'starbolt'];

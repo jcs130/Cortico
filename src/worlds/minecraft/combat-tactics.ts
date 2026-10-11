@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileS
 import { dirname } from 'node:path';
 import type { CombatTactic } from './combat-spells.ts';
 import { validCombatRules } from './combat-rules.ts';
+import { validCombatProgram } from './combat-program.ts';
 
 export interface CombatScene {
   dimension: string | null;
@@ -91,7 +92,8 @@ export function validCombatTactic(value: unknown): value is CombatTactic {
     && v.spells.every((id) => typeof id === 'string' && /^[a-z][a-z0-9_:-]{0,63}$/.test(id) && id !== 'selfheal')
     && new Set(v.spells).size === v.spells.length))
     && (v.healAtOrBelow === null || (Number.isInteger(v.healAtOrBelow) && v.healAtOrBelow >= 1 && v.healAtOrBelow <= 20))
-    && (v.rules === undefined || validCombatRules(v.rules));
+    && (v.rules === undefined || validCombatRules(v.rules))
+    && (v.program === undefined || v.program === null || validCombatProgram(v.program));
 }
 
 export class CombatTacticBook {

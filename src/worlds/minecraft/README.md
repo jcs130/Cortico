@@ -2,6 +2,8 @@
 
 # worlds/minecraft
 
+`mc_combat_tactic.program` 保存模型编写的同步 JavaScript 候选程序及 JSON 参数。`combat-program.ts` 与 `combat-program-worker.mjs` 在独立 SES Worker 评估 `frame`，提供完整可执行动作池；程序返回候选和快模型选择说明，可自行生成0.5–1.6格的安全短步。程序短步不采用默认的无命中等待，身体租约、碰撞、能力、生命危机和版本仍重检。源码12000字符、参数4096字符、输出24000字符、候选16项、选择说明1200字符；Worker 初始化最多2秒、每次评估50毫秒，无原始 bot、导入、文件或网络。失败后停止采用该程序并保留默认候选回退；显式更新可恢复试验。最近八次选择可用 decisions/decision 按需读取，保留程序哈希、版本、真实模型输入、选择结果和一秒后的位移/生命/目标读数；跨连接或维度的后观测标为未验证。观测不证明因果或整场胜利，学习结论、源码与版本检索由 Persona 的方法库负责。
+
 `mc_script` 执行模型编写的 JavaScript 异步函数体，独立 Worker 内使用 SES Compartment；只提供 JSON `params` 与 `mc.state()`、`mc.flightPlan(args)`、`mc.do(steps)`，不提供原始 bot、模块导入、文件、网络或进程入口。`mc.do` 共用普通受理检查、执行器与身体优先级，并等待对应任务的实际终态；返回受理状态、任务编号、各步结果、完整回执与新采样。语法校验不执行脚本。源码上限12000字符，参数4096字符，单次JSON消息24000字符；最多32次串行SDK调用、16组动作，默认60秒、最多120秒（含排队）。超时、取消、死亡、断线、World停止或新的已受理身体任务撤销方法及其自己的一单，保留其他工作和救生冻结。最近八次运行仅在本进程保留，含源码哈希、时间及调用链；Persona 自行保存源码、经验与验证证据。脚本完成不等于原目标已实现。
 
 `mc.state()` 返回 `{sampledAt, connectionGeneration, snapshot, flight, queue, combatActive, combat, method}`。位置、维度、生命、饥饿、物品与装备在 `snapshot.position/dimension/health/food/inventory/equipment`；`snapshot` 可为 `null`。实体是 `snapshot.entities` 数组，字段为 `entityId?`、`name`、`kind`、`distance`、`direction`、`dy`、`visible`，`entitiesOmitted` 表示未列出的数量。该调用不扫描方块或地形，`blocksScanned:false`，空列表不能证明水域深度或通路。字段缺失表示未观察到。首次使用某类 SDK 回执时，展开 `{runId,call}` 核对实际结构，再比较方法目标与观测结果、保存已验证范围。
