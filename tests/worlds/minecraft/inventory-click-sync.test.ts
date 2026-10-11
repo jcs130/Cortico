@@ -147,6 +147,28 @@ describe('server inventory click snapshots', () => {
     expect(rig.inventory.selectedItem.count).toBe(64);
   });
 
+  it('a later full read recovers a denied click without confirming or retrying the failed operation', async () => {
+    vi.useFakeTimers();
+    const rig = inventoryServer({ deny: true });
+    rig.seed(33, 'iron_helmet', 1);
+    const click = clickInventoryConfirmed(rig.bot, 33, 0, 0);
+    const rejected = expect(click).rejects.toMatchObject({ reason: 'quarantined' });
+    await vi.runAllTimersAsync();
+    await rejected;
+    expect(inventoryReadConfirmed(rig.bot)).toBe(false);
+
+    rig.client.emit('window_items', { windowId: 0, stateId: 90,
+      items: [], carriedItem: { itemCount: 0 } });
+    expect(inventoryClickState(rig.bot).phase).toBe('quarantined');
+    rig.full();
+    expect(inventoryClickState(rig.bot).phase).toBe('ready');
+    expect(inventoryReadConfirmed(rig.bot)).toBe(true);
+    expect(rig.inventory.slots[33]?.name).toBe('iron_helmet');
+    expect(rig.inventory.selectedItem).toBeNull();
+    expect(rig.sent).toHaveLength(1);
+    await expect(click).rejects.toMatchObject({ reason: 'quarantined' });
+  });
+
   it.each([-1, 255])('cursor packet %i updates server authority even when Mineflayer ignores the window ID', (windowId) => {
     const rig = inventoryServer();
     const raw = rig.Item.toNotch(new rig.Item(rig.registry.itemsByName.cherry_log.id, 64));

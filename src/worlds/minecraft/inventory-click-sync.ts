@@ -200,6 +200,14 @@ export function installInventoryClickSync(bot: Bot, diag?: MinecraftLog): void {
       return;
     }
     if (pending && seq <= pending.sentSeq) return;
+    // The failed operation has already returned. A later complete server view
+    // can restore inventory access without claiming that the click succeeded.
+    if (state.phase === 'quarantined' && pending?.sent && pending.nativeSettled) {
+      state.phase = 'ready'; state.reason = undefined; state.pending = null;
+      record(state, 'click-recovered', { packetSeq: seq, windowId: window.id,
+        windowSerial: windowSerial(state, window), failedSentSeq: pending.sentSeq });
+      return;
+    }
     if (pending && target === pending.window) {
       const mismatchedSlots = [...pending.expectedSlots].filter(([slot, key]) => stackKey(items[slot]) !== key)
         .map(([slot]) => slot);
