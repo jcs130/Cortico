@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Worker } from 'node:worker_threads';
 import { Vec3 } from 'vec3';
 import type { Bot } from 'mineflayer';
 import { CombatProgramRunner, combatProgramCandidates, COMBAT_PROGRAM_LIMITS } from '../../../src/worlds/minecraft/combat-program.ts';
@@ -39,8 +40,8 @@ describe('agent-authored combat programs', () => {
 
   it('has no process, module or network capabilities and cannot mutate an observation', async () => {
     const r = runner();
-    const p = { name: 'capabilities', code: `return {candidates:[],instructions:[typeof process,typeof require,typeof fetch,typeof mc].join(',')};` };
-    expect((await r.run(p, frame())).instructions).toBe('undefined,undefined,undefined,undefined');
+    const p = { name: 'capabilities', code: `return {candidates:[],instructions:[typeof process,typeof require,typeof fetch,typeof mc,typeof run,typeof Script].join(',')};` };
+    expect((await r.run(p, frame())).instructions).toBe('undefined,undefined,undefined,undefined,undefined,undefined');
     await expect(r.run({ ...p, code: `frame.battlefield.self.position[0]=99; return {candidates:[],instructions:''};` }, frame())).rejects.toThrow();
   });
 
@@ -54,6 +55,32 @@ describe('agent-authored combat programs', () => {
     await clock; expect(clockAdvanced).toBe(true);
     await expect(r.run(bad, frame())).rejects.toThrow('budget');
     expect((await r.run({ name: 'revision', code: `return {candidates:[],instructions:'Corrected'};` }, frame())).instructions).toBe('Corrected');
+  });
+
+  it('keeps a completed worker result when delivery exceeds the evaluation budget', async () => {
+    const r = runner(), p = { name: 'simple', code: `return {candidates:[],instructions:'Completed'};` };
+    await r.configure(p);
+    const emit = Worker.prototype.emit;
+    const delayed = vi.spyOn(Worker.prototype, 'emit').mockImplementation(function (this: Worker, event, ...args) {
+      if (event === 'message' && args[0]?.kind === 'result') {
+        setTimeout(() => emit.call(this, event, ...args), COMBAT_PROGRAM_LIMITS.evaluationMs * 2);
+        return true;
+      }
+      return emit.call(this, event, ...args);
+    });
+    try {
+      await expect(r.run(p, frame())).resolves.toMatchObject({ instructions: 'Completed' });
+      expect(r.status().error).toBeNull();
+      expect(r.status().evaluationMs).toBeLessThan(COMBAT_PROGRAM_LIMITS.evaluationMs);
+      expect(r.status().roundTripMs).toBeGreaterThanOrEqual(COMBAT_PROGRAM_LIMITS.evaluationMs * 2);
+    } finally { delayed.mockRestore(); }
+  });
+
+  it('limits synchronous code invoked by output serialization inside the worker', async () => {
+    const r = runner();
+    await expect(r.run({ name: 'getter-loop', code: `return {get candidates(){while(true){}},instructions:''};` }, frame()))
+      .rejects.toThrow('evaluation budget');
+    expect(r.status().error).toContain('evaluation budget');
   });
 
   it('cancels worker startup and rejects malformed syntax before changing a tactic', async () => {

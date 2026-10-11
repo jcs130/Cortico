@@ -6,7 +6,7 @@ import type { CombatCandidate, CombatDecisionFrame } from './combat-decision.ts'
 export interface CombatProgram { name: string; code: string; params?: Record<string, unknown> }
 export interface CombatProgramResult { candidates: CombatCandidate[]; instructions: string }
 export const COMBAT_PROGRAM_LIMITS = Object.freeze({ sourceChars: 12_000, paramsChars: 4096,
-  outputChars: 24_000, candidates: 16, startupMs: 2000, evaluationMs: 50, stepBlocks: 1.6 });
+  outputChars: 24_000, candidates: 16, startupMs: 2000, evaluationMs: 50, responseMs: 500, stepBlocks: 1.6 });
 
 export function validCombatProgram(value: unknown): value is CombatProgram {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -27,12 +27,15 @@ export class CombatProgramRunner {
   private key = '';
   private ready: Promise<void> | null = null;
   private failure: string | null = null;
+  private evaluationMs: number | null = null;
+  private roundTripMs: number | null = null;
   private cancelStartup: ((reason: string) => void) | null = null;
   private pending: { resolve: (value: CombatProgramResult) => void; reject: (error: Error) => void;
     timer: ReturnType<typeof setTimeout> } | null = null;
 
-  status(): { sourceHash: string | null; error: string | null } {
-    return { sourceHash: this.key.split(':')[0] || null, error: this.failure };
+  status(): { sourceHash: string | null; error: string | null; evaluationMs: number | null; roundTripMs: number | null } {
+    return { sourceHash: this.key.split(':')[0] || null, error: this.failure,
+      evaluationMs: this.evaluationMs, roundTripMs: this.roundTripMs };
   }
 
   async configure(program: CombatProgram): Promise<void> {
@@ -45,7 +48,8 @@ export class CombatProgramRunner {
     this.close();
     this.key = key;
     const worker = new Worker(new URL('./combat-program-worker.mjs', import.meta.url), {
-      workerData: { code: program.code, outputChars: COMBAT_PROGRAM_LIMITS.outputChars },
+      workerData: { code: program.code, outputChars: COMBAT_PROGRAM_LIMITS.outputChars,
+        evaluationMs: COMBAT_PROGRAM_LIMITS.evaluationMs },
       env: {}, execArgv: [], resourceLimits: { maxOldGenerationSizeMb: 64, stackSizeMb: 4 },
     });
     this.worker = worker;
@@ -74,6 +78,7 @@ export class CombatProgramRunner {
         if (message.kind === 'error') { fail(String(message.error)); return; }
         if (message.kind === 'result' && this.pending) {
           const pending = this.pending; this.pending = null; clearTimeout(pending.timer);
+          this.evaluationMs = message.evaluationMs;
           pending.resolve(message.value);
         }
       });
@@ -84,16 +89,17 @@ export class CombatProgramRunner {
   async run(program: CombatProgram, frame: CombatDecisionFrame): Promise<CombatProgramResult> {
     await this.configure(program);
     if (this.pending) throw new Error('Combat program already evaluating');
+    const startedAt = performance.now();
     return await new Promise<CombatProgramResult>((resolve, reject) => {
       this.pending = { resolve, reject, timer: setTimeout(() => {
-        this.failure = 'Combat program exceeded evaluation budget';
+        this.failure = 'Combat program worker response timed out';
         const pending = this.pending; this.pending = null;
         const worker = this.worker; this.worker = null;
         void worker?.terminate(); pending?.reject(new Error(this.failure));
-      }, COMBAT_PROGRAM_LIMITS.evaluationMs) };
+      }, COMBAT_PROGRAM_LIMITS.responseMs) };
       const { program: _program, ...input } = frame;
       this.worker!.postMessage({ frame: input, params: program.params ?? {} });
-    });
+    }).finally(() => { this.roundTripMs = performance.now() - startedAt; });
   }
 
   close(): void {
@@ -102,6 +108,7 @@ export class CombatProgramRunner {
       clearTimeout(this.pending.timer); this.pending.reject(new Error('Combat program revoked')); this.pending = null;
     }
     const worker = this.worker; this.worker = null; this.key = ''; this.failure = null; this.ready = null;
+    this.evaluationMs = null; this.roundTripMs = null;
     void worker?.terminate();
   }
 }

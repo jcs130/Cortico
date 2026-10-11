@@ -2189,7 +2189,7 @@ export const MINECRAFT_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
       + 'frame.actionPool contains currently executable casts, engagements and collision-checked directions; you may select, reorder or relabel them, or construct step destinations 0.5 to 1.6 blocks away. '
       + 'The program constructs choices from fresh battlefield facts independently of the main model; the fast model chooses and the combat controller executes. '
       + 'Direct steps last at most 700ms and share the combat body lease; survival, task ownership and collisions remain checked. '
-      + 'Use program:null to remove it. No imports, files, network or raw bot; 50ms evaluation budget. Runtime failure revokes that program until updated; built-in choices remain a fallback. '
+      + 'Use program:null to remove it. No imports, files, network or raw bot; 50ms worker execution budget, separate 500ms response deadline. Runtime failure revokes that program until updated; built-in choices remain a fallback. '
       + '{decisions:true} lists recent fast choices and measured one-second outcomes; {decision:id} expands input and result. These observations do not prove causation or a successful encounter. '
       + 'Keep source and previous versions in your own methods library; compare combat reports before calling a revision an improvement. '
       + 'The World checks observed spell availability, mana, targets and announced cooldowns; '
