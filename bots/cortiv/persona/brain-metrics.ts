@@ -179,20 +179,24 @@ export class BrainMetrics {
           [...submitted.map(item => roleOf(item.event.role)), ...selectors.map(() => 'system1')]),
         context_distributions: {
           history_budget: distribution(submitted.flatMap(item => item.policy.appliedHistoryTokens === null ? [] : [item.policy.appliedHistoryTokens])),
-          matched_input: distribution(submitted.flatMap(item => { const matched = this.matched(item); return matched ? [matched.inputTokens!] : []; })),
-          reasoning_budget: distribution([]),
+          matched_input: distribution(submitted.flatMap(item => { const matched = this.matched(item); return matched?.inputTokens != null ? [matched.inputTokens] : []; })),
+          reasoning_budget: distribution(submitted.flatMap(item => {
+            const reasoning = this.matched(item)?.reasoning;
+            return reasoning?.confirmed === true && reasoning.effective.budgetTokens !== null ? [reasoning.effective.budgetTokens] : [];
+          })),
         },
       } };
   }
 
   private matched(submission: Submission): ModelAttemptObservation | null {
     const attempt = submission.attempts.at(-1);
-    return attempt?.requestId && attempt.inputTokens !== null ? attempt : null;
+    return attempt?.requestId ? attempt : null;
   }
 
   private selection(submission: Submission, scope: 'current' | 'last') {
     const { event, policy } = submission;
     const matched = this.matched(submission);
+    const reasoning = matched?.reasoning;
     const sources = { route: 'configured', reading: policy.readingSource, reasoning: policy.reasoningSource };
     return { scope, decision_id: event.id, request_id: matched?.requestId ?? event.id,
       inference_request_id: matched?.requestId ?? null, round: policy.round,
@@ -200,7 +204,12 @@ export class BrainMetrics {
       proposed: { reading: policy.proposedReading, reasoning: policy.proposedReasoning, effort: null },
       applied: { role: roleOf(event.role), model: event.model, reading: policy.reading, thinking: event.thinking,
         effort: event.effort, reasoning_budget_tokens: null },
-      provider_confirmed: null, confidence: policy.confidence, selector_ms: policy.selectorMs,
+      provider_confirmed: reasoning?.confirmed ?? null, provider_confirmation_scope: reasoning ? 'reasoning' : null,
+      provider_requested: reasoning?.requested ?? null, provider_effective: reasoning?.effective ?? null,
+      provider_confirmation: reasoning?.confirmation ?? null,
+      execution_ms: matched?.executionMs ?? null, queue_ms: matched?.queueMs ?? null,
+      reasoning_tokens: matched?.reasoningTokens ?? null,
+      confidence: policy.confidence, selector_ms: policy.selectorMs,
       context: { requested_history_tokens: policy.requestedHistoryTokens, applied_history_tokens: policy.appliedHistoryTokens,
         growth_tokens: policy.growthTokens, protected_tokens: policy.protectedTokens,
         estimated_input_tokens: event.estimatedInputTokens, actual_input_tokens: matched?.inputTokens ?? null },
