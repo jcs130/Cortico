@@ -1262,6 +1262,8 @@ export class MainLoop {
             context: outbound, nativeSpec: spec,
             ...(tapEvents ?? {}),
             role: decl.id,
+            estimatedInputTokens: requestContext.estimatedInputTokens,
+            resubmission: consecutiveFailures > 0,
             sessionId: this.mainTrack?.id,
             signal: flight.controller.signal,
           });

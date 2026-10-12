@@ -3355,20 +3355,22 @@ describe("deliver:false 与隐藏 World 的事件归档后推进水位", () => {
   let core: Core<BotConfig>;
   let host: WorldHost;
 
-  async function build(): Promise<void> {
+  async function build(metadata?: NonNullable<Persona['onWorldMetadata']>): Promise<void> {
     tmp = makeTmpDir();
     const cfg = makeCfg();
     cfg.worlds.qq.enabled = false;
     const probe = makeFakeIO('probe');
     let captured: WorldHost | null = null;
     probe.start = async (h) => { captured = h; };
+    const persona = makeFakePersona([], { cfg, worlds: [probe], silent: true });
+    persona.onWorldMetadata = metadata;
     core = new Core(makeLoaded({
       config: cfg,
       rootDir: tmp.dir,
       memoryDir: join(tmp.dir, 'persona'),
       dataDir: join(tmp.dir, 'data'),
     }), {
-      persona: makeFakePersona([], { cfg, worlds: [probe], silent: true }),
+      persona,
       worlds: [probe],
       llm: new FakeLLM(),
     });
@@ -3392,6 +3394,17 @@ describe("deliver:false 与隐藏 World 的事件归档后推进水位", () => {
     expect(echo.contextDelivery).toBe('archive-only');
     // 归档后立即推进水位，不要求候选引用。
     await until(() => core.state.data.lastDeliveredCursor >= echo.cursor);
+  });
+
+  it('只归档的环境回执同步提供元数据，观察器不接收正文且异常不阻止归档', async () => {
+    const seen: unknown[] = [];
+    await build(event => { seen.push(event); throw new Error('observer unavailable'); });
+    const envelope = await host.pushEvent({ source: 'probe', type: 'probe.metrics', ts: new Date().toISOString(),
+      text: 'private-result-text', meta: { result: 1 } }, { deliver: false });
+    expect(envelope.contextDelivery).toBe('archive-only');
+    expect(seen).toEqual([{ source: 'probe', type: 'probe.metrics', at: envelope.ts, metadata: { result: 1 } }]);
+    expect(JSON.stringify(seen)).not.toContain('private-result-text');
+    await until(() => core.state.data.lastDeliveredCursor >= envelope.cursor);
   });
 
   it('隐藏 World 的 pushEvent 与 pushCandidate 原文归档后推进水位', async () => {

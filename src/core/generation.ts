@@ -62,12 +62,33 @@ export interface ProviderAttempt {
   purpose?: 'generation' | 'diagnostic';
   meters: TokenMeters;
   charges: Charge[];
+  inferenceStats?: InferenceStats;
+}
+/** Metadata returned by the serving gateway, independent of response content. */
+export interface InferenceStats {
+  requestId: string;
+  sessionId: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedInputTokens: number | null;
+  reasoningTokens: number | null;
+  gatewayDurationMs: number | null;
+  gatewayTtftMs: number | null;
+  inputProcessingMs: number | null;
+  decodeMs: number | null;
+  executionMs: number | null;
+  queueMs: number | null;
+  inputTokS: number | null;
+  outputTokS: number | null;
 }
 export interface GenerateOptions {
   signal?: AbortSignal;
   onEvent?: (event: StreamEvent) => void;
   role?: string;
   sessionId?: string;
+  conversationId?: string;
+  estimatedInputTokens?: number;
+  resubmission?: boolean;
   /** Local context retains output reasoning and media references alongside the request Items. */
   context?: readonly ContextRecord[];
   nativeSpec?: ModelSpec;

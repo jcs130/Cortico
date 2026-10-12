@@ -1,5 +1,5 @@
 /** Optional context and response-timing fallback. No action or memory-writing authority. */
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { EventEnvelope } from 'cortico/core/types.ts';
 import { parseTypedChoice } from 'cortico/protocol/typed-decision.ts';
 
@@ -58,6 +58,9 @@ export interface ForegroundAdvice {
   latencyMs?: number;
   inputChars?: number;
   cursors: number[];
+  attemptId?: string;
+  proposedReading?: keyof typeof READING;
+  proposedReasoning?: keyof typeof REASONING;
 }
 
 /** Only a fresh structured queue-tail observation can defer; any other substantive event bypasses it. */
@@ -137,6 +140,7 @@ export class ForegroundAdviser {
       ...(cfg.reasoningEnabled && cfg.reasoningModel.trim() ? { reasoning: { type: 'choice',
         instructions: '只选择下一次主意识请求的思考深度，依据新输入、现场采样时间、当前任务实际进度及最近失败回执。空闲不必深思，正在执行不等于安全或有时间。不能改变身体任务、发言或等待策略；不确定选 routine。', criteria: REASONING } } : {}),
     } });
+    const attemptId = randomUUID();
     const controller = new AbortController();
     this.controller = controller;
     const abortFromCaller = () => controller.abort();
@@ -155,7 +159,7 @@ export class ForegroundAdviser {
       const raw = await Promise.race([request, new Promise<null>(resolve => {
         timer = setTimeout(() => { timedOut = true; controller.abort(); resolve(null); }, Math.max(1, Math.min(250, cfg.timeoutMs)));
       }), new Promise<null>(resolve => { onAbort = () => resolve(null); controller.signal.addEventListener('abort', onAbort, { once: true }); })]) as { answers?: Record<string, unknown>; latency_ms?: number } | null;
-      const measured = { elapsedMs: this.now() - started, inputChars: body.length,
+      const measured = { attemptId, elapsedMs: this.now() - started, inputChars: body.length,
         ...(typeof raw?.latency_ms === 'number' && Number.isFinite(raw.latency_ms) ? { latencyMs: raw.latency_ms } : {}) };
       if ((controller.signal.aborted && !timedOut) || generation !== this.generation || configKey !== createHash('sha256').update(JSON.stringify(this.config())).digest('hex'))
         return { ...base, ...measured, kind: 'stale' };
@@ -170,10 +174,11 @@ export class ForegroundAdviser {
       const defer = !!(opportunity && queueTailOpportunity(scene.events, this.now())
         && timing?.choice === 'continue' && timing.choiceProbability >= cfg.minConfidence);
       return { ...base, ...measured, kind: acceptedReading || acceptedReasoning || defer ? 'advice' : 'uncertain',
+        proposedReading: reading?.choice, proposedReasoning: reasoning?.choice,
         ...(acceptedReading ? { reading: reading.choice } : {}), defer,
         ...(acceptedReasoning ? { reasoning: reasoning.choice } : {}), reasoningProbability: reasoning?.choiceProbability,
         readingProbability: reading?.choiceProbability, timingProbability: timing?.choiceProbability };
-    } catch { return { ...base, kind: timedOut ? 'timeout' : 'unavailable', elapsedMs: this.now() - started, inputChars: body.length }; }
+    } catch { return { ...base, attemptId, kind: timedOut ? 'timeout' : 'unavailable', elapsedMs: this.now() - started, inputChars: body.length }; }
     finally { clearTimeout(timer); signal?.removeEventListener('abort', abortFromCaller);
       if (onAbort) controller.signal.removeEventListener('abort', onAbort);
       if (this.controller === controller) this.controller = null; }

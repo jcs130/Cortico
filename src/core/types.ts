@@ -522,6 +522,14 @@ export interface CoreApi {
   /** 运行临时 session 的工具循环，返回最后一段正文。 */
   spawnFork(opts: ForkOptions): Promise<string>;
   sessionInfo(id: string): SessionInfo;
+  /** Cached runtime metadata; reading it does not generate or inspect model content. */
+  runtimeMetadata?(): {
+    phase: string;
+    paused: boolean;
+    providerName: string | null;
+    model: string | null;
+    inputHardLimit: number | null;
+  };
   /** 记录用量并支持重试的模型客户端。 */
   llm: ResponseClient;
   /** 跨重启恢复的定时器；载荷对 Core 不透明。 */
@@ -1012,6 +1020,10 @@ export type WorldLifecycleEvent =
  * 文本通过 CoreApi 的注入方法或有文本返回值的钩子提供；Core 不生成语义内容。
  */
 export interface Persona {
+  /** Metadata-only lifecycle for model requests from every declared session. */
+  onModelObservation?(event: import('./model-observer.ts').ModelObservation): void;
+  /** Committed World metadata, including archive-only events; no event text or attachments. */
+  onWorldMetadata?(event: { source: string; type: string; at: string; metadata: Readonly<Record<string, unknown>> }): void;
   /** system 前缀的有序段；Core 按序拼接 text。 */
   systemSegments(ctx: SystemPrefixContext): Promise<PrefixSegment[]>;
   /** 控制台预览使用的模板变量当前值；未实现时仅显示占位符声明。 */

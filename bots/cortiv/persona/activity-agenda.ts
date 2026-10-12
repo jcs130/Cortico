@@ -94,7 +94,8 @@ function section(lines: string[], budget: number): string {
 export class ActivityAgenda {
   private readonly file: string;
   private ledger: Ledger = { version: 1, revision: 0, summary: '', items: [], proposal: null };
-  constructor(memoryDir: string, private readonly now: () => number = Date.now) {
+  constructor(memoryDir: string, private readonly now: () => number = Date.now,
+    private readonly onMetadata?: (items: readonly { id: string; status: string; updatedAt: string }[]) => void) {
     this.file = join(memoryDir, AGENDA_FILE);
     if (!existsSync(this.file)) return;
     const saved: unknown = JSON.parse(readFileSync(this.file, 'utf8'));
@@ -318,5 +319,6 @@ export class ActivityAgenda {
     writeFileSync(temporary, JSON.stringify(next, null, 2) + '\n', 'utf8');
     renameSync(temporary, this.file);
     this.ledger = next;
+    this.onMetadata?.(next.items.map(({ id, status, updatedAt }) => ({ id, status, updatedAt })));
   }
 }

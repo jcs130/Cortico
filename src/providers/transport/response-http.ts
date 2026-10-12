@@ -5,6 +5,7 @@ import { GenerationError, priceUsage, unknownMeters, type GenerateOptions, type 
 import { ResponseProtocolError } from '../../protocol/open-responses/stream.ts';
 import { LLMError, abortError, parseRetryAfter, retryDelay, reqIdSuffix } from './errors.ts';
 import type { ResponseAssembly } from './response-assembly.ts';
+import { inferenceStats } from './inference-stats.ts';
 
 export interface ResponseTransport {
   url: string;
@@ -128,13 +129,19 @@ export async function generate(request: Request, options: GenerateOptions, origi
     };
     try {
       const headers = await transport.headers();
+      if (options.conversationId && /^[a-zA-Z0-9_.:/-]{1,160}$/.test(options.conversationId))
+        headers['x-litellm-session-id'] = options.conversationId;
       if (options.signal?.aborted) throw abortError(options.signal);
       attempt.startedAt = new Date().toISOString();
       quotes = structuredClone(options.quote?.({ startedAt: attempt.startedAt, requestedServiceTier: attempt.requestedServiceTier ?? null }) ?? []);
       sent = true;
       const response = await fetch(transport.url, { method: 'POST', body: requestJson(transport.body), headers, signal });
       attempt.status = response.status;
-      attempt.requestId = response.headers.get('x-request-id');
+      attempt.requestId = response.headers.get('x-litellm-call-id') ?? response.headers.get('x-request-id');
+      const noteStats = (payload: unknown): void => {
+        const stats = inferenceStats(payload, attempt.requestId);
+        if (stats) { attempt.inferenceStats = stats; attempt.requestId = stats.requestId; }
+      };
       if (!response.ok) {
         const error = new LLMError(`LLM API ${response.status}`, response.status, await response.text());
         retryAfterMs = parseRetryAfter(response.headers.get('retry-after'));
@@ -158,14 +165,18 @@ export async function generate(request: Request, options: GenerateOptions, origi
           if (chunk.done) break;
           for (const payload of frames.feed(decoder.decode(chunk.value, { stream: true }))) {
             if (payload === '[DONE]') break stream;
-            assembly.feed(JSON.parse(payload), forward);
+            const value: unknown = JSON.parse(payload);
+            noteStats(value);
+            assembly.feed(value, forward);
           }
         }
         partial = assembly.finish(forward);
         attempt.meters = assembly.meters();
         attempt.serviceTier = assembly.serviceTier();
       } else {
-        const parsed = transport.parse(JSON.parse(await response.text()));
+        const value: unknown = JSON.parse(await response.text());
+        noteStats(value);
+        const parsed = transport.parse(value);
         partial = parsed.response;
         attempt.meters = parsed.meters;
         attempt.serviceTier = parsed.serviceTier;

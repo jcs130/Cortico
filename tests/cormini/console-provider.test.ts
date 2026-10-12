@@ -74,7 +74,7 @@ describe('Persona卡:只有 ORIENTATION 与宪法', () => {
     parts.persona.attach?.(makeFakeHarnessApi());
     const decl = parts.persona.console?.();
     expect(decl?.panels?.map((panel) => ({ id: panel.id, getMethods: panel.getMethods })))
-      .toEqual([{ id: 'planning', getMethods: ['state'] }, { id: 'dream', getMethods: ['state'] }]);
+      .toEqual([{ id: 'planning', getMethods: ['state', 'metrics'] }, { id: 'dream', getMethods: ['state'] }]);
     expect(await decl?.invoke?.('planning', 'state', [])).toMatchObject({ enabled: false, running: false });
     const dream = await decl?.invoke?.('dream', 'state', []);
     expect(dream).toMatchObject({ currentTask: null, queuedTasks: [], lastOutcome: null,

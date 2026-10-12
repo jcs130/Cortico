@@ -37,6 +37,7 @@ import { LogBlobStore, blobScheme, mimeOfHandle, withBlobLines } from './blobs.t
 import { TimerStore } from './timers.ts';
 import { SessionTracker, type SessionHandle } from './sessions.ts';
 import { UsageLog } from './usage-log.ts';
+import { observeModel } from './model-observer.ts';
 import { ToolCallLog } from './tool-log.ts';
 import { Transcript } from './transcript.ts';
 import { openRun, writeRunJson, type RunInfo } from './run.ts';
@@ -147,7 +148,7 @@ export class Core<C extends CoreConfig = CoreConfig> {
       keepThinking: () => cfg.context.keepPastThinking,
       log: this.log.child('llm'),
     });
-    this.llm = deps.llm ?? this.makeProviderRouter();
+    this.llm = observeModel(deps.llm ?? this.makeProviderRouter(), event => this.persona.onModelObservation?.(event), this.run.id);
 
     // TimerStore 仅提供通用持久定时器；Persona定义心跳与闹钟语义。
     this.timers = new TimerStore(dataDir, this.log.child('timer'));
@@ -216,6 +217,12 @@ export class Core<C extends CoreConfig = CoreConfig> {
       requestContextHandoff: () => this.loop.requestContextHandoff(),
       spawnFork: (opts) => this.spawnFork(opts),
       sessionInfo: (id) => this.sessionInfo(id),
+      runtimeMetadata: () => {
+        const status = this.loop.getStatus();
+        const entry = this.config.providers[this.config.activeProvider];
+        return { phase: status.phase.state, paused: status.paused, providerName: this.config.activeProvider || null,
+          model: entry?.spec?.model ?? null, inputHardLimit: status.context.hardTokens };
+      },
       llm: this.llm,
       timers: this.timers,
       deliveryGate: {
@@ -328,7 +335,8 @@ export class Core<C extends CoreConfig = CoreConfig> {
     const { name, entry } = opts.provider === undefined ? this.activeProviderEntry() : this.providerEntry(opts.provider);
     if (!entry.spec) throw new Error(`LLM provider ${name} 还没选模型`);
     const spec = { ...entry.spec, ...(opts.model ? { model: opts.model } : {}), ...(opts.maxOutputTokens !== undefined ? { maxTokens: opts.maxOutputTokens } : {}) };
-    const llm = opts.provider === undefined ? this.llm.bind?.() ?? this.llm : this.providers.bind(name);
+    const llm = opts.provider === undefined ? this.llm.bind?.() ?? this.llm
+      : observeModel(this.providers.bind(name), event => this.persona.onModelObservation?.(event), this.run.id);
     let observedMessages = opts.messages;
     const track = this.sessions.open(decl.id, decl.label, {
       messagesRef: () => observedMessages,
@@ -536,6 +544,10 @@ export class Core<C extends CoreConfig = CoreConfig> {
           origin: e.origin ?? 'external',
           contextDelivery: deliver ? 'deliver' : 'archive-only',
         });
+        if (envelope.meta && this.persona.onWorldMetadata) {
+          try { this.persona.onWorldMetadata({ source: mod.id, type: envelope.type, at: envelope.ts, metadata: envelope.meta }); }
+          catch { /* Observation cannot change event delivery. */ }
+        }
         // 隐藏 World 的事件仍归档，不投递。
         if (deliver) {
           this.bus.push({ event: envelope }, { trigger: opts?.trigger });

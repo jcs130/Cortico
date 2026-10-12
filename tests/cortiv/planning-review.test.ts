@@ -515,7 +515,7 @@ describe('Persona长期复盘', () => {
     expect(decl).toMatchObject({ persistent: false, receivesEvents: false });
     expect(decl.tools()).toEqual([]); expect(decl.rounds()).toEqual({ soft: 1, hard: 1 });
     const console = persona.console();
-    expect(console.panels?.find((panel) => panel.id === 'planning')?.getMethods).toEqual(['state']);
+    expect(console.panels?.find((panel) => panel.id === 'planning')?.getMethods).toEqual(['state', 'metrics']);
     expect(await console.invoke!('planning', 'review', [])).toMatchObject({ accepted: false, reason: '长期复盘未启用' });
     expect(await console.invoke!('planning', 'state', [])).toMatchObject({ enabled: false, running: false });
   });

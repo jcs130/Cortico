@@ -1,4 +1,6 @@
 import { GenerationError } from 'cortico/core/generation.ts';
+import type { ModelObservation } from 'cortico/core/model-observer.ts';
+import { BrainMetrics, emptyBrainPolicy, type BrainPolicy } from './brain-metrics.ts';
 import { withBlobLines } from 'cortico/core/blobs.ts';
 import { itemText, message, withText, type ContextRecord } from 'cortico/protocol/open-responses/context.ts';
 import { hasRole, textOf } from 'cortico/protocol/open-responses/context-helpers.ts';
@@ -478,6 +480,11 @@ export class CortiV extends Cormini {
   private readonly fastForegroundConfig: () => FastForegroundConfig;
   private readonly foregroundAdviser: ForegroundAdviser;
   private foregroundReading: 'focused' | 'connected' | undefined;
+  private readonly brainMetrics = new BrainMetrics();
+  private brainPolicy: BrainPolicy = emptyBrainPolicy();
+  private foregroundReadingAdvice: ForegroundAdvice | undefined;
+  private foregroundReadingInherited = false;
+  private foregroundAppliedReading: BrainPolicy['reading'] = null;
   private foregroundRevision = 0;
   private foregroundEvents: readonly EventEnvelope[] = [];
   private foregroundOutcome: ForegroundScene['intent'];
@@ -546,7 +553,7 @@ export class CortiV extends Cormini {
     if (this.worldLifecycle.sync(this.worlds)) this.saveWorldLifecycle();
     this.sleepReview = new SleepReview(core, this.sleepReviewConfig);
     this.pendingWork = new PendingWork(core, this.memoryDir, this.timezone);
-    this.activityAgenda = new ActivityAgenda(this.memoryDir);
+    this.activityAgenda = new ActivityAgenda(this.memoryDir, Date.now, items => this.brainMetrics.agenda(items));
     this.stateMemory.migrate(this.stateNotePaths());
     this.planningReview = new PeriodicPlanningReview({
       core, config: this.planningConfig, agenda: this.activityAgenda,
@@ -817,6 +824,8 @@ export class CortiV extends Cormini {
   }
 
   prepareRequest(ctx: { sessionId: string; round: number; messages: readonly ContextRecord[] }): ContextRecord[] | null {
+    if (ctx.sessionId === MAIN) this.brainPolicy = { ...emptyBrainPolicy(), round: ctx.round,
+      eligible: this.fastForegroundConfig().enabled && this.foregroundConfig().enabled };
     const original = ctx.messages;
     if (ctx.sessionId === MAIN) this.captureRecentSpeech(ctx.messages);
     if (ctx.sessionId === MAIN && this.toolCallRecoveryConfig().enabled)
@@ -845,8 +854,10 @@ export class CortiV extends Cormini {
     ctx = { ...ctx, messages: current };
     const cfg = this.foregroundConfig();
     if (ctx.sessionId !== MAIN) return refreshed ? current : null;
-    if (!cfg.enabled) { this.foregroundEpoch.reset(); return complete(); }
+    if (!cfg.enabled) { this.brainPolicy.reading = 'full'; this.foregroundEpoch.reset(); return complete(); }
     if (this.fullContextRequested) {
+      this.brainPolicy.reading = 'full';
+      this.brainPolicy.readingSource = 'manual';
       this.foregroundEpoch.reset();
       const latest = this.latestModelRecord(ctx.messages);
       if (this.fullContextBaseline === null) this.fullContextBaseline = { marker: latest };
@@ -895,6 +906,17 @@ export class CortiV extends Cormini {
       coveredSnapshots: facts.coveredSnapshots,
       coveredCheckpoints,
     }, pins, this.foregroundNotice);
+    const readingAdvice = this.foregroundReadingAdvice;
+    const requestedReading = this.foregroundReading ?? 'standard';
+    if (view.rebuilt || this.foregroundAppliedReading === null) this.foregroundAppliedReading = requestedReading;
+    this.brainPolicy = { ...this.brainPolicy, reading: this.foregroundAppliedReading,
+      readingSource: !view.rebuilt || this.foregroundReadingInherited ? 'inherited' : readingAdvice?.reading ? 'adaptive'
+        : readingAdvice?.kind === 'cooldown' ? 'inherited'
+        : this.fastForegroundConfig().enabled && readingAdvice && !['disabled', 'advice'].includes(readingAdvice.kind) ? 'fallback' : 'configured',
+      proposedReading: readingAdvice?.proposedReading ?? null,
+      confidence: readingAdvice?.readingProbability ?? null, selectorMs: readingAdvice?.elapsedMs ?? null,
+      requestedHistoryTokens: maxHistoryTokens, appliedHistoryTokens: view.maxHistoryTokens,
+      growthTokens: view.maxGrowthTokens, protectedTokens: view.protectedTokens };
     this.foregroundRecordIds = new Set(ctx.messages.flatMap((record) => record.item.id ? [record.item.id] : []));
     this.foregroundHandoffSources = handoffSources;
     this.core?.log.emit('debug', '即时调用阅读材料', { event: 'foreground-context', data: {
@@ -931,6 +953,9 @@ export class CortiV extends Cormini {
     const revision = this.foregroundRevision;
     const config = JSON.stringify(this.fastForegroundConfig());
     const advice = await this.foregroundAdviser.advise(this.foregroundScene(ctx.events));
+    this.brainMetrics.selector(advice);
+    this.foregroundReadingInherited = advice.kind === 'cooldown';
+    if (advice.kind !== 'cooldown') this.foregroundReadingAdvice = advice;
     if (revision === this.foregroundRevision && config === JSON.stringify(this.fastForegroundConfig()))
       this.foregroundReasoningAdvice = { advice, revision, config, at: Date.now() };
     if (advice.kind !== 'cooldown') this.foregroundReading = advice.reading;
@@ -967,6 +992,7 @@ export class CortiV extends Cormini {
     const reused = pending && pending.revision === revision && pending.config === config && Date.now() - pending.at <= 1000;
     const advice = reused ? pending.advice : await this.foregroundAdviser.advise(this.foregroundScene(this.foregroundEvents), ctx.signal);
     const stale = ctx.signal.aborted || revision !== this.foregroundRevision || config !== JSON.stringify(this.fastForegroundConfig());
+    this.brainMetrics.selector(stale ? { ...advice, kind: 'stale' } : advice);
     let choice: RequestReasoning | null = null;
     if (!stale && advice.reasoning) {
       if (advice.reasoning === 'immediate') choice = { thinking: false };
@@ -975,6 +1001,11 @@ export class CortiV extends Cormini {
         if (effort) choice = { thinking: true, reasoningEffort: effort };
       }
     }
+    this.brainPolicy = { ...this.brainPolicy, proposedReasoning: advice.proposedReasoning ?? null,
+      reasoningSource: choice ? 'adaptive' : stale || !['disabled', 'cooldown', 'advice'].includes(advice.kind) ? 'fallback'
+        : advice.kind === 'cooldown' ? 'inherited' : 'configured',
+      confidence: advice.reasoningProbability ?? this.brainPolicy.confidence,
+      selectorMs: advice.elapsedMs ?? this.brainPolicy.selectorMs };
     this.core?.log.emit('debug', '本次请求思考档位选择', { event: 'foreground-reasoning', data: {
       round: ctx.round, model: ctx.spec.model, kind: stale ? 'stale' : advice.kind,
       choice: choice ? advice.reasoning : 'configured', probability: advice.reasoningProbability ?? null,
@@ -982,6 +1013,14 @@ export class CortiV extends Cormini {
       reused: !!reused, elapsedMs: reused ? 0 : advice.elapsedMs ?? 0, inputChars: advice.inputChars ?? 0,
     } });
     return choice;
+  }
+
+  onModelObservation(event: ModelObservation): void {
+    this.brainMetrics.observe(event, event.kind === 'started' && event.role === MAIN ? this.brainPolicy : undefined);
+  }
+
+  onWorldMetadata(event: { source: string; type: string; at: string; metadata: Readonly<Record<string, unknown>> }): void {
+    this.brainMetrics.verification({ source: event.source, ts: event.at, meta: event.metadata, origin: 'external' });
   }
 
   private recoveryTools(): Set<string> {
@@ -1096,7 +1135,7 @@ export class CortiV extends Cormini {
     return {
       ...base,
       panels: [...(base.panels ?? []), { id: 'planning', title: '长期复盘',
-        description: '只读后台复盘与运行状态。review请求一次即时复盘，主意识继续运行。', getMethods: ['state'] },
+        description: '只读后台复盘与运行状态。review请求一次即时复盘，主意识继续运行。', getMethods: ['state', 'metrics'] },
       { id: 'dream', title: '后台整理', description: '整理任务、排队与最近终态；review 可请求观众交流整理并补入已审计历史。', getMethods: ['state'] }],
       memory: { panels: surface.panels },
       invoke: async (panel, method, args) => {
@@ -1116,6 +1155,7 @@ export class CortiV extends Cormini {
           throw new Error(`未知面板方法: ${panel}.${method}`);
         }
         if (panel === 'planning') {
+          if (method === 'metrics') return this.brainMetrics.snapshot(this.core?.runtimeMetadata?.());
           if (!this.planningReview) throw new Error('Persona尚未连接Core');
           if (method === 'state') return { ...this.planningReview.state(), agenda: this.activityAgenda?.state() };
           if (method === 'review') {
@@ -1739,12 +1779,14 @@ export class CortiV extends Cormini {
   }
 
   onDelivery(ctx: { events: EventEnvelope[] }): void | Promise<void> {
+    for (const event of ctx.events) if (this.worlds.some(world => world.id === event.source)) this.brainMetrics.verification(event);
     this.foregroundRevision++;
     this.foregroundReasoningAdvice = undefined;
     this.foregroundEvents = ctx.events;
     if (ctx.events.some(event => event.contextDelivery !== 'archive-only'
       && !event.tags?.includes('snapshot') && !(event.source === 'persona' && ['notice', 'tick'].includes(event.type)))) {
       this.foregroundReading = undefined;
+      this.foregroundReadingAdvice = undefined;
       clearTimeout(this.foregroundDeadline);
       this.foregroundDeadline = undefined;
     }

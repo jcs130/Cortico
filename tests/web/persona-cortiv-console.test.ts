@@ -43,7 +43,9 @@ describe('CortiV 控制面声明', () => {
     ]);
     expect(decl.storage).toBeUndefined();
     expect(decl.panels?.map((panel) => ({ id: panel.id, getMethods: panel.getMethods })))
-      .toEqual([{ id: 'planning', getMethods: ['state'] }, { id: 'dream', getMethods: ['state'] }]);
+      .toEqual([{ id: 'planning', getMethods: ['state', 'metrics'] }, { id: 'dream', getMethods: ['state'] }]);
+    expect(await decl.invoke!('planning', 'metrics', [])).toMatchObject({ schema: 'cortico-brain-metrics-v1',
+      selection: null, window: { calls: 0, selector_attempts: 0, verified_success: null, complete: false } });
     expect(await decl.invoke!('planning', 'state', [])).toMatchObject({ enabled: false, running: false });
     const dream = await decl.invoke!('dream', 'state', []);
     expect(dream).toMatchObject({ currentTask: null, queuedTasks: [], lastOutcome: null,
