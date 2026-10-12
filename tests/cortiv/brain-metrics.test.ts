@@ -38,6 +38,39 @@ describe('event brain metrics', () => {
     now += 600_001;
     expect(metrics.snapshot().window).toMatchObject({ selector_attempts: 0, complete: true });
   });
+  it('separates submitted thinking choices from confirmed ended calls and deduplicates receipts', () => {
+    let now = 1_000_000;
+    const metrics = new BrainMetrics(() => now);
+    const requested = [
+      { thinking: null, effort: 'none' }, { thinking: true, effort: 'minimal' },
+      { thinking: true, effort: 'xhigh' }, { thinking: true, effort: 'max' },
+      { thinking: true, effort: null }, { thinking: null, effort: null },
+    ];
+    requested.forEach((value, index) => metrics.observe({ ...start(String(index), now), ...value }));
+    const reasoning = { requested: { thinking: true, effort: 'xhigh', budgetTokens: null },
+      effective: { thinking: false, effort: 'none', nativeEffort: 'none', budgetTokens: null, budgetStatus: 'disabled' },
+      confirmation: 'engine', confirmed: true };
+    const receipt = { ...attempt('one', now), reasoning };
+    metrics.observe({ kind: 'finished', id: '0', atMs: now, attempts: [receipt, receipt] });
+    // A second logical submission can refer to the same upstream receipt.
+    metrics.observe({ kind: 'finished', id: '1', atMs: now, attempts: [{ ...receipt, id: 'duplicate' }] });
+    metrics.observe({ kind: 'finished', id: '2', atMs: now,
+      attempts: [{ ...attempt('two', now), reasoning: { ...reasoning, confirmed: false } }] });
+    metrics.observe({ kind: 'finished', id: '3', atMs: now,
+      attempts: [{ ...attempt('three', now), requestId: null, reasoning }] });
+    let state = metrics.snapshot().window;
+    expect(state.requested_reasoning).toMatchObject({ samples: 6, thinking_counts: { on: 4, off: 1, unknown: 1 },
+      effort_counts: { off: 1, minimal: 1, xhigh: 1, max: 1, default: 1, unknown: 1 } });
+    expect(state.effective_reasoning).toMatchObject({ samples: 3, confirmed_samples: 1,
+      thinking_counts: { on: 0, off: 1, unknown: 2 }, effort_counts: { off: 1, unknown: 2 } });
+    // Submission and receipt windows use their own event timestamps.
+    now += 600_001;
+    metrics.observe({ kind: 'finished', id: '4', atMs: now, attempts: [attempt('late', now)] });
+    state = metrics.snapshot().window;
+    expect(state.requested_reasoning.samples).toBe(0);
+    expect(state.effective_reasoning).toMatchObject({ samples: 1, confirmed_samples: 0,
+      thinking_counts: { on: 0, off: 0, unknown: 1 } });
+  });
   it('keeps model task closures unverified and accepts only explicit environment evidence', () => {
     const now = 1_000_000;
     const metrics = new BrainMetrics(() => now);

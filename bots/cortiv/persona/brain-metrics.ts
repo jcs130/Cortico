@@ -41,9 +41,18 @@ const distribution = (values: number[]) => {
     p95_tokens: values.length ? values[Math.ceil(values.length * .95) - 1] : null };
 };
 const buckets = (keys: string[], values: string[]) => Object.fromEntries(keys.map(key => [key, values.filter(value => value === key).length]));
-const effortOf = (event: ModelRequestObservation): string => event.thinking === false ? 'off'
-  : event.effort ? ['low', 'medium', 'high'].includes(event.effort) ? event.effort : 'other'
-  : event.thinking === true ? 'default' : 'unknown';
+const EFFORTS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'default', 'other', 'unknown'];
+type ReasoningParameters = { thinking: boolean | null; effort: string | null };
+const thinkingOf = (value: ReasoningParameters | null): string => value?.thinking === true ? 'on'
+  : value?.thinking === false ? 'off' : ['none', 'off'].includes(value?.effort ?? '') ? 'off'
+  : ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(value?.effort ?? '') ? 'on' : 'unknown';
+const effortOf = (value: ReasoningParameters | null): string => value?.thinking === false ? 'off'
+  : ['none', 'off'].includes(value?.effort ?? '') ? value?.thinking === true ? 'unknown' : 'off'
+  : value?.effort ? EFFORTS.includes(value.effort) ? value.effort : 'other'
+  : value?.thinking === true ? 'default' : 'unknown';
+const reasoningCounts = (values: (ReasoningParameters | null)[]) => ({ samples: values.length,
+  thinking_counts: buckets(['on', 'off', 'unknown'], values.map(thinkingOf)),
+  effort_counts: buckets(EFFORTS, values.map(effortOf)) });
 
 /** Ten-minute event aggregates. The collector receives only choices, identities and numeric meters. */
 export class BrainMetrics {
@@ -174,7 +183,11 @@ export class BrainMetrics {
         usage_samples: { attempts: attempts.length, input: attempts.filter(item => item.inputTokens !== null).length,
           output: attempts.filter(item => item.outputTokens !== null).length, reasoning: attempts.filter(item => item.reasoningTokens !== null).length },
         reading_counts: buckets(['focused', 'connected', 'standard', 'full', 'unknown'], submitted.map(item => item.policy.reading ?? 'unknown')),
-        effort_counts: buckets(['off', 'low', 'medium', 'high', 'default', 'other', 'unknown'], submitted.map(item => effortOf(item.event))),
+        effort_counts: buckets(EFFORTS, submitted.map(item => effortOf(item.event))),
+        requested_reasoning: reasoningCounts(submitted.map(item => item.event)),
+        effective_reasoning: { ...reasoningCounts(metered.map(item =>
+          item.requestId && item.reasoning?.confirmed === true ? item.reasoning.effective : null)),
+          confirmed_samples: metered.filter(item => item.requestId && item.reasoning?.confirmed === true).length },
         route_counts: buckets(['main', 'system1', 'planning', 'reflection', 'cognition', 'dream', 'unknown'],
           [...submitted.map(item => roleOf(item.event.role)), ...selectors.map(() => 'system1')]),
         context_distributions: {
