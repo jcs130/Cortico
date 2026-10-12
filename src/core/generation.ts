@@ -66,6 +66,12 @@ export interface ProviderAttempt {
   inferenceStats?: InferenceStats;
 }
 /** Metadata returned by the serving gateway, independent of response content. */
+export interface InferenceReasoning {
+  requested: { thinking: boolean | null; effort: string | null; budgetTokens: number | null };
+  effective: { thinking: boolean | null; effort: string | null; nativeEffort: string | null; budgetTokens: number | null; budgetStatus: string | null };
+  confirmation: string | null;
+  confirmed: boolean | null;
+}
 export interface InferenceStats {
   requestId: string | null;
   sessionId: string | null;
@@ -81,6 +87,7 @@ export interface InferenceStats {
   queueMs: number | null;
   inputTokS: number | null;
   outputTokS: number | null;
+  reasoning?: InferenceReasoning | null;
 }
 export interface GenerateOptions {
   signal?: AbortSignal;

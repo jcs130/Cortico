@@ -1,4 +1,5 @@
 import type { InferenceStats } from '../../core/generation.ts';
+import { reasoningStats } from './reasoning-stats.ts';
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const number = (value: unknown): number | null => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
@@ -24,5 +25,5 @@ export function inferenceStats(payload: unknown, expectedRequestId: string | nul
     gatewayDurationMs: number(source.gateway_duration_ms), gatewayTtftMs: number(source.gateway_ttft_ms),
     inputProcessingMs: number(source.input_processing_ms), decodeMs: number(source.decode_ms),
     executionMs: number(source.execution_ms), queueMs: number(source.queue_ms),
-    inputTokS: number(source.input_tok_s), outputTokS: number(source.output_tok_s) };
+    inputTokS: number(source.input_tok_s), outputTokS: number(source.output_tok_s), reasoning: reasoningStats(source.reasoning) };
 }

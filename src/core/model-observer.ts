@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { createConversationId } from './conversation-id.ts';
-import { GenerationError, type GenerateOptions, type ProviderAttempt, type ResponseClient } from './generation.ts';
+import { GenerationError, type GenerateOptions, type InferenceReasoning, type ProviderAttempt, type ResponseClient } from './generation.ts';
 
 export interface ModelRequestObservation {
   kind: 'started';
@@ -28,6 +28,8 @@ export interface ModelAttemptObservation {
   elapsedMs: number;
   endedAtMs: number;
   executionMs: number | null;
+  queueMs?: number | null;
+  reasoning?: InferenceReasoning | null;
 }
 export type ModelObservation = ModelRequestObservation | { kind: 'finished'; id: string; atMs: number; attempts: ModelAttemptObservation[] };
 
@@ -44,6 +46,8 @@ export function observeModel(client: ResponseClient, emit: (event: ModelObservat
       reasoningTokens: attempt.inferenceStats ? attempt.inferenceStats.reasoningTokens : attempt.meters.reasoning,
       elapsedMs: attempt.elapsedMs, endedAtMs: Date.parse(attempt.startedAt) + attempt.elapsedMs,
       executionMs: attempt.inferenceStats?.executionMs ?? null,
+      queueMs: attempt.inferenceStats?.queueMs ?? null,
+      reasoning: attempt.inferenceStats?.reasoning ?? null,
     })) });
   return {
     bind: () => observeModel(client.bind?.() ?? client, emit),

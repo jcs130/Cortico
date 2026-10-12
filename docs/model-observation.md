@@ -4,6 +4,8 @@ Core 包装主循环、绑定客户端和 fork 的模型请求，向可选的 `P
 
 模型传输在普通响应和流式最终 usage 中读取 `inference_stats`。HTTP 请求身份不匹配时丢弃该统计快照；同一尝试以最后一份快照覆盖。显式 null 保持未知，不从网关往返耗时或输入、生成阶段之和推算执行时间。流式客户端继续读取 finish_reason 之后的 usage 帧。
 
+`reasoning` 保留请求与引擎生效的 thinking、effort 和独立预算，连同服务确认来源交给 Persona。确认只覆盖思考参数；没有引擎回执时不把发送参数视为生效。预算关闭时保持 null，输出上限和实测思考 token 不替代独立预算。
+
 `x-litellm-session-id` 使用运行身份与会话身份的 SHA256 派生值，同一会话内稳定。它只用于上游会话分组，不能代替某次请求身份。Core 的重提请求和传输层 attempt 分别记录，取消与丢弃保留原终态。
 
 World 事件落库后，可选的 `Persona.onWorldMetadata` 同步取得来源、事件类型、时间及 metadata，包括仅归档的事件。观察器没有正文或附件。World 可以发布空正文、deliver:false 的验证元数据，既不唤醒模型，也不增加模型上下文。metadata 的语义和聚合由 Persona 与对应 World 定义。
