@@ -46,6 +46,24 @@ async function completePage(options: FixtureForkOptions, dir: string, files: str
 }
 
 describe('durable audience evidence pages', () => {
+  it('archives QQ actors separately from their conversation addresses and rejects mismatched private identities', () => {
+    const dir = temp(), journal = new SocialMemoryReview(dir);
+    const qq = (cursor: number, conversation: string, user: number): EventEnvelope => event({ cursor,
+      source: 'chatworld', type: 'qq.message', senderKey: conversation,
+      meta: { channel: 'qq', conv: conversation, user, sender: 'Same display name' }, text: 'seedling 是另一位 Agent，不是我。' });
+    journal.observe([qq(1, 'private:42', 42), qq(2, 'group:700', 42), qq(3, 'group:700', 43),
+      qq(4, 'private:42', 43), { ...qq(5, 'private:42', 42), origin: 'internal' },
+      { ...qq(6, 'private:42', 42), contextDelivery: 'archive-only' }]);
+    const page = new SocialMemoryReview(dir).nextPage()!;
+    expect(page.entries.map(row => row.entry)).toEqual([
+      expect.objectContaining({ source: 'chatworld', senderKey: '42', conversation: 'private:42', type: 'qq.message' }),
+      expect.objectContaining({ source: 'chatworld', senderKey: '42', conversation: 'group:700', type: 'qq.message' }),
+      expect.objectContaining({ source: 'chatworld', senderKey: '43', conversation: 'group:700', type: 'qq.message' }),
+    ]);
+    expect(page.profilePaths).toEqual(['viewers/chatworld/42.md', 'viewers/chatworld/43.md']);
+    expect(page.entries[0].entry).toMatchObject({ text: 'seedling 是另一位 Agent，不是我。' });
+  });
+
   it('retains one delivered message and native failures across restart without enrolling a profile', () => {
     const dir = temp(), r = new SocialMemoryReview(dir);
     r.observe([event({ contextDelivery: 'archive-only' }), event(), event(), event({ origin: 'internal', cursor: 2 })]);

@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { EventEnvelope, ToolOutcome } from 'cortico/core/types.ts';
+import { isSocialChatType, isSocialConversation, socialMessageIdentity } from './social-event.ts';
 
 export const SOCIAL_REVIEW_LIMITS = { pageEntries: 48, pageChars: 24_000, entryChars: 2_000,
   importEntries: 200, importChars: 64_000, journalEntries: 128 };
@@ -13,6 +14,7 @@ const hash = (value: string): string => createHash('sha256').update(value).diges
 
 export type SocialReviewEntry = {
   kind: 'audience'; at: string; source: string; senderKey: string; uname: string; cursor: number; type: string; text: string;
+  conversation?: string;
 } | {
   kind: 'speech'; at: string; tool: string; script: string; receipt: string; failed: boolean; callId?: string;
 };
@@ -44,10 +46,15 @@ function validateEntry(value: unknown, cutoffAt: string): SocialReviewEntry {
     if (typeof row.source !== 'string' || !safeSegment(row.source) || typeof row.senderKey !== 'string'
       || !safeSegment(row.senderKey) || typeof row.uname !== 'string' || !row.uname.trim()
       || !Number.isSafeInteger(row.cursor) || Number(row.cursor) < 0 || typeof row.type !== 'string'
-      || ![`${row.source}.danmaku`, `${row.source}.chat`, `${row.source}.superchat`].includes(row.type)
+      || !isSocialChatType(row.source, row.type)
+      || row.conversation !== undefined && !isSocialConversation(row.conversation)
+      || row.type === 'qq.message' && (!isSocialConversation(row.conversation)
+        || !/^[1-9]\d{0,14}$/.test(row.senderKey) || !Number.isSafeInteger(Number(row.senderKey))
+        || row.conversation.startsWith('private:') && row.conversation !== `private:${row.senderKey}`)
       || typeof row.text !== 'string' || !row.text.trim()) throw new Error('观众条目需要真实 source、senderKey、昵称、cursor 和聊天事件');
     return { kind: 'audience', at: row.at, source: row.source, senderKey: row.senderKey,
-      uname: row.uname, cursor: Number(row.cursor), type: row.type, text: row.text };
+      uname: row.uname, cursor: Number(row.cursor), type: row.type, text: row.text,
+      ...(typeof row.conversation === 'string' ? { conversation: row.conversation } : {}) };
   }
   if (row.kind === 'speech' && typeof row.tool === 'string' && row.tool.trim()
     && typeof row.script === 'string' && row.script.trim() && typeof row.receipt === 'string'
@@ -113,12 +120,12 @@ export class SocialMemoryReview {
     let ended = false;
     for (const event of events) {
       ended ||= isRoomEnded(event);
-      if (event.origin !== 'external' || event.contextDelivery === 'archive-only' || !event.senderKey
-        || ![`${event.source}.danmaku`, `${event.source}.chat`, `${event.source}.superchat`].includes(event.type)) continue;
+      if (event.origin !== 'external' || event.contextDelivery === 'archive-only') continue;
+      const identity = socialMessageIdentity(event);
+      if (!identity) continue;
       try {
         const entry = validateEntry({ kind: 'audience', at: event.ts, source: event.source,
-          senderKey: event.senderKey, uname: event.meta?.uname, cursor: event.cursor, type: event.type,
-          text: typeof event.meta?.body === 'string' ? event.meta.body : event.text }, event.ts);
+          ...identity, cursor: event.cursor, type: event.type, text: identity.body }, event.ts);
         if (entry.kind !== 'audience' || entry.cursor <= (this.state.lastCursors[entry.source] ?? -1)) continue;
         this.append(entry, 'delivery');
         this.state.lastCursors[entry.source] = entry.cursor;

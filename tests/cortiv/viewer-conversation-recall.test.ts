@@ -8,7 +8,7 @@ import { ViewerConversationRecall, VIEWER_CONVERSATION_RECALL_LIMITS } from '../
 const dirs: string[] = [];
 afterEach(() => { vi.restoreAllMocks(); for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 const at = '2026-01-02T21:00:00Z';
-const row = (cursor: number, text = `记录${cursor}`, senderKey = '42', source = 'stream'): SocialReviewEntry => ({
+const row = (cursor: number, text = `记录${cursor}`, senderKey = '42', source = 'stream'): Extract<SocialReviewEntry, { kind: 'audience' }> => ({
   kind: 'audience', source, senderKey, at, uname: '同名观众', cursor, type: `${source}.danmaku`, text,
 });
 const request = (patch: Partial<Parameters<ViewerConversationRecall['recall']>[0]> = {}) => ({
@@ -32,6 +32,24 @@ function append(journal: SocialMemoryReview, cursor: number, text: string, sende
 }
 
 describe('bounded exact-identity audience recall', () => {
+  it('recovers a bounded chronological QQ exchange without mixing other actors or conversations', () => {
+    const qq = (cursor: number, text: string, conversation = 'private:42', senderKey = '42'): SocialReviewEntry => ({
+      ...row(cursor, text, senderKey, 'chatworld'), type: 'qq.message', conversation,
+    });
+    const { recall } = fixture([qq(1, '他是新来的 Agent，你带带他'), qq(2, '就是 seedling'),
+      qq(3, 'seedling 不是我，是另一位 Agent'), qq(4, '我游戏里叫 operator_one'),
+      qq(5, '另一个群的 PRIVATE_OTHER_GROUP', 'group:700'), qq(6, 'OTHER_ACTOR', 'private:43', '43')]);
+    const out = recall.recall(request({ source: 'chatworld', conversation: 'private:42', query: '新来的 Agent' }));
+    expect(out.entries.map(entry => entry.cursor)).toEqual([1, 2, 3, 4]);
+    expect(out.text).toContain('seedling 不是我');
+    expect(out.text).toContain('就是 seedling');
+    expect(out.text).not.toContain('PRIVATE_OTHER_GROUP');
+    expect(out.text).not.toContain('OTHER_ACTOR');
+    expect(out.text.length).toBeLessThanOrEqual(VIEWER_CONVERSATION_RECALL_LIMITS.conversationTextChars);
+    expect(recall.recall(request({ source: 'chatworld' })).text).toContain('需要 conversation');
+    expect(recall.recall(request({ source: 'chatworld', conversation: 'group:700' })).entries.map(entry => entry.cursor)).toEqual([5]);
+  });
+
   it('returns prior audience evidence, excludes the current cursor and future time, and never pairs speech', () => {
     const { recall } = fixture([row(1, '昨晚我请你造玻璃房'),
       { kind: 'speech', at, tool: 'native_voice', script: '我答应了', receipt: '拒绝', failed: true },

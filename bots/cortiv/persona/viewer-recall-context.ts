@@ -1,7 +1,7 @@
 /** Bounded current viewer notes remain available when foreground history is compacted. */
 import { estimateTokens } from 'cortico/core/util.ts';
 
-export const VIEWER_RECALL_CONTEXT_LIMITS = { viewers: 8, noteChars: 1_600, tokens: 800 };
+export const VIEWER_RECALL_CONTEXT_LIMITS = { viewers: 8, noteChars: 3_000, tokens: 1_200 };
 
 export class ViewerRecallContext {
   private readonly notes = new Map<string, string>();

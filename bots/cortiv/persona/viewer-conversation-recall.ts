@@ -1,22 +1,26 @@
 /** Bounded lexical retrieval of exact-identity audience evidence; the journal remains authoritative. */
 import { SOCIAL_REVIEW_LIMITS, type SocialMemoryReview, type SocialReviewEntry } from './social-memory-review.ts';
+import { isSocialChatType, isSocialConversation } from './social-event.ts';
 
 export const VIEWER_CONVERSATION_RECALL_LIMITS = {
   entries: 3, textChars: 800, scanBytes: 1024 * 1024, scanPages: 16, chunkBytes: 64 * 1024,
   lineBytes: 128 * 1024, identities: 64, queriesPerIdentity: 2, deferredEntries: 16, queryChars: 300,
+  conversationEntries: 8, conversationTextChars: 2400,
 };
 type AudienceEntry = Extract<SocialReviewEntry, { kind: 'audience' }>;
 type Journal = Pick<SocialMemoryReview, 'stateInfo' | 'journalPageInfo' | 'journalRead'>;
 interface Candidate { seq: number; entry: AudienceEntry; score: number; }
 interface Scan { page: number; offset: number; carry: Buffer; oversized: boolean; }
 interface RecallState {
+  entryLimit: number;
+  needsConversation?: boolean;
   cursor: number; atMs: number; seenSeq: number; history: Scan; refresh: Scan | null; refreshUntil: number;
   refreshFloor: { page: number; bytes: number } | null;
   recent: Candidate[]; matches: Candidate[]; deferred: Candidate[]; deferredOverflow: boolean;
   complete: boolean; damaged: boolean; tail: { page: number; bytes: number; modifiedAtMs: number } | null;
 }
 export interface ViewerConversationRecallRequest {
-  source: string; senderKey: string; beforeCursor: number; beforeAt: string; query?: string;
+  source: string; senderKey: string; beforeCursor: number; beforeAt: string; query?: string; conversation?: string;
 }
 export interface ViewerConversationRecallResult {
   entries: AudienceEntry[]; text: string; searchComplete: boolean; truncated: boolean;
@@ -45,10 +49,10 @@ function score(text: string, query: readonly string[]): number {
   const lower = text.toLowerCase();
   return query.reduce((sum, term) => sum + (/\p{Script=Han}/u.test(term) ? Number(lower.includes(term)) : Number(words.has(term))), 0);
 }
-function keep(items: Candidate[], next: Candidate, ranked: boolean): Candidate[] {
+function keep(items: Candidate[], next: Candidate, ranked: boolean, limit: number): Candidate[] {
   const all = items.filter(item => item.seq !== next.seq); all.push(next);
   all.sort(ranked ? (a, b) => b.score - a.score || order(a, b) : order);
-  return all.slice(0, VIEWER_CONVERSATION_RECALL_LIMITS.entries);
+  return all.slice(0, limit);
 }
 
 export class ViewerConversationRecall {
@@ -58,10 +62,12 @@ export class ViewerConversationRecall {
   recall(request: ViewerConversationRecallRequest): ViewerConversationRecallResult {
     if (!identityPart(request.source) || !identityPart(request.senderKey) || !Number.isSafeInteger(request.beforeCursor)
       || request.beforeCursor < 0 || !Number.isFinite(time(request.beforeAt))
-      || request.query !== undefined && (typeof request.query !== 'string' || request.query.length > VIEWER_CONVERSATION_RECALL_LIMITS.queryChars)) {
+      || request.query !== undefined && (typeof request.query !== 'string' || request.query.length > VIEWER_CONVERSATION_RECALL_LIMITS.queryChars)
+      || request.conversation !== undefined && !isSocialConversation(request.conversation)) {
       throw new RangeError('Recall needs an exact source/senderKey and a valid cursor/time boundary.');
     }
-    const tokens = terms(request.query ?? ''), key = `${request.source}/${request.senderKey}`, queryKey = tokens.join('\0');
+    const tokens = terms(request.query ?? ''), key = `${request.source}/${request.senderKey}/${request.conversation ?? ''}`, queryKey = tokens.join('\0');
+    const entryLimit = request.conversation ? VIEWER_CONVERSATION_RECALL_LIMITS.conversationEntries : VIEWER_CONVERSATION_RECALL_LIMITS.entries;
     let queries = this.cache.get(key);
     if (!queries) {
       queries = new Map(); this.cache.set(key, queries);
@@ -76,7 +82,7 @@ export class ViewerConversationRecall {
     if (!state || rewritten || seq < state.seenSeq || request.beforeCursor < state.cursor || time(request.beforeAt) < state.atMs
       || state.deferredOverflow && (request.beforeCursor > state.cursor || time(request.beforeAt) > state.atMs)) {
       const scan = this.newScan(seq);
-      state = { cursor: request.beforeCursor, atMs: time(request.beforeAt), seenSeq: seq, history: scan,
+      state = { entryLimit, cursor: request.beforeCursor, atMs: time(request.beforeAt), seenSeq: seq, history: scan,
         refresh: null, refreshUntil: 0, refreshFloor: null, recent: [], matches: [], deferred: [], deferredOverflow: false,
         complete: scan.page < 0, damaged: false, tail: this.tailInfo(seq) };
       queries.set(queryKey, state);
@@ -100,8 +106,13 @@ export class ViewerConversationRecall {
       if (Number(row.seq) > state.seenSeq) return;
       const entry = row.entry as AudienceEntry;
       if (entry.kind !== 'audience' || entry.source !== request.source || entry.senderKey !== request.senderKey) return;
+      if (entry.conversation !== request.conversation) {
+        if (request.conversation === undefined && isSocialConversation(entry.conversation)) state.needsConversation = true;
+        return;
+      }
       if (!Number.isSafeInteger(entry.cursor) || !Number.isFinite(time(entry.at)) || typeof entry.text !== 'string'
-        || typeof entry.uname !== 'string' || ![`${request.source}.danmaku`, `${request.source}.chat`].includes(entry.type)) { state.damaged = true; return; }
+        || typeof entry.uname !== 'string' || !isSocialChatType(request.source, entry.type)
+        || entry.type === 'qq.message' && !isSocialConversation(entry.conversation)) { state.damaged = true; return; }
       const item = { seq: Number(row.seq), entry, score: score(entry.text, tokens) };
       if (qualifies(entry)) this.accept(state, item);
       else if (!state.deferred.some(held => held.seq === item.seq)) {
@@ -151,25 +162,27 @@ export class ViewerConversationRecall {
       if (state.refresh && scan.offset === floor && state.refreshFloor?.page === scan.page) { state.refresh = null; continue; }
       if (scan.offset === 0) {
         if (state.refresh) this.previousPage(scan, state);
-        else if (!tokens.length && state.recent.length >= VIEWER_CONVERSATION_RECALL_LIMITS.entries) state.complete = true;
+        else if (!tokens.length && state.recent.length >= entryLimit) state.complete = true;
         else this.previousPage(scan, state);
       }
       // Without a topic the three latest identity-matched entries satisfy the request.
-      if (!state.refresh && !tokens.length && state.recent.length >= VIEWER_CONVERSATION_RECALL_LIMITS.entries) { state.complete = true; break; }
+      if (!state.refresh && !tokens.length && state.recent.length >= entryLimit) { state.complete = true; break; }
     }
     if (state.history.page < 0) state.complete = true;
     let selected = tokens.length && state.matches.length ? [...state.matches.slice(0, 2)] : [];
-    for (const item of state.recent) if (selected.length < VIEWER_CONVERSATION_RECALL_LIMITS.entries && !selected.some(row => row.seq === item.seq)) selected.push(item);
-    selected.sort(order);
+    for (const item of state.recent) if (selected.length < entryLimit && !selected.some(row => row.seq === item.seq)) selected.push(item);
+    selected.sort(request.conversation ? (a, b) => -order(a, b) : order);
     const searchComplete = state.complete && state.refresh === null && seq <= state.seenSeq && !state.damaged;
-    const header = `[观众原文检索 ${request.source}/${request.senderKey}；本地词法匹配，不代表理解或完整对话]`;
+    const header = `[观众原文检索 ${request.source}/${request.senderKey}${request.conversation ? `；会话=${request.conversation}` : ''}；本地词法匹配，不代表理解或完整对话]`;
     const status = state.damaged ? '部分证据行无法读取；结果不完整。'
       : !searchComplete ? '检索预算内未读完；同条件再次查询会继续旧页。' : '';
     const topic = tokens.length && !state.matches.length ? '关键词未命中；若列出记录，仅为近期原文。' : '';
-    const notes = [header, status, topic].filter(Boolean);
-    if (!selected.length) notes.push(searchComplete ? '无旧记录。' : '已检索部分未找到旧记录。');
+    const scope = state.needsConversation ? 'QQ 旧发言需要 conversation=事件 meta.conv；未读取其他会话。这不表示该账号没有旧记录。' : '';
+    const notes = [header, status, topic, scope].filter(Boolean);
+    if (!selected.length && !scope) notes.push(searchComplete ? '无旧记录。' : '已检索部分未找到旧记录。');
     const prefixes = selected.map(item => `${new Date(time(item.entry.at)).toISOString()} #${item.entry.cursor} ${safeText(item.entry.uname).slice(0, 48)}：`);
-    const cap = VIEWER_CONVERSATION_RECALL_LIMITS.textChars, suffix = '\n[原文节选；其余未展开]';
+    const cap = request.conversation ? VIEWER_CONVERSATION_RECALL_LIMITS.conversationTextChars : VIEWER_CONVERSATION_RECALL_LIMITS.textChars;
+    const suffix = '\n[原文节选；其余未展开]';
     const available = cap - notes.join('\n').length - prefixes.reduce((sum, prefix) => sum + prefix.length, 0)
       - selected.length - suffix.length;
     const quoteChars = selected.length ? Math.max(0, Math.floor(available / selected.length)) : 0;
@@ -184,8 +197,8 @@ export class ViewerConversationRecall {
   }
 
   private accept(state: RecallState, item: Candidate): void {
-    state.recent = keep(state.recent, item, false);
-    if (item.score > 0) state.matches = keep(state.matches, item, true);
+    state.recent = keep(state.recent, item, false, state.entryLimit);
+    if (item.score > 0) state.matches = keep(state.matches, item, true, state.entryLimit);
   }
   private newScan(seq: number): Scan {
     const page = seq ? Math.floor((seq - 1) / SOCIAL_REVIEW_LIMITS.journalEntries) : -1;

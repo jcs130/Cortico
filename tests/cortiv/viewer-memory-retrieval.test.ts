@@ -38,6 +38,48 @@ function arrival(cursor: number, senderKey = '901', type = 'enter'): EventEnvelo
 }
 
 describe('Persona viewer memory retrieval', () => {
+  it('recalls the QQ account relationship without assigning it to a same-name sender or conversation', () => {
+    const { persona, memoryDir } = rig();
+    profile(memoryDir, 'chatworld', '42', 'Operator：可米的主人，另一位游戏 Agent 是 seedling。');
+    profile(memoryDir, 'chatworld', 'private_42', 'WRONG_CONVERSATION_PROFILE');
+    const qq = (cursor: number, user: number): EventEnvelope => ({
+      ...event(cursor, '你还记得我吗', 'chatworld', `private:${user}`), type: 'qq.message',
+      meta: { channel: 'qq', conv: `private:${user}`, user, sender: 'Operator' },
+    });
+    persona.onDelivery({ events: [qq(1, 43)] });
+    expect(recalledText(persona)).not.toContain('可米的主人');
+    persona.onDelivery({ events: [qq(2, 42)] });
+    expect(recalledText(persona)).toContain('可米的主人');
+    expect(recalledText(persona)).not.toContain('WRONG_CONVERSATION_PROFILE');
+  });
+
+  it('retains QQ identity corrections through game traffic, context handoff and process reconstruction', async () => {
+    const { persona, memoryDir } = rig();
+    const qq = (cursor: number, body: string): EventEnvelope => ({
+      ...event(cursor, body, 'chatworld', 'private:42'), type: 'qq.message',
+      meta: { channel: 'qq', conv: 'private:42', user: 42, sender: 'Operator' },
+    });
+    persona.onDelivery({ events: [qq(1, '他是新来的 Agent，你带带他')] });
+    persona.onDelivery({ events: [qq(2, '就是 seedling')] });
+    persona.onDelivery({ events: [qq(3, 'seedling 不是我，是另一位 Agent')] });
+    for (let cursor = 4; cursor < 40; cursor++) persona.onDelivery({ events: [{
+      ...event(cursor, 'Observed inventory and terrain. '.repeat(200), 'game', ''), type: 'game.snapshot',
+    }] });
+    persona.onDelivery({ events: [qq(40, '装备好了带新来的 Agent 去试炼')] });
+    const projected = recalledText(persona);
+    expect(projected).toContain('就是 seedling');
+    expect(projected).toContain('seedling 不是我');
+    expect(projected).toContain('chatworld/42');
+    expect(projected).not.toContain('chatworld/private:42');
+    await persona.onHandoff([message('user', 'prior context')], { hardTokens: null });
+    persona.onDelivery({ events: [qq(41, '还记得那位 Agent 吗')] });
+    expect(recalledText(persona)).toContain('seedling 不是我');
+    const restored = rig(memoryDir).persona;
+    restored.onDelivery({ events: [qq(42, '我们刚才说的新 Agent 是谁')] });
+    expect(recalledText(restored)).toContain('就是 seedling');
+    expect(recalledText(restored)).toContain('seedling 不是我');
+  });
+
   it('recalls old messages before the current input even without a profile, and survives history compaction', () => {
     const { persona } = rig();
     persona.onDelivery({ events: [event(1, '上次问过唱歌，希望试试轻快念白。')] });

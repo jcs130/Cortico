@@ -1,6 +1,7 @@
 /** Short-lived social evidence, separate from profiles and preserved across context handoff. */
 import type { EventEnvelope } from 'cortico/core/types.ts';
 import { estimateTokens } from 'cortico/core/util.ts';
+import { socialMessageIdentity } from './social-event.ts';
 
 export const VIEWER_ENCOUNTER_LIMITS = { identities: 8, tokens: 600 };
 
@@ -25,19 +26,21 @@ export class ViewerEncounters {
   observe(event: EventEnvelope): string {
     if (event.origin !== 'external' || event.contextDelivery === 'archive-only' || !event.source || !event.senderKey) return '';
     const arrival = event.type === `${event.source}.enter` || event.type === `${event.source}.enter-guard`;
-    const chat = event.type === `${event.source}.chat` || event.type === `${event.source}.danmaku` || event.type === `${event.source}.superchat`;
+    const message = socialMessageIdentity(event);
+    const chat = message !== null;
     const departure = event.type === `${event.source}.leave`;
     const playerObservation = event.meta?.minecraftPlayerObservation;
     if (!arrival && !chat && !departure && !playerObservation) return '';
-    const identity = `${event.source}/${event.senderKey}`;
+    const key = message?.senderKey ?? event.senderKey;
+    const identity = `${event.source}/${key}`;
     const previous = this.people.get(identity);
     // Replaying archived deliveries or observing a stale event must not turn it into a new visit.
     if (previous && event.cursor <= previous.latestCursor) return '';
-    const scope = event.meta?.socialScope === 'live-room' ? '直播间'
+    const scope = message?.conversation ? `QQ ${message.conversation}` : event.meta?.socialScope === 'live-room' ? '直播间'
       : event.meta?.socialScope === 'minecraft-server' || playerObservation ? 'Minecraft 服务器'
         : previous?.scope ?? '范围未标注（按事件来源核对）';
-    const person: Encounter = { ...previous, source: event.source, key: event.senderKey,
-      name: typeof event.meta?.uname === 'string' ? event.meta.uname.slice(0, 80) : previous?.name ?? '',
+    const person: Encounter = { ...previous, source: event.source, key,
+      name: message?.uname.slice(0, 80) ?? (typeof event.meta?.uname === 'string' ? event.meta.uname.slice(0, 80) : previous?.name ?? ''),
       scope, firstAt: previous?.firstAt ?? event.ts, latestAt: event.ts,
       latestCursor: event.cursor, latestType: event.type, arrivalSignals: previous?.arrivalSignals ?? 0 };
     if (arrival) {
