@@ -367,6 +367,10 @@ export interface UsageRecord {
   ts: string;
   /** 常驻 session 使用声明 id；fork 实例 id 由声明 id 和序号派生。 */
   sessionId: string;
+  /** Requested gateway identity; independent of the local tracker id. */
+  conversationId?: string | null;
+  /** Identity returned by inference_stats; absent gateway values remain null. */
+  gatewaySessionId?: string | null;
   /** Persona 定义的 session 声明 id，用于分类统计。 */
   role: string;
   label: string;

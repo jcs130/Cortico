@@ -17,11 +17,11 @@ describe('model metadata observer', () => {
       sessions.push(options!.conversationId!);
       return { response: { ...createResponse('response', { model: 'test' }), status: 'completed' }, origin: attempt.origin, attempts: [attempt] };
     } };
-    const wrapped = observeModel(client, event => seen.push(event), 'runtime');
-    await wrapped.respond({ model: 'test', input: 'secret-prompt' }, { sessionId: 'private-session', role: 'main', nativeSpec: { model: 'test', thinking: true, reasoningEffort: 'high' } });
-    await wrapped.bind!().respond({ model: 'test', input: 'secret-prompt' }, { sessionId: 'private-session', role: 'main' });
+    const wrapped = observeModel(client, event => seen.push(event));
+    await wrapped.respond({ model: 'test', input: 'secret-prompt' }, { sessionId: 'private-session', conversationId: 'cortico-persisted-context', role: 'main', nativeSpec: { model: 'test', thinking: true, reasoningEffort: 'high' } });
+    await wrapped.bind!().respond({ model: 'test', input: 'secret-prompt' }, { sessionId: 'private-session', conversationId: 'cortico-persisted-context', role: 'main' });
     expect(sessions[0]).toBe(sessions[1]);
-    expect(sessions[0]).toMatch(/^[a-f0-9]{64}$/);
+    expect(sessions[0]).toBe('cortico-persisted-context');
     expect(seen.filter(event => event.kind === 'started')).toHaveLength(2);
     expect(seen[1]).toMatchObject({ kind: 'finished', attempts: [{ inputTokens: 100, reasoningTokens: null, executionMs: null }] });
     expect(JSON.stringify(seen)).not.toContain('secret-prompt');
@@ -30,7 +30,7 @@ describe('model metadata observer', () => {
   it('an observer failure cannot change generation', async () => {
     const client: ResponseClient = { async respond() { return { response: { ...createResponse('response', { model: 'test' }), status: 'completed' },
       origin, attempts: [] }; } };
-    const wrapped = observeModel(client, () => { throw new Error('observer unavailable'); }, 'runtime');
+    const wrapped = observeModel(client, () => { throw new Error('observer unavailable'); });
     await expect(wrapped.respond({ model: 'test', input: '' })).resolves.toMatchObject({ response: { status: 'completed' } });
   });
 });

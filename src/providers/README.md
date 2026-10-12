@@ -1,10 +1,12 @@
-<!-- Owner: src/providers/base.ts, src/providers/console/hub.ts, src/providers/hub-api.ts, src/providers/name.ts, src/providers/registry.ts, src/providers/console/settings.ts, src/providers/console/config.ts, src/providers/openai-responses-compat/config.ts, src/providers/transport/responses-input.ts, src/providers/transport/history.ts, src/providers/transport/response-assembly.ts, src/providers/llamacpp/native.ts -->
+<!-- Owner: src/providers/base.ts, src/providers/console/hub.ts, src/providers/hub-api.ts, src/providers/name.ts, src/providers/registry.ts, src/providers/console/settings.ts, src/providers/console/config.ts, src/providers/openai-responses-compat/config.ts, src/providers/transport/responses-input.ts, src/providers/transport/history.ts, src/providers/transport/response-assembly.ts, src/providers/transport/response-http.ts, src/providers/transport/inference-stats.ts, src/providers/llamacpp/native.ts -->
 
 # src/providers
 
 `ProviderModule` 实现一种模型通信协议,`ProviderInstance` 对应一个端点,
 `ProviderHost` 提供实例所需的配置、密钥、资源与日志接口。Core 通过 `ProviderRegistry.bind(name)`
 获取带报价与来源信息的客户端,Persona 通过 Core 调用模型。
+
+HTTP 请求用 `GenerateOptions.conversationId` 传递 `x-litellm-session-id`；已有 `metadata.session_id` 同步为此值。重试沿用同一 ID，不发送网关 request ID。普通响应及 SSE 最终 usage 事件的 `inference_stats` 只提取身份、token 和耗时字段；未知值保留 null，`execution_ms` 不用网关耗时替代。用量账本的 `gatewaySessionId` 来自服务端返回值，`conversationId` 记录发送值，两者分别保存。会话 ID 用于关联统计；KV 复用仍取决于实际输入前缀。
 
 ## 文件
 

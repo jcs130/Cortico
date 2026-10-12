@@ -86,7 +86,8 @@ describe('ResponsesProvider(HTTP 边界)', () => {
     const client = new ResponsesProvider({ baseUrl: 'https://api.deepseek.com/', apiKey: 'sk-1', extraHeaders: { 'X-Title': 'cortico' } });
     const result = await client.respond(request({ model: 'deepseek-flash', thinking: false }), { context });
     expect(fetchMock.mock.calls[0][0]).toBe('https://api.deepseek.com/responses');
-    expect((fetchMock.mock.calls[0][1] as RequestInit).headers).toEqual({ 'Content-Type': 'application/json', 'X-Title': 'cortico', Authorization: 'Bearer sk-1' });
+    expect((fetchMock.mock.calls[0][1] as RequestInit).headers).toMatchObject({ 'Content-Type': 'application/json', 'X-Title': 'cortico', Authorization: 'Bearer sk-1' });
+    expect(new Headers((fetchMock.mock.calls[0][1] as RequestInit).headers).get('x-litellm-session-id')).toBe(result.attempts[0].conversationId);
     expect(result.response.output[0]).toMatchObject({ type: 'message' });
     expect(result.attempts[0]).toMatchObject({ outcome: 'completed', serviceTier: 'default', meters: { input: 12, output: 3, cachedInput: 8, uncachedInput: 4, reasoning: 1 } });
   });

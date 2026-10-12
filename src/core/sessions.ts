@@ -122,6 +122,7 @@ export class SessionTracker {
           stats.cacheMissTokens += usage.cacheMissTokens;
           stats.reasoningTokens += usage.reasoningTokens ?? 0;
           this.onRecord?.({ version: 2, attempt, ts: nowIso(this.timezone, new Date(attempt.startedAt)), sessionId: id,
+            conversationId: attempt.conversationId ?? null, gatewaySessionId: attempt.inferenceStats?.sessionId ?? null,
             role: stats.role, label: stats.label, model: attempt.origin.model, ...usage, reasoningTokens: usage.reasoningTokens ?? 0,
             ...(failed ? { failedAfterMs: attempt.elapsedMs } : {}), ...(attempt.requestId ? { requestId: attempt.requestId } : {}),
             ...(attempt.status !== null ? { status: attempt.status } : {}),

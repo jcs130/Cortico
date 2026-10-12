@@ -8,9 +8,13 @@ const id = (value: unknown): string | null => typeof value === 'string' && /^[a-
 /** Final snapshots replace earlier snapshots; the HTTP attempt owns their association. */
 export function inferenceStats(payload: unknown, expectedRequestId: string | null): InferenceStats | null {
   const root = object(payload);
-  const source = object(root.inference_stats ?? object(root.response).inference_stats);
-  const requestId = id(source.request_id);
-  if (!requestId || expectedRequestId && requestId !== expectedRequestId
+  const response = object(root.response);
+  const raw = root.inference_stats ?? response.inference_stats ?? object(root.usage).inference_stats ?? object(response.usage).inference_stats;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const source = object(raw);
+  const suppliedRequestId = id(source.request_id);
+  const requestId = suppliedRequestId ?? expectedRequestId;
+  if (suppliedRequestId && expectedRequestId && suppliedRequestId !== expectedRequestId
     || source.schema !== undefined && source.schema !== 'llm-request-stats-v1') return null;
   const input = count(source.input_tokens), output = count(source.output_tokens);
   const cached = count(source.cached_input_tokens), reasoning = count(source.reasoning_tokens);

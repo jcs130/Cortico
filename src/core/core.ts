@@ -148,7 +148,7 @@ export class Core<C extends CoreConfig = CoreConfig> {
       keepThinking: () => cfg.context.keepPastThinking,
       log: this.log.child('llm'),
     });
-    this.llm = observeModel(deps.llm ?? this.makeProviderRouter(), event => this.persona.onModelObservation?.(event), this.run.id);
+    this.llm = observeModel(deps.llm ?? this.makeProviderRouter(), event => this.persona.onModelObservation?.(event));
 
     // TimerStore 仅提供通用持久定时器；Persona定义心跳与闹钟语义。
     this.timers = new TimerStore(dataDir, this.log.child('timer'));
@@ -336,7 +336,7 @@ export class Core<C extends CoreConfig = CoreConfig> {
     if (!entry.spec) throw new Error(`LLM provider ${name} 还没选模型`);
     const spec = { ...entry.spec, ...(opts.model ? { model: opts.model } : {}), ...(opts.maxOutputTokens !== undefined ? { maxTokens: opts.maxOutputTokens } : {}) };
     const llm = opts.provider === undefined ? this.llm.bind?.() ?? this.llm
-      : observeModel(this.providers.bind(name), event => this.persona.onModelObservation?.(event), this.run.id);
+      : observeModel(this.providers.bind(name), event => this.persona.onModelObservation?.(event));
     let observedMessages = opts.messages;
     const track = this.sessions.open(decl.id, decl.label, {
       messagesRef: () => observedMessages,

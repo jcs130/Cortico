@@ -6,6 +6,7 @@ import { ResponseProtocolError } from '../../protocol/open-responses/stream.ts';
 import { LLMError, abortError, parseRetryAfter, retryDelay, reqIdSuffix } from './errors.ts';
 import type { ResponseAssembly } from './response-assembly.ts';
 import { inferenceStats } from './inference-stats.ts';
+import { createConversationId, validConversationId } from '../../core/conversation-id.ts';
 
 export interface ResponseTransport {
   url: string;
@@ -74,6 +75,12 @@ const CONTENT_IDLE_MS = 300_000;
 
 /** Every fetch attempt produces its own immutable metering and price snapshot. */
 export async function generate(request: Request, options: GenerateOptions, origin: ItemOrigin, transport: ResponseTransport): Promise<Generation> {
+  const metadata = transport.body.metadata;
+  const fields = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata as Record<string, unknown> : null;
+  const conversationId = options.conversationId ?? fields?.session_id ?? createConversationId();
+  if (!validConversationId(conversationId)) throw new TypeError('Invalid gateway session identity');
+  const body = fields && Object.hasOwn(fields, 'session_id')
+    ? { ...transport.body, metadata: { ...fields, session_id: conversationId } } : transport.body;
   const generationId = crypto.randomUUID();
   const attempts: ProviderAttempt[] = [];
   let lastError: unknown;
@@ -92,7 +99,7 @@ export async function generate(request: Request, options: GenerateOptions, origi
     retryAfterMs = null;
     const attempt: ProviderAttempt = {
       id: crypto.randomUUID(), generationId, ordinal, origin: structuredClone(origin), startedAt: new Date().toISOString(), elapsedMs: 0,
-      requestId: null, responseId: null, outcome: 'failed', status: null, serviceTier: null, requestedServiceTier: typeof transport.body.service_tier === 'string' ? transport.body.service_tier : request.service_tier ?? null, purpose: options.diagnostic ? 'diagnostic' : 'generation', meters: unknownMeters(), charges: [],
+      requestId: null, conversationId, responseId: null, outcome: 'failed', status: null, serviceTier: null, requestedServiceTier: typeof transport.body.service_tier === 'string' ? transport.body.service_tier : request.service_tier ?? null, purpose: options.diagnostic ? 'diagnostic' : 'generation', meters: unknownMeters(), charges: [],
     };
     let quotes: readonly PriceSnapshot[] = [];
     const started = Date.now();
@@ -128,19 +135,19 @@ export async function generate(request: Request, options: GenerateOptions, origi
       }
     };
     try {
-      const headers = await transport.headers();
-      if (options.conversationId && /^[a-zA-Z0-9_.:/-]{1,160}$/.test(options.conversationId))
-        headers['x-litellm-session-id'] = options.conversationId;
+      const headers = { ...await transport.headers() };
+      for (const key of Object.keys(headers)) if (key.toLowerCase() === 'x-litellm-session-id') delete headers[key];
+      headers['x-litellm-session-id'] = conversationId;
       if (options.signal?.aborted) throw abortError(options.signal);
       attempt.startedAt = new Date().toISOString();
       quotes = structuredClone(options.quote?.({ startedAt: attempt.startedAt, requestedServiceTier: attempt.requestedServiceTier ?? null }) ?? []);
       sent = true;
-      const response = await fetch(transport.url, { method: 'POST', body: requestJson(transport.body), headers, signal });
+      const response = await fetch(transport.url, { method: 'POST', body: requestJson(body), headers, signal });
       attempt.status = response.status;
       attempt.requestId = response.headers.get('x-litellm-call-id') ?? response.headers.get('x-request-id');
       const noteStats = (payload: unknown): void => {
         const stats = inferenceStats(payload, attempt.requestId);
-        if (stats) { attempt.inferenceStats = stats; attempt.requestId = stats.requestId; }
+        if (stats) { attempt.inferenceStats = stats; attempt.requestId = stats.requestId ?? attempt.requestId; }
       };
       if (!response.ok) {
         const error = new LLMError(`LLM API ${response.status}`, response.status, await response.text());

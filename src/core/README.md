@@ -1,6 +1,8 @@
-Owner: `src/core/core.ts`, `src/core/types.ts`, `src/core/loop.ts`, `src/core/bus.ts`
+Owner: `src/core/core.ts`, `src/core/types.ts`, `src/core/loop.ts`, `src/core/bus.ts`, `src/core/session.ts`, `src/core/conversation-id.ts`, `src/core/model-observer.ts`
 
 # src/core
+
+`SessionLog.conversationId` 保存在对应上下文旁的 `<session-file>.metadata.json`，格式为 `cortico-UUID`。继续历史、前缀重载和上下文交接保留身份；显式清空重开用 `startConversation()` 创建新身份。每次 fork 有独立身份，工具续接、调度让出及失败重试保留它；独立单次模型请求和诊断使用新身份。身份不进入系统提示或历史消息。元数据损坏时报错并保留文件，不静默更换身份。
 
 Core 管理 session、事件流与模型调用的生命周期，包括事件投递、调度、上下文交接、工具执行、
 容量限制、错误隔离和 Provider。Persona 定义上下文语义；Core 使用的事件封装、错误和截断记号

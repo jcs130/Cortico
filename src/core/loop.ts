@@ -1265,6 +1265,7 @@ export class MainLoop {
             estimatedInputTokens: requestContext.estimatedInputTokens,
             resubmission: consecutiveFailures > 0,
             sessionId: this.mainTrack?.id,
+            conversationId: session.conversationId,
             signal: flight.controller.signal,
           });
         } finally {
@@ -1778,7 +1779,7 @@ export class MainLoop {
     const { session, log } = this.d;
     const sysMsg = await this.buildSystem();
     if (!this.active(generation)) return;
-    session.reset([sysMsg]);
+    session.startConversation([sysMsg]);
     this.d.transcript?.boundary('clear', {});
     this.finishTurn();
     this.pushOpening('cleared');

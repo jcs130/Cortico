@@ -54,6 +54,7 @@ export interface ProviderAttempt {
   startedAt: string;
   elapsedMs: number;
   requestId: string | null;
+  conversationId?: string;
   responseId: string | null;
   outcome: 'completed' | 'incomplete' | 'failed' | 'aborted' | 'discarded';
   status: number | null;
@@ -66,7 +67,7 @@ export interface ProviderAttempt {
 }
 /** Metadata returned by the serving gateway, independent of response content. */
 export interface InferenceStats {
-  requestId: string;
+  requestId: string | null;
   sessionId: string | null;
   inputTokens: number | null;
   outputTokens: number | null;
@@ -86,6 +87,7 @@ export interface GenerateOptions {
   onEvent?: (event: StreamEvent) => void;
   role?: string;
   sessionId?: string;
+  /** Gateway identity owned by the context lifecycle, independent of local role and run IDs. */
   conversationId?: string;
   estimatedInputTokens?: number;
   resubmission?: boolean;

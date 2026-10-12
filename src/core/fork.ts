@@ -7,6 +7,7 @@ import { ResponseAccumulator } from '../protocol/open-responses/stream.ts';
 import { GenerationError, type ResponseClient } from './generation.ts';
 import type { GenerationScheduler } from './generation-scheduler.ts';
 import { validateRequestContext } from './request-context.ts';
+import { createConversationId } from './conversation-id.ts';
 import {
   NOT_EXECUTED_BARRIER,
   NOT_EXECUTED_INCOMPLETE,
@@ -45,6 +46,7 @@ const FORK_RECEIPT_HARD_CAP_CHARS = 20_000;
 
 export async function runForkLoop(opts: ForkLoopOptions): Promise<string> {
   const { id, llm, spec, tools, maxRounds, log } = opts;
+  const conversationId = createConversationId();
   const messages = [...opts.messages];
   const observed = [...messages];
   opts.observeMessages?.(observed);
@@ -74,7 +76,8 @@ export async function runForkLoop(opts: ForkLoopOptions): Promise<string> {
       }
       try {
         generated = await llm.respond(responseRequest(spec, outbound, schemas), {
-          role: id, sessionId: id, context: outbound, nativeSpec: spec, signal: lease?.signal ?? opts.signal,
+          role: id, sessionId: id, conversationId,
+          context: outbound, nativeSpec: spec, signal: lease?.signal ?? opts.signal,
           onEvent: event => {
             if (lease?.signal.aborted || opts.signal?.aborted) return;
             if (event.type === 'response.created') draft = new ResponseAccumulator();

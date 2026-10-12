@@ -6,6 +6,7 @@ import { GenerationError, type GenerateOptions, type Generation, type ResponseCl
 import { generate } from './response-http.ts';
 import { ChatResponseAssembly, parseChatResponse, type ResponseAssembly } from './response-assembly.ts';
 import { nativeChatInput, requestSpec, requestTools } from './native-input.ts';
+import { createConversationId } from '../../core/conversation-id.ts';
 
 const INFLIGHT_ALERT_WINDOW_MS = 60_000;
 const INFLIGHT_ALERT_MIN = 2;
@@ -37,6 +38,7 @@ export interface StreamFailureVerdict {
 export abstract class OpenAIHttpClient extends BaseProvider {
   protected buildResponseBody(request: Request, options: GenerateOptions): Record<string, unknown> {
     const body = this.buildBody(requestSpec(request, options), nativeChatInput(request, options), requestTools(request), options.sessionId);
+    if (request.metadata) body.metadata = { ...request.metadata };
     for (const key of ['top_p', 'presence_penalty', 'frequency_penalty', 'parallel_tool_calls'] as const) if (request[key] !== undefined) body[key] = request[key];
     if (request.tool_choice != null) {
       const choice = request.tool_choice;
@@ -73,6 +75,7 @@ export abstract class OpenAIHttpClient extends BaseProvider {
           try {
             const signals = [options.signal, probeOptions?.signal].filter((signal): signal is AbortSignal => Boolean(signal));
             const result = await this.respond(probe, { ...options, onEvent: undefined, context: undefined, ...probeOptions,
+              conversationId: probeOptions?.conversationId ?? createConversationId(),
               signal: signals.length ? AbortSignal.any(signals) : undefined, diagnostic: true });
             record(result.attempts);
             return result;
