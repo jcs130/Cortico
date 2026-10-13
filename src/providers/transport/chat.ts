@@ -75,7 +75,7 @@ export abstract class OpenAIHttpClient extends BaseProvider {
           try {
             const signals = [options.signal, probeOptions?.signal].filter((signal): signal is AbortSignal => Boolean(signal));
             const result = await this.respond(probe, { ...options, onEvent: undefined, context: undefined, ...probeOptions,
-              conversationId: probeOptions?.conversationId ?? createConversationId(),
+              conversationId: probeOptions?.conversationId ?? createConversationId(options.agentId),
               signal: signals.length ? AbortSignal.any(signals) : undefined, diagnostic: true });
             record(result.attempts);
             return result;
@@ -84,7 +84,8 @@ export abstract class OpenAIHttpClient extends BaseProvider {
             throw error;
           }
         } });
-        this.log.warn('LLM 生成阶段中断：连续失败 ' + streak + ' 次，开流后 ' + (info.elapsedMs / 1000).toFixed(1) + ' 秒' + (verdict.note ? ';' + verdict.note : ''), info);
+        this.log.warn('LLM 生成阶段中断', { streak, elapsedMs: info.elapsedMs, status: info.status, model: info.model,
+          role: info.role ?? null, requestId: info.requestId });
         return verdict.retry;
       },
     });

@@ -8,6 +8,16 @@ const efforts = ['none', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'ma
 const confirmations = ['serving_template_and_budget_policy', 'serving_template', 'engine', 'engine_effective', 'engine_confirmed'];
 const statuses = ['disabled', 'not_requested', 'not_configured', 'unsupported', 'applied', 'configured', 'default', 'unlimited', 'unknown', 'enabled', 'independent', 'inherited'];
 
+/** Only explicit wire fields describe the request; output caps never supply a thinking budget. */
+export function requestedReasoning(body: Record<string, unknown>): InferenceReasoning['requested'] {
+  const reasoning = object(body.reasoning), template = object(body.chat_template_kwargs);
+  return {
+    thinking: boolean(body.thinking) ?? boolean(body.enable_thinking) ?? boolean(template.enable_thinking),
+    effort: choice(body.reasoning_effort ?? reasoning.effort, efforts),
+    budgetTokens: count(body.reasoning_budget_tokens ?? body.thinking_budget_tokens ?? reasoning.budget_tokens),
+  };
+}
+
 /** A received parameter becomes effective only when the serving engine confirms it. */
 export function reasoningStats(value: unknown): InferenceReasoning | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;

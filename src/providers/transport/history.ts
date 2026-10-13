@@ -65,7 +65,7 @@ export function imageBlobs<T extends { mime: string }>(refs: readonly T[] | unde
 /** OpenAI function 格式的 tools 段(各 chat 方言共用)。 */
 export function mapTools(tools?: ToolSchema[]): Array<Record<string, unknown>> | undefined {
   if (!tools || tools.length === 0) return undefined;
-  return tools.map((t) => ({
+  return [...tools].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0).map((t) => ({
     type: 'function',
     function: { name: t.name, description: t.description, parameters: t.parameters },
   }));

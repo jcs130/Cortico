@@ -7,7 +7,7 @@ const count = (value: unknown): number | null => Number.isSafeInteger(value) && 
 const id = (value: unknown): string | null => typeof value === 'string' && /^[a-zA-Z0-9_.:/-]{1,160}$/.test(value) ? value : null;
 
 /** Final snapshots replace earlier snapshots; the HTTP attempt owns their association. */
-export function inferenceStats(payload: unknown, expectedRequestId: string | null): InferenceStats | null {
+export function inferenceStats(payload: unknown, expectedRequestId: string | null, expectedSessionId?: string): InferenceStats | null {
   const root = object(payload);
   const response = object(root.response);
   const raw = root.inference_stats ?? response.inference_stats ?? object(root.usage).inference_stats ?? object(response.usage).inference_stats;
@@ -15,11 +15,13 @@ export function inferenceStats(payload: unknown, expectedRequestId: string | nul
   const source = object(raw);
   const suppliedRequestId = id(source.request_id);
   const requestId = suppliedRequestId ?? expectedRequestId;
+  const sessionId = id(source.session_id);
   if (suppliedRequestId && expectedRequestId && suppliedRequestId !== expectedRequestId
+    || sessionId && expectedSessionId && sessionId !== expectedSessionId
     || source.schema !== undefined && source.schema !== 'llm-request-stats-v1') return null;
   const input = count(source.input_tokens), output = count(source.output_tokens);
   const cached = count(source.cached_input_tokens), reasoning = count(source.reasoning_tokens);
-  return { requestId, sessionId: id(source.session_id), inputTokens: input, outputTokens: output,
+  return { requestId, sessionId, inputTokens: input, outputTokens: output,
     cachedInputTokens: input !== null && cached !== null && cached <= input ? cached : null,
     reasoningTokens: output !== null && reasoning !== null && reasoning <= output ? reasoning : null,
     gatewayDurationMs: number(source.gateway_duration_ms), gatewayTtftMs: number(source.gateway_ttft_ms),

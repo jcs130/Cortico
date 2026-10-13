@@ -24,10 +24,16 @@ retained. Returned reasoning remains part of Cortico's response Items in either 
 
 `options.extraHeaders` adds request headers; the configured bearer secret owns Authorization.
 `options.extraBody` overrides generated body fields. The caller's streaming choice remains
-authoritative. Streaming requests include usage unless an explicit `stream_options` override is
-supplied. `options.maxContextImages` limits the newest unique saved image handles; unset replays
+authoritative and every stream sets `stream_options.include_usage=true` after the merge.
+Nonstream requests omit `stream_options`. `options.maxContextImages` limits the newest unique saved image handles; unset replays
 all saved images and zero leaves attachment text only. Saved images require `multimodal: true`.
 Inline image content parts and function results use the shared Chat history renderer.
+
+Requests carry the full selected history. Tool names are sorted and JSON object keys serialize
+canonically; message order and schema arrays are retained. The transport serializes once before
+retrying. An explicit request reasoning level and output limit take precedence over native model
+defaults. `inference_stats` is read alongside final usage without an SDK projection; mismatched
+session or request statistics are rejected. Stored usage contains allowlisted counters only.
 
 The module declares its protocol settings as a ConfigGroup and uses the standard connection
 editor. Provider discovery reads its `index.ts`; no console client registration is required.

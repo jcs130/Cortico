@@ -35,7 +35,7 @@ describe('gateway metadata', () => {
     let headers: RequestInit['headers'];
     vi.stubGlobal('fetch', async (_url: unknown, init: RequestInit) => {
       headers = init.headers;
-      return new Response(JSON.stringify({ ...reply, inference_stats: stats }), { headers: { 'x-litellm-call-id': 'call-1' } });
+      return new Response(JSON.stringify({ ...reply, inference_stats: { ...stats, session_id: new Headers(init.headers).get('x-litellm-session-id') } }), { headers: { 'x-litellm-call-id': 'call-1' } });
     });
     const result = await new Fixture().respond({ model: 'test', input: 'input' }, { conversationId: 'opaque-session' });
     expect(new Headers(headers).get('x-litellm-session-id')).toBe('opaque-session');
@@ -49,10 +49,22 @@ describe('gateway metadata', () => {
     ];
     vi.stubGlobal('fetch', async () => new Response(frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join('') + 'data: [DONE]\n\n',
       { headers: { 'x-litellm-call-id': 'call-1', 'Content-Type': 'text/event-stream' } }));
-    const result = await new Fixture().respond({ model: 'test', input: 'input' }, { onEvent() {} });
+    const result = await new Fixture().respond({ model: 'test', input: 'input' }, { conversationId: stats.session_id, onEvent() {} });
     expect(result.response.status).toBe('completed');
     expect(result.attempts).toHaveLength(1);
     expect(result.attempts[0].inferenceStats?.inputTokens).toBe(120);
+  });
+
+  it('does not reuse an earlier statistics snapshot when the final usage frame reports unknown statistics', async () => {
+    const frames = [
+      { id: 'response', choices: [{ delta: { content: 'ready' }, finish_reason: 'stop' }], inference_stats: stats },
+      { id: 'response', choices: [], usage: reply.usage, inference_stats: null },
+    ];
+    vi.stubGlobal('fetch', async () => new Response(frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join('') + 'data: [DONE]\n\n',
+      { headers: { 'x-litellm-call-id': 'call-1', 'content-type': 'text/event-stream' } }));
+    const result = await new Fixture().respond({ model: 'test', input: 'input' }, { conversationId: stats.session_id, onEvent() {} });
+    expect(result.attempts[0].inferenceStats).toBeUndefined();
+    expect(result.attempts[0].meters.input).toBe(120);
   });
 
   it('uses the same persisted identity in unary and streaming calls and aligns existing body metadata', async () => {
@@ -96,7 +108,7 @@ describe('gateway metadata', () => {
     vi.stubGlobal('fetch', async (_url: unknown, init: RequestInit) => {
       sent.push(new Headers(init.headers));
       return sent.length === 1 ? new Response('retry', { status: 429 })
-        : new Response(JSON.stringify({ ...reply, inference_stats: stats }), { headers: { 'x-litellm-call-id': 'call-1' } });
+        : new Response(JSON.stringify({ ...reply, inference_stats: { ...stats, session_id: 'cortico-retry-context' } }), { headers: { 'x-litellm-call-id': 'call-1' } });
     });
     const promise = new Fixture().respond({ model: 'test', input: 'history' }, { conversationId: 'cortico-retry-context' });
     await vi.advanceTimersByTimeAsync(1000);
@@ -105,10 +117,11 @@ describe('gateway metadata', () => {
     expect(sent.map(headers => headers.get('x-litellm-session-id'))).toEqual(['cortico-retry-context', 'cortico-retry-context']);
     expect(sent.every(headers => !headers.has('x-request-id') && !headers.has('x-litellm-call-id'))).toBe(true);
     expect(result.attempts[0].conversationId).toBe(result.attempts[1].conversationId);
-    expect(result.attempts[1].inferenceStats?.sessionId).toBe(stats.session_id);
+    expect(result.attempts[1].inferenceStats?.sessionId).toBe('cortico-retry-context');
   });
 
   it('keeps missing response identities and execution readings unknown', () => {
+    expect(inferenceStats({ inference_stats: stats }, 'call-1', 'another-session')).toBeNull();
     expect(inferenceStats({ inference_stats: { gateway_duration_ms: 900 } }, null))
       .toMatchObject({ requestId: null, sessionId: null, executionMs: null, queueMs: null, inputTokens: null });
     expect(inferenceStats({ usage: { inference_stats: { execution_ms: 12 } } }, 'call-1'))

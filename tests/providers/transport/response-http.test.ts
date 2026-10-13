@@ -7,8 +7,9 @@ import { OpenAIHttpClient } from '../../../src/providers/transport/chat.ts';
 import type { NativeChatMessage } from '../../../src/providers/transport/native-types.ts';
 import type { ModelSpec, ToolSchema } from '../../../src/core/types.ts';
 import { nullLogger } from '../../../src/core/util.ts';
+import { requestJson } from '../../../src/providers/transport/response-http.ts';
 
-afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 class Fixture extends OpenAIHttpClient {
   constructor() { super('https://fixture.test', nullLogger()); }
@@ -20,6 +21,15 @@ class Fixture extends OpenAIHttpClient {
 const ok = () => new Response(JSON.stringify({ id: 'r1', model: 'test', choices: [{ index: 0, message: { content: 'ready' }, finish_reason: 'stop' }], usage: { prompt_tokens: 3, completion_tokens: 2 } }));
 
 describe('request body', () => {
+  it('serializes nested schemas canonically without changing array order or JSON semantics', () => {
+    const left = { z: undefined, schema: { required: ['second', 'first'], properties: { second: { type: 'number' }, first: { type: 'string' } } } };
+    const right = { schema: { properties: { first: { type: 'string' }, second: { type: 'number' } }, required: ['second', 'first'] } };
+    expect(requestJson(left)).toBe(requestJson(right));
+    expect(JSON.parse(requestJson(left)).schema.required).toEqual(['second', 'first']);
+    expect(left.schema.properties.second.type).toBe('number');
+    const cycle: Record<string, unknown> = {}; cycle.self = cycle;
+    expect(() => requestJson(cycle)).toThrow(TypeError);
+  });
   it('a lone surrogate in the context goes out as U+FFFD; whole pairs are kept', async () => {
     let sent = '';
     vi.stubGlobal('fetch', async (_url: unknown, init: RequestInit) => { sent = String(init.body); return ok(); });
@@ -32,6 +42,7 @@ describe('request body', () => {
 describe('retry policy', () => {
   it('waits out the Retry-After interval before retrying a 429', async () => {
     vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0);
     const fetcher = vi.fn()
       .mockResolvedValueOnce(new Response('rate limited', { status: 429, headers: { 'retry-after': '2' } }))
       .mockResolvedValueOnce(ok());
@@ -58,6 +69,7 @@ describe('retry policy', () => {
 
   it('waits out a long Retry-After; the caller signal is the only bound', async () => {
     vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0);
     const fetcher = vi.fn()
       .mockResolvedValueOnce(new Response('rate limited', { status: 429, headers: { 'retry-after': '3600' } }))
       .mockResolvedValueOnce(ok());
@@ -67,5 +79,43 @@ describe('retry policy', () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(1);
     await expect(promise).resolves.toMatchObject({ response: { status: 'completed' } });
+  });
+
+  it('jitters transient retries and resends identical bytes despite a concurrent schema edit', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const bodies: string[] = [];
+    const request = { model: 'test', input: 'read', tools: [{ type: 'function' as const, name: 'inspect', parameters: { type: 'object', properties: { b: { type: 'string' } } } }] };
+    vi.stubGlobal('fetch', async (_url: unknown, init: RequestInit) => {
+      bodies.push(String(init.body));
+      return bodies.length === 1 ? new Response('unavailable', { status: 503 }) : ok();
+    });
+    const pending = new Fixture().respond(request, { conversationId: 'agent:conversation' });
+    await vi.advanceTimersByTimeAsync(0);
+    request.tools[0].parameters.properties.b.type = 'number';
+    await vi.advanceTimersByTimeAsync(749);
+    expect(bodies).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await pending;
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toBe(bodies[1]);
+  });
+
+  it('allows a long unary queue and aborts its fetch when the caller cancels', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    let upstreamSignal: AbortSignal | undefined;
+    vi.stubGlobal('fetch', (_url: unknown, init: RequestInit) => new Promise((_resolve, reject) => {
+      upstreamSignal = init.signal as AbortSignal;
+      upstreamSignal.addEventListener('abort', () => reject(upstreamSignal!.reason), { once: true });
+    }));
+    const pending = new Fixture().respond({ model: 'test', input: 'long input' }, { signal: controller.signal }).catch(error => error);
+    await vi.advanceTimersByTimeAsync(240_000);
+    expect(upstreamSignal!.aborted).toBe(false);
+    controller.abort(new Error('client disconnected'));
+    const error = await pending;
+    expect(upstreamSignal!.aborted).toBe(true);
+    expect(error.attempts).toHaveLength(1);
+    expect(error.attempts[0].outcome).toBe('aborted');
   });
 });

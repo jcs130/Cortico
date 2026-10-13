@@ -1,4 +1,4 @@
-<!-- Owner: src/providers/base.ts, src/providers/console/hub.ts, src/providers/hub-api.ts, src/providers/name.ts, src/providers/registry.ts, src/providers/console/settings.ts, src/providers/console/config.ts, src/providers/openai-responses-compat/config.ts, src/providers/transport/responses-input.ts, src/providers/transport/history.ts, src/providers/transport/response-assembly.ts, src/providers/transport/response-http.ts, src/providers/transport/inference-stats.ts, src/providers/llamacpp/native.ts -->
+<!-- Owner: src/providers/base.ts, src/providers/console/hub.ts, src/providers/hub-api.ts, src/providers/name.ts, src/providers/registry.ts, src/providers/console/settings.ts, src/providers/console/config.ts, src/providers/openai-responses-compat/config.ts, src/providers/transport/responses-input.ts, src/providers/transport/history.ts, src/providers/transport/response-assembly.ts, src/providers/transport/response-http.ts, src/providers/transport/response-meters.ts, src/providers/transport/reasoning-stats.ts, src/providers/transport/inference-stats.ts, src/providers/llamacpp/native.ts -->
 
 # src/providers
 
@@ -7,6 +7,8 @@
 获取带报价与来源信息的客户端,Persona 通过 Core 调用模型。
 
 HTTP 请求用 `GenerateOptions.conversationId` 传递 `x-litellm-session-id`；已有 `metadata.session_id` 同步为此值。重试沿用同一 ID，不发送网关 request ID。普通响应及 SSE 最终 usage 事件的 `inference_stats` 只提取身份、token 和耗时字段；未知值保留 null，`execution_ms` 不用网关耗时替代。用量账本的 `gatewaySessionId` 来自服务端返回值，`conversationId` 记录发送值，两者分别保存。会话 ID 用于关联统计；KV 复用仍取决于实际输入前缀。
+
+工具按名称稳定排序，JSON 对象键采用稳定序列化，消息和 schema 数组保留顺序；一次生成的重试复用完全相同的请求字节。流式最终 usage 与同级 `inference_stats` 分别读取，显式未知的最终统计清除早期快照；返回身份与当前请求不符时不关联。原生 usage 只保留标准计数项，请求思考参数另存 `requestedReasoning`，独立预算只取显式预算字段。
 
 ## 文件
 

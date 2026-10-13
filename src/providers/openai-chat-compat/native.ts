@@ -68,6 +68,8 @@ export class ChatCompatProvider extends OpenAIHttpClient {
     if (request.service_tier != null && this.options.extraBody?.service_tier === undefined)
       body.service_tier = request.service_tier;
     body.stream = Boolean(options.onEvent);
+    if (options.onEvent) body.stream_options = { ...body.stream_options as Record<string, unknown> | undefined, include_usage: true };
+    else delete body.stream_options;
     return body;
   }
 

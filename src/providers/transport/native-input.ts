@@ -7,9 +7,8 @@ import type { GenerateOptions } from '../../core/generation.ts';
 
 export function requestSpec(request: Request, options: GenerateOptions): ModelSpec {
   return { ...options.nativeSpec, model: request.model ?? options.nativeSpec?.model ?? '',
-    thinking: options.nativeSpec?.thinking ?? request.reasoning?.effort !== 'none',
+    thinking: request.reasoning?.effort != null ? request.reasoning.effort !== 'none' : options.nativeSpec?.thinking ?? true,
     ...(request.reasoning?.effort && request.reasoning.effort !== 'none' ? { reasoningEffort: request.reasoning.effort } : {}),
-    ...(options.nativeSpec?.reasoningEffort === 'max' ? { reasoningEffort: 'max' } : {}),
     ...(request.temperature != null ? { temperature: request.temperature } : {}),
     ...(request.max_output_tokens != null ? { maxTokens: request.max_output_tokens } : {}),
   };

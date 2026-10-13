@@ -7,6 +7,7 @@ import { LLMError, abortError, parseRetryAfter, retryDelay, reqIdSuffix } from '
 import type { ResponseAssembly } from './response-assembly.ts';
 import { inferenceStats } from './inference-stats.ts';
 import { createConversationId, validConversationId } from '../../core/conversation-id.ts';
+import { requestedReasoning } from './reasoning-stats.ts';
 
 export interface ResponseTransport {
   url: string;
@@ -27,8 +28,18 @@ const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[
  * the \uXXXX escape JSON.stringify writes for one.
  */
 export function requestJson(body: unknown): string {
-  return JSON.stringify(body, (_key, value: unknown) =>
-    typeof value === 'string' ? value.replace(LONE_SURROGATE, '\uFFFD') : value);
+  const sorted = new WeakMap<object, Record<string, unknown>>();
+  return JSON.stringify(body, (_key, value: unknown) => {
+    if (typeof value === 'string') return value.replace(LONE_SURROGATE, '\uFFFD');
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+    let result = sorted.get(value);
+    if (!result) {
+      result = Object.fromEntries(Object.keys(value).sort().map(key => [key, (value as Record<string, unknown>)[key]]));
+      sorted.set(value, result);
+      sorted.set(result, result);
+    }
+    return result;
+  });
 }
 
 /** SSE framing is independent of packet and line boundaries. */
@@ -63,8 +74,8 @@ function carriesContent(event: StreamEvent): boolean {
   return 'delta' in event || event.type === 'response.output_item.added' || event.type === 'response.output_item.done';
 }
 
-/** 首包等待上限：流式 420 秒（思考档静默推理期+拥塞 TTFT），非流式 180 秒。 */
-const FIRST_RESPONSE_MS = { streaming: 420_000, unary: 180_000 } as const;
+/** Admission, long-input processing and silent reasoning share the initial response allowance. */
+export const FIRST_RESPONSE_MS = 900_000;
 /** 帧空闲:连续这么久一个字节都没来。思考档推理期可能长时间无字节，120s 会误杀（09-29 实证）。 */
 const FRAME_IDLE_MS = 300_000;
 /**
@@ -81,6 +92,7 @@ export async function generate(request: Request, options: GenerateOptions, origi
   if (!validConversationId(conversationId)) throw new TypeError('Invalid gateway session identity');
   const body = fields && Object.hasOwn(fields, 'session_id')
     ? { ...transport.body, metadata: { ...fields, session_id: conversationId } } : transport.body;
+  const wireBody = requestJson(body);
   const generationId = crypto.randomUUID();
   const attempts: ProviderAttempt[] = [];
   let lastError: unknown;
@@ -94,23 +106,30 @@ export async function generate(request: Request, options: GenerateOptions, origi
   for (let ordinal = 0; ordinal <= delays.length; ordinal++) {
     try {
       if (options.signal?.aborted) throw abortError(options.signal);
-      if (ordinal) await retryDelay(retryAfterMs ?? delays[ordinal - 1], options.signal);
+      if (ordinal) {
+        const base = delays[ordinal - 1];
+        const waitMs = retryAfterMs === null ? Math.floor(base * (0.5 + Math.random() * 0.5))
+          : retryAfterMs + Math.floor(Math.random() * Math.min(base, 1000));
+        await retryDelay(waitMs, options.signal);
+      }
     } catch (error) { throw fail(error); }
     retryAfterMs = null;
     const attempt: ProviderAttempt = {
       id: crypto.randomUUID(), generationId, ordinal, origin: structuredClone(origin), startedAt: new Date().toISOString(), elapsedMs: 0,
-      requestId: null, conversationId, responseId: null, outcome: 'failed', status: null, serviceTier: null, requestedServiceTier: typeof transport.body.service_tier === 'string' ? transport.body.service_tier : request.service_tier ?? null, purpose: options.diagnostic ? 'diagnostic' : 'generation', meters: unknownMeters(), charges: [],
+      requestId: null, conversationId, agentId: options.agentId ?? null, clientQueueMs: options.clientQueueMs ?? null,
+      requestedReasoning: requestedReasoning(body),
+      responseId: null, outcome: 'failed', status: null, serviceTier: null, requestedServiceTier: typeof transport.body.service_tier === 'string' ? transport.body.service_tier : request.service_tier ?? null, purpose: options.diagnostic ? 'diagnostic' : 'generation', meters: unknownMeters(), charges: [],
     };
     let quotes: readonly PriceSnapshot[] = [];
     const started = Date.now();
     const controller = new AbortController();
     const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
     const streaming = Boolean(options.onEvent);
-    let timer = setTimeout(() => controller.abort(new Error('Provider first response timeout')), streaming ? FIRST_RESPONSE_MS.streaming : FIRST_RESPONSE_MS.unary);
+    let timer = setTimeout(() => controller.abort(new Error('Provider first response timeout')), FIRST_RESPONSE_MS);
     let contentTimer: ReturnType<typeof setTimeout> | null = null;
     const touchContent = (): void => {
       if (contentTimer) clearTimeout(contentTimer);
-      contentTimer = setTimeout(() => controller.abort(new Error('Provider stream content idle timeout')), CONTENT_IDLE_MS);
+      contentTimer = setTimeout(() => controller.abort(new Error('Provider stream content idle timeout')), observed ? CONTENT_IDLE_MS : FIRST_RESPONSE_MS);
     };
     let committed = false;
     let characters = 0;
@@ -123,8 +142,7 @@ export async function generate(request: Request, options: GenerateOptions, origi
     const diagnostics: ProviderAttempt[] = [];
     partial = null;
     const forward = (event: StreamEvent): void => {
-      observed = true;
-      if (carriesContent(event)) touchContent();
+      if (carriesContent(event)) { observed = true; touchContent(); }
       if ('delta' in event && typeof event.delta === 'string') characters += event.delta.length;
       if (irreversible(event)) committed = true;
       if (!options.signal?.aborted) options.onEvent?.(event);
@@ -142,12 +160,19 @@ export async function generate(request: Request, options: GenerateOptions, origi
       attempt.startedAt = new Date().toISOString();
       quotes = structuredClone(options.quote?.({ startedAt: attempt.startedAt, requestedServiceTier: attempt.requestedServiceTier ?? null }) ?? []);
       sent = true;
-      const response = await fetch(transport.url, { method: 'POST', body: requestJson(body), headers, signal });
+      const response = await fetch(transport.url, { method: 'POST', body: wireBody, headers, signal });
       attempt.status = response.status;
       attempt.requestId = response.headers.get('x-litellm-call-id') ?? response.headers.get('x-request-id');
       const noteStats = (payload: unknown): void => {
-        const stats = inferenceStats(payload, attempt.requestId);
+        const stats = inferenceStats(payload, attempt.requestId, conversationId);
         if (stats) { attempt.inferenceStats = stats; attempt.requestId = stats.requestId ?? attempt.requestId; }
+        else if (payload && typeof payload === 'object') {
+          const root = payload as Record<string, any>;
+          const resource = root.response && typeof root.response === 'object' ? root.response : root;
+          if (Object.hasOwn(root, 'inference_stats') || Object.hasOwn(resource, 'inference_stats')
+            || (Array.isArray(root.choices) && root.choices.length === 0 && root.usage)
+            || ['completed', 'incomplete', 'failed'].includes(resource.status)) delete attempt.inferenceStats;
+        }
       };
       if (!response.ok) {
         const error = new LLMError(`LLM API ${response.status}`, response.status, await response.text());
@@ -168,7 +193,7 @@ export async function generate(request: Request, options: GenerateOptions, origi
         stream: for (;;) {
           const chunk = await reader.read();
           clearTimeout(timer);
-          timer = setTimeout(() => controller.abort(new Error('Provider stream idle timeout')), FRAME_IDLE_MS);
+          timer = setTimeout(() => controller.abort(new Error('Provider stream idle timeout')), observed ? FRAME_IDLE_MS : FIRST_RESPONSE_MS);
           if (chunk.done) break;
           for (const payload of frames.feed(decoder.decode(chunk.value, { stream: true }))) {
             if (payload === '[DONE]') break stream;
@@ -196,6 +221,7 @@ export async function generate(request: Request, options: GenerateOptions, origi
       return { response: partial, origin, attempts };
     } catch (error) {
       finishedAt = Date.now();
+      controller.abort(new Error('Provider attempt ended'));
       if (streaming) {
         partial = assembly.snapshot();
         attempt.meters = assembly.meters();
@@ -214,10 +240,11 @@ export async function generate(request: Request, options: GenerateOptions, origi
         model: request.model ?? '', role: options.role, elapsedMs: Date.now() - started, status,
         requestId: attempt.requestId, body: error instanceof LLMError ? error.body : '', message: String(error),
       }, values => diagnostics.push(...values))) break;
-      transport.log.warn('Provider attempt failed; retrying', { ordinal, err: String(error) });
+      transport.log.warn('Provider attempt failed; retrying', { ordinal, status, requestId: attempt.requestId });
     } finally {
       clearTimeout(timer);
       if (contentTimer) clearTimeout(contentTimer);
+      controller.abort(new Error('Provider attempt ended'));
       if (reader) { try { await reader.cancel(); } catch { /* The failed transport may already be closed. */ } reader.releaseLock(); }
       attempt.elapsedMs = (finishedAt ?? Date.now()) - started;
       attempt.charges = priceUsage(attempt.meters, quotes, attempt.serviceTier);

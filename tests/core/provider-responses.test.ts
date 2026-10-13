@@ -6,13 +6,13 @@ import type { NativeChatMessage } from '../../src/providers/transport/native-typ
 import type { ModelSpec, ToolSchema } from '../../src/core/types.ts';
 import { nullLogger } from '../../src/core/util.ts';
 import { ChatResponseAssembly, NativeResponseAssembly } from '../../src/providers/transport/response-assembly.ts';
-import { EventDecoder } from '../../src/providers/transport/response-http.ts';
+import { EventDecoder, FIRST_RESPONSE_MS } from '../../src/providers/transport/response-http.ts';
 import { GenerationError, priceUsage, unknownMeters } from '../../src/core/generation.ts';
 import { ResponsesProvider } from '../../src/providers/openai-responses-compat/native.ts';
 import type { FunctionCall, StreamEvent } from '../../src/protocol/open-responses/index.ts';
 
 const sse = (values: unknown[]): Response => new Response(values.map(value => `data: ${JSON.stringify(value)}\n\n`).join('') + 'data: [DONE]\n\n');
-afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 /** The Chat transport is used by llamacpp and extensions; this adapter tests their shared transport behavior. */
 class ChatFixture extends OpenAIHttpClient {
@@ -112,7 +112,7 @@ describe('Provider standard Responses boundary', () => {
     const assembly = new ChatResponseAssembly({ model: 'test' });
     assembly.feed({ choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }], usage: { prompt_tokens: '12', completion_tokens: -1, prompt_cache_hit_tokens: 40, total_tokens: 5 } }, () => {});
     expect(assembly.finish(() => {}).status).toBe('completed');
-    expect(assembly.meters()).toMatchObject({ input: null, output: -1, cachedInput: 40, uncachedInput: null, total: 5, native: { prompt_tokens: '12' } });
+    expect(assembly.meters()).toMatchObject({ input: null, output: null, cachedInput: 40, uncachedInput: null, total: 5, native: { prompt_tokens: null } });
   });
   it('maps native call order without overlapping text Items between tool chunks', () => {
     const assembly = new ChatResponseAssembly({ model: 'test' });
@@ -193,7 +193,8 @@ describe('Provider standard Responses boundary', () => {
 
   it('accounts for failed reasoning-only attempts before a successful retry, with separate stream identities', async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-09-07T00:59:59Z'));
+    vi.setSystemTime(new Date('2026-09-07T00:59:59.500Z'));
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
     const fetcher = vi.fn()
       .mockResolvedValueOnce(sse([{ id: 'first', choices: [{ delta: { reasoning_content: 'try' } }], usage: { prompt_tokens: 20, completion_tokens: 5 } }]))
       .mockResolvedValueOnce(sse([{ id: 'second', choices: [{ delta: { content: 'ready' }, finish_reason: 'stop' }], usage: {
@@ -263,8 +264,8 @@ describe('Provider standard Responses boundary', () => {
       }));
     });
     const promise = new ChatFixture().respond({ model: 'test' }, { onEvent: () => {} }).catch(error => error);
-    // keepalive 重置帧空闲计时，内容空闲仍在 300 秒后取消请求。
-    for (let i = 0; i < 14; i++) await vi.advanceTimersByTimeAsync(100_000);
+    // Keepalives cannot extend the initial long-input allowance indefinitely.
+    for (let i = 0; i < 4; i++) await vi.advanceTimersByTimeAsync(FIRST_RESPONSE_MS + 20_000);
     const caught = await promise;
     expect(caught).toBeInstanceOf(GenerationError);
     expect(String(caught.message)).toContain('content idle');

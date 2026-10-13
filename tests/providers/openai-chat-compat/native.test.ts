@@ -24,6 +24,16 @@ function stream(chunks: unknown[]): Response {
 }
 
 describe('Chat Completions request mapping', () => {
+  it('preserves an explicit request thinking level over a conflicting connection default', async () => {
+    const sent: any[] = [];
+    vi.stubGlobal('fetch', async (_url: string, init: RequestInit) => { sent.push(JSON.parse(String(init.body))); return response(); });
+    const client = new ChatCompatProvider({ baseUrl: 'https://fixture.test' });
+    await client.respond({ model: spec.model, input: 'read', reasoning: { effort: 'high' }, max_output_tokens: 2048 },
+      { nativeSpec: { ...spec, thinking: false, reasoningEffort: 'low', maxTokens: 32 } });
+    await client.respond({ model: spec.model, input: 'read', reasoning: { effort: 'none' } }, { nativeSpec: spec });
+    expect(sent[0]).toMatchObject({ reasoning_effort: 'high', max_tokens: 2048 });
+    expect(sent[1].reasoning_effort).toBe('none');
+  });
   it('maps the model thinking switch without adding template-specific fields', () => {
     expect(buildChatCompatRequestBody(spec, [])).toMatchObject({ reasoning_effort: 'high' });
     expect(buildChatCompatRequestBody({ ...spec, thinking: false }, [])).toMatchObject({ reasoning_effort: 'none' });
@@ -104,6 +114,40 @@ describe('Chat Completions request mapping', () => {
 });
 
 describe('shared native tool and response lifecycle', () => {
+  it('forces final stream usage and keeps complete metadata while dropping arbitrary usage content', async () => {
+    let wire: any;
+    let upstreamSignal: AbortSignal | undefined;
+    let closed = false;
+    vi.stubGlobal('fetch', async (_url: string, init: RequestInit) => {
+      wire = JSON.parse(String(init.body)); upstreamSignal = init.signal as AbortSignal;
+      const sessionId = new Headers(init.headers).get('x-litellm-session-id');
+      const frames = [
+        { id: 'response', model: spec.model, choices: [{ delta: { content: 'ready' }, finish_reason: 'stop' }] },
+        { id: 'response', choices: [], usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110,
+          prompt_tokens_details: { cached_tokens: 80, prompt: 'private-prompt' },
+          completion_tokens_details: { reasoning_tokens: 2, reasoning: 'private-thinking' }, answer: 'private-answer', credential: 'private-key' },
+          inference_stats: { request_id: 'call', session_id: sessionId, input_tokens: 100, cached_input_tokens: 80,
+            output_tokens: 10, reasoning_tokens: 2, execution_ms: null, queue_ms: 20,
+            reasoning: { requested: { reasoning_effort: 'high' }, effective: { thinking: true, reasoning_effort: 'high', budget_tokens: null }, confirmation: 'engine' } } },
+      ];
+      return new Response(new ReadableStream({ start(controller) {
+        controller.enqueue(new TextEncoder().encode(frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join('') + 'data: [DONE]\n\n'));
+      }, cancel() { closed = true; } }), { headers: { 'x-litellm-call-id': 'call', 'content-type': 'text/event-stream' } });
+    });
+    const client = new ChatCompatProvider({ baseUrl: 'https://fixture.test', extraBody: { stream_options: { include_usage: false } } });
+    const result = await client.respond(responseRequest({ ...spec, maxTokens: 2048 }, [message('user', 'private-prompt')], tools),
+      { onEvent() {}, agentId: 'agent-a', conversationId: 'agent-a:conversation', nativeSpec: spec });
+    expect(wire.stream_options.include_usage).toBe(true);
+    expect(wire.reasoning_effort).toBe('high');
+    expect(wire.max_tokens).toBe(2048);
+    expect(result.response.usage).toMatchObject({ input_tokens: 100, output_tokens: 10, input_tokens_details: { cached_tokens: 80 } });
+    expect(result.attempts[0]).toMatchObject({ agentId: 'agent-a', conversationId: 'agent-a:conversation', requestedReasoning: { effort: 'high', budgetTokens: null },
+      inferenceStats: { inputTokens: 100, cachedInputTokens: 80, executionMs: null, queueMs: 20, reasoning: { confirmed: true, effective: { effort: 'high', budgetTokens: null } } } });
+    expect(JSON.stringify(result.attempts)).not.toContain('private-');
+    expect(closed).toBe(true);
+    expect(upstreamSignal!.aborted).toBe(true);
+  });
+
   it('streams parallel function calls with reasoning and replays their matching results in a second round', async () => {
     const bodies: any[] = [];
     vi.stubGlobal('fetch', async (_url: string, init: RequestInit) => {
