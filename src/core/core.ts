@@ -45,6 +45,8 @@ import { currentAnchors } from './log-context.ts';
 import { MainLoop, type ContextFacts } from './loop.ts';
 import type { ResponseClient } from './generation.ts';
 import { GenerationScheduler } from './generation-scheduler.ts';
+import { createPersistedConversationId, loadAgentId } from './conversation-id.ts';
+import { DEFAULT_MODEL_CONCURRENCY, ModelCallGate, limitModelCalls } from './model-calls.ts';
 import { HOST_LIFECYCLE_ENDED } from './markers.ts';
 
 /** 单个 World 的停止期限；失败或超时写入结果，其他停止操作继续。 */
@@ -110,12 +112,16 @@ export class Core<C extends CoreConfig = CoreConfig> {
   readonly providers: ProviderRegistry;
   private readonly moduleHostLeases = new Map<World, { active: boolean }>();
   private readonly generationScheduler = new GenerationScheduler();
+  readonly agentId: string;
+  private readonly modelCalls: ModelCallGate;
 
   constructor(loaded: LoadedConfig<C>, deps: CoreDeps) {
     this.loaded = loaded;
     const cfg = loaded.config;
     const dataDir = loaded.dataDir;
     if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
+    this.agentId = loadAgentId(dataDir, loaded.rootDir);
+    this.modelCalls = new ModelCallGate(() => cfg.generation?.maxConcurrent ?? DEFAULT_MODEL_CONCURRENCY);
 
     this.run = openRun(dataDir, { timezone: cfg.timezone, bot: cfg.displayName, repoRoot: loaded.repoRoot });
     this.runlog = new Runlog(join(this.run.dir, 'log.jsonl'), {
@@ -128,7 +134,7 @@ export class Core<C extends CoreConfig = CoreConfig> {
     this.store = new JsonlEventStore({ dataDir, run: this.run.id, log: this.log.child('store') });
     // WakeBus 持有只读配置引用，使 batching 热更新对后续 push 生效。
     this.bus = new WakeBus(cfg.batching, this.log.child('bus'));
-    this.session = new SessionLog(dataDir, 'session-main.jsonl', () => nowIso(cfg.timezone));
+    this.session = new SessionLog(dataDir, 'session-main.jsonl', () => nowIso(cfg.timezone), this.agentId);
     this.transcript = new Transcript(join(this.run.dir, 'transcript.jsonl'), { run: this.run.id, timezone: cfg.timezone });
     this.session.onAppend((record, index) => this.transcript.item(record, index));
     this.state = new CoreState(dataDir);
@@ -148,7 +154,7 @@ export class Core<C extends CoreConfig = CoreConfig> {
       keepThinking: () => cfg.context.keepPastThinking,
       log: this.log.child('llm'),
     });
-    this.llm = observeModel(deps.llm ?? this.makeProviderRouter(), event => this.persona.onModelObservation?.(event));
+    this.llm = this.observeClient(deps.llm ?? this.makeProviderRouter());
 
     // TimerStore 仅提供通用持久定时器；Persona定义心跳与闹钟语义。
     this.timers = new TimerStore(dataDir, this.log.child('timer'));
@@ -157,7 +163,7 @@ export class Core<C extends CoreConfig = CoreConfig> {
     this.toolLog = new ToolCallLog(join(this.run.dir, 'toolcalls.jsonl'), { timezone: cfg.timezone, run: this.run.id });
     this.sessions = new SessionTracker(cfg.timezone, (rec) => {
       const { round } = currentAnchors();
-      this.usageLog.append({ ...rec, run: this.run.id, ...(round !== undefined ? { round } : {}) });
+      this.usageLog.append({ ...rec, agentId: this.agentId, run: this.run.id, ...(round !== undefined ? { round } : {}) });
     });
 
     // attach 必须先于 declareSessions，后者会将工具 handler 绑定到 CoreApi。
@@ -325,7 +331,7 @@ export class Core<C extends CoreConfig = CoreConfig> {
 
   /**
    * 创建临时 session；在创建时绑定所选 provider 的端点与模型，工具和轮数来自声明或调用参数。
-   * 记录并发数与用量；并发限制由 Persona 决定。
+   * 记录并发数与用量；共享 Core 生成上限，Persona 可进一步限制任务并发。
    */
   async spawnFork(opts: ForkOptions): Promise<string> {
     const decl = this.sessionDecls.get(opts.id);
@@ -336,7 +342,7 @@ export class Core<C extends CoreConfig = CoreConfig> {
     if (!entry.spec) throw new Error(`LLM provider ${name} 还没选模型`);
     const spec = { ...entry.spec, ...(opts.model ? { model: opts.model } : {}), ...(opts.maxOutputTokens !== undefined ? { maxTokens: opts.maxOutputTokens } : {}) };
     const llm = opts.provider === undefined ? this.llm.bind?.() ?? this.llm
-      : observeModel(this.providers.bind(name), event => this.persona.onModelObservation?.(event));
+      : this.observeClient(this.providers.bind(name), name);
     let observedMessages = opts.messages;
     const track = this.sessions.open(decl.id, decl.label, {
       messagesRef: () => observedMessages,
@@ -345,6 +351,9 @@ export class Core<C extends CoreConfig = CoreConfig> {
     try {
       return await runForkLoop({
         id: decl.id,
+        agentId: this.agentId,
+        conversationId: createPersistedConversationId(this.loaded.dataDir, this.agentId, { role: decl.id, sessionId: track.id }),
+        priority: opts.generationPriority === 'background' ? 'background' : undefined,
         llm,
         spec,
         messages: opts.messages,
@@ -497,6 +506,15 @@ export class Core<C extends CoreConfig = CoreConfig> {
       throw new Error(`没有这个 LLM provider: ${name}(config.json providers 段现有: ${known})`);
     }
     return { name, entry };
+  }
+
+  /** All request paths share admission and publish metadata through the same observer. */
+  private observeClient(client: ResponseClient, provider?: string): ResponseClient {
+    return observeModel(limitModelCalls(client, this.modelCalls, this.agentId, this.generationScheduler.signal, () => {
+      const { name, entry } = provider ? this.providerEntry(provider) : this.activeProviderEntry();
+      try { return new URL(entry.baseUrl).origin; } catch { return name; }
+    }),
+      event => this.persona.onModelObservation?.(event), this.agentId);
   }
 
   /** The selected instance is resolved once at the start of each request. */

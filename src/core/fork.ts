@@ -8,6 +8,7 @@ import { GenerationError, type ResponseClient } from './generation.ts';
 import type { GenerationScheduler } from './generation-scheduler.ts';
 import { validateRequestContext } from './request-context.ts';
 import { createConversationId } from './conversation-id.ts';
+import { estimateMessagesTokens, estimateToolTokens } from '../protocol/open-responses/tokens.ts';
 import {
   NOT_EXECUTED_BARRIER,
   NOT_EXECUTED_INCOMPLETE,
@@ -18,6 +19,9 @@ import {
 
 export interface ForkLoopOptions {
   id: string;
+  agentId?: string;
+  conversationId?: string;
+  priority?: 'foreground' | 'background';
   llm: ResponseClient;
   spec: ModelSpec;
   messages: ContextRecord[];
@@ -46,7 +50,7 @@ const FORK_RECEIPT_HARD_CAP_CHARS = 20_000;
 
 export async function runForkLoop(opts: ForkLoopOptions): Promise<string> {
   const { id, llm, spec, tools, maxRounds, log } = opts;
-  const conversationId = createConversationId();
+  const conversationId = opts.conversationId ?? createConversationId(opts.agentId);
   const messages = [...opts.messages];
   const observed = [...messages];
   opts.observeMessages?.(observed);
@@ -75,9 +79,12 @@ export async function runForkLoop(opts: ForkLoopOptions): Promise<string> {
         }
       }
       try {
+        const estimatedInputTokens = estimateMessagesTokens(outbound) + estimateToolTokens(schemas);
+        if (spec.contextWindow !== undefined && estimatedInputTokens + (spec.maxTokens ?? 0) > spec.contextWindow)
+          throw new RangeError('Fork complete input and reserved output exceed the configured context window');
         generated = await llm.respond(responseRequest(spec, outbound, schemas), {
-          role: id, sessionId: id, conversationId,
-          context: outbound, nativeSpec: spec, signal: lease?.signal ?? opts.signal,
+          role: id, sessionId: id, conversationId, priority: opts.priority,
+          context: outbound, nativeSpec: spec, estimatedInputTokens, signal: lease?.signal ?? opts.signal,
           onEvent: event => {
             if (lease?.signal.aborted || opts.signal?.aborted) return;
             if (event.type === 'response.created') draft = new ResponseAccumulator();

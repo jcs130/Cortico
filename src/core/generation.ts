@@ -55,6 +55,10 @@ export interface ProviderAttempt {
   elapsedMs: number;
   requestId: string | null;
   conversationId?: string;
+  agentId?: string | null;
+  /** Local admission wait, independent of gateway queue and engine execution. */
+  clientQueueMs?: number | null;
+  requestedReasoning?: InferenceReasoning['requested'];
   responseId: string | null;
   outcome: 'completed' | 'incomplete' | 'failed' | 'aborted' | 'discarded';
   status: number | null;
@@ -96,6 +100,10 @@ export interface GenerateOptions {
   sessionId?: string;
   /** Gateway identity owned by the context lifecycle, independent of local role and run IDs. */
   conversationId?: string;
+  agentId?: string;
+  clientQueueMs?: number;
+  /** Admission priority within an endpoint; it never interrupts an active generation. */
+  priority?: 'foreground' | 'background';
   estimatedInputTokens?: number;
   resubmission?: boolean;
   /** Local context retains output reasoning and media references alongside the request Items. */

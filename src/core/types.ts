@@ -371,6 +371,7 @@ export interface UsageRecord {
   conversationId?: string | null;
   /** Identity returned by inference_stats; absent gateway values remain null. */
   gatewaySessionId?: string | null;
+  agentId?: string | null;
   /** Persona 定义的 session 声明 id，用于分类统计。 */
   role: string;
   label: string;
@@ -1269,6 +1270,8 @@ export interface CoreConfig {
   providers: Record<string, LLMProviderEntry>;
   /** providers 中的端点名；新模型调用读取当前值。 */
   activeProvider: string;
+  /** Shared across all provider bindings; one generation per conversation is always enforced. */
+  generation?: { maxConcurrent: number };
   /** provider 配置格式版本，保存配置时写入。 */
   providerSchemaVersion?: number;
   context: {

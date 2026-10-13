@@ -33,4 +33,13 @@ describe('model metadata observer', () => {
     const wrapped = observeModel(client, () => { throw new Error('observer unavailable'); });
     await expect(wrapped.respond({ model: 'test', input: '' })).resolves.toMatchObject({ response: { status: 'completed' } });
   });
+  it('reports explicit request reasoning ahead of endpoint defaults', async () => {
+    const seen: ModelObservation[] = [];
+    const client: ResponseClient = { async respond(request) { return {
+      response: { ...createResponse('response', request), status: 'completed' }, origin, attempts: [],
+    }; } };
+    await observeModel(client, event => seen.push(event)).respond({ model: 'test', input: '', reasoning: { effort: 'high' } },
+      { nativeSpec: { model: 'test', thinking: false } });
+    expect(seen[0]).toMatchObject({ kind: 'started', thinking: true, effort: 'high' });
+  });
 });

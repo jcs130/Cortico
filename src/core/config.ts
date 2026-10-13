@@ -11,6 +11,10 @@ const CORE_GROUP_TEXT = {
       title: '展示名',
       description: '控制台标题与 bot 发出的消息用这个名字。控制台立刻跟上;已经挂载的 World 在自己重启后才跟上。',
     },
+    maxConcurrent: {
+      title: '模型并发上限',
+      description: '同一服务地址的模型端点共享此上限；不同服务分别计数。前台优先，同一会话始终只允许一个在途生成。',
+    },
     quietGap: {
       title: '安静窗口',
       description: "参与合批的事件在最后一项到达后等待此时长；达到批次时限或数量上限时提前投递。",
@@ -51,6 +55,10 @@ const CORE_GROUP_TEXT = {
     displayName: {
       title: 'Display name',
       description: 'Used for the console title and as the sender name on messages the bot sends. The console picks it up at once; a mounted World does so when that World restarts.',
+    },
+    maxConcurrent: {
+      title: 'Model concurrency limit',
+      description: 'Shared by endpoints at the same service origin; separate services count independently. Foreground has priority; a conversation has at most one generation in flight.',
     },
     quietGap: {
       title: 'Quiet window',
@@ -104,6 +112,10 @@ export function coreConfigGroup(language: Language): ConfigGroup {
           title: t.displayName.title,
           'x-hot': true,
           description: t.displayName.description,
+        },
+        'generation.maxConcurrent': {
+          type: 'integer', title: t.maxConcurrent.title, description: t.maxConcurrent.description,
+          minimum: 1, maximum: 16, 'x-hot': true,
         },
         'batching.quietGapMs': {
           type: 'integer',
@@ -187,6 +199,7 @@ export const CORE_DEFAULTS = {
   timezone: 'Asia/Shanghai',
   providers: {} as Record<string, import('./types.ts').LLMProviderEntry>,
   activeProvider: '',
+  generation: { maxConcurrent: 2 },
   web: { port: 7777, theme: 'mint' },
   paths: { memory: 'memory', data: 'data' },
   batching: { quietGapMs: 2500, minBatchAgeMs: 0, maxBatchAgeMs: 15000, maxBatchSize: 100 },

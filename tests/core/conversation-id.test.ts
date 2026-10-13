@@ -9,12 +9,26 @@ import { message } from '../../src/protocol/open-responses/context.ts';
 import type { GenerateOptions, ResponseClient } from '../../src/core/generation.ts';
 import { nullLogger } from '../../src/core/util.ts';
 import { makeTmpDir } from './helpers.ts';
+import { createPersistedConversationId, loadAgentId } from '../../src/core/conversation-id.ts';
 
 const dirs: ReturnType<typeof makeTmpDir>[] = [];
 const temporary = () => { const tmp = makeTmpDir(); dirs.push(tmp); return tmp.dir; };
 afterEach(() => { for (const tmp of dirs.splice(0)) tmp.cleanup(); });
 
 describe('context-owned gateway sessions', () => {
+  it('persists unique agent namespaces and retains legacy session IDs during adoption', () => {
+    const dir = temporary();
+    const agent = loadAgentId(dir, '/deployments/operator');
+    expect(loadAgentId(dir, '/moved/operator')).toBe(agent);
+    expect(loadAgentId(temporary(), '/deployments/operator')).not.toBe(agent);
+    const legacy = new SessionLog(dir).conversationId;
+    const adopted = new SessionLog(dir, 'session-main.jsonl', undefined, agent);
+    expect(adopted.conversationId).toBe(legacy);
+    adopted.startConversation([message('user', 'new conversation')]);
+    expect(adopted.conversationId.startsWith(`${agent}:`)).toBe(true);
+    expect(new SessionLog(dir, 'session-main.jsonl', undefined, agent).conversationId).toBe(adopted.conversationId);
+    expect(new SessionLog(dir, 'branch.jsonl', undefined, agent).conversationId).not.toBe(adopted.conversationId);
+  });
   it('restores identities with historical contexts and retains them across prefix replacement', () => {
     const dir = temporary();
     const session = new SessionLog(dir);
@@ -42,6 +56,7 @@ describe('context-owned gateway sessions', () => {
   });
 
   it('retains one identity through actual fork tool rounds and isolates another fork of the same role', async () => {
+    const dir = temporary(), agentId = loadAgentId(dir, '/deployment/fixture');
     const ids: string[] = [];
     let calls = 0, toolRuns = 0;
     const client: ResponseClient = { async respond(request, options: GenerateOptions = {}) {
@@ -52,7 +67,10 @@ describe('context-owned gateway sessions', () => {
       return { response, origin: { instance: 'fixture', module: 'fixture', model: request.model!, compatibilityDomain: 'fixture' }, attempts: [] };
     } };
     for (let task = 0; task < 2; task++) {
+      const conversationId = createPersistedConversationId(dir, agentId, { role: 'review', sessionId: `review-${task}` });
+      expect(readFileSync(join(dir, 'conversation-identities.jsonl'), 'utf8')).toContain(conversationId);
       await runForkLoop({ id: 'review', llm: observeModel(client, () => {}), spec: { model: 'fixture-model', thinking: false },
+        agentId, conversationId,
         messages: [message('user', 'inspect')], maxRounds: 2, log: nullLogger(),
         tools: [{ name: 'inspect', description: 'Read the fixture', parameters: { type: 'object' }, tags: ['read'],
           handler: async () => { toolRuns++; return 'observed'; } }] });
@@ -62,5 +80,8 @@ describe('context-owned gateway sessions', () => {
     expect(ids[0]).toBe(ids[1]);
     expect(ids[2]).toBe(ids[3]);
     expect(ids[0]).not.toBe(ids[2]);
+    const saved = readFileSync(join(dir, 'conversation-identities.jsonl'), 'utf8');
+    expect(saved.trim().split('\n').map(line => JSON.parse(line).conversationId)).toEqual([ids[0], ids[2]]);
+    expect(saved).not.toContain('inspect');
   });
 });

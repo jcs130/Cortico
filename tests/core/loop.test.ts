@@ -12,6 +12,7 @@ import { SessionLog } from "./fixture-session.ts";
 import { JsonlEventStore } from '../../src/core/event-store.ts';
 import { CoreState } from '../../src/core/state.ts';
 import { estimateMessagesTokens, nullLogger } from "./fixture-util.ts";
+import { estimateToolTokens } from '../../src/protocol/open-responses/tokens.ts';
 import { ToolCallLog } from '../../src/core/tool-log.ts';
 import { Transcript } from '../../src/core/transcript.ts';
 import { LLMError, LLMStreamAborted } from './fixture-errors.ts';
@@ -891,7 +892,7 @@ describe('MainLoop user事件协议', () => {
     expect(messages[1].content).toContain('Session started');
     expect(messages[2].tool_calls).toBeUndefined();
     expect(rig.llm.calls[0].tools?.map((tool) => tool.name).slice(0, 2))
-      .toEqual(['fork', 'schedule_wake']);
+      .toEqual(['fork', 'noop']);
     assertPairing(messages);
   });
 
@@ -1596,6 +1597,7 @@ describe('MainLoop user事件协议', () => {
     rig.start();
     await until(() => handoffs >= 1);
     expect(warnings.some((w) => w.includes('越过模型上下文上限'))).toBe(true);
+    expect(rig.llm.calls).toHaveLength(0);
   });
 
   it('交接收尾通知可见 World onHandoffEnded:此刻 session 已换新前缀,钩子里推的项落在新 session 第一批;隐藏 World 不通知', async () => {
@@ -2025,16 +2027,18 @@ describe('MainLoop user事件协议', () => {
     const warnings: string[] = [];
     rig = makeRig({
       cfgPatch: (cfg) => {
-        activeSpec(cfg).contextWindow = 3000;
+        Object.assign(activeSpec(cfg), { contextWindow: 3000, maxTokens: 500 });
       },
+      worlds: [makeFakeIO('qq', [{ ...makeTool('noop', 'ok'), description: 'Required operation schema. '.repeat(50) }])],
       log: { ...nullLogger(), warn: (msg: string) => warnings.push(msg) },
       preSession: [{ role: 'system', content: 'old system' }],
       onHandoff: async () => ({ tail: bulk('候选'), trim: true }),
     });
 
     await rig.loop.handoffContext();
-    // 照常裁剪:前缀加尾巴装进窗口
-    expect(estimateMessagesTokens(rig.session.messages)).toBeLessThanOrEqual(3000);
+    // 保留历史时也给完整工具 schema 和单轮输出留下位置。
+    expect(estimateMessagesTokens(rig.session.messages) + estimateToolTokens(rig.loop.getToolSchemas()) + 500)
+      .toBeLessThanOrEqual(3000);
     // trim 允许裁剪，不产生策略越界告警。
     expect(warnings.some((w) => w.includes('越过模型上下文上限'))).toBe(false);
     assertPairing(rig.session.messages);
@@ -3002,7 +3006,10 @@ describe("MainLoop 连续失败与恢复通知", () => {
     // 第 5 次响,第 6 次不再响
     expect(alarms).toHaveLength(1);
     expect(alarms[0].msg).toContain('连续失败 5 次');
-    expect(alarms[0].data).toMatchObject({ threshold: 5, err: { message: 'upstream down' } });
+    expect(alarms[0].data).toMatchObject({ threshold: 5, err: {
+      name: 'GenerationError', status: 0, requestId: null, attempts: 1,
+    } });
+    expect(JSON.stringify(alarms[0].data)).not.toContain('upstream down');
     expect(rows.some((row) => row.msg.includes('[解除]'))).toBe(false);
 
     rig.llm.script(textReply('回来了'));

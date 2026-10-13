@@ -152,6 +152,7 @@ describe('Core · session 声明与 fork 原语', () => {
       id: 'sidethought',
       messages: [{ role: 'user', content: '画一张图' }],
     });
+    await vi.waitFor(() => expect(llmSessionId).toBe('sidethought'));
     const session = core.sessions.list().find((s) => s.role === 'sidethought')!;
     expect(llmSessionId).toBe('sidethought');
     expect(core.sessions.messages(session.id)?.map(entry => entry.item)).toMatchObject([
@@ -212,6 +213,7 @@ describe('Core · session 声明与 fork 原语', () => {
 
     const first = core.spawnFork({ id: 'sidethought', model: 'bulk', maxOutputTokens: 2000, messages: [] });
     const second = core.spawnFork({ id: 'sidethought', messages: [] });
+    await vi.waitFor(() => expect(seen).toHaveLength(2));
     const activeIds = core.sessions.list()
       .filter((s) => s.role === 'sidethought' && s.endedAt === null)
       .map((s) => s.id)

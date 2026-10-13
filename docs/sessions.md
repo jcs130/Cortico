@@ -1,4 +1,4 @@
-<!-- Owner: src/core/sessions.ts, src/core/types.ts (SessionDecl, Persona.onHandoff), src/core/loop.ts -->
+<!-- Owner: src/core/sessions.ts, src/core/session.ts, src/core/conversation-id.ts, src/core/fork.ts, src/core/types.ts (SessionDecl, Persona.onHandoff), src/core/loop.ts -->
 
 # Session
 
@@ -39,6 +39,8 @@ Core 的输入上限为 `hardTokens = max(0, 生效窗口 − (spec.maxTokens ??
 Core 调用 `Persona.onHandoff(snapshot, { hardTokens })`。Persona 决定保留的上下文和交接笔记，
 Core 重建 system 前缀、按容量截断保留内容并重置 session。
 
+完整输入的本地估算包含 system、历史、合成开头、当轮投影和工具 schema，发送前检查该估算与输入上限。临时 fork 同样将完整输入与预留输出相加检查；不为通过预算而降低思考等级或输出上限。真实输入 token 来自服务回执，本地估算单独标识。
+
 阶段预算(`context.maxTokens`、`softRatio`、`keepRatio`)是 Persona 自己的配置,不在 Core 里。
 Cormini 一系的默认:64000 / 0.85 / 1/3;终端页上下文圈的分母与黄线读的是这几个数。
 
@@ -58,3 +60,5 @@ Core 记录并发数，控制台「运行诊断 → 会话统计」显示各 ses
 没有换行结尾视为追加中途中断:解析不出的截掉、完整的补上换行,并记一条 warn;其他损坏行拒绝加载。
 统计(调用次数、prompt / completion / 缓存命中 / 推理 token)只在内存,重启清零;已结束的
 临时 session 保留最近 8 个供查看。
+
+`data/agent-identity.json` 保存部署的固定命名空间，新真实会话使用 `<agent-id>:<UUID>`。`<session-file>.metadata.json` 保存会话 ID；已有 ID 保留，后续轮次、工具循环、重试、前缀重载及进程恢复沿用它。独立 fork 使用不同 ID；已结束或进程结束的临时 fork 不恢复执行，其已发请求身份保存在用量账本。显式新开会话分配新 ID。所有模型请求发送 `x-litellm-session-id`，身份不进入提示词。

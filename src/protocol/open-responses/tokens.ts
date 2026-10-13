@@ -29,3 +29,9 @@ export function estimateMessagesTokens(messages: readonly ContextRecord[]): numb
     0,
   );
 }
+
+/** Schema text contributes to every complete input; no upstream tokenizer count is implied. */
+export function estimateToolTokens(tools: readonly { name: string; description?: string | null; parameters?: Record<string, unknown> | null }[]): number {
+  return tools.reduce((sum, { name, description, parameters }) =>
+    sum + 8 + estimateTokens(JSON.stringify({ name, description, parameters })), 0);
+}

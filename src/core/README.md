@@ -1,8 +1,10 @@
-Owner: `src/core/core.ts`, `src/core/types.ts`, `src/core/loop.ts`, `src/core/bus.ts`, `src/core/session.ts`, `src/core/conversation-id.ts`, `src/core/model-observer.ts`
+Owner: `src/core/core.ts`, `src/core/types.ts`, `src/core/loop.ts`, `src/core/bus.ts`, `src/core/session.ts`, `src/core/conversation-id.ts`, `src/core/model-observer.ts`, `src/core/model-calls.ts`
 
 # src/core
 
-`SessionLog.conversationId` 保存在对应上下文旁的 `<session-file>.metadata.json`，格式为 `cortico-UUID`。继续历史、前缀重载和上下文交接保留身份；显式清空重开用 `startConversation()` 创建新身份。每次 fork 有独立身份，工具续接、调度让出及失败重试保留它；独立单次模型请求和诊断使用新身份。身份不进入系统提示或历史消息。元数据损坏时报错并保留文件，不静默更换身份。
+部署命名空间保存在 `data/agent-identity.json`，新会话使用 `<agent-id>:<UUID>`。`SessionLog.conversationId` 保存在对应上下文旁的 `<session-file>.metadata.json`；已有 ID 原样保留。继续历史、前缀重载、上下文交接与进程恢复保留身份；显式清空重开用 `startConversation()` 创建新身份。每次 fork 的独立身份在首个请求之前写入 `data/conversation-identities.jsonl`，工具续接、调度让出及失败重试保留它；临时 fork 不恢复执行。独立单次模型请求和诊断使用新身份。身份不进入系统提示或历史消息。元数据损坏时报错并保留文件。
+
+`ModelCallGate` 在同一服务 origin 的所有前台、后台与绑定端点间共享 `generation.maxConcurrent`，默认 2；不同服务分别计数，同一会话跨服务也只允许一个在途生成。空出名额时前台优先，已运行的生成不被此闸门打断。等候取消不会发请求，关机信号传给排队和在途调用。`attempt.clientQueueMs` 记录一次生成的客户端准入等待，同一生成的重试共享该值，汇总时按 generation 去重；服务端 `queueMs` 与 `executionMs` 分别保留。输入预算包含 system、历史、合成开头、当轮投影和工具 schema，另留完整输出上限；本地估算与服务端实际 token 分开记录。
 
 Core 管理 session、事件流与模型调用的生命周期，包括事件投递、调度、上下文交接、工具执行、
 容量限制、错误隔离和 Provider。Persona 定义上下文语义；Core 使用的事件封装、错误和截断记号
@@ -17,6 +19,7 @@ Core 管理 session、事件流与模型调用的生命周期，包括事件投�
 | `loop.ts` | 主 session 的模型调用循环、事件投递、上下文交接执行 |
 | `bus.ts` | `WakeBus`：合批事件总线、四种触发模式、FIFO 顺序、暂停与投递闸门 |
 | `fork.ts` | 临时 session 的工具循环 |
+| `model-calls.ts` | 共享生成并发、会话串行与排队取消 |
 | `tool-outcome.ts` | Persona 对完成工具结果的同步补充，保留原日志与控制字段 |
 | `session.ts`、`sessions.ts` | 常驻 session 的追加式上下文；各 session 的状态与用量记录 |
 | `event-store.ts` | 按 run 分片的 JSONL 事件库,cursor 跨 run 全局单调 |

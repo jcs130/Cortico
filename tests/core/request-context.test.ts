@@ -13,6 +13,7 @@ import type { LogEmitOptions, Persona, ToolDef } from '../../src/core/types.ts';
 import { createResponse, type OutputItem, type Request } from '../../src/protocol/open-responses/index.ts';
 import { functionCall, functionResult, message, type ContextRecord } from '../../src/protocol/open-responses/context.ts';
 import { textOf, withoutPastReasoning } from '../../src/protocol/open-responses/context-helpers.ts';
+import { estimateToolTokens } from '../../src/protocol/open-responses/tokens.ts';
 import { activeSpec, fakeBlobIntern, makeCfg, makeFakeHarnessApi, makeFakeIO, makeFakePersona, makeTmpDir, makeTool, sleep } from './helpers.ts';
 
 class ScriptedClient implements ResponseClient {
@@ -100,7 +101,8 @@ function makeRig(options: {
 }
 
 const historicalContext = () => [message('system', 'stable prefix'), message('user', 'historical detail '.repeat(1_000)), message('assistant', 'historical answer')];
-const actualEstimate = (rig: ReturnType<typeof makeRig>) => estimateMessagesTokens(rig.cfg.context.keepPastThinking ? rig.loop.outboundMessages() : withoutPastReasoning(rig.loop.outboundMessages()));
+const actualEstimate = (rig: ReturnType<typeof makeRig>) => estimateMessagesTokens(rig.cfg.context.keepPastThinking ? rig.loop.outboundMessages() : withoutPastReasoning(rig.loop.outboundMessages()))
+  + estimateToolTokens(rig.llm.calls.at(-1)!.request.tools ?? []);
 
 describe('MainLoop request context projection', () => {
   it.each(['user', 'tool'] as const)('preserves internal event provenance and exact offsets without changing %s delivery text', async (eventDelivery) => {
@@ -249,7 +251,8 @@ describe('MainLoop request context projection', () => {
     expect(sent[1].context.head).toBe(true);
     expect(rig.session.records.some(entry => entry.context.head)).toBe(false);
     const metadata = (rig.rounds[0].data as { requestContext: Record<string, unknown> }).requestContext;
-    expect(metadata).toEqual({ storedRecords: 4, completeRecords: 5, requestRecords: 3, projected: true, estimatedInputTokens: estimateMessagesTokens(sent) });
+    expect(metadata).toEqual({ storedRecords: 4, completeRecords: 5, requestRecords: 3, projected: true,
+      estimatedInputTokens: estimateMessagesTokens(sent) + estimateToolTokens(rig.llm.calls[0].request.tools ?? []) });
     expect(JSON.stringify(metadata)).not.toContain('synthetic head');
     expect(JSON.stringify(metadata)).not.toContain('historical detail');
   });

@@ -20,6 +20,7 @@ export class SessionLog {
     dataDir: string,
     fileName = 'session-main.jsonl',
     stamp?: () => string,
+    private readonly agentId?: string,
   ) {
     this.context = new ContextLog(join(dataDir, fileName), stamp);
     this.identityFile = join(dataDir, `${fileName}.metadata.json`);
@@ -35,7 +36,7 @@ export class SessionLog {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
-    return this.saveIdentity(createConversationId());
+    return this.saveIdentity(createConversationId(this.agentId));
   }
 
   private saveIdentity(id: string): string {
@@ -49,7 +50,7 @@ export class SessionLog {
   /** Explicitly starting a new context also starts a new gateway session. */
   startConversation(messages: readonly ContextRecord[]): void {
     this.reset(messages);
-    this.saveIdentity(createConversationId());
+    this.saveIdentity(createConversationId(this.agentId));
   }
 
   /** 每次 append 后通知 Web 调试监听器;监听器异常与会话写入隔离。 */

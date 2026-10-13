@@ -71,6 +71,7 @@ import {
 } from './markers.ts';
 import { fixPairing, rebuildTail, validatePairing } from './truncate.ts';
 import { validateRequestContext } from './request-context.ts';
+import { estimateToolTokens } from '../protocol/open-responses/tokens.ts';
 
 import { nowIso, prefixFingerprint, renderEventLines } from './util.ts';
 
@@ -1231,7 +1232,7 @@ export class MainLoop {
         completeRecords: completeOutbound.length,
         requestRecords: outbound.length,
         projected,
-        estimatedInputTokens: this.estimateOutbound(outbound),
+        estimatedInputTokens: this.estimateOutbound(outbound) + estimateToolTokens(schemas),
       };
       if (projected) this.anchor = null;
       const prefixHash = prefixFingerprint(outbound);
@@ -1254,6 +1255,14 @@ export class MainLoop {
           } finally { reasoningSelectionMs = Date.now() - selectionStart; }
         }
         flight.controller.signal.throwIfAborted();
+        const hardTokens = this.d.context.hardTokens();
+        if (hardTokens !== null && requestContext.estimatedInputTokens > hardTokens) {
+          log.warn('完整请求估算越过模型上下文上限,交接后继续', { ...requestContext, hardTokens, reservedOutputTokens: spec.maxTokens ?? null });
+          this.handoffRequested = true;
+          noteRound('overflow');
+          this.finishTurn();
+          return;
+        }
         // role 仅用于故障分类，不写入请求体。
         const llmStart = Date.now();
         let res: Awaited<ReturnType<typeof llm.respond>>;
@@ -1262,6 +1271,7 @@ export class MainLoop {
             context: outbound, nativeSpec: spec,
             ...(tapEvents ?? {}),
             role: decl.id,
+            priority: 'foreground',
             estimatedInputTokens: requestContext.estimatedInputTokens,
             resubmission: consecutiveFailures > 0,
             sessionId: this.mainTrack?.id,
@@ -1357,9 +1367,8 @@ export class MainLoop {
         }
         consecutiveFailures++;
         const detail = {
-          err: e,
-          // 4xx 正文截断后记录；流内失败保留协议层提供的失败事件。
-          ...(e instanceof GenerationError && e.body ? { body: e.body.slice(0, 500) } : {}),
+          err: e instanceof GenerationError ? { name: e.name, status: e.status,
+            requestId: e.attempts.at(-1)?.requestId ?? null, attempts: e.attempts.length } : e,
           ...(e instanceof GenerationError ? { status: e.status } : {}),
           attempt: consecutiveFailures,
         };
@@ -1607,7 +1616,7 @@ export class MainLoop {
       const keep = this.d.cfg.context.keepPastThinking;
       return anchor.tokens - (keep ? 0 : anchor.reasoningTokens) + this.estimateOutbound(records.slice(anchor.records));
     }
-    return this.estimateOutbound(this.outboundMessages());
+    return this.estimateOutbound(this.outboundMessages()) + estimateToolTokens(this.getToolSchemas());
   }
 
   /** 上游已计数的部分；全部由本地估算时为 0。 */
@@ -1740,7 +1749,8 @@ export class MainLoop {
     const { log, context } = this.d;
     const { tail } = result;
     const hard = context.hardTokens();
-    const budget = hard === null ? null : Math.max(0, hard - context.estimateTokens(prefix));
+    const budget = hard === null ? null : Math.max(0,
+      hard - context.estimateTokens(prefix) - estimateToolTokens(this.getToolSchemas()));
     const estimate = (records: readonly ContextRecord[]): number => context.estimateTokens(records);
     if (tail === null) {
       let start = 0;
