@@ -9,42 +9,8 @@ import type { CoreConfig, World, WorldLifecycleEvent } from './core/types.ts';
 import type { LoadedConfig } from './core/config.ts';
 import type { BotDefinition } from './bot.ts';
 import { updateJsonObject } from './config-file.ts';
-import { pick, type Language } from './core/language.ts';
-
-/** 装配层给控制台的回执与拒绝理由,按发起请求的界面语言取。 */
-const ASSEMBLY_TEXT = {
-  zh: {
-    constructFailed: (detail: string) => `构造失败: ${detail}`,
-    notImplemented: '本地没有找到这个 World 的实现。',
-    unknownWorld: (id: string) => `未知 World: ${id}`,
-    alreadyRunning: (label: string) => `${label} 已启用`,
-    prebuilt: (label: string) => `${label} 是预建实例,不经装配层激活`,
-    activated: (label: string, id: string) => `${label}（${id}）已启用`,
-    deactivated: (label: string, id: string) => `${label}（${id}）已停用`,
-    notActive: (label: string) => `${label} 未激活,没有可重启的实例`,
-    restarted: (label: string) => `${label} 已重启`,
-    toolClash: (other: string, names: string[]) => `工具名与 ${other} 撞名,拒绝挂载: ${names.join(', ')}`,
-    resourceClash: (other: string, resource: string) => `运行资源 ${resource} 已由 ${other} 使用,拒绝挂载`,
-    toolReserved: (names: string[]) => `工具名已被 Core 或 Persona 占用,拒绝挂载: ${names.join(', ')}`,
-    unbound: '装配层尚未绑定 core',
-  },
-  en: {
-    constructFailed: (detail: string) => `Construction failed: ${detail}`,
-    notImplemented: 'No implementation of this World was found locally.',
-    unknownWorld: (id: string) => `Unknown World: ${id}`,
-    alreadyRunning: (label: string) => `${label} is already enabled`,
-    prebuilt: (label: string) => `${label} is a prebuilt instance and is not activated through assembly`,
-    activated: (label: string, id: string) => `${label} (${id}) enabled`,
-    deactivated: (label: string, id: string) => `${label} (${id}) disabled`,
-    notActive: (label: string) => `${label} is not active, so there is no instance to restart`,
-    restarted: (label: string) => `${label} restarted`,
-    toolClash: (other: string, names: string[]) => `Tool names clash with ${other}, refusing to mount: ${names.join(', ')}`,
-    resourceClash: (other: string, resource: string) => `Runtime resource ${resource} is already used by ${other}, refusing to mount`,
-    toolReserved: (names: string[]) => `Tool names are taken by Core or the Persona, refusing to mount: ${names.join(', ')}`,
-    unbound: 'The assembly layer is not bound to a core yet',
-  },
-};
-const text = (language: Language) => pick(language, ASSEMBLY_TEXT);
+import type { Language } from './core/language.ts';
+import { assemblyText as text } from './strings.ts';
 
 /** 每个 World 配置段的最小形状。 */
 export interface WorldSection {
@@ -334,13 +300,29 @@ export class WorldAssembly {
     return this.slots.find((s) => s.id === id)?.label;
   }
 
+  /**
+   * `language` 下的显示名,每次现取:实例的 `console(language).label`,其次定义的 `label`;
+   * 预建实例与只有声明的缺失项用装配时记下的名字。
+   */
+  labelIn(id: string, language: Language): string {
+    const slot = this.slots.find((s) => s.id === id);
+    let declared: string | undefined;
+    try {
+      declared = slot?.instance.console?.(language)?.label;
+    } catch {
+      declared = undefined;
+    }
+    const def = slot ? slot.definition : this.worlds.find((d) => d.id === id);
+    return declared ?? def?.label ?? slot?.label ?? this.missing.find((m) => m.id === id)?.label ?? id;
+  }
+
   /** 三个动作的回执与拒绝理由按 `language` 给;省略 = 中文。 */
   async activate(id: string, language: Language = 'zh'): Promise<string> {
     const t = text(language);
     const slot = this.slot(id, language);
-    if (slot.mounted) return t.alreadyRunning(slot.label);
+    if (slot.mounted) return t.alreadyRunning(this.labelIn(id, language));
     const def = slot.definition;
-    if (!def) throw new Error(t.prebuilt(slot.label));
+    if (!def) throw new Error(t.prebuilt(this.labelIn(id, language)));
     const ctx = this.context(def);
     def.preflight?.(ctx);
     const clash = this.resourceClash(def, this.slots.filter((other) => other.mounted))
@@ -356,7 +338,7 @@ export class WorldAssembly {
     }
     slot.mounted = true;
     this.host?.lifecycle?.({ kind: 'mounted', id, label: slot.label });
-    return t.activated(slot.label, id);
+    return t.activated(this.labelIn(id, language), id);
   }
 
   async deactivate(id: string, language: Language = 'zh'): Promise<string> {
@@ -365,12 +347,12 @@ export class WorldAssembly {
     if (wasMounted) await this.stopSlot(slot);
     this.persist(id, { enabled: false });
     if (wasMounted) this.host?.lifecycle?.({ kind: 'unmounted', id, label: slot.label });
-    return text(language).deactivated(slot.label, id);
+    return text(language).deactivated(this.labelIn(id, language), id);
   }
 
   async restart(id: string, language: Language = 'zh'): Promise<string> {
     const slot = this.slot(id, language);
-    if (!slot.mounted) throw new Error(text(language).notActive(slot.label));
+    if (!slot.mounted) throw new Error(text(language).notActive(this.labelIn(id, language)));
     await this.stopSlot(slot);
     const clash = slot.definition
       ? this.resourceClash(slot.definition, this.slots.filter((other) => other.mounted))
@@ -380,7 +362,7 @@ export class WorldAssembly {
     await this.mountHost().mount(slot.instance);
     slot.mounted = true;
     this.host?.lifecycle?.({ kind: 'restarted', id, label: slot.label });
-    return text(language).restarted(slot.label);
+    return text(language).restarted(this.labelIn(id, language));
   }
 
   /** 按 worlds.<id>.enabled 同步状态，供 WorldContext.restart 调用。 */
@@ -410,8 +392,7 @@ export class WorldAssembly {
     for (const other of mounted) {
       const shared = other.tools().map((t) => t.name).filter((n) => names.has(n));
       if (shared.length) {
-        const label = this.labelOf(other.id) ?? other.id;
-        return (language) => text(language).toolClash(label, shared);
+        return (language) => text(language).toolClash(this.labelIn(other.id, language), shared);
       }
     }
     return null;

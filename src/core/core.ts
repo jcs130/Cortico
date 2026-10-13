@@ -104,8 +104,6 @@ export class Core<C extends CoreConfig = CoreConfig> {
   private readonly forkRunning = new Map<string, number>();
   /** 各 World 在途的认知请求数；并发限制由 Persona 决定。 */
   private readonly cognitionRunning = new Map<string, number>();
-  /** 接收事件的主 session 声明。 */
-  private readonly mainDecl: SessionDecl;
   /** World 自愿上报用量的常驻仪表条目(每 World 一条) */
   private readonly moduleUsageTracks = new Map<string, SessionHandle>();
   /** 隐藏 World 照常落库的事件计数与上次回报时刻(每 World 一条) */
@@ -132,7 +130,7 @@ export class Core<C extends CoreConfig = CoreConfig> {
       incidentsDir: join(this.run.dir, 'incidents'),
     });
     this.log = this.runlog.logger('core');
-    this.store = new JsonlEventStore({ dataDir, run: this.run.id, log: this.log.child('store') });
+    this.store = new JsonlEventStore({ dataDir, run: this.run.id, log: this.log.child('store'), timezone: cfg.timezone });
     // WakeBus 持有只读配置引用，使 batching 热更新对后续 push 生效。
     this.bus = new WakeBus(cfg.batching, this.log.child('bus'));
     this.session = new SessionLog(dataDir, 'session-main.jsonl', () => nowIso(cfg.timezone), this.agentId);
@@ -178,7 +176,6 @@ export class Core<C extends CoreConfig = CoreConfig> {
       );
     }
 
-    this.mainDecl = main[0];
     this.loop = new MainLoop({
       cfg,
 
@@ -382,7 +379,7 @@ export class Core<C extends CoreConfig = CoreConfig> {
         onToolOutcome: this.persona.onToolOutcome?.bind(this.persona),
       });
     } finally {
-      this.forkRunning.set(decl.id, Math.max(0, (this.forkRunning.get(decl.id) ?? 1) - 1));
+      this.forkRunning.set(decl.id, this.forkRunning.get(decl.id)! - 1);
       track.close();
     }
   }
@@ -429,17 +426,10 @@ export class Core<C extends CoreConfig = CoreConfig> {
           log.warn('认知请求受理失败', { err: e });
           return { error: e instanceof Error ? e.message : String(e) };
         } finally {
-          this.cognitionRunning.set(mod.id, Math.max(0, (this.cognitionRunning.get(mod.id) ?? 1) - 1));
+          this.cognitionRunning.set(mod.id, this.cognitionRunning.get(mod.id)! - 1);
         }
       },
     };
-  }
-
-  /** 各 World 当下在途的认知外包请求数(控制台/诊断用;没有在途的 World 不出现) */
-  cognitionInFlight(): Record<string, number> {
-    const out: Record<string, number> = {};
-    for (const [id, n] of this.cognitionRunning) if (n > 0) out[id] = n;
-    return out;
   }
 
   get config() {
@@ -480,11 +470,6 @@ export class Core<C extends CoreConfig = CoreConfig> {
     const visibility: Record<string, boolean> = {};
     for (const mod of this.worlds) visibility[mod.id] = this.isWorldVisible(mod.id);
     return { visibility, driftedWorlds: this.loop.modulePrefixDrift() };
-  }
-
-  /** 用于控制台状态和启动信息的当前模型配置。 */
-  mainSessionSpec(): ModelSpec {
-    return this.activeSpec();
   }
 
   /** 按 activeProvider 读取模型配置；端点未配置模型时抛错。 */
@@ -668,15 +653,13 @@ export class Core<C extends CoreConfig = CoreConfig> {
     const id = `worlds.${worldId}`;
     let track = this.moduleUsageTracks.get(id);
     if (!track) {
-      track = this.sessions.open(id, opts?.label ?? `${worldId}World 自带模型`, { id });
+      track = this.sessions.open(id, opts?.label ?? worldId, { id });
       this.moduleUsageTracks.set(id, track);
     }
     track.record(usage, undefined, opts?.model, { charges: opts?.charges });
   }
 
   async start(): Promise<void> {
-    const dataDir = this.loaded.dataDir;
-    if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
     // 构造期已加载状态；此处再次 load 会覆盖装配后、启动前的修改。
     const repair = this.session.load();
     if (repair) {
@@ -710,7 +693,6 @@ export class Core<C extends CoreConfig = CoreConfig> {
     this.log.emit('info', 'core已启动', { event: 'started', data: { run: this.run.id } });
   }
 
-  /** 先终止主循环，再并发停止 World；各步骤有独立期限，失败写入返回结果。 */
   /**
    * 运行中挂载一个 World:入表,core 已启动则立即 start,并重建 system 前缀
    * (环境提示词段与工具表同属缓存前缀,挂载必须连带换掉)。start 抛错时不入表。
@@ -754,6 +736,7 @@ export class Core<C extends CoreConfig = CoreConfig> {
     return failure;
   }
 
+  /** 先终止主循环，再并发停止 World；各步骤有独立期限，失败写入返回结果。 */
   async stop(): Promise<WorldStopFailure[]> {
     this.started = false;
     this.generationScheduler.stop();

@@ -46,8 +46,13 @@ SameSite=Strict、Max-Age 取浏览器上限 400 天;请求经 HTTPS 或反向�
 操作员开口或按下按钮时控制台销掉标记(`POST /api/onboarding/dismiss`),这一组不再出现。
 没有可用端点时按钮按不动。
 
+终端页时间线把记录上 `image/*` 的附件画成缩略图,点击在浮层里看原图;取不到字节的那张不画,正文里的
+`[blob …]` 行照常显示。字节经 `GET /api/blob?handle=<句柄>` 取,按 `Core.resolveBlob` 解析:`log:` 回应可长期缓存,
+`mem:` 回应 `no-store`,认不出或已不在回 404。回应带 `X-Content-Type-Options: nosniff` 与
+`Content-Security-Policy: sandbox`。
+
 左栏三组:Core(框架自己的页)、Persona & Memory(Persona 页、Memory 页、系统提示词)、World(总览与各实例)。
-左栏顶上是框架字标,底部是这一台 bot 的头像与展示名(`displayName`)。
+左栏顶上是框架字标,底部是这一台 bot 的头像与展示名(`displayName`),展示名下面写运行中或已暂停。
 根 URL 不带 hash 时跳转到 `live`；未知路由不显示页面内容，侧栏仍可导航。
 存储项按归属分页:Core 的在运行诊断的「数据」子页,一键清空也在那里;World、Persona 与 Memory 页
 各有「数据」页签,列本页声明的项。配置组同理:Core 的在运行诊断的「配置」子页,其余在声明方自己的页。
@@ -83,7 +88,7 @@ bot 的展示名。面板、配置组与提示词文档由贡献方声明;
 登记的资源在卸载时释放;`memo` 按页面和面板隔离本地状态,`guardLeave` 检查是否允许离开,
 `pickPath` 打开本机路径选择器,`setConfig` 写配置组,`mountSlot` 挂本页声明到某插槽的面板,
 `ui` 提供界面组件(`sheet`、`table`、
-`log`、`toast`、`confirm`、`drawer`、`promptInput`…)。面板不碰 `document.body`,不直连
+`log`、`toast`、`confirm`、`drawer`、`lightbox`、`promptInput`…)。面板不碰 `document.body`,不直连
 `/api/`,不用裸定时器。
 
 ## 框架更新提示
@@ -106,9 +111,10 @@ bot 的展示名。面板、配置组与提示词文档由贡献方声明;
 `GET /api/diagnostics`(终端页的「导出诊断」)把排查一场跑要看的记录收进一个
 JSON:运行指纹(`runs/index.jsonl` 的这一行与 `run.json`)、状态快照、常驻 session 的上下文与
 合成开头、session 列表、工具表、最近事件、运行日志(warn 及以上与不分级别的尾部各一段)、
-工具调用、transcript 里的交接记号、用量聚合与本 run 的用量行、`config.json`。每段各有条数
+工具调用、transcript 里的交接记号、用量聚合与本 run 的用量行、当前端点(`endpoint`:端点名、Provider 模块与
+`spec` 里填了的 `model`、`thinking`、`reasoningEffort`、`temperature`、`maxTokens`、`contextWindow`)、`config.json`。每段各有条数
 上限(`DIAGNOSTICS_TAIL`),取到上限的段名列在 `truncated` 里;键名含 secret / token / key /
-password 的配置值写出前抹成 `***`。未挂载的接缝那一段为空。
+password 的配置值写出前抹成 `***`;`endpoint` 段不经这一步,否则 `maxTokens` 会被抹掉。未挂载的接缝那一段为空。
 
 ## 语言
 
@@ -124,8 +130,9 @@ password 的配置值写出前抹成 `***`。未挂载的接缝那一段为空�
 
 文案用 `pick(language, table)` 选取。表必须有 `zh` 和 `en`,其余语言可缺;缺的语言 `zh-Hant` 读 `zh`,
 其余读 `en`。值为普通对象时,某语言的译文可以只给部分顶层键,缺的键取回退语言的值。译文放在 `strings.ts`
-旁的 `strings.<语言代码>.ts`,默认导出 `Partial<typeof en>`(`strings.ts` 导出 `en`,译文文件用
-`import type` 取类型),由 `strings.ts` 导入并放进传给 `pick` 的表。
+旁的 `strings.<语言代码>.ts`,`strings.ts` 导出的每张表(`S`、`text`、`panel` 等)在译文文件里各有一个
+同名导出,类型是该表英文版的 `Partial`(`strings.ts` 导出 `en`、`panelEn` 等,译文文件用 `import type`
+取类型),由 `strings.ts` 导入并放进传给 `pick` 的表。
 
 界面语言不改变模型输入。World 的环境提示词模板、工具回执和事件正文使用其实现指定的语言,
 Persona 的文本使用作者选择的语言。

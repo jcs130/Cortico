@@ -3,10 +3,14 @@
  * 主进程转发工具、面板及宿主调用；子进程上报日志、事件和状态缓存。
  */
 import type { LogNote } from '../../core/ipc-logger.ts';
+import type { Language } from '../../core/language.ts';
 import type {
-  CognitionRequest, CognitionResult, EventEnvelope, EventTag, LLMUsage, WorldConsoleDecl,
-  PushOptions, TriggerMode, WorldRequestFacts,
-  WorldHost,
+CognitionRequest,CognitionResult,
+EventTag,LLMUsage,
+PushOptions,TriggerMode,
+WorldConsoleDecl,
+WorldHost,
+WorldRequestFacts
 } from '../../core/types.ts';
 import type { MinecraftConfigSection } from './config.ts';
 
@@ -30,7 +34,8 @@ export type EngineRequest =
       /** Parent resolves only the explicitly selected procedure graph. */
       selectedBlobs?: Array<{ handle: string; b64: string; mime: string }>;
     }
-  | { kind: 'panel'; panel: string; method: string; args: unknown[] }
+  /** 回执与错误按 language 措辞。 */
+  | { kind: 'panel'; panel: string; method: string; args: unknown[]; language: Language }
   | { kind: 'storage-clear'; key: string }
   /** 投递时调用子进程登记的渲染回调；null 表示不生成事件正文。 */
   | { kind: 'render-deferred'; type: string; renderId: number }
@@ -85,7 +90,10 @@ export type EngineNote =
     }
   | {
       kind: 'status';
-      decl: Pick<WorldConsoleDecl, 'lamps' | 'badges' | 'links'>;
+      /** 灯、徽标、链接的中英两份;代理按请求的界面语言取一份。 */
+      decl: Record<'zh' | 'en', Pick<WorldConsoleDecl, 'lamps' | 'badges' | 'links'>>;
+      /** 环境提示词的世界身份一行,按当前连接的目标算 */
+      worldLine: string;
       storage: StorageStat[];
       promptVars: Record<'minecraft.current_task' | 'minecraft.goals', string>;
       requestFacts: WorldRequestFacts | null;

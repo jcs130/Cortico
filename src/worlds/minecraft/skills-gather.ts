@@ -4,44 +4,50 @@
  * 共同点是先看见再动手,看不见的一律照实报,不靠穿墙情报凑答案。
  */
 import type { Bot } from 'mineflayer';
+import pathfinderPkg from 'mineflayer-pathfinder';
 import { Vec3 } from 'vec3';
+import { blockIdOf,isAirState,normalizeBlockName } from './blueprint.ts';
 import {
-  CROP_MAX_AGE, DIRECTIONS, DIRECTION_ZH, bearing, biomeAt, canSeeBlockAt, canSeeEntity, cropAgeAt, farmlandMoistureAt,
-  droppedStackOf, entityObservationNote, headInWater, isNight, type Direction, villagerNote,
-} from './terrain.ts';
-import { Aborted, SkillBlocked, checkAbort, sleep, type SkillContext } from './skill-context.ts';
-import {
-  breakPermissionNote, digBlock, dropGoal, gotoGoal, levelTravelGoal, matchBlockIds, routeNote,
-  settleOnGround, walkOnlyPath, withRouteScene,
-} from './travel.ts';
-import {
-  INVENTORY_SLOTS, PICKUP_SETTLE_MS, dropNamesOf, invCount, invGains, invSnapshot,
-} from './inventory.ts';
-import { Upkeep, pushPocketLine, standableCell } from './placement.ts';
-import { zhEntity, zhName } from './names.ts';
+AIR_NAMES,LIQUIDS,PROBE_CELLWISE_MAX,PROBE_CELL_CAP,PROBE_WHERE_CELL_CAP,SHAPE_ZH,
+blockAtCell,blockNamesOf,blockProp,cellText,cropAgeOfCell,dimensionOf,feetOf,fnv32,
+readRegion,resolveAt,shapeCells,skyBlocked,
+} from './cell-facts.ts';
 import { metaOf } from './entity-facts.ts';
-import { equipToolFor, harvestFact, miningToolPlan } from './tools.ts';
-import { bestWeapon } from './melee.ts';
-import { type FindKind } from './search-observation.ts';
+import { ownedFishingBobber } from './fishing.ts';
 import { type Cell } from './geometry.ts';
 import {
-  AIR_NAMES, LIQUIDS, PROBE_CELLWISE_MAX, PROBE_CELL_CAP, PROBE_WHERE_CELL_CAP, SHAPE_ZH,
-  blockAtCell, blockNamesOf, blockProp, cellText, cropAgeOfCell, dimensionOf, feetOf, fnv32,
-  readRegion, resolveAt, shapeCells, skyBlocked,
-} from './cell-facts.ts';
-import {
-  FIND_STATIC_MAX, PROBE_WHERE_SHOWN, UNTIL_CATEGORIES, UNTIL_CATEGORY_DOC, type SkillCall,
-} from './skills.ts';
-import { compositionText, zhErrorText, zhThing } from './receipt.ts';
-import { UNTIL_TRAVEL_RADIUS, type UntilHit, untilBlockIds, untilHit, untilUnknownNote } from './until.ts';
+INVENTORY_SLOTS,PICKUP_SETTLE_MS,dropNamesOf,invCount,invGains,invSnapshot,
+} from './inventory.ts';
+import { bestWeapon } from './melee.ts';
+import { zhEntity,zhName } from './names.ts';
+import { Upkeep,pushPocketLine,standableCell } from './placement.ts';
 import { PLAYER_SLOTS } from './precheck.ts';
-import { ownedFishingBobber } from './fishing.ts';
+import { compositionText,zhErrorText,zhThing } from './receipt.ts';
+import { type FindKind } from './search-observation.ts';
+import { Aborted,SkillBlocked,checkAbort,sleep,type SkillContext } from './skill-context.ts';
+import {
+FIND_STATIC_MAX,PROBE_WHERE_SHOWN,UNTIL_CATEGORIES,UNTIL_CATEGORY_DOC,type SkillCall,
+} from './skills.ts';
+import { PROBE_SLICE_CELL_CAP,renderSpatialSlices } from './spatial-slices.ts';
+import {
+beginTemporaryScaffold,closeTemporaryScaffold,reclaimTemporaryScaffold,
+type TemporaryScaffoldScope
+} from './temporary-scaffold.ts';
+import {
+CROP_MAX_AGE,DIRECTIONS,DIRECTION_ZH,bearing,biomeAt,canSeeBlockAt,canSeeEntity,cropAgeAt,
+droppedStackOf,entityObservationNote,
+farmlandMoistureAt,
+headInWater,isNight,
+villagerNote,
+type Direction,
+} from './terrain.ts';
 import { minecraftTextComponent } from './text-component.ts';
-import { beginTemporaryScaffold, closeTemporaryScaffold, reclaimTemporaryScaffold,
-  type TemporaryScaffoldScope } from './temporary-scaffold.ts';
-import pathfinderPkg from 'mineflayer-pathfinder';
-import { blockIdOf, isAirState, normalizeBlockName } from './blueprint.ts';
-import { PROBE_SLICE_CELL_CAP, renderSpatialSlices } from './spatial-slices.ts';
+import { equipToolFor,harvestFact,miningToolPlan } from './tools.ts';
+import {
+breakPermissionNote,digBlock,dropGoal,gotoGoal,levelTravelGoal,matchBlockIds,routeNote,
+settleOnGround,walkOnlyPath,withRouteScene,
+} from './travel.ts';
+import { UNTIL_TRAVEL_RADIUS,untilBlockIds,untilHit,untilUnknownNote,type UntilHit } from './until.ts';
 
 const { goals } = pathfinderPkg;
 
@@ -70,16 +76,6 @@ function knownProtectedBreakTarget(bot: Bot, p: { x: number; y: number; z: numbe
   const block = bot.blockAt(new Vec3(p.x, p.y, p.z));
   return !!block && (bot as Bot & { cortiBreakVerdict?: (value: typeof block) =>
     'allowed' | 'protected' | 'unknown' }).cortiBreakVerdict?.(block) === 'protected';
-}
-
-/** 首批候选含已知不可采来源时扩大索引查询；每次最多取 128 个候选。 */
-function findPastProtected(
-  bot: Bot, ids: number[], maxDistance: number, count: number,
-  excluded?: (position: Vec3) => boolean,
-): Vec3[] {
-  const first = bot.findBlocks({ matching: ids, maxDistance, count });
-  return first.length === count && first.some((p) => knownProtectedBreakTarget(bot, p) || excluded?.(p))
-    ? bot.findBlocks({ matching: ids, maxDistance, count: 128 }) : first;
 }
 
 /** The desk supplies bindings for the current realm and dimension. Match only intended material cells. */
@@ -1174,35 +1170,6 @@ export function bobberLanding(
   if (below?.boundingBox === 'block') return { kind: 'rest', name: below.name, x, y: y - 1, z };
   // 底下没有能托住它的东西:这个读数是飞行中或没同步到的位置
   return null;
-}
-
-/**
- * 钓一竿。`bot.fish()` 抛竿等浮标粒子,咬钩时它自己收线并 resolve;它没有超时,
- * 也没有取消入口——中止/超时靠再挥一次竿收回浮标,浮标销毁后 fish() 以
- * "Fishing cancelled" 收场。收获按物品栏差分照实报。
- *
- * `bot.fish()` 只等咬钩粒子,不看浮标落在哪:落岸上就白等满 45 秒再谎报「没鱼咬钩」。
- * 所以仰角自己按弹道搜(见 planFishingCasts),抛完先看浮标真停在哪一格,
- * 不是水就立刻收竿换下一个仰角重抛。
- */
-/** 岸上候选站位最多试几个;每个都要走一趟,试多了一竿还没抛就过去半分钟 */
-const FISH_STAND_TRIES = 3;
-/** 岸上站位离水面格的水平距离上限:抛竿轨迹 planFishingCasts 在 4 格内都解得出 */
-const FISH_STAND_R = 4;
-
-/** 离那格水面 FISH_STAND_R 格内、能站人又不泡水的格,按离人远近排 */
-function dryFishingStands(bot: Bot, water: Cell): Cell[] {
-  const out: Cell[] = [];
-  for (let dx = -FISH_STAND_R; dx <= FISH_STAND_R; dx++) {
-    for (let dz = -FISH_STAND_R; dz <= FISH_STAND_R; dz++) {
-      for (let dy = 0; dy <= 2; dy++) {
-        const c = { x: water.x + dx, y: water.y + dy, z: water.z + dz };
-        if (standableCell(bot, c)) out.push(c);
-      }
-    }
-  }
-  const me = bot.entity.position;
-  return out.sort((p, q) => Math.hypot(p.x - me.x, p.y - me.y, p.z - me.z) - Math.hypot(q.x - me.x, q.y - me.y, q.z - me.z));
 }
 
 export async function skillFish(bot: Bot, call: Extract<SkillCall, { skill: 'fish' }>, ctx: SkillContext): Promise<string> {

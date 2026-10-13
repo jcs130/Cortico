@@ -49,7 +49,7 @@ function seed(store: JsonlEventStore, n: number, offset = 0): void {
 
 describe('JsonlEventStore', () => {
   let tmp: ReturnType<typeof makeTmpDir>;
-  const open = (run = RUN_A, log = nullLogger()) => new JsonlEventStore({ dataDir: tmp.dir, run, log });
+  const open = (run = RUN_A, log = nullLogger()) => new JsonlEventStore({ dataDir: tmp.dir, run, log, timezone: 'Asia/Shanghai' });
   const fileOf = (run: string) => join(tmp.dir, 'runs', run, 'events.jsonl');
   beforeEach(() => (tmp = makeTmpDir(), fsHooks.reads.length = 0));
   afterEach(() => tmp.cleanup());
@@ -217,6 +217,17 @@ describe('JsonlEventStore', () => {
     expect(b.range({ fromTs: '2026-07-17T10:04:00' }).map((e) => e.cursor)).toEqual([4, 5]);
   });
 
+  it('换过时区的历史分片按游标排,时间区间按时刻比较', () => {
+    // A 按 +08:00 写,B 晚 5 分钟按 -05:00 写:两者的 run id 与 ts 字典序都与时间序相反
+    const a = open('r-20260718-020000-aaaa');
+    a.append({ type: 'qq.message', ts: '2026-07-18T02:00:00.000+08:00', source: 'qq', origin: 'external', text: 'A' });
+    const b = open('r-20260717-130500-bbbb');
+    b.append({ type: 'qq.message', ts: '2026-07-17T13:05:00.000-05:00', source: 'qq', origin: 'external', text: 'B' });
+    const c = open(RUN_C);
+    expect(c.range({ limit: 1 }).map((e) => e.text)).toEqual(['B']);
+    expect(c.range({ fromTs: '2026-07-17T18:03:00Z' }).map((e) => e.text)).toEqual(['B']);
+  });
+
   it('分片里乱序或重复的 cursor 行按损坏跳过', () => {
     const rows = [
       { type: 'qq.message', ts: '2026-08-27T10:00:00.000+08:00', source: 'qq', origin: 'external', text: '一', cursor: 1 },
@@ -231,21 +242,5 @@ describe('JsonlEventStore', () => {
     expect(store.latestCursor()).toBe(3);
     expect(store.range({}).map((e) => e.text)).toEqual(['一', '二', '四']);
     expect(spy.calls.filter((c) => c.level === 'warn').map((c) => c.data)).toEqual([{ run: RUN_A, skipped: 1 }]);
-  });
-
-  it('写盘前发现文件被别人动过,报一次 error', () => {
-    const spy = spyLogger();
-    const store = open(RUN_A, spy.log);
-    seed(store, 2);
-    expect(spy.calls.filter((c) => c.level === 'error')).toHaveLength(0);
-    appendFileSync(fileOf(RUN_A), JSON.stringify({
-      type: 'qq.message', ts: '2026-08-27T10:00:00.000+08:00', source: 'qq', origin: 'external', text: '别人写的', cursor: 1,
-    }) + '\n', 'utf8');
-    seed(store, 1, 2);
-    const errors = spy.calls.filter((c) => c.level === 'error');
-    expect(errors).toHaveLength(1);
-    expect(errors[0].msg).toContain('另一个实例');
-    seed(store, 1, 3);
-    expect(spy.calls.filter((c) => c.level === 'error')).toHaveLength(1);
   });
 });

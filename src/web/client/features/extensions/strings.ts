@@ -1,4 +1,13 @@
 import { pick } from '../../core/language.ts';
+import { S as zhHant } from './strings.zh-Hant.ts';
+import { S as ja } from './strings.ja.ts';
+import { S as ko } from './strings.ko.ts';
+import { S as fr } from './strings.fr.ts';
+import { S as de } from './strings.de.ts';
+import { S as es419 } from './strings.es-419.ts';
+import { S as ptBR } from './strings.pt-BR.ts';
+import { S as it } from './strings.it.ts';
+import { S as ru } from './strings.ru.ts';
 
 const zh = {
   navLabel: '扩展',
@@ -78,6 +87,7 @@ const zh = {
   pageOf: (page: number, pages: number) => `${page} / ${pages}`,
   searching: '读取中…',
   noPackages: 'npm 上还没有这一类的包',
+  noPackagesAt: (registry: string) => `npm 源 ${registry} 上没有这一类的包。换源：在安装位置的 .npmrc 里写一行 registry=<地址>，重启进程后生效`,
   noHits: '没有匹配的包',
   searchFailed: (msg: string) => `读取失败： ${msg}`,
   partial: '仅显示部分 npm 搜索结果，请使用手动安装查找确切包名。',
@@ -136,7 +146,7 @@ const zh = {
   listSeparator: '、',
 };
 
-const en: typeof zh = {
+export const en: typeof zh = {
   navLabel: 'Extensions',
   navGroup: 'Core',
   introTitle: 'Extensions',
@@ -214,6 +224,7 @@ const en: typeof zh = {
   pageOf: (page: number, pages: number) => `${page} / ${pages}`,
   searching: 'Loading…',
   noPackages: 'No packages of this kind on npm yet',
+  noPackagesAt: (registry: string) => `No packages of this kind on the npm registry ${registry}. To use another registry, add a line registry=<url> to .npmrc in the installation location and restart the process.`,
   noHits: 'No matching packages',
   searchFailed: (msg: string) => `Loading failed: ${msg}`,
   partial: 'npm results are incomplete. Use manual installation for an exact package name.',
@@ -272,4 +283,6 @@ const en: typeof zh = {
   listSeparator: ', ',
 };
 
-export const S = pick({ zh, en });
+export const S = pick({
+  zh, en, 'zh-Hant': zhHant, ja, ko, fr, de, 'es-419': es419, 'pt-BR': ptBR, it, ru,
+});

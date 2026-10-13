@@ -4,7 +4,7 @@
  * 分片按 cursor / ts 区间按需装载,只缓存最近一次查询读到的那些;range / around / grep
  * 跨分片作答。
  */
-import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type {
   EventEnvelope,
@@ -15,13 +15,15 @@ import type {
   Logger,
 } from './types.ts';
 import { listRuns, runsDirOf } from './run.ts';
-import { nullLogger } from './util.ts';
+import { nullLogger, parseTimeIn, SYSTEM_TIMEZONE } from './util.ts';
 
 export interface JsonlEventStoreOptions {
   dataDir: string;
   /** 当前 run id;新事件写进它的分片 */
   run: string;
   log?: Logger;
+  /** 不带偏移的 fromTs / toTs 按这个时区的墙钟读;缺省本机时区 */
+  timezone?: string;
 }
 
 interface Segment {
@@ -29,8 +31,8 @@ interface Segment {
   file: string;
   first: number;
   last: number;
-  firstTs: string;
-  lastTs: string;
+  firstAtMs: number;
+  lastAtMs: number;
   /** 装载后的记录,按 cursor 升序 */
   events: EventEnvelope[] | null;
 }
@@ -71,6 +73,20 @@ function readEdges(file: string): { first: EventEnvelope; last: EventEnvelope } 
   }
 }
 
+/** 时间区间(含端点)的毫秒端点。事件 ts 带各自写入时的偏移,只按时刻比较。 */
+function timeWindow(q: { fromTs?: string; toTs?: string }, timezone: string): { fromMs: number; toMs: number } {
+  return {
+    fromMs: q.fromTs === undefined ? -Infinity : parseTimeIn(timezone, q.fromTs),
+    toMs: q.toTs === undefined ? Infinity : parseTimeIn(timezone, q.toTs),
+  };
+}
+
+function outside(e: EventEnvelope, q: { fromTs?: string; toTs?: string }, fromMs: number, toMs: number): boolean {
+  if (q.fromTs === undefined && q.toTs === undefined) return false;
+  const atMs = Date.parse(e.ts);
+  return atMs < fromMs || atMs > toMs;
+}
+
 function lowerBound(events: EventEnvelope[], cursor: number): number {
   let lo = 0;
   let hi = events.length;
@@ -85,17 +101,11 @@ function lowerBound(events: EventEnvelope[], cursor: number): number {
 export class JsonlEventStore implements EventStore {
   private readonly log: Logger;
   private readonly run: string;
+  private readonly timezone: string;
   private readonly segments: Segment[] = [];
   private readonly current: Segment;
   /** 下一条事件拿到的 cursor */
   private next = 1;
-  /**
-   * 本实例记录的分片字节数；写入前的大小变化可能来自其他写入方。
-   * 用 stat 比较大小，避免每次追加都读取全部文件。
-   */
-  private expectedSize = 0;
-  /** 文件大小不符的错误只报告一次。 */
-  private concurrencyReported = false;
   private appendListeners: Array<(e: EventEnvelope) => void> = [];
   /**
    * 最近一次查询(get / range / around / grep,grep 为每条命中取上下文的 around 也各算一次)
@@ -107,6 +117,7 @@ export class JsonlEventStore implements EventStore {
   constructor(opts: JsonlEventStoreOptions) {
     this.log = opts.log ?? nullLogger();
     this.run = opts.run;
+    this.timezone = opts.timezone ?? SYSTEM_TIMEZONE;
     const runsDir = runsDirOf(opts.dataDir);
     for (const id of listRuns(opts.dataDir)) {
       if (id === this.run) continue;
@@ -122,23 +133,23 @@ export class JsonlEventStore implements EventStore {
       if (!edges) continue;
       this.segments.push({
         run: id, file, first: edges.first.cursor, last: edges.last.cursor,
-        firstTs: edges.first.ts, lastTs: edges.last.ts, events: null,
+        firstAtMs: Date.parse(edges.first.ts), lastAtMs: Date.parse(edges.last.ts), events: null,
       });
       this.next = Math.max(this.next, edges.last.cursor + 1);
     }
+    // run id 里是写入时区的墙钟时间,换过时区或跨夏令时后字典序不等于时间序;游标才是
+    this.segments.sort((a, b) => a.first - b.first);
     const currentFile = join(runsDir, this.run, EVENTS_FILE);
     mkdirSync(join(runsDir, this.run), { recursive: true });
-    this.current = { run: this.run, file: currentFile, first: 0, last: 0, firstTs: '', lastTs: '', events: [] };
+    this.current = { run: this.run, file: currentFile, first: 0, last: 0, firstAtMs: 0, lastAtMs: 0, events: [] };
     if (existsSync(currentFile)) {
-      const raw = readFileSync(currentFile, 'utf8');
-      this.expectedSize = Buffer.byteLength(raw, 'utf8');
-      this.current.events = this.parseAll(raw, this.run);
+      this.current.events = this.parseAll(readFileSync(currentFile, 'utf8'), this.run);
       const events = this.current.events;
       if (events.length) {
         this.current.first = events[0].cursor;
         this.current.last = events[events.length - 1].cursor;
-        this.current.firstTs = events[0].ts;
-        this.current.lastTs = events[events.length - 1].ts;
+        this.current.firstAtMs = Date.parse(events[0].ts);
+        this.current.lastAtMs = Date.parse(events[events.length - 1].ts);
         this.next = Math.max(this.next, this.current.last + 1);
       }
     }
@@ -190,39 +201,18 @@ export class JsonlEventStore implements EventStore {
   }
 
   append(e: Omit<EventEnvelope, 'cursor'>): EventEnvelope {
-    this.checkExclusiveWrite();
     const envelope: EventEnvelope = { ...e, cursor: this.next++, run: this.run };
     const events = this.current.events!;
     events.push(envelope);
-    if (events.length === 1) { this.current.first = envelope.cursor; this.current.firstTs = envelope.ts; }
+    const atMs = Date.parse(envelope.ts);
+    if (events.length === 1) { this.current.first = envelope.cursor; this.current.firstAtMs = atMs; }
     this.current.last = envelope.cursor;
-    this.current.lastTs = envelope.ts;
-    const line = JSON.stringify(envelope) + '\n';
-    appendFileSync(this.current.file, line, 'utf8');
-    this.expectedSize += Buffer.byteLength(line, 'utf8');
+    this.current.lastAtMs = atMs;
+    appendFileSync(this.current.file, JSON.stringify(envelope) + '\n', 'utf8');
     for (const cb of this.appendListeners) {
       try { cb(envelope); } catch { /* 观察者异常不影响主流程 */ }
     }
     return envelope;
-  }
-
-  /** 大小与本实例记录不符时报告文件变化，仍继续写入；独占检查由 instanceLock 负责。 */
-  private checkExclusiveWrite(): void {
-    if (this.concurrencyReported) return;
-    let onDisk = 0;
-    try {
-      onDisk = existsSync(this.current.file) ? statSync(this.current.file).size : 0;
-    } catch {
-      return; // 读不到文件状态不影响写入
-    }
-    if (onDisk === this.expectedSize) return;
-    this.concurrencyReported = true;
-    this.log.error('事件库被本进程之外的写入改动过,疑似另一个实例在写同一个事件库', {
-      expectedSize: this.expectedSize,
-      onDiskSize: onDisk,
-      file: this.current.file,
-    });
-    this.expectedSize = onDisk;
   }
 
   /** 事件追加订阅，供控制台实时观察。 */
@@ -251,12 +241,12 @@ export class JsonlEventStore implements EventStore {
   }
 
   private segmentsIn(q: { fromCursor?: number; toCursor?: number; fromTs?: string; toTs?: string }): Segment[] {
+    const { fromMs, toMs } = timeWindow(q, this.timezone);
     return this.segments.filter((s) => {
       if (s.last === 0) return s === this.current;
       if (q.fromCursor !== undefined && s.last < q.fromCursor) return false;
       if (q.toCursor !== undefined && s.first > q.toCursor) return false;
-      if (q.fromTs !== undefined && s.lastTs < q.fromTs) return false;
-      if (q.toTs !== undefined && s.firstTs > q.toTs) return false;
+      if (s.lastAtMs < fromMs || s.firstAtMs > toMs) return false;
       return true;
     });
   }
@@ -267,6 +257,7 @@ export class JsonlEventStore implements EventStore {
 
   private scanRange(q: EventRangeQuery): EventEnvelope[] {
     const limit = q.limit !== undefined && q.limit >= 0 ? q.limit : undefined;
+    const { fromMs, toMs } = timeWindow(q, this.timezone);
     // 无起点区间的 limit 查询只要最近的几条:从尾部分片倒着凑,不触碰更早的历史
     if (limit !== undefined && q.fromCursor === undefined && q.fromTs === undefined) {
       if (limit === 0) return [];
@@ -276,7 +267,7 @@ export class JsonlEventStore implements EventStore {
         for (let i = events.length - 1; i >= 0; i--) {
           const e = events[i];
           if (q.toCursor !== undefined && e.cursor > q.toCursor) continue;
-          if (q.toTs !== undefined && e.ts > q.toTs) continue;
+          if (outside(e, q, fromMs, toMs)) continue;
           if (q.senderKey !== undefined && e.senderKey !== q.senderKey) continue;
           if (q.source !== undefined && e.source !== q.source) continue;
           if (q.origin !== undefined && e.origin !== q.origin) continue;
@@ -294,8 +285,7 @@ export class JsonlEventStore implements EventStore {
       for (let i = start; i < events.length; i++) {
         const e = events[i];
         if (q.toCursor !== undefined && e.cursor > q.toCursor) break;
-        if (q.fromTs !== undefined && e.ts < q.fromTs) continue;
-        if (q.toTs !== undefined && e.ts > q.toTs) continue;
+        if (outside(e, q, fromMs, toMs)) continue;
         if (q.senderKey !== undefined && e.senderKey !== q.senderKey) continue;
         if (q.source !== undefined && e.source !== q.source) continue;
         if (q.origin !== undefined && e.origin !== q.origin) continue;
@@ -323,14 +313,14 @@ export class JsonlEventStore implements EventStore {
   private scanGrep(q: EventGrepQuery): EventGrepHit[] {
     const kw = q.keyword.toLowerCase();
     const ctx = Math.max(0, q.context);
+    const { fromMs, toMs } = timeWindow(q, this.timezone);
     const hits: EventGrepHit[] = [];
     for (const segment of this.segmentsIn(q)) {
       for (const e of this.load(segment)) {
         if (q.senderKey !== undefined && e.senderKey !== q.senderKey) continue;
         if (q.source !== undefined && e.source !== q.source) continue;
         if (q.origin !== undefined && e.origin !== q.origin) continue;
-        if (q.fromTs !== undefined && e.ts < q.fromTs) continue;
-        if (q.toTs !== undefined && e.ts > q.toTs) continue;
+        if (outside(e, q, fromMs, toMs)) continue;
         if (!e.text.toLowerCase().includes(kw)) continue;
         // 邻近记录不经过筛选；重叠窗口保持分开。
         hits.push({ hitCursor: e.cursor, events: this.around(e.cursor, ctx, ctx) });
@@ -349,10 +339,9 @@ export class JsonlEventStore implements EventStore {
     this.current.events = [];
     this.current.first = 0;
     this.current.last = 0;
-    this.current.firstTs = '';
-    this.current.lastTs = '';
+    this.current.firstAtMs = 0;
+    this.current.lastAtMs = 0;
     if (existsSync(this.current.file)) rmSync(this.current.file);
-    this.expectedSize = 0;
     this.log.warn('当前 run 的事件分片已清空', { cleared: n, run: this.run });
     return n;
   }

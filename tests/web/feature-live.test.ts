@@ -709,6 +709,48 @@ describe('live feature 挂载', () => {
     expect(card.textContent).toContain('没人等它');
   });
 
+  it('记录上的图片附件印成缩略图,取不到字节的那张撤掉', () => {
+    const { env, sockets } = fakeEnv();
+    const { ctx, root } = mkCtx({ debug: true });
+    live.createLiveFeature({ env }).mount(ctx);
+    sockets[0].emit({ t: 'hello', session: [functionResult('shot', '截图', { blobs: [
+      { handle: 'log:aaaa.png', mime: 'image/png', fallbackText: '屏幕' },
+      { handle: 'mem:blobs/b.jpg', mime: 'image/jpeg', fallbackText: '旧图' },
+      { handle: 'log:cccc.wav', mime: 'audio/wav', fallbackText: '声音' },
+    ] })] });
+    const links = root.findAll('blob-thumb') as FakeEl[];
+    expect(links.map((l) => l.href)).toEqual(['/api/blob?handle=log%3Aaaaa.png', '/api/blob?handle=mem%3Ablobs%2Fb.jpg']);
+    expect(links[0].title).toBe('屏幕');
+    links[0].dispatchEvent({ type: 'click', preventDefault: () => {} });
+    const box = root.ownerDocument.body.find('lightbox') as FakeEl;
+    expect(box.find('lightbox-image')).not.toBeNull();
+    box.dispatchEvent({ type: 'click' });
+    expect(root.ownerDocument.body.find('lightbox')).toBeNull();
+    links[1].children[0].dispatchEvent({ type: 'error' });
+    expect((root.findAll('blob-thumb') as FakeEl[]).map((l) => l.href)).toEqual(['/api/blob?handle=log%3Aaaaa.png']);
+  });
+
+  it('缩略图晚到撑高时间线:贴底时滚到新底部,翻看历史时不动', () => {
+    const { env, sockets } = fakeEnv();
+    const { ctx, root } = mkCtx({ debug: true });
+    live.createLiveFeature({ env }).mount(ctx);
+    const shot = { handle: 'log:aaaa.png', mime: 'image/png', fallbackText: '屏幕' };
+    sockets[0].emit({ t: 'hello', session: [functionResult('a', '截图', { blobs: [shot] }), functionResult('b', '截图', { blobs: [shot] })] });
+    const scroll = root.find('tlscroll') as FakeEl;
+    const [first, second] = (root.findAll('blob-thumb') as FakeEl[]).map((l) => l.children[0]);
+
+    scroll.scrollHeight = 900;
+    first.dispatchEvent({ type: 'load' });
+    expect(scroll.scrollTop).toBe(900);
+
+    scroll.clientHeight = 300;
+    scroll.scrollTop = 100;
+    scroll.dispatchEvent({ type: 'scroll' });
+    scroll.scrollHeight = 1200;
+    second.dispatchEvent({ type: 'load' });
+    expect(scroll.scrollTop).toBe(100);
+  });
+
   it('气泡只画模型的直接输出:speak 工具也是工具卡,事件投递帧靠右,气泡带头像', () => {
     const { session } = responseTimelineFixture();
     const { env, sockets } = fakeEnv();

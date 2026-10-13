@@ -15,8 +15,9 @@ import type {
   ToolSchema,
 } from './core/types.ts';
 import type { LoadedConfig } from './core/config.ts';
-import { coreConfigGroup } from './core/config.ts';
-import { pick, resolveLanguage, type Language } from './core/language.ts';
+import { coreConfigGroup, usageRates } from './core/config.ts';
+import { resolveLanguage, type Language } from './core/language.ts';
+import { botText } from './strings.ts';
 import { updateJsonObject } from './config-file.ts';
 import { ONBOARDING_FLAG_FILE } from './deploy.ts';
 import { isSupervised, requestRestart, startsPaused } from './boot.ts';
@@ -29,7 +30,7 @@ import type { ResponseClient } from './core/generation.ts';
 import { acquireInstanceLock, type InstanceLock } from './core/instance-lock.ts';
 import { assembleSystemSegments, envPromptOverridePath, envPromptTemplateSource, renderWorldEnvPrompt, type EnvPromptDirs, type EnvPromptOrigin } from './core/prefix.ts';
 import { aggregateUsage } from './core/cost.ts';
-import { nowIso, withDeadline } from './core/util.ts';
+import { DeadlineError, nowIso, withDeadline } from './core/util.ts';
 import { closeRun } from './core/run.ts';
 import { ProviderHub } from './providers/console/hub.ts';
 import { ProviderSettings } from './providers/console/settings.ts';
@@ -160,211 +161,6 @@ const SHUTDOWN_BUDGET_MS = {
   flush: 2_000,
   web: 3_000,
 } as const;
-
-const BOT_TEXT = {
-  zh: {
-    noFile: '(无文件)',
-    storage: {
-      events: {
-        label: '事件库(本次运行的分片)',
-        note: '清除本次运行的事件记录，保留此前运行的记录；游标不回退',
-        stat: (count: number, cursor: number, size: string) => `${count}条(游标至 ${cursor}) / ${size}`,
-        cleared: (n: number) => `已清除本次运行的${n}条事件`,
-      },
-      session: {
-        label: '主session(当前对话上下文)',
-        note: '清除对话上下文并重新开场，保留 Memory 和事件库。正在处理批次时等该批结束后执行',
-        stat: (records: number, ktok: number, size: string) => `${records}条 / ~${ktok}k tok / ${size}`,
-        cleared: 'session已清空重开(system前缀+开场消息)',
-      },
-      runlog: {
-        label: '运行日志(本次运行)',
-        note: '清除本次运行的日志，保留此前运行的日志。运行日志不进入模型上下文',
-        cleared: '运行日志已清空',
-      },
-      usage: {
-        label: 'token用量流水(成本页数据源)',
-        note: '清除全部模型用量与成本记录，成本页从后续写入的记录重新累计。这些记录不进入模型上下文',
-        stat: (n: number, size: string) => `${n}条 / ${size}`,
-        cleared: (n: number) => `已清除${n}条用量记录`,
-      },
-      toolcalls: {
-        label: '工具调用流水(工具名/原始参数/回执)',
-        note: '清除本次运行的工具调用日志，不改变模型上下文中的工具回执',
-        cleared: '工具调用流水已清空',
-      },
-      state: {
-        label: 'Core 状态',
-        note: '清除 Persona 状态、交接时间和模型连续失败记录，保留投递游标与 World 可见性',
-        stat: (n: number, lastHandoff: string) => `人格状态${n}项 / 上次交接${lastHandoff}`,
-        never: '无',
-        cleared: 'core状态已重置为默认',
-      },
-      wakes: {
-        label: '持久定时器',
-        note: '全部定时器取消(不产生通知)',
-        stat: (n: number) => `${n}个待触发`,
-        cleared: (n: number) => `已取消${n}个定时器`,
-      },
-      tracker: {
-        label: 'session统计(usage/缓存命中)',
-        note: '清零统计，保留正在运行的 session 条目',
-        stat: (n: number) => `${n}个session`,
-        cleared: 'session统计已清零',
-      },
-      pending: {
-        label: '待投递事件',
-        note:
-          '丢弃待投递的事件，保留事件库记录。延迟生成正文的队列项保留；已丢弃项不会在重启后补投',
-        stat: (n: number) => `${n}条待投递`,
-        cleared: (n: number) => `已丢弃${n}条待投递事件`,
-      },
-      media: {
-        label: '附件库(事件与工具回执里的图片、音频)',
-        note: '删除全部附件文件，保留引用它们的事件与 session 记录；删掉的附件在上下文里只剩文字说明',
-        stat: (n: number, size: string) => `${n}份 / ${size}`,
-        cleared: (n: number) => `已删除${n}份附件`,
-      },
-    },
-    config: {
-      unknownGroup: (id: string) => `没有这一组配置: ${id}`,
-      updated: (title: string, file: string) => `${title}已更新,已写回 ${file}`,
-    },
-    prompts: {
-      unknown: (key: string) => `未知提示词模板: ${key}`,
-      packageReadOnly: (title: string) => `${title} 是只读的扩展包模板`,
-      conflict: (title: string) => `${title} 已在别处被修改,请重新载入后再保存`,
-      saved: (title: string) => `已保存 ${title}`,
-      savedOverride: (title: string) => `已保存 ${title} 的部署覆盖文件`,
-      notEnvPrompt: (title: string) => `${title} 没有可恢复的默认模板`,
-      alreadyDefault: (title: string) => `${title} 本来就在用 World 默认`,
-      reset: (title: string) => `已删除 ${title} 的部署覆盖文件`,
-    },
-    visibility: {
-      shown: (id: string) => `${id} 对 agent 重新可见。事件投递已恢复;前缀段与工具要等前缀重载才回来。`,
-      hidden: (id: string) => `${id} 已对 agent 隐藏。新事件不再唤醒 agent(仍照常落库);前缀段与工具要等前缀重载才撤下。`,
-      prefixReloaded: (kept: number) => `系统前缀与工具表已重载，保留当前session的${kept}条既有消息`,
-    },
-    shutdown: {
-      pause: '暂停事件投递',
-      worlds: '停止 World',
-      core: '停止 Persona',
-      modulesTimedOut: 'World 停止超时',
-      externalState: (worldId: string) => `${worldId} 外部状态`,
-      stopIncomplete: (detail: string) => `World 停止未完成，不能采用外部核验缓存:${detail}`,
-      cacheReadFailed: (detail: string) => `读取已缓存的关机验证结果失败:${detail}`,
-      manualCheck: '请检查对应外部服务是否已停止。',
-      llm: '停止 Provider 实例',
-      flush: '保存 Core 状态',
-      web: '关闭控制台',
-      summarySkipped: '本地关机步骤未全部完成',
-      summaryComplete: '本地关机步骤全部完成',
-      summaryUnverified: (items: string[]) => `本地关机完成,但外部状态未确认结束:${items.join('、')}(需人工确认)`,
-    },
-  },
-  en: {
-    noFile: '(no file)',
-    storage: {
-      events: {
-        label: "Event store (this run's shard)",
-        note: 'Clears events from this run and keeps earlier runs; the cursor does not rewind',
-        stat: (count: number, cursor: number, size: string) => `${count} records (cursor at ${cursor}) / ${size}`,
-        cleared: (n: number) => `Cleared ${n} events from this run`,
-      },
-      session: {
-        label: 'Main session (current conversation context)',
-        note: 'Clears the conversation and reopens the session, keeping Memory and the event store. While a batch is in progress, runs after it finishes',
-        stat: (records: number, ktok: number, size: string) => `${records} records / ~${ktok}k tok / ${size}`,
-        cleared: 'Session cleared and reopened (system prefix + opening message)',
-      },
-      runlog: {
-        label: 'Run log (this run)',
-        note: 'Clears logs from this run and keeps earlier runs. Run logs are not included in model context',
-        cleared: 'Run log cleared',
-      },
-      usage: {
-        label: 'Token usage ledger (source of the cost page)',
-        note: 'Clears all model usage and cost records; totals restart with subsequently written records. These records are not included in model context',
-        stat: (n: number, size: string) => `${n} records / ${size}`,
-        cleared: (n: number) => `Cleared ${n} usage records`,
-      },
-      toolcalls: {
-        label: 'Tool call ledger (tool name / raw arguments / receipt)',
-        note: 'Clears tool call logs from this run without changing tool results in model context',
-        cleared: 'Tool call ledger cleared',
-      },
-      state: {
-        label: 'Core state',
-        note: 'Clears Persona state, handoff time and consecutive model failure records; keeps the delivery cursor and World visibility',
-        stat: (n: number, lastHandoff: string) => `${n} persona state entries / last handoff ${lastHandoff}`,
-        never: 'none',
-        cleared: 'Core state reset to defaults',
-      },
-      wakes: {
-        label: 'Persistent timers',
-        note: 'Cancels every timer (no notifications are produced)',
-        stat: (n: number) => `${n} pending`,
-        cleared: (n: number) => `Cancelled ${n} timers`,
-      },
-      tracker: {
-        label: 'Session statistics (usage / cache hits)',
-        note: 'Resets statistics and keeps entries for active sessions',
-        stat: (n: number) => `${n} sessions`,
-        cleared: 'Session statistics zeroed',
-      },
-      pending: {
-        label: 'Pending events',
-        note:
-          'Discards pending events and keeps archived records. Deferred rendering items remain queued; discarded items will not be replayed after restart',
-        stat: (n: number) => `${n} pending`,
-        cleared: (n: number) => `Discarded ${n} pending events`,
-      },
-      media: {
-        label: 'Attachment store (images and audio from events and tool results)',
-        note: 'Deletes every attachment file and keeps the events and session records that reference them; a deleted attachment leaves only its text description in context',
-        stat: (n: number, size: string) => `${n} files / ${size}`,
-        cleared: (n: number) => `Deleted ${n} attachments`,
-      },
-    },
-    config: {
-      unknownGroup: (id: string) => `No such config group: ${id}`,
-      updated: (title: string, file: string) => `${title} updated and written back to ${file}`,
-    },
-    prompts: {
-      unknown: (key: string) => `Unknown prompt template: ${key}`,
-      packageReadOnly: (title: string) => `${title} is a read-only extension package template`,
-      conflict: (title: string) => `${title} was modified elsewhere; reload before saving`,
-      saved: (title: string) => `Saved ${title}`,
-      savedOverride: (title: string) => `Saved the deployment override for ${title}`,
-      notEnvPrompt: (title: string) => `${title} has no default template to restore`,
-      alreadyDefault: (title: string) => `${title} is already using the World default`,
-      reset: (title: string) => `Removed the deployment override for ${title}`,
-    },
-    visibility: {
-      shown: (id: string) => `${id} is visible to the agent again. Event delivery has resumed; its prefix segment and tools return once the prefix is reloaded.`,
-      hidden: (id: string) => `${id} is now hidden from the agent. New events no longer wake the agent (they are still stored); its prefix segment and tools are removed once the prefix is reloaded.`,
-      prefixReloaded: (kept: number) => `System prefix and tool table reloaded; ${kept} existing messages of the current session kept`,
-    },
-    shutdown: {
-      pause: 'Pause event delivery',
-      worlds: 'Stop Worlds',
-      core: 'Stop Persona',
-      modulesTimedOut: 'World shutdown timed out',
-      externalState: (worldId: string) => `${worldId} external state`,
-      stopIncomplete: (detail: string) => `World stop incomplete, so the cached external verification cannot be used: ${detail}`,
-      cacheReadFailed: (detail: string) => `Failed to read the cached shutdown verification: ${detail}`,
-      manualCheck: 'Check whether the corresponding external service has stopped.',
-      llm: 'Stop provider instances',
-      flush: 'Persist core state',
-      web: 'Close the console',
-      summarySkipped: 'Local shutdown steps incomplete',
-      summaryComplete: 'Local shutdown finished: every step completed',
-      summaryUnverified: (items: string[]) => `Local shutdown finished, but external state is not confirmed ended: ${items.join(', ')} (manual confirmation needed)`,
-    },
-  },
-};
-type BotText = (typeof BOT_TEXT)['zh'];
-const botText = (language: Language): BotText => pick(language, BOT_TEXT);
 
 const fileSize = (dir: string, rel: string, noFile: string): string => {
   const p = join(dir, rel);
@@ -661,7 +457,7 @@ export function deriveWorldFacts(
     } catch {
       decl = undefined;
     }
-    const label = decl?.label ?? slot.label;
+    const label = decl?.label ?? assembly.labelIn(slot.id, language);
     if (!slot.mounted) {
       return { id: slot.id, status: 'inactive' as const, label, declared: slot.declared };
     }
@@ -682,7 +478,7 @@ export function deriveWorldFacts(
   const missing: WorldFacts[] = assembly.missing.map((m) => ({
     id: m.id,
     status: 'missing' as const,
-    label: m.label,
+    label: assembly.labelIn(m.id, language),
     declared: m.declared ?? true,
     reason: m.reason(language),
   }));
@@ -720,7 +516,7 @@ export function builtinExtensions(assembly: WorldAssembly, set: ExtensionSet, la
   const worlds = candidates.filter((world) => !external.has(world.id)).flatMap((world): ExtensionInfo[] => {
     const slot = assembly.slots.find((item) => item.id === world.id);
     const missing = assembly.missing.find((item) => item.id === world.id);
-    const base = { ...common, name: `builtin:world:${world.id}`, kind: 'world' as const, worldId: world.id, label: slot?.label ?? world.label };
+    const base = { ...common, name: `builtin:world:${world.id}`, kind: 'world' as const, worldId: world.id, label: assembly.labelIn(world.id, language) };
     if (slot) return [{ ...base, loaded: true, state: 'loaded' }];
     if (missing) return [{ ...base, loaded: false, state: 'failed', reason: missing.reason(language) }];
     return [];
@@ -729,7 +525,7 @@ export function builtinExtensions(assembly: WorldAssembly, set: ExtensionSet, la
   const providers = providerModules.filter((module) => !externalProviders.has(module.id)).map((module): ExtensionInfo => {
     const description = module.localize?.(language).description ?? module.description;
     return {
-      ...common, name: `builtin:provider:${module.id}`, kind: 'provider', worldId: module.id, label: module.title,
+      ...common, name: `builtin:provider:${module.id}`, kind: 'provider', worldId: module.id, label: module.localize?.(language).title ?? module.title,
       ...(description ? { description } : {}), loaded: true, state: 'loaded',
     };
   });
@@ -738,17 +534,23 @@ export function builtinExtensions(assembly: WorldAssembly, set: ExtensionSet, la
 
 /**
  * 扩展条目在本进程的运行状态:World 看挂载与对 agent 是否可见,provider 与 bot 看启动时是否加载。
- * 已卸载的条目不算生效。
+ * 已卸载的条目不算生效。有实例的 World 名按 `language` 现取,外部扩展的名字因此也跟界面语言走。
  */
 export function extensionRuntimeState(
   assembly: WorldAssembly,
   isWorldVisible: (id: string) => boolean,
-): (item: ExtensionInfo) => ExtensionInfo {
-  return (item) => {
+): (item: ExtensionInfo, language: Language) => ExtensionInfo {
+  return (item, language) => {
     if (item.state === 'removed') return { ...item, enabled: false };
     if (item.kind === 'world' && item.worldId) {
-      const mounted = assembly.slots.some((slot) => slot.id === item.worldId && slot.mounted);
-      return { ...item, enabled: mounted, ...(mounted && !isWorldVisible(item.worldId) ? { hidden: true } : {}) };
+      const slot = assembly.slots.find((s) => s.id === item.worldId);
+      const mounted = slot?.mounted ?? false;
+      return {
+        ...item,
+        ...(slot ? { label: assembly.labelIn(slot.id, language) } : {}),
+        enabled: mounted,
+        ...(mounted && !isWorldVisible(item.worldId) ? { hidden: true } : {}),
+      };
     }
     return { ...item, enabled: item.loaded && item.state === 'loaded' };
   };
@@ -763,7 +565,7 @@ function deriveSlotStorage(assembly: WorldAssembly, language: Language): OwnedSt
     (slot.instance.console?.(language)?.storage ?? []).map((part): OwnedStoragePart => {
       const current = (): StoragePart => {
         const found = slot.instance.console?.(language)?.storage?.find((p) => p.key === part.key);
-        if (!found) throw new Error(`${slot.id} 的存储项 ${part.key} 在当前实例上不存在`);
+        if (!found) throw new Error(botText(language).storagePartGone(slot.id, part.key));
         return found;
       };
       return { ...part, owner: `world:${slot.id}`, stat: () => current().stat(), clear: () => current().clear() };
@@ -899,6 +701,7 @@ export function mergePersonaContributions(
   label: string,
   core: ConsolePageContribution | null,
   extras: readonly ConsolePageContribution[],
+  language: Language = 'zh',
 ): ConsolePageContribution | null {
   const parts = [core, ...extras].filter((c): c is ConsolePageContribution => !!c);
   if (parts.length === 0) return null;
@@ -933,14 +736,14 @@ export function mergePersonaContributions(
   if (parts.some((p) => p.invoke)) {
     out.invoke = async (panel, method, args) => {
       const target = owner.get(panel);
-      if (!target?.invoke) throw new Error(`没有面板数据面: ${panel}`);
+      if (!target?.invoke) throw new Error(botText(language).panelNoInvoke(panel));
       return target.invoke(panel, method, args);
     };
   }
   if (parts.some((p) => p.stream)) {
     out.stream = (panel, socket) => {
       const target = owner.get(panel);
-      if (!target?.stream) throw new Error(`没有流式面: ${panel}`);
+      if (!target?.stream) throw new Error(botText(language).panelNoStream(panel));
       target.stream(panel, socket);
     };
   }
@@ -960,7 +763,6 @@ export function deriveConsolePageSources(
   extra?: (language: Language) => ConsolePageContribution[],
 ): () => ConsolePageSource[] {
   const { assembly } = parts;
-  const labelOf = (id: string): string => assembly.labelOf(id) ?? id;
   return () => {
     // 每次枚举按语言缓存状态，供同一批 contribute() 调用共享。
     const once = new Map<Language, Map<string, WorldFacts>>();
@@ -976,8 +778,10 @@ export function deriveConsolePageSources(
     const ids = [...assembly.slots.map((s) => s.id), ...assembly.missing.map((m) => m.id)];
     const sources: ConsolePageSource[] = ids.map((id) => ({
       id: pageIdFor('world', id),
-      contribute: (language) =>
-        ioPageContribution(id, labelOf(id), infos(language).get(id), instances.get(id), language),
+      contribute: (language) => {
+        const info = infos(language).get(id);
+        return ioPageContribution(id, info?.label ?? id, info, instances.get(id), language);
+      },
     }));
 
     const persona = parts.persona;
@@ -1009,6 +813,7 @@ export function deriveConsolePageSources(
           personaLabel,
           persona ? personaPageContribution(bot.id, personaLabel, persona, language) : null,
           [...extrasOf(language).filter((c) => c.id === selfId), ...botConfig],
+          language,
         ),
       });
       if (persona) {
@@ -1154,6 +959,7 @@ export function createBot<C extends CoreConfig>(
       memoryDir: loaded.memoryDir,
       dataDir: loaded.dataDir,
       botDir: loaded.rootDir,
+      blob: (handle) => core.resolveBlob(handle),
       language,
       ...(cfg.web.host ? { host: cfg.web.host } : {}),
       allowedHosts: cfg.web.allowedHosts ?? [],
@@ -1161,7 +967,7 @@ export function createBot<C extends CoreConfig>(
       defaultScheme: cfg.web.theme,
       sessions: core.sessions,
       storage: consoleStorage,
-      usage: { aggregate: (opts) => aggregateUsage(core.usageLog.readAll(), { ...opts, timezone: core.config.timezone }), status: () => core.usageLog.status() },
+      usage: { aggregate: (opts) => aggregateUsage(core.usageLog.readAll(), { ...opts, timezone: core.config.timezone, rates: usageRates(core.config) }), status: () => core.usageLog.status() },
       config: {
         groups: (language) => allConfigGroups(language).map((group) => ({ group, values: group.owner.startsWith('provider:') ? providerSettings.values(group.id, language) : readGroupValues(cfg, group) })),
         set: (groupId: string, values: ConfigValues, language) => {
@@ -1209,7 +1015,8 @@ export function createBot<C extends CoreConfig>(
           core.setWorldVisible(id, visible);
           notifyLifecycle({ kind: 'visibility', id, label: assembly.labelOf(id) ?? id, visible });
           const t = botText(language).visibility;
-          return visible ? t.shown(id) : t.hidden(id);
+          const label = assembly.labelIn(id, language);
+          return visible ? t.shown(label) : t.hidden(label);
         },
       },
       sessionControl: {
@@ -1250,14 +1057,23 @@ export function createBot<C extends CoreConfig>(
         onRunPhase: (cb) => core.loop.onRunPhase(cb),
         runId: () => core.run.id,
         toolSchemas: () => core.loop.getToolSchemas(),
+        activeEndpoint: () => {
+          const entry = cfg.providers[cfg.activeProvider];
+          if (!entry) return null;
+          const spec = entry.spec;
+          // 只取 ModelSpec 的已知字段;值为 undefined 的键写出 JSON 时省略。
+          return { name: cfg.activeProvider, kind: entry.kind, spec: spec ? {
+            model: spec.model, thinking: spec.thinking, reasoningEffort: spec.reasoningEffort,
+            temperature: spec.temperature, maxTokens: spec.maxTokens, contextWindow: spec.contextWindow,
+          } : null };
+        },
       },
       toolSchemas: {
-        list: () => {
+        list: (language) => {
 
           const byWorld = new Map<string, ToolOwner>();
           for (const m of assembly.mounted) {
-            const label = assembly.labelOf(m.id);
-            const owner: ToolOwner = { kind: 'world', id: m.id, ...(label ? { label } : {}) };
+            const owner: ToolOwner = { kind: 'world', id: m.id, label: assembly.labelIn(m.id, language) };
             for (const t of m.tools()) byWorld.set(t.name, owner);
           }
           const extras = (contribution.extraToolSchemas?.() ?? []).map((s) => ({ ...s, tags: [] }));
@@ -1340,7 +1156,7 @@ async function runShutdown<C extends CoreConfig>(ctx: {
   /** 步骤名和总结使用控制台请求语言。 */
   language: Language;
 }): Promise<ShutdownReport> {
-  const t = pick(ctx.language, BOT_TEXT).shutdown;
+  const t = botText(ctx.language).shutdown;
   const steps: ShutdownStep[] = [];
   let externalChecks: ShutdownExternalCheck[] = [];
   let modulesSettled = false;
@@ -1357,7 +1173,8 @@ async function runShutdown<C extends CoreConfig>(ctx: {
       steps.push({ key, label, ok: true, elapsedMs: Date.now() - t0 });
       ctx.log.info(`关机 ✓ ${label}`, { elapsedMs: Date.now() - t0 });
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
+      const detail = err instanceof DeadlineError && err.what === label ? t.stepTimedOut(Math.round(err.ms / 1000))
+        : err instanceof Error ? err.message : String(err);
       steps.push({ key, label, ok: false, elapsedMs: Date.now() - t0, detail });
       ctx.log.warn(`关机步骤失败: ${label}`, { detail });
     }
@@ -1390,7 +1207,7 @@ async function runShutdown<C extends CoreConfig>(ctx: {
       }];
     }
     try {
-      return module.shutdownVerification().map((check) => ({ ...check }));
+      return module.shutdownVerification(ctx.language).map((check) => ({ ...check }));
     } catch (error) {
       return [{
         key: `${module.id}.shutdown-verification`,

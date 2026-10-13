@@ -43,6 +43,14 @@ export function baseLanguage(language: Language): BaseLanguage {
   return language === 'zh' || language === 'zh-Hant' ? 'zh' : 'en';
 }
 
+/**
+ * An error whose operator-facing text is chosen per request: `describe` renders it in the request
+ * language, `message` holds the English text for logs. `status` is the HTTP status to answer with.
+ */
+export class LocalizedError extends Error {
+  constructor(readonly describe: (language: Language) => string, readonly status = 400) { super(describe('en')); }
+}
+
 /** BCP 47 tag for `<html lang>`; zh is written zh-CN. */
 export function languageTag(language: Language): string {
   return language === 'zh' ? 'zh-CN' : language;
@@ -137,4 +145,12 @@ export function pick<T>(language: Language, table: LanguageTable<T>): T {
     if (value !== undefined) merged[key] = value;
   }
   return merged as T;
+}
+
+/**
+ * `text` followed by `mark`, unless `text` already ends with sentence-final punctuation
+ * (`. ! ? 。 ！ ？`). Joins text whose last piece may or may not close its own sentence.
+ */
+export function punctuate(text: string, mark: string): string {
+  return /[.!?。！？]$/u.test(text) ? text : text + mark;
 }

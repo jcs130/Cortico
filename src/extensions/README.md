@@ -27,8 +27,8 @@ World 调用 `create()` / `tools()` / `console()`,provider 调用 `create()`,bot
 }
 ```
 
-`parseExtensionManifest(pkg)` 只做解析与校验,不碰文件系统;装载器与
-`pnpm check:extension <dir>` 共用它。`api` 与这一类的契约版本不等时不加载,扩展页说明哪一边旧。
+`parseExtensionManifest(pkg, language)` 只做解析与校验,不碰文件系统;装载器与
+`pnpm check:extension <dir>` 共用它。问题与警告按 `language` 成文,扩展页的装载原因按请求语言现取。`api` 与这一类的契约版本不等时不加载,扩展页说明哪一边旧。
 
 `EXTENSION_API_VERSIONS` 按 kind 各记一个版本:`WorldDefinition` 不兼容变更只加 world,
 `ProviderModule` 只加 provider,`BotDefinition`(连同 `BotParts`、`Persona`、`LoadedConfig`)只加 bot;
@@ -71,7 +71,7 @@ bot 包不在这条循环里 import:`deployment.json` 的 `bot` 字段指向哪�
 `ExtensionManager` 提供扩展页接口:`list(language)` 比较启动时的加载结果与当前安装状态
 (`loaded` / `failed` / `pending-restart` / `removed` / `idle`),带上本机 package.json 的 `metadata` 与 `author`,
 末尾接 `builtins` 给的随框架条目,每条再经 `decorate` 补上本进程的 `enabled` / `hidden`。
-`search()` 按关键字查 npm registry,翻到上限时 `searchPartial()` 为真;`packageInfo(name, version?)` 取一个版本的包文档;
+`search()` 按 `keywords:<类关键字>` 查 npm registry,一个包都没回时再按类关键字做文本搜索，结果只留带这个关键字的包;翻到上限时 `searchPartial()` 为真;`npmRegistry()` 给出所用的 registry;`packageInfo(name, version?)` 取一个版本的包文档;
 `updates()` 比较磁盘版本与 `latest`。这三处用安装时的 registry:首次查询时在 `extensions/` 里跑
 `pnpm config get registry --ignore-workspace`,成功的结果用到进程结束,pnpm 失败时抛出它的输出;请求失败的错误带主机和
 undici 的 `cause` 错误码。

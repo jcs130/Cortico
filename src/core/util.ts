@@ -4,7 +4,7 @@ import { type ContextRecord } from '../protocol/open-responses/context.ts';
  */
 import { createHash } from 'node:crypto';
 import { appendFileSync, mkdirSync, existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { LOG_LEVEL_RANK, type EventEnvelope, type LogEmitOptions, type LogError, type LogInput, type Logger, type LogLevel, type LogRecord } from './types.ts';
 import { currentAnchors } from './log-context.ts';
 
@@ -50,6 +50,9 @@ export function withDeadline<T>(work: Promise<T>, ms: number, what = 'this step'
   });
 }
 
+/** 本机时区的 IANA 名;部署没配 timezone 时用它。 */
+export const SYSTEM_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
 /** 当前时刻ISO 8601(带时区偏移,毫秒),按配置时区渲染 */
 export function nowIso(timezone: string, d: Date = new Date()): string {
   const fmt = new Intl.DateTimeFormat('sv-SE', {
@@ -67,11 +70,31 @@ export function nowIso(timezone: string, d: Date = new Date()): string {
   return `${parts}${sign}${hh}:${mm}`;
 }
 
-/** 目标时区相对UTC的偏移(分钟, UTC-本地=负东区),内部用 */
-function getTimezoneOffsetMinutes(timezone: string, d: Date): number {
-  const utc = new Date(d.toLocaleString('en-US', { timeZone: 'UTC' }));
-  const loc = new Date(d.toLocaleString('en-US', { timeZone: timezone }));
-  return (utc.getTime() - loc.getTime()) / 60000;
+/**
+ * 目标时区相对UTC的偏移(分钟, UTC-本地=负东区)。墙钟各字段按 UTC 拼回时刻再相减,
+ * 结果与进程自身的时区无关。
+ */
+export function getTimezoneOffsetMinutes(timezone: string, d: Date): number {
+  const parts: Record<string, number> = {};
+  for (const p of new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone, hourCycle: 'h23',
+    year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric',
+  }).formatToParts(d)) parts[p.type] = Number(p.value);
+  const wall = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  return (Math.floor(d.getTime() / 1000) * 1000 - wall) / 60000;
+}
+
+const ISO_OFFSET = /(?:[zZ]|[+-]\d{2}:?\d{2})$/;
+
+/** ISO 8601 文本对应的毫秒时刻;不带偏移的日期或时刻按 timezone 的墙钟读。读不出时为 NaN。 */
+export function parseTimeIn(timezone: string, text: string): number {
+  const s = text.trim();
+  if (ISO_OFFSET.test(s)) return Date.parse(s);
+  const wall = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(s) ? `${s}T00:00:00Z` : `${s}Z`);
+  if (Number.isNaN(wall)) return NaN;
+  // 偏移取在目标时刻上;第二次用第一次的结果重取,夏令时切换前后才能落对
+  const guess = wall + getTimezoneOffsetMinutes(timezone, new Date(wall)) * 60_000;
+  return wall + getTimezoneOffsetMinutes(timezone, new Date(guess)) * 60_000;
 }
 
 /** 渲染"[HH:MM]"短时间(消息行用) */
@@ -159,7 +182,21 @@ function slug(text: string): string {
   return text.replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '').slice(0, 40) || 'error';
 }
 
-const ANCHOR_KEYS = ['sess', 'round', 'resp', 'call', 'ev', 'task'] as const;
+export const LOG_ANCHOR_KEYS = ['sess', 'round', 'resp', 'call', 'ev', 'task'] as const;
+
+/** data 本身是 Error，或带 Error 类型的 err / error 字段时，错误移到 err，其余字段留在 data。 */
+export function splitLogError(data: unknown, err: unknown): { data: unknown; err: unknown } {
+  if (data instanceof Error) return { data: undefined, err: err ?? data };
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    const bag = data as Record<string, unknown>;
+    const carried = bag.err instanceof Error ? bag.err : bag.error instanceof Error ? bag.error : undefined;
+    if (carried) {
+      const { err: _e, error: _error, ...rest } = bag;
+      return { data: Object.keys(rest).length ? rest : undefined, err: err ?? carried };
+    }
+  }
+  return { data, err };
+}
 
 /**
  * 日志写入 data/runs/<run>/log.jsonl，并按独立门槛输出到 stdout。
@@ -174,7 +211,6 @@ export class Runlog {
   private readonly echo: boolean;
   private seq = 0;
   private bytes = 0;
-  private dirReady = false;
   private areaSpec = '';
   private areaLevels: Array<{ prefix: string; level: LogLevel }> = [];
   private readonly ring: LogRecord[] = [];
@@ -185,14 +221,11 @@ export class Runlog {
   constructor(file: string | null, opts: RunlogOptions = {}) {
     this.file = file;
     this.run = opts.run ?? 'r-none';
-    this.timezone = opts.timezone ?? 'Asia/Shanghai';
+    this.timezone = opts.timezone ?? SYSTEM_TIMEZONE;
     this.levels = opts.levels ?? (() => DEFAULT_LEVELS);
     this.incidentsDir = opts.incidentsDir ?? null;
     this.echo = opts.console ?? true;
     if (file) {
-      const dir = dirname(file);
-      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-      this.dirReady = true;
       try { this.bytes = existsSync(file) ? statSync(file).size : 0; } catch { this.bytes = 0; }
     }
   }
@@ -241,24 +274,13 @@ export class Runlog {
       msg: input.msg,
     };
     if (input.event !== undefined) record.event = input.event;
-    for (const key of ANCHOR_KEYS) {
+    for (const key of LOG_ANCHOR_KEYS) {
       const value = input[key] ?? anchors[key];
       if (value !== undefined) (record as unknown as Record<string, unknown>)[key] = value;
     }
     if (input.durMs !== undefined) record.durMs = input.durMs;
     if (input.incident) record.incident = true;
-    let data = input.data;
-    let err = input.err;
-    if (data instanceof Error) { err ??= data; data = undefined; }
-    else if (data && typeof data === 'object' && !Array.isArray(data)) {
-      const bag = data as Record<string, unknown>;
-      const carried = bag.err instanceof Error ? bag.err : bag.error instanceof Error ? bag.error : undefined;
-      if (carried) {
-        err ??= carried;
-        const { err: _e, error: _error, ...rest } = bag;
-        data = Object.keys(rest).length ? rest : undefined;
-      }
-    }
+    const { data, err } = splitLogError(input.data, input.err);
     if (data !== undefined) record.data = data;
     if (err !== undefined) record.err = normalizeError(err);
     return record;
@@ -286,7 +308,6 @@ export class Runlog {
     if (this.ring.length > RING_SIZE) this.ring.shift();
     if (toFile && this.file) {
       try {
-        if (!this.dirReady) { mkdirSync(dirname(this.file), { recursive: true }); this.dirReady = true; }
         if (this.bytes > ROTATE_BYTES) this.rotate();
         const line = `${JSON.stringify(record)}\n`;
         appendFileSync(this.file, line, 'utf8');

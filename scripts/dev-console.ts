@@ -4,6 +4,7 @@ import { ProviderRegistry } from '../src/providers/registry.ts';
 import type { FixtureMessage } from '../tests/core/fixture-messages.ts';
 import { fixtureRecords } from '../tests/core/fixture-messages.ts';
 import { responseTimelineFixture } from '../tests/web/response-timeline-fixture.ts';
+import { functionCall, functionResult, message } from '../src/protocol/open-responses/context.ts';
 /**
  * 使用代表性固定夹具启动 WebApp，供前端开发与截图核验。
  * 不连接真实 API，不启动 core。
@@ -24,16 +25,16 @@ import { LogBlobStore, withBlobLines } from '../src/core/blobs.ts';
 import type { BlobRef } from '../src/core/types.ts';
 import { CortiSoulmate } from '../bots/corti-soulmate/persona/index.ts';
 import { QQWorld } from '../src/worlds/qq/world.ts';
-import { QQ_CONFIG_GROUP } from '../src/worlds/qq/config.ts';
+import { qqConfigGroup } from '../src/worlds/qq/config.ts';
 import { TerminalWorld } from '../src/worlds/terminal/world.ts';
 import { WebSearchWorld } from '../src/worlds/websearch/world.ts';
 import type { Language } from '../src/core/language.ts';
-import { WEBSEARCH_CONFIG_GROUP } from '../src/worlds/websearch/config.ts';
-import { MINECRAFT_CLIENT_CONFIG_GROUP, MINECRAFT_CONFIG_GROUP, MINECRAFT_DEFAULTS, MINECRAFT_PLAYER_CONFIG_GROUP, MINECRAFT_RHYTHM_CONFIG_GROUP } from '../src/worlds/minecraft/config.ts';
-import { MINECRAFT_PANEL_DECLS } from '../src/worlds/minecraft/world.ts';
-import { FLAT_PRESETS, LEVEL_TYPE_LABELS } from '../src/worlds/minecraft/server-config.ts';
-import { BILIBILI_CONFIG_GROUP, BILIBILI_DEFAULTS } from '../src/worlds/bilibili/config.ts';
-import { BILIBILI_PANEL_DECLS } from '../src/worlds/bilibili/world.ts';
+import { webSearchConfigGroup } from '../src/worlds/websearch/config.ts';
+import { minecraftClientConfigGroup, minecraftConfigGroup, MINECRAFT_DEFAULTS, minecraftPlayerConfigGroup, minecraftRhythmConfigGroup, type MinecraftConfigSection } from '../src/worlds/minecraft/config.ts';
+import { minecraftPanelDecls } from '../src/worlds/minecraft/world.ts';
+import { flatPresets, levelTypeLabels } from '../src/worlds/minecraft/server-config.ts';
+import { bilibiliConfigGroup, BILIBILI_DEFAULTS } from '../src/worlds/bilibili/config.ts';
+import { bilibiliPanelDecls } from '../src/worlds/bilibili/world.ts';
 import { BUILTIN_OVERLAY_STYLES, normalizeOverlayDesign } from '../src/worlds/bilibili/overlay/model.ts';
 import { OverlayAssetStore } from '../src/worlds/bilibili/overlay/assets.ts';
 import { BilibiliOverlayServer, OverlayEditorConflictError } from '../src/worlds/bilibili/overlay/server.ts';
@@ -44,11 +45,13 @@ import { pageIdFor } from '../src/web/shared/console-protocol.ts';
 import { deriveConsolePageSources, ioPageContribution } from '../src/bot.ts';
 import { WorldAssembly } from '../src/world.ts';
 import { ConsoleFixtureWorld } from '../src/worlds/console-fixture/world.ts';
-import { CORE_CONFIG_GROUP } from '../src/core/config.ts';
+import { CORE_CONFIG_GROUP, usageRates } from '../src/core/config.ts';
 import { PERSONA_CONFIG_GROUP } from '../bots/corti-soulmate/persona/config.ts';
 import { readGroupValues, setByPath, type ConfigGroup } from '../src/core/config-schema.ts';
 import { WorkspaceGit, AUTHOR_SELF, AUTHOR_OPERATOR } from '../bots/cormini/persona/workspaceGit.ts';
 import { aggregateUsage } from '../src/core/cost.ts';
+import { priceUsage, unknownMeters } from '../src/core/generation.ts';
+import { snapshotPrice } from '../src/providers/pricebook.ts';
 import { nullLogger } from '../src/core/util.ts';
 import type {
   World, WorldConsoleDecl, ToolSchema, ToolTag, UsageRecord,
@@ -90,10 +93,10 @@ const devCfg = JSON.parse(JSON.stringify(cfg)) as BotConfig;
 const devConfigGroups: ConfigGroup[] = MINIMAL
   ? [CORE_CONFIG_GROUP]
   : [
-      CORE_CONFIG_GROUP, PERSONA_CONFIG_GROUP, QQ_CONFIG_GROUP, WEBSEARCH_CONFIG_GROUP,
-      MINECRAFT_CONFIG_GROUP, MINECRAFT_RHYTHM_CONFIG_GROUP, MINECRAFT_CLIENT_CONFIG_GROUP,
-      MINECRAFT_PLAYER_CONFIG_GROUP,
-      BILIBILI_CONFIG_GROUP,
+      CORE_CONFIG_GROUP, PERSONA_CONFIG_GROUP, qqConfigGroup('zh'), webSearchConfigGroup('zh'),
+      minecraftConfigGroup('zh'), minecraftRhythmConfigGroup('zh'), minecraftClientConfigGroup('zh'),
+      minecraftPlayerConfigGroup('zh'),
+      bilibiliConfigGroup('zh'),
     ];
 function genUsage(): UsageRecord[] {
   const recs: UsageRecord[] = [];
@@ -115,6 +118,10 @@ function genUsage(): UsageRecord[] {
       sessionId: role === 'main' ? 'main' : `${role}-${recs.length}`, role, label, model,
       promptTokens: prompt, completionTokens: comp, cacheHitTokens: hit, cacheMissTokens: prompt - hit,
       reasoningTokens: Math.floor(comp * 0.4),
+      charges: priceUsage({ ...unknownMeters(), input: prompt, output: comp, cachedInput: hit, uncachedInput: prompt - hit }, [snapshotPrice({
+        models: [model], currency: 'USD', basis: 'marginal', source: 'dev fake price',
+        rules: [{ meter: 'cachedInput', perMillion: 0.02 }, { meter: 'uncachedInput', perMillion: 0.27 }, { meter: 'output', perMillion: 1.1 }],
+      }, { startedAt: `${day}T${p2(hh)}:${p2(mm)}:00+08:00`, requestedServiceTier: null })]),
     });
   };
 // 日期按今天的 +08:00 日历日生成,覆盖分钟、周、月等聚合粒度。
@@ -204,7 +211,28 @@ const fixtureSession: FixtureMessage[] = [
   { role: 'tool', tool_call_id: 'c2', content: '[sent #5]' } as FixtureMessage,
   { role: 'assistant', content: '', reasoning_content: '' } as FixtureMessage,
 ];
-const session = [...fixtureRecords(fixtureSession, 'dev-console'), ...responseTimelineFixture().session.slice(1)];
+// 带图的终端消息与工具回执:时间线经 /api/blob 取图
+const devImage = (width: number, height: number, from: [number, number, number], to: [number, number, number]): Buffer => {
+  const raw = Buffer.alloc((width * 3 + 1) * height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const t = (x + y) / (width + height);
+      for (let c = 0; c < 3; c++) raw[y * (width * 3 + 1) + 1 + x * 3 + c] = Math.round(from[c] + (to[c] - from[c]) * t);
+    }
+  }
+  return encodePng(width, height, 2, raw);
+};
+const devImageRef = (bytes: Buffer, name: string, fallbackText: string): BlobRef =>
+  ({ handle: devBlobs.put(bytes, 'image/png'), mime: 'image/png', name, fallbackText });
+const userImage = devImageRef(devImage(320, 240, [240, 180, 120], [120, 160, 240]), 'sunset.png', 'image 1/1 from 阿明');
+const shotImage = devImageRef(devImage(480, 270, [40, 60, 90], [200, 220, 240]), 'screen.png', '屏幕截图 480×270');
+const session = [
+  ...fixtureRecords(fixtureSession, 'dev-console'),
+  message('user', withBlobLines('[15:12] 阿明: 看我拍的', [userImage]), { blobs: [userImage] }),
+  functionCall('c-shot', 'look_screen', '{}', { responseId: 'resp-dev-shot' }),
+  functionResult('c-shot', withBlobLines('截到了', [shotImage]), { blobs: [shotImage] }),
+  ...responseTimelineFixture().session.slice(1),
+];
 
 
 const worldLabels: Record<string, string> = {
@@ -234,7 +262,6 @@ const toolSchemas: Array<ToolSchema & { owner: ToolOwner; tags: readonly ToolTag
   owner: toolOwner.get(t.name) ?? (t.tags.includes('flow') ? { kind: 'core' } : { kind: 'persona' }),
 }));
 
-const now = '2026-07-19T15:20:00+08:00';
 const sessionsList: SessionStats[] = [
   { id: 'main', role: 'main', label: '主意识', startedAt: '2026-07-19T09:00:00+08:00', endedAt: null, calls: 42, promptTokens: 358000, completionTokens: 12400, cacheHitTokens: 322000, cacheMissTokens: 36000, reasoningTokens: 5200, cacheHitRate: 322000 / 358000, messageCount: 96 } as SessionStats,
   { id: 'dream-1', role: 'dream', label: '梦', startedAt: '2026-07-19T04:00:00+08:00', endedAt: '2026-07-19T04:06:00+08:00', calls: 8, promptTokens: 61000, completionTokens: 3400, cacheHitTokens: 40000, cacheMissTokens: 21000, reasoningTokens: 1200, cacheHitRate: 40000 / 61000, messageCount: 18 } as SessionStats,
@@ -392,6 +419,58 @@ function devMount(
     state: async () => snap(),
     start: async () => { phase = 'starting'; readyAt = Date.now() + 6_000; return snap(); },
     stop: async () => { phase = 'stopped'; return snap(); },
+  };
+}
+
+/**
+ * Minecraft「服务器」一行:按 devCfg 的 serverMode 分本地托管与外部服务器。外部服务器
+ * 连接 3 秒后进入世界;端口为 25571 时模拟端口可达但被白名单拒绝。
+ */
+function devMinecraftServer(): { state(): Promise<unknown>; start(): Promise<unknown>; stop(): Promise<unknown>; reconnect(): Promise<unknown> } {
+  const local = devMount(
+    () => ({ address: '127.0.0.1:25565', serverDir: 'C:\\mc\\server', configured: true }),
+    (phase) => ({ reachable: phase === 'running' }),
+  );
+  const mc = () => (devCfg.worlds as unknown as Record<string, MinecraftConfigSection>).minecraft;
+  const targetOf = () => ({ host: mc().host, port: mc().port, username: mc().username, version: mc().version });
+  let wanted = true;
+  let applied = targetOf();
+  let since = Date.now();
+  const external = () => mc().serverMode === 'external';
+  const link = (phase: string) => {
+    if (!external()) {
+      return { phase: phase === 'running' ? 'online' : 'stopped', target: '127.0.0.1:25565', username: applied.username, version: applied.version, attempt: 0, failure: null };
+    }
+    const blocked = applied.port === 25571;
+    const settled = Date.now() - since > 3_000;
+    return {
+      phase: !wanted ? 'stopped' : !settled ? 'connecting' : blocked ? 'retrying' : 'online',
+      target: `${applied.host}:${applied.port}`,
+      username: applied.username,
+      version: applied.version,
+      attempt: wanted && settled && blocked ? 1 : 0,
+      failure: wanted && settled && blocked ? '被服务器断开(白名单):multiplayer.disconnect.not_whitelisted' : null,
+    };
+  };
+  const snap = async () => {
+    const base = await local.state() as { phase: string } & Record<string, unknown>;
+    const now = targetOf();
+    const differs = now.host !== applied.host || now.port !== applied.port
+      || now.username !== applied.username || now.version !== applied.version;
+    if (!external()) return { ...base, mode: 'local', modeInferred: false, wanted: base.phase !== 'stopped', link: link(base.phase), pending: null };
+    return {
+      ...base, phase: 'stopped', pid: null, detail: null, reachable: true, configured: false,
+      address: `${applied.host}:${applied.port}`, mode: 'external', modeInferred: false, wanted,
+      link: link(base.phase),
+      pending: wanted && differs ? `${now.host}:${now.port}(${now.username},${now.version})` : null,
+    };
+  };
+  const connect = () => { wanted = true; applied = targetOf(); since = Date.now(); };
+  return {
+    state: snap,
+    start: async () => { if (external()) { if (!wanted) connect(); } else await local.start(); return snap(); },
+    stop: async () => { if (external()) wanted = false; else await local.stop(); return snap(); },
+    reconnect: async () => { connect(); return snap(); },
   };
 }
 
@@ -656,10 +735,7 @@ const devPanels: Record<string, Record<string, Record<string, (...args: never[])
     },
       // 面板方法的链路前缀与 MinecraftWorld.invokePanel 一致。
 
-    server: devMount(
-      () => ({ address: '127.0.0.1:25565', serverDir: 'C:\\mc\\server', configured: true }),
-      (phase) => ({ reachable: phase === 'running' }),
-    ),
+    server: devMinecraftServer(),
     client: devMount(
       () => ({
         enabled: true, gameDir: 'C:\\mc\\.minecraft', versionId: '1.20.1-fabric-iris',
@@ -773,8 +849,8 @@ const devPanels: Record<string, Record<string, Record<string, (...args: never[])
           sizeBytes: 0, dimensions: [], info: null as never,
         }]),
         settings: { ...settings },
-        flatPresets: FLAT_PRESETS,
-        levelTypes: LEVEL_TYPE_LABELS,
+        flatPresets: flatPresets('zh'),
+        levelTypes: levelTypeLabels('zh'),
         detail,
       });
       return {
@@ -864,13 +940,13 @@ function devPanelSurface(id: string): { invoke(panel: string, method: string, ar
 /** 复用 World 的面板声明,以 devPanels 提供方法结果。 */
 function devFakeWorld(
   id: string,
-  panels: WorldConsoleDecl['panels'],
+  panels: (language: Language) => WorldConsoleDecl['panels'],
   lamps: WorldConsoleDecl['lamps'],
   badges: WorldConsoleDecl['badges'],
   links: WorldConsoleDecl['links'],
   envPrompt: string,
 
-  config: WorldConsoleDecl['config'] = [],
+  config: (language: Language) => NonNullable<WorldConsoleDecl['config']> = () => [],
 ): World {
   const surface = devPanelSurface(id);
 
@@ -880,12 +956,12 @@ function devFakeWorld(
     id,
     envPromptVars: () => ({}),
     tools: () => [],
-    console: () => ({
+    console: (language: Language = 'zh') => ({
       lamps,
       badges,
-      panels,
+      panels: panels(language),
       links,
-      ...(config.length ? { config } : {}),
+      config: config(language),
       promptDocs: [
         {
           key: `worlds.${id}.envPrompt`,
@@ -915,20 +991,20 @@ const devBilibiliBadges: WorldConsoleDecl['badges'] = [
 ];
 const devFakeWorlds: World[] = MINIMAL ? [] : [
   devFakeWorld(
-    'minecraft', [...MINECRAFT_PANEL_DECLS], [
+    'minecraft', (language) => [...minecraftPanelDecls(language)], [
       { label: '服务器', state: 'online', hint: '127.0.0.1:25565' },
       { label: '任务', state: 'online', hint: '采集 5 个 oak_log' },
       { label: '画面', state: 'online', hint: '客户端主视角' },
     ], devMinecraftBadges,
     [{ label: '打开画面', href: 'http://127.0.0.1:3007' }],
     '(dev) Minecraft World 的环境提示词假数据。',
-    [
-      MINECRAFT_CONFIG_GROUP, MINECRAFT_RHYTHM_CONFIG_GROUP, MINECRAFT_CLIENT_CONFIG_GROUP,
-      MINECRAFT_PLAYER_CONFIG_GROUP,
+    (language) => [
+      minecraftConfigGroup(language), minecraftRhythmConfigGroup(language), minecraftClientConfigGroup(language),
+      minecraftPlayerConfigGroup(language),
     ],
   ),
   devFakeWorld(
-    'bilibili', [...BILIBILI_PANEL_DECLS], [
+    'bilibili', (language) => [...bilibiliPanelDecls(language)], [
       { label: '接入', state: 'online' },
       { label: '直播间', state: 'online', hint: '7734200 · 直播中' },
       { label: '身份', state: 'online', hint: '可认人' },
@@ -941,7 +1017,7 @@ const devFakeWorlds: World[] = MINIMAL ? [] : [
         ]
       : [],
     '(dev) B 站直播间的环境提示词假数据。',
-    [BILIBILI_CONFIG_GROUP],
+    (language) => [bilibiliConfigGroup(language)],
   ),
 ];
 
@@ -1137,6 +1213,7 @@ const app = new WebApp({
   memoryDir: tmpPersona,
   dataDir: tmpData,
   botDir: tmpPersona,
+  blob: (handle) => devBlobs.read(handle),
   password: process.env.CORTICO_DEV_PASSWORD ?? '',
   defaultScheme: cfg.web.theme,
   getStatus: () => ({
@@ -1153,7 +1230,7 @@ const app = new WebApp({
   }),
   sessions: { list: () => sessionsList, messages: (id) => (id === 'main' ? session : sessionsList.some((s) => s.id === id) ? session.slice(0, 4) : null), onChange: () => {} },
   storage: () => storage,
-  usage: { aggregate: (opts) => aggregateUsage(usageRecords, { ...opts, timezone: TZ }) },
+  usage: { aggregate: (opts) => aggregateUsage(usageRecords, { ...opts, timezone: TZ, rates: usageRates(devCfg) }) },
 
   config: {
     groups: () => [...devConfigGroups,...devProviders.groups()].map((group) => ({ group, values: group.owner.startsWith('provider:') ? devProviders.values(group.id) : readGroupValues(devCfg, group) })),

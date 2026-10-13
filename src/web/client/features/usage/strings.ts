@@ -1,4 +1,13 @@
 import { pick } from '../../core/language.ts';
+import { S as zhHant } from './strings.zh-Hant.ts';
+import { S as ja } from './strings.ja.ts';
+import { S as ko } from './strings.ko.ts';
+import { S as fr } from './strings.fr.ts';
+import { S as de } from './strings.de.ts';
+import { S as es419 } from './strings.es-419.ts';
+import { S as ptBR } from './strings.pt-BR.ts';
+import { S as it } from './strings.it.ts';
+import { S as ru } from './strings.ru.ts';
 
 const zh = {
   // index.ts
@@ -23,6 +32,8 @@ const zh = {
   refresh: '刷新',
   granularity: '粒度',
   autoCurrency: '自动币种',
+  rateHint: '保存到 Core 配置 usage.rates，修改后立即重新换算',
+  rateSaveFailed: (why: string) => `汇率没有保存：${why}`,
   basisMarginal: '边际费用',
   basisEquivalent: '等价 API 成本',
   ledger: '账本',
@@ -101,7 +112,7 @@ const zh = {
   typeOther: '其他费用 / 未分布输入',
 };
 
-const en: typeof zh = {
+export const en: typeof zh = {
   // index.ts
   navLabel: 'Usage & cost',
   navGroup: 'Core',
@@ -124,6 +135,8 @@ const en: typeof zh = {
   refresh: 'Refresh',
   granularity: 'Granularity',
   autoCurrency: 'Auto currency',
+  rateHint: 'Saved to the Core config (usage.rates); the report converts again at once',
+  rateSaveFailed: (why: string) => `Rate not saved: ${why}`,
   basisMarginal: 'Marginal cost',
   basisEquivalent: 'Equivalent API cost',
   ledger: 'Ledger',
@@ -202,4 +215,6 @@ const en: typeof zh = {
   typeOther: 'Other charges / unclassified input',
 };
 
-export const S = pick({ zh, en });
+export const S = pick({
+  zh, en, 'zh-Hant': zhHant, ja, ko, fr, de, 'es-419': es419, 'pt-BR': ptBR, it, ru,
+});

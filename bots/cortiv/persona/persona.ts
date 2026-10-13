@@ -1,9 +1,9 @@
+import { withBlobLines } from 'cortico/core/blobs.ts';
 import { GenerationError } from 'cortico/core/generation.ts';
 import type { ModelObservation } from 'cortico/core/model-observer.ts';
-import { BrainMetrics, emptyBrainPolicy, type BrainPolicy } from './brain-metrics.ts';
-import { withBlobLines } from 'cortico/core/blobs.ts';
-import { itemText, message, withText, type ContextRecord } from 'cortico/protocol/open-responses/context.ts';
-import { hasRole, textOf } from 'cortico/protocol/open-responses/context-helpers.ts';
+import { hasRole,textOf } from 'cortico/protocol/open-responses/context-helpers.ts';
+import { itemText,message,withText,type ContextRecord } from 'cortico/protocol/open-responses/context.ts';
+import { BrainMetrics,emptyBrainPolicy,type BrainPolicy } from './brain-metrics.ts';
 /**
  * AI VTuber 实时系统的 Persona。
  *
@@ -27,73 +27,74 @@ import { hasRole, textOf } from 'cortico/protocol/open-responses/context-helpers
  *    工具面 = World 点名的那几把 + 她自己的工作区文件工具;单实例、15 分钟封顶。
  *    task 提示另走单轮定向认知,只读本次说明与附件,不继承主会话或Memory工具。
  */
-import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
-import type {
-
-  CognitionContext,
-  CognitionRequest,
-  CognitionResult,
-  ContextHandoffResult,
-  CoreApi,
-  EventEnvelope,
-  FrameEventRef,
-  ModelSpec,
-  PersonaCognition,
-  PersonaConsoleDecl,
-  PrefixSegment,
-  RequestReasoning,
-  SessionDecl,
-  SessionOpeningReason,
-  ToolDef,
-  ToolOutcome,
-  WorldLifecycleEvent,
-} from 'cortico/core/types.ts';
 import type { Language } from 'cortico/core/language.ts';
-import { DeadlineError, estimateTokens, withDeadline } from 'cortico/core/util.ts';
-import { Cormini, HANDOFF_DIR, MAIN, type CorminiOptions } from '../../cormini/persona/persona.ts';
+import type {
+CognitionContext,
+CognitionRequest,
+CognitionResult,
+ContextHandoffResult,
+CoreApi,
+EventEnvelope,
+FrameEventRef,
+ModelSpec,
+PersonaCognition,
+PersonaConsoleDecl,
+RequestReasoning,
+SessionDecl,
+SessionOpeningReason,
+ToolDef,
+ToolOutcome,
+WorldLifecycleEvent
+} from 'cortico/core/types.ts';
+import { DeadlineError,estimateTokens,withDeadline } from 'cortico/core/util.ts';
+import { createHash } from 'node:crypto';
+import { readFileSync,readdirSync,realpathSync,statSync } from 'node:fs';
+import { join,relative } from 'node:path';
 import { HANDOFF_NOTE_TYPE } from '../../cormini/persona/handoffNote.ts';
-import { AUTHOR_SELF, type WorkspaceGit } from '../../cormini/persona/workspaceGit.ts';
-import { personaConsoleDecl } from './consoleSurface.ts';
-import { causalReviewTail, PeriodicPlanningReview, PLANNING, PLANNING_DEFAULTS, type PlanningConfig } from './planning-review.ts';
-import { ActivityAgenda, AGENDA_FILE, AGENDA_MAX_ITEMS } from './activity-agenda.ts';
-import { CortiVSocialAttention, FAST_ATTENTION_DEFAULTS, type FastAttentionConfig } from './attention-adviser.ts';
-import { ActionFailureReflection, FAILURE_REFLECTION_ADVICE } from './failure-reflection.ts';
-import { combatReviewEvidence, COMBAT_REFLECTION_ADVICE } from './combat-reflection.ts';
-import { RecentSpeech } from './recent-speech.ts';
-import { actionEvidence } from './action-evidence.ts';
-import { FocusedCognition, FOCUSED_COGNITION } from './focused-cognition.ts';
-import { projectForeground, FOREGROUND_CONTEXT_DEFAULTS, type ForegroundContextConfig } from './foreground-context.ts';
-import { excerptHandoffRecords } from './context-excerpts.ts';
-import { ForegroundEpoch } from './foreground-epoch.ts';
-import { ForegroundAdviser, FAST_FOREGROUND_DEFAULTS, type FastForegroundConfig, type ForegroundAdvice, type ForegroundScene } from './foreground-adviser.ts';
-import { DreamContext, DREAM_DEFAULTS, dreamHistoryWithinBudget, normalizeDreamConfig, renderDreamHistory, type DreamConfig, type DreamHistory } from './dream-context.ts';
-import { DreamTaskQueue, DreamTaskStoppedError, dreamAbortable, dreamDelay } from './dream-task-queue.ts';
-import { DreamMemory, dreamWorkspaceTools } from './dream-memory.ts';
-import { MemoryNoteProvenance, NOTE_PROVENANCE_DIR } from './note-provenance.ts';
-import { memoryIndex } from './memory-index.ts';
-import { StateMemory, STATE_MEMORY_FILE, MEMORY_HISTORY_DIR, STATE_MEMORY_SEARCH_NOTICE } from './state-memory.ts';
-import { WorldLifecycleContext, WORLD_LIFECYCLE_STATE_KEY } from './world-lifecycle-context.ts';
+import { Cormini,HANDOFF_DIR,MAIN,type CorminiOptions } from '../../cormini/persona/persona.ts';
+import { AUTHOR_SELF,type WorkspaceGit } from '../../cormini/persona/workspaceGit.ts';
 import { workspaceTools } from '../../cormini/persona/workspaceTools.ts';
-import { ToolCallRecoveryFallback, TOOL_CALL_RECOVERY_DEFAULTS, projectToolCallRecovery, type ToolCallRecoveryConfig } from './tool-call-recovery.ts';
-import { SleepReview, SLEEP_REVIEW_DEFAULTS, type SleepReviewConfig } from './sleep-review.ts';
-import { SocialMemoryReview, socialReviewPrompt, verifySocialReviewProof, prepareSocialReviewProof } from './social-memory-review.ts';
-import { ViewerConversationRecall, VIEWER_CONVERSATION_RECALL_LIMITS } from './viewer-conversation-recall.ts';
-import { ViewerRecallContext } from './viewer-recall-context.ts';
-import { ReferenceLibrary, REFERENCE_LIBRARY_DEFAULTS, type ReferenceLibraryConfig } from './reference-library.ts';
-import { FAST_REFERENCE_DEFAULTS, type FastReferenceConfig } from './reference-adviser.ts';
-import { ReferenceRouting, type ReferenceIntent } from './reference-routing.ts';
+import { actionEvidence } from './action-evidence.ts';
+import { AGENDA_FILE,AGENDA_MAX_ITEMS,ActivityAgenda } from './activity-agenda.ts';
+import { CortiVSocialAttention,FAST_ATTENTION_DEFAULTS,type FastAttentionConfig } from './attention-adviser.ts';
+import { COMBAT_REFLECTION_ADVICE,combatReviewEvidence } from './combat-reflection.ts';
+import { personaConsoleDecl } from './consoleSurface.ts';
+import { excerptHandoffRecords } from './context-excerpts.ts';
+import { DREAM_DEFAULTS,DreamContext,dreamHistoryWithinBudget,normalizeDreamConfig,renderDreamHistory,type DreamConfig,type DreamHistory } from './dream-context.ts';
+import { DreamMemory,dreamWorkspaceTools } from './dream-memory.ts';
+import { DreamTaskQueue,DreamTaskStoppedError,dreamAbortable,dreamDelay } from './dream-task-queue.ts';
+import { ActionFailureReflection,FAILURE_REFLECTION_ADVICE } from './failure-reflection.ts';
+import { FOCUSED_COGNITION,FocusedCognition } from './focused-cognition.ts';
+import { FAST_FOREGROUND_DEFAULTS,ForegroundAdviser,type FastForegroundConfig,type ForegroundAdvice,type ForegroundScene } from './foreground-adviser.ts';
+import { FOREGROUND_CONTEXT_DEFAULTS,projectForeground,type ForegroundContextConfig } from './foreground-context.ts';
+import { ForegroundEpoch } from './foreground-epoch.ts';
+import { memoryIndex } from './memory-index.ts';
+import { MemoryNoteProvenance,NOTE_PROVENANCE_DIR } from './note-provenance.ts';
 import {
-  PendingWork, PENDING_WORK_ID_MAX_CHARS, PENDING_WORK_NOTE_MAX_CHARS,
-  PENDING_WORK_SELECTOR_MAX_CHARS, PENDING_WORK_LIST_MAX_ENTRIES,
+PENDING_WORK_ID_MAX_CHARS,
+PENDING_WORK_LIST_MAX_ENTRIES,
+PENDING_WORK_NOTE_MAX_CHARS,
+PENDING_WORK_SELECTOR_MAX_CHARS,
+PendingWork,
 } from './pending-work.ts';
-import { VIEWERS_DIR, VIEWER_MEMORY_NOTE_FILE, viewerMemoryNote } from './viewers.ts';
+import { PLANNING,PLANNING_DEFAULTS,PeriodicPlanningReview,causalReviewTail,type PlanningConfig } from './planning-review.ts';
+import { RecentSpeech } from './recent-speech.ts';
+import { FAST_REFERENCE_DEFAULTS,type FastReferenceConfig } from './reference-adviser.ts';
+import { REFERENCE_LIBRARY_DEFAULTS,ReferenceLibrary,type ReferenceLibraryConfig } from './reference-library.ts';
+import { ReferenceRouting,type ReferenceIntent } from './reference-routing.ts';
+import { SLEEP_REVIEW_DEFAULTS,SleepReview,type SleepReviewConfig } from './sleep-review.ts';
+import { socialMessageIdentity } from './social-event.ts';
+import { SocialMemoryReview,prepareSocialReviewProof,socialReviewPrompt,verifySocialReviewProof } from './social-memory-review.ts';
+import { MEMORY_HISTORY_DIR,STATE_MEMORY_FILE,STATE_MEMORY_SEARCH_NOTICE,StateMemory } from './state-memory.ts';
+import { TOOL_CALL_RECOVERY_DEFAULTS,ToolCallRecoveryFallback,projectToolCallRecovery,type ToolCallRecoveryConfig } from './tool-call-recovery.ts';
+import { VIEWER_CONVERSATION_RECALL_LIMITS,ViewerConversationRecall } from './viewer-conversation-recall.ts';
 import { ViewerEncounters } from './viewer-encounters.ts';
 import { ViewerIdentityLinks } from './viewer-identity-links.ts';
-import { socialMessageIdentity } from './social-event.ts';
+import { ViewerRecallContext } from './viewer-recall-context.ts';
+import { VIEWERS_DIR,VIEWER_MEMORY_NOTE_FILE,viewerMemoryNote } from './viewers.ts';
+import { WORLD_LIFECYCLE_STATE_KEY,WorldLifecycleContext } from './world-lifecycle-context.ts';
 
-export { HANDOFF_DIR, VIEWERS_DIR, VIEWER_MEMORY_NOTE_FILE, viewerMemoryNote };
+export { HANDOFF_DIR,VIEWERS_DIR,VIEWER_MEMORY_NOTE_FILE,viewerMemoryNote };
 
 /** 梦 session 声明 id(交接后并行整理) */
 const DREAM = 'dream';
@@ -466,7 +467,6 @@ export class CortiV extends Cormini {
   private readonly fastReferenceConfig: () => FastReferenceConfig;
   private deliveredReferenceNote = '';
   private deliveredRecentNote = '';
-  private hadRecentMemoryNote = false;
   private deliveredMemoryIndex = '';
   private hadMemoryIndex = false;
   private pendingWork: PendingWork | null = null;

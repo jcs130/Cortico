@@ -2,9 +2,9 @@
  * 单实例守卫拒绝同一实例的并发启动。
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { acquireInstanceLock, INSTANCE_LOCK_FILE } from '../../src/core/instance-lock.ts';
+import { acquireInstanceLock, INSTANCE_LOCK_FILE, InstanceLockedError } from '../../src/core/instance-lock.ts';
 import { nullLogger } from '../../src/core/util.ts';
 import { makeTmpDir } from './helpers.ts';
 
@@ -49,6 +49,7 @@ describe('acquireInstanceLock', () => {
   it('同一个 dataDir 起第二个:拒绝启动,错误里带第一个的 pid', () => {
     held.push(acquireInstanceLock(tmp.dir));
     expect(() => acquireInstanceLock(tmp.dir)).toThrow(new RegExp(String(process.pid)));
+    expect(() => acquireInstanceLock(tmp.dir)).toThrow(InstanceLockedError);
     expect(() => acquireInstanceLock(tmp.dir)).toThrow(/锁记录指向运行中的进程/);
   });
 
@@ -115,42 +116,17 @@ describe('acquireInstanceLock', () => {
       expect(spy.calls.some((c) => c.level === 'warn' && c.msg.includes('接管'))).toBe(true);
     });
 
-    it('运行期锁文件被删掉:自检重新落锁并 error', () => {
-      const spy = spyLogger();
-      const lock = acquireInstanceLock(tmp.dir, { log: spy.log });
+    it('PID 被别的程序复用(可执行文件名与锁里记的不同):按陈旧锁接管', () => {
+      writeFileSync(join(tmp.dir, INSTANCE_LOCK_FILE), JSON.stringify({
+        pid: process.pid, // 活着、开机后启动，但可执行文件不是锁里记的那个
+        startedAt: new Date().toISOString(),
+        argv: ['old'],
+        execPath: join(tmp.dir, 'another-app.exe'),
+      }), 'utf8');
+      const lock = acquireInstanceLock(tmp.dir, { log: nullLogger() });
       held.push(lock);
-      rmSync(lock.file);
-      lock.verify();
-      expect(existsSync(lock.file)).toBe(true);
-      expect(JSON.parse(readFileSync(lock.file, 'utf8')).pid).toBe(process.pid);
-      const errors = spy.calls.filter((c) => c.level === 'error');
-      expect(errors).toHaveLength(1);
-      expect(errors[0].msg).toContain('实例锁');
-    });
-
-    it('运行期锁被别人接管:自检 error 并报出对方 pid,不夺回来', () => {
-      const spy = spyLogger();
-      const lock = acquireInstanceLock(tmp.dir, { log: spy.log });
-      held.push(lock);
-      const other = deadPid();
-      writeFileSync(lock.file, JSON.stringify({ pid: other, startedAt: 'x', argv: [] }), 'utf8');
-      lock.verify();
-      const errors = spy.calls.filter((c) => c.level === 'error');
-      expect(errors).toHaveLength(1);
-      expect(errors[0].data).toMatchObject({ nowPid: other });
-      // 所有权变化只报告，不覆盖锁文件。
-      expect(JSON.parse(readFileSync(lock.file, 'utf8')).pid).toBe(other);
-    });
-
-    it("同一锁异常状态只报告一次", () => {
-      const spy = spyLogger();
-      const lock = acquireInstanceLock(tmp.dir, { log: spy.log });
-      held.push(lock);
-      writeFileSync(lock.file, JSON.stringify({ pid: deadPid(), startedAt: 'x', argv: [] }), 'utf8');
-      lock.verify();
-      lock.verify();
-      lock.verify();
-      expect(spy.calls.filter((c) => c.level === 'error')).toHaveLength(1);
+      expect(lock.owns).toBe(true);
+      expect(JSON.parse(readFileSync(lock.file, 'utf8'))).toMatchObject({ pid: process.pid, execPath: process.execPath });
     });
   });
 

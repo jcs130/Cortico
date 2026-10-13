@@ -189,7 +189,6 @@ describe('认知外包 · 注入与开关', () => {
     expect(seen?.ctx.blobs).toEqual([{ handle: expect.stringMatching(/^log:/),
       mime: 'image/png', name: 'scene.png', fallbackText: '当前入口画面' }]);
     expect(live.core.resolveBlob(seen!.ctx.blobs![0].handle)?.bytes).toEqual(Buffer.from(bytes));
-    expect(live.core.cognitionInFlight()).toEqual({});
   });
 
   it('模型不接受本次附件时返回明确错误，不把缺图的判断交给 Persona', async () => {
@@ -200,7 +199,6 @@ describe('认知外包 · 注入与开关', () => {
       hint: { context: 'task' } });
     expect(result).toEqual({ error: '当前模型通道不支持本次附件格式：image/png' });
     expect(called).toBe(false);
-    expect(live.core.cognitionInFlight()).toEqual({});
   });
 
   it("Persona 抛错时返回错误给 World", async () => {
@@ -300,11 +298,11 @@ describe('认知外包 · 并发记账与用量归账', () => {
     const b = live.host().cognition!.request({ brief: '第二件' });
     await bothEntered;
     expect(seen).toEqual([1, 2]);
-    expect(live.core.cognitionInFlight()).toEqual({ mc: 2 });
 
     release();
     await Promise.all([a, b]);
-    expect(live.core.cognitionInFlight()).toEqual({});
+    await live.host().cognition!.request({ brief: '第三件' });
+    expect(seen).toEqual([1, 2, 1]);
   });
 
   it('人格实现走 spawnFork:工具装进 fork,用量归到它自己的声明上', async () => {
@@ -334,6 +332,5 @@ describe('认知外包 · 并发记账与用量归账', () => {
     // cognition 不重复记录 spawnFork 已计入的用量。
     const stats = live.core.sessions.list().find((s) => s.role === 'cognition');
     expect(stats?.calls).toBe(1);
-    expect(live.core.cognitionInFlight()).toEqual({});
   });
 });

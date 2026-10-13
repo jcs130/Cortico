@@ -22,7 +22,7 @@ World 不直接访问 Memory 或调用 Persona 的工具。
 | `onHandoffEnded?()`、`onTurnEnded?()` | 交接结束与主循环一轮结束的通知;隐藏的 World 不接收 |
 | `onEventsSettled?(events, outcome)` | 本 World 的事件写入主 session(`delivered`)或被操作者清空队列丢弃(`discarded`) |
 | `onRunPhase?(phase)` | 主循环的 `RunPhase`(`idle`、`delivering`、`model`、`tools`、`backoff`、`handoff`,轮序号,执行中的工具名)改变时同步调用;隐藏的 World 不接收 |
-| `shutdownVerification?()` | 关机前要核对的外部状态,同步只读快照 |
+| `shutdownVerification?(language)` | 关机前要核对的外部状态,同步只读快照;文案按 `language` 给 |
 
 Core 通过 `WorldHost` 向 World 提供以下能力:
 
@@ -82,7 +82,8 @@ World 应通过事件报告服务器起停、存档切换、连接变化等状�
 `WorldContext` 向 `create` 提供:`cfg`(共享配置对象)、`timezone`、`botName`、`botDir` /
 `packageDir` / `dataDir` / `repoRoot`、`secret()` / `storeSecret()`、`persist()`(写回
 `worlds.<id>`)、`restart()`。界面语言不在其中:它是每个请求的属性,`console(language)` 与
-`configOptions(kind, language)` 每次传入(见 [console.md](console.md))。
+`configOptions(kind, language)` 每次传入(见 [console.md](console.md))。控制台里的 World 名取
+`console(language).label`,没有时取定义的 `label`,两者都按请求现读。
 
 仓内定义列在 `src/worlds/index.ts`;启动器合并内建与扩展定义,通过 `withWorlds()` 交给 bot 定义。
 bot 的 `index.ts` 在 `declares` 中列出默认启用的 World id。声明但未安装的 World 显示为不可用;

@@ -5,40 +5,42 @@
  */
 import type { Bot } from 'mineflayer';
 import {
-  Aborted, SkillBlocked, checkAbort, sleep, type BlueprintSite, type BlueprintSurvey,
-  type SkillContext,
-} from './skill-context.ts';
-import {
-  AIR_NAMES, EXCAVATE_CELL_CAP, FACE_ZH, LIQUIDS, NEIGHBORS6, NO_PLACE_REFERENCE, PLACE_REACH,
-  SHAPE_ZH, blockAtCell, cellKeyOf, cellText, dimensionOf, faceText, feetOf, nearLavaAt, refAt,
-  refCellOf, resolveAt, skyVisibleAt, solidAt,
-} from './cell-facts.ts';
-import {
-  Upkeep, buildSpots, ensureHolding, footprintOf, footprintScene, gotoPlaceable, hitboxBlocks,
-  jumpPlaceBelow, matchPlacedMaterialName, materialCollides, occupantOf, occupantText,
-  occupiedByMe, permitPlacement, placeIntoCell, siteAtCellAnywhere, stationNotes,
-  singlePlaceScene, stepOffCell, type BuildSpot,
-} from './placement.ts';
-import { digBlock, readStamp, settleOnGround } from './travel.ts';
-import { zhName } from './names.ts';
-import { equipToolFor } from './tools.ts';
-import { bodyInWater, headInWater } from './terrain.ts';
-import { type BlueprintCall, type PlaceCall } from './receipt.ts';
-import { isBoat, skillUse } from './skills-interact.ts';
-import { invCount, invSnapshot } from './inventory.ts';
-import { matchMaterialName, type ChestBook } from './chests.ts';
-import { type BlockFace, type Cell } from './geometry.ts';
-import {
-  BLUEPRINT_MATERIAL_NOTE, billForSteps, blueprintProgress, blueprintStepStateMatches, diffBlueprint,
-  remainingPlacementBillSteps, renderBlueprintAdvisories, stepCountThroughLayer, stepToBuildCall, summarizeReadback, toWorld,
-  type BlueprintCheckCell, type BlueprintConflict, type BlueprintDiff, type BlueprintStep,
-  type ItemTally, type ReadbackEntry,
+BLUEPRINT_MATERIAL_NOTE,billForSteps,blueprintProgress,blueprintStepStateMatches,diffBlueprint,
+remainingPlacementBillSteps,renderBlueprintAdvisories,stepCountThroughLayer,stepToBuildCall,summarizeReadback,toWorld,
+type BlueprintCheckCell,type BlueprintConflict,type BlueprintDiff,type BlueprintStep,
+type ItemTally,type ReadbackEntry,
 } from './blueprint-plan.ts';
 import {
-  blockIdOf, normalizeBlockName, renderLayerMap, type NormalizedBlueprint, type PositionXYZ,
+blockIdOf,normalizeBlockName,renderLayerMap,type NormalizedBlueprint,type PositionXYZ,
 } from './blueprint.ts';
+import {
+AIR_NAMES,EXCAVATE_CELL_CAP,FACE_ZH,LIQUIDS,NEIGHBORS6,NO_PLACE_REFERENCE,PLACE_REACH,
+SHAPE_ZH,blockAtCell,cellKeyOf,cellText,dimensionOf,faceText,feetOf,nearLavaAt,refAt,
+refCellOf,resolveAt,skyVisibleAt,solidAt,
+} from './cell-facts.ts';
+import { matchMaterialName,type ChestBook } from './chests.ts';
+import { type BlockFace,type Cell } from './geometry.ts';
+import { invCount,invSnapshot } from './inventory.ts';
+import { zhName } from './names.ts';
+import {
+Upkeep,buildSpots,ensureHolding,footprintOf,footprintScene,gotoPlaceable,hitboxBlocks,
+jumpPlaceBelow,matchPlacedMaterialName,materialCollides,occupantOf,occupantText,
+occupiedByMe,permitPlacement,placeIntoCell,
+singlePlaceScene,
+siteAtCellAnywhere,stationNotes,
+stepOffCell,type BuildSpot,
+} from './placement.ts';
+import { type BlueprintCall,type PlaceCall } from './receipt.ts';
+import {
+Aborted,SkillBlocked,checkAbort,sleep,type BlueprintSite,type BlueprintSurvey,
+type SkillContext,
+} from './skill-context.ts';
 import { skillExcavate } from './skills-dig.ts';
-import { promoteTemporaryScaffold, reclaimPendingTemporaryScaffold } from './temporary-scaffold.ts';
+import { isBoat,skillUse } from './skills-interact.ts';
+import { promoteTemporaryScaffold,reclaimPendingTemporaryScaffold } from './temporary-scaffold.ts';
+import { bodyInWater,headInWater } from './terrain.ts';
+import { equipToolFor } from './tools.ts';
+import { digBlock,readStamp,settleOnGround } from './travel.ts';
 
 /** 陆上 surface 一次爬升的时限;到点如实报爬到哪 */
 export const SURFACE_CLIMB_MS = 90_000;

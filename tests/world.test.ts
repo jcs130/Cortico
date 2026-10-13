@@ -12,6 +12,7 @@ import { WorldAssembly, withWorlds, worldDefaults, type WorldDefinition, type Wo
 import { loadDeployment } from '../src/deploy.ts';
 import type { BotDefinition } from '../src/bot.ts';
 import type { CoreConfig, ToolDef, World, WorldHost, WorldLifecycleEvent } from '../src/core/types.ts';
+import type { Language } from '../src/core/language.ts';
 import { makeCfg } from './core/helpers.ts';
 
 interface ProbeSection { enabled: boolean; port: number; nested: { name: string; tags: string[] } }
@@ -277,6 +278,28 @@ describe('激活 / 停用 / 重启', () => {
     expect(assembly.mounted).toEqual([prebuilt]);
     await expect(assembly.activate('a')).resolves.toContain('已启用');
     expect(existsSync(join(dir, '.env'))).toBe(false);
+  });
+});
+
+describe('显示名', () => {
+  const labelled = (id: string, labels: Partial<Record<Language, string>>) => probeDefinition(id, {
+    create: (ctx) => Object.assign(new Probe(id, ctx), { console: (language: Language) => ({ label: labels[language] }) }),
+  });
+
+  it('按请求语言现取:实例 console().label,其次定义的 label', () => {
+    let current = '启动时的名字';
+    const live = Object.defineProperty(probeDefinition('live'), 'label', { get: () => current });
+    const { assembly } = assemblyOf([labelled('decl', { en: 'Declared' }), live], []);
+    current = '现在的名字';
+    expect(assembly.labelIn('decl', 'en')).toBe('Declared');
+    expect(assembly.labelIn('decl', 'zh')).toBe('decl 探针');
+    expect(assembly.labelIn('live', 'en')).toBe('现在的名字');
+  });
+
+  it('激活与停用的回执用请求语言的名字', async () => {
+    const { assembly } = assemblyOf([labelled('a', { en: 'Alpha' })], []);
+    expect(await assembly.activate('a', 'en')).toContain('Alpha');
+    expect(await assembly.deactivate('a', 'en')).toContain('Alpha');
   });
 });
 

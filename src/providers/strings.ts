@@ -1,4 +1,13 @@
 import { pick, type Language } from '../core/language.ts';
+import { text as zhHant } from './strings.zh-Hant.ts';
+import { text as ja } from './strings.ja.ts';
+import { text as ko } from './strings.ko.ts';
+import { text as fr } from './strings.fr.ts';
+import { text as de } from './strings.de.ts';
+import { text as es419 } from './strings.es-419.ts';
+import { text as ptBR } from './strings.pt-BR.ts';
+import { text as it } from './strings.it.ts';
+import { text as ru } from './strings.ru.ts';
 
 /** Validation errors that reach the console as `{ error }` from the provider settings. */
 const zh = {
@@ -10,6 +19,8 @@ const zh = {
   effortWithoutThinking: '思维链关闭时不能带推理强度',
   temperatureRange: 'temperature 必须在 0–2 之间',
   positiveInteger: (field: string) => `${field} 必须为正整数`,
+  contextWindowAboveOutput: (window: number, output: number) =>
+    `contextWindow 必须大于 maxTokens(当前 ${window} ≤ ${output})`,
   optionsObject: '原生参数必须是对象',
   kindChange: '实例不能改变 Provider 模块类型',
   baseUrlFormat: '供应地址需要不含凭据的 HTTP(S) URL',
@@ -35,7 +46,7 @@ const zh = {
   noModel: '未选模型',
   noSecret: (name: string) => `缺少密钥 ${name}`,
 };
-const en: typeof zh = {
+export const en: typeof zh = {
   profileObject: 'Model configuration must be an object',
   modelRequired: 'Model name cannot be empty',
   thinkingBoolean: 'Reasoning switch must be a boolean',
@@ -44,6 +55,8 @@ const en: typeof zh = {
   effortWithoutThinking: 'Reasoning effort cannot be set while reasoning is off',
   temperatureRange: 'temperature must be between 0 and 2',
   positiveInteger: (field: string) => `${field} must be a positive integer`,
+  contextWindowAboveOutput: (window: number, output: number) =>
+    `contextWindow must be greater than maxTokens (now ${window} ≤ ${output})`,
   optionsObject: 'Native options must be an object',
   kindChange: 'An instance cannot change its provider module type',
   baseUrlFormat: 'Provider URL must be an HTTP(S) URL without credentials',
@@ -70,4 +83,6 @@ const en: typeof zh = {
   noModel: 'No model selected',
   noSecret: (name: string) => `Missing secret ${name}`,
 };
-export const text = (language: Language) => pick(language, { zh, en });
+export const text = (language: Language) => pick(language, {
+  zh, en, 'zh-Hant': zhHant, ja, ko, fr, de, 'es-419': es419, 'pt-BR': ptBR, it, ru,
+});

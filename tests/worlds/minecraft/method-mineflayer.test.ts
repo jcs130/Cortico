@@ -1,14 +1,13 @@
-import { createRequire } from 'node:module';
-import { afterEach, describe, expect, it } from 'vitest';
 import type { Bot } from 'mineflayer';
+import { createRequire } from 'node:module';
 import { Vec3 } from 'vec3';
-import { methodHarness, methodEnded } from './method-harness.ts';
+import { afterEach,describe,expect,it } from 'vitest';
 import { installNavigationBareHand } from '../../../src/worlds/minecraft/hand-interaction.ts';
+import { methodEnded,methodHarness } from './method-harness.ts';
 
 const dependency = createRequire(createRequire(import.meta.url).resolve('mineflayer'));
 const registry = dependency('prismarine-registry')('1.20.6');
 const Item = dependency('prismarine-item')(registry);
-const Block = dependency('prismarine-block')(registry);
 const rigs: ReturnType<typeof methodHarness>[] = [];
 afterEach(() => rigs.splice(0).forEach(r => r.close()));
 

@@ -34,6 +34,15 @@ body:
       label: Commit or npm version / commit 或 npm 版本
     validations:
       required: true
+  - type: textarea
+    id: release-diff
+    attributes:
+      label: Diff against the release / 与对应 Release 的 diff
+      description: |
+        In your checkout, run `git diff <tag>` against the Pal-AI-Lab/Cortico release your code is based on, for example `git diff v0.1.11 > release-diff.txt`, and drop the file here. Write `none` if you run the npm package or an unmodified release.
+        在你的检出里对代码所基于的 Pal-AI-Lab/Cortico Release 跑 `git diff <tag>`,例如 `git diff v0.1.11 > release-diff.txt`,把文件拖进来。用 npm 包或没改过的 Release 就写「无」。
+    validations:
+      required: true
   - type: input
     id: environment
     attributes:

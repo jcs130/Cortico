@@ -121,8 +121,7 @@ export class TimerStore implements TimersApi {
   }
 
   private save(): void {
-    const dir = dirname(this.file);
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    mkdirSync(dirname(this.file), { recursive: true });
     const tmp = this.file + '.tmp';
     writeFileSync(tmp, JSON.stringify(this.entries, null, 2), 'utf8');
     // 通过 rename 原子覆盖，不先删除，避免崩溃后定时器全部丢失。

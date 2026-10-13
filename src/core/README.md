@@ -122,6 +122,8 @@ handler 异常转为失败回执。流式生成时 `EagerDispatch` 可提前执�
 `hardTokens = max(0, contextWindowOf(spec) − (spec.maxTokens ?? 0))`。
 `contextWindowOf` 取 provider 探测值与手动 `contextWindow` 的较小者；两者均未知时不按窗口裁剪。
 超过上限时，主循环在轮次边界结束本批，并在批末强制交接；上游报告输入超限时也请求交接。
+上一批已按计数强制交接、之后计数检查仍越过同一上限时不交接,记一条 error,这个上限下不再按计数收束或强制交接;
+计数检查回到上限内或上限改变时恢复。上游超限与手动交接不影响这条记录。
 
 `Persona.onHandoff(snapshot, { hardTokens })` 返回 `{ tail, trim? }`。Core 重建 system 前缀，
 按 `hardTokens − estimate(prefix)` 限制保留上下文，其中 prefix 包括 system 前缀和 Persona 的合成
@@ -136,4 +138,4 @@ warn；`onHandoff` 异常记录 error 并使用默认交接策略。其他钩子
 读取 `console()` 失败时省略该 World 的环境段，继续构建前缀。主循环异常退出时记录 error
 并停止定时器。启动器处理未捕获的进程异常并执行关机流程。
 
-`instanceIsRunning(dataDir)` 只读检查实例锁对应进程是否存活，沿用锁接管时的陈旧记录判定，不获取或更改锁。
+`instanceIsRunning(dataDir)` 只读检查实例锁对应进程是否存活，沿用锁接管时的陈旧记录判定(开机时刻、可执行文件名)，不获取或更改锁。

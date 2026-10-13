@@ -1,8 +1,8 @@
 import { isDeepStrictEqual } from 'node:util';
-import { message, record, functionCall, functionResult, responseRecords, itemText, withText, type ContextRecord, type Item } from '../protocol/open-responses/context.ts';
-import { hasRole, textOf, withoutPastReasoning, responseRequest, usageCounters } from '../protocol/open-responses/context-helpers.ts';
-import type { Response, StreamEvent } from '../protocol/open-responses/index.ts';
-import { GenerationError, type ResponseClient, type TokenMeters } from './generation.ts';
+import { hasRole,responseRequest,textOf,usageCounters,withoutPastReasoning } from '../protocol/open-responses/context-helpers.ts';
+import { functionCall,functionResult,message,record,responseRecords,withText,type ContextRecord,type Item } from '../protocol/open-responses/context.ts';
+import type { StreamEvent } from '../protocol/open-responses/index.ts';
+import { GenerationError,type ResponseClient,type TokenMeters } from './generation.ts';
 /**
  * MainLoop 执行 receivesEvents=true 的常驻 session。
  * 内部文本进入 user 消息；外部正文按 eventDelivery 进入合成工具回执（默认）
@@ -11,69 +11,69 @@ import { GenerationError, type ResponseClient, type TokenMeters } from './genera
  * Persona 提供交接内容与主动触发策略；Core 在超过模型容量时强制交接，
  * 修复工具配对、限制保留内容大小并重写上下文。
  */
+import { estimateToolTokens } from '../protocol/open-responses/tokens.ts';
+import { withBlobLines } from './blobs.ts';
+import type { WakeBus } from './bus.ts';
+import { setAnchors,withAnchors } from './log-context.ts';
+import {
+ABORT_INTERRUPTED,
+ABORT_PREEMPTED,
+ABORT_SHUTDOWN,
+ABORT_TOOL_INTERRUPTED,
+INTERRUPTED_WHILE_RUNNING,
+MISSING_RESULT_RESTART,
+NOT_EXECUTED_BARRIER,
+NOT_EXECUTED_INCOMPLETE,
+NOT_EXECUTED_INTERRUPTED,
+NOT_EXECUTED_LOOP_STOPPED,
+NOT_EXECUTED_STREAM_ABORTED,
+SHUTDOWN_INTERRUPTED,
+TOOL_FAILED_BAD_ARGS,
+UNKNOWN_TOOL,
+eventFrameHeader,
+toolFailed,
+} from './markers.ts';
+import { assembleSystem,type EnvPromptDirs } from './prefix.ts';
+import { validateRequestContext } from './request-context.ts';
+import type { SessionLog } from './session.ts';
+import type { SessionHandle,SessionTracker } from './sessions.ts';
+import type { CoreState } from './state.ts';
+import { recordToolCall,type ToolCallLog } from './tool-log.ts';
+import { explainToolOutcome,toolOutcomeText } from './tool-outcome.ts';
+import type { Transcript } from './transcript.ts';
+import { fixPairing,rebuildTail } from './truncate.ts';
 import type {
-  CandidateEventSpec,
-  CandidateProjector,
-  CandidateProjectionEvent,
-  CoreConfig,
-  ContextHandoffResult,
-  DeferredEventSpec,
-  EventEnvelope,
-  FrameEventRef,
-  EventStore,
-  BlobInput,
-  BlobRef,
-  DeferredRendered,
-  World,
-  LLMUsage,
-  Logger,
-  ModelSpec,
-  OutputTap,
-  Persona,
-  RunPhase,
-  SessionDecl,
-  SessionOpeningReason,
-  ToolCallContext,
-  ToolDef,
-  ToolOutcome,
-  ToolSchema,
-  ToolTag,
-  WakeItem,
+BlobInput,
+BlobRef,
+CandidateEventSpec,
+CandidateProjectionEvent,
+CandidateProjector,
+ContextHandoffResult,
+CoreConfig,
+DeferredEventSpec,
+DeferredRendered,
+EventEnvelope,
+EventStore,
+FrameEventRef,
+LLMUsage,
+Logger,
+ModelSpec,
+OutputTap,
+Persona,
+RunPhase,
+SessionDecl,
+SessionOpeningReason,
+ToolCallContext,
+ToolDef,
+ToolOutcome,
+ToolSchema,
+ToolTag,
+WakeItem,
+World,
 } from './types.ts';
 import { defaultExternalizes } from './types.ts';
-import type { WakeBus } from './bus.ts';
-import type { SessionLog } from './session.ts';
-import type { CoreState } from './state.ts';
-import type { SessionHandle, SessionTracker } from './sessions.ts';
-import { assembleSystem, type EnvPromptDirs } from './prefix.ts';
-import { recordToolCall, type ToolCallLog } from './tool-log.ts';
-import { explainToolOutcome, toolOutcomeText } from './tool-outcome.ts';
-import type { Transcript } from './transcript.ts';
-import { setAnchors, withAnchors } from './log-context.ts';
-import { withBlobLines } from './blobs.ts';
-import {
-  ABORT_INTERRUPTED,
-  ABORT_PREEMPTED,
-  ABORT_SHUTDOWN,
-  ABORT_TOOL_INTERRUPTED,
-  INTERRUPTED_WHILE_RUNNING,
-  MISSING_RESULT_RESTART,
-  NOT_EXECUTED_BARRIER,
-  NOT_EXECUTED_INCOMPLETE,
-  NOT_EXECUTED_INTERRUPTED,
-  NOT_EXECUTED_LOOP_STOPPED,
-  NOT_EXECUTED_STREAM_ABORTED,
-  SHUTDOWN_INTERRUPTED,
-  TOOL_FAILED_BAD_ARGS,
-  UNKNOWN_TOOL,
-  eventFrameHeader,
-  toolFailed,
-} from './markers.ts';
-import { fixPairing, rebuildTail, validatePairing } from './truncate.ts';
-import { validateRequestContext } from './request-context.ts';
-import { estimateToolTokens } from '../protocol/open-responses/tokens.ts';
 
-import { nowIso, prefixFingerprint, renderEventLines } from './util.ts';
+import { nowIso,prefixFingerprint,renderEventLines } from './util.ts';
 
 
 /**
@@ -286,6 +286,13 @@ export class MainLoop {
   /** 当前正在处理一个事件批；手动交接必须等到该批自然结束，不能重置半轮session。 */
   private processingBatch = false;
   private handoffRequested = false;
+  /** 上一批以计数触发的强制交接结束时的 hardTokens；之后一次计数检查看到计数在上限内即清空。 */
+  private forcedHandoffHard: number | null = null;
+  /**
+   * 按计数强制交接后，其间没有一批回到上限内、计数又越过的 hardTokens。上限仍是这个值时
+   * 不再按计数收束或强制交接；计数检查看到计数回到上限内，或上限改变后恢复。
+   */
+  private hardLimitUnreachable: number | null = null;
   /** onDelivery 执行期间（含其 Promise 完成前），injectInternal 的即时项加入当前批，不经过总线。 */
   private deliveryCollector: EventEnvelope[] | null = null;
   /** 已投递但前面仍有外部缺口的游标；水位只越过连续前缀。 */
@@ -674,7 +681,6 @@ export class MainLoop {
         tags: deferred.tags,
       }));
     }
-    if (!this.active(generation)) return false;
     if (delivered.length > 0) {
       // 捕获钩子完成前的即时注入；钩子完成后恢复总线投递。
       const injected: EventEnvelope[] = [];
@@ -706,7 +712,7 @@ export class MainLoop {
     // 仅当整条消息都可清除时标记 ephemeral，混合消息需保留其他内容。
     const ephemeral = ephemeralCount > 0 && ephemeralCount === internals.length && events.length === 0;
     if (!this.active(generation)) return false;
-    this.dropEphemeral(generation);
+    this.dropEphemeral();
     if (lines.length > 0) {
       const msg: ContextRecord = message('user', lines.join('\n'));
       if (ephemeral) msg.context.ephemeral = true;
@@ -721,7 +727,7 @@ export class MainLoop {
       if (blobs.length > 0) msg.context.blobs = blobs;
       session.append(msg);
     }
-    if (events.length > 0 && !inUser) this.appendEventFrame(events, generation);
+    if (events.length > 0 && !inUser) this.appendEventFrame(events);
     this.noteHandled(delivered, generation);
     this.notifySettled(delivered, 'delivered');
     const changed = lines.length > 0 || events.length > 0;
@@ -793,8 +799,7 @@ export class MainLoop {
   }
 
   /** 每批投递前删除带 ephemeral 标记的旧消息；重启读回的标记同样有效。 */
-  private dropEphemeral(generation: number): void {
-    if (!this.active(generation)) return;
+  private dropEphemeral(): void {
     const { session } = this.d;
     if (!session.records.some((m) => m.context.ephemeral)) return;
     const kept = session.records.filter((m) => !m.context.ephemeral);
@@ -805,7 +810,6 @@ export class MainLoop {
 
   /** 延迟渲染应读取当前状态；null、超时或异常均不归档、不投递，超时与异常记录日志。 */
   private async renderDeferred(spec: DeferredEventSpec, generation: number): Promise<DeferredRendered | null> {
-    if (!this.active(generation)) return null;
     const { log } = this.d;
     let timer: ReturnType<typeof setTimeout> | null = null;
     try {
@@ -831,8 +835,7 @@ export class MainLoop {
    * 以合成调用及回执承载外部正文，不新增模型请求。
    * 该模式下 user 消息仅承载内部文本。
    */
-  private appendEventFrame(events: EventEnvelope[], generation: number): void {
-    if (!this.active(generation)) return;
+  private appendEventFrame(events: EventEnvelope[]): void {
     const { session } = this.d;
     const id = `evf_${events[events.length - 1].cursor}`;
     session.append(functionCall(id, EXTERNAL_EVENT_FRAME, '{}'));
@@ -1113,7 +1116,6 @@ export class MainLoop {
   }
 
   private async roundsInScope(generation: number): Promise<void> {
-    if (!this.active(generation)) return;
     const { llm, session, log, bus, decl } = this.d;
     const modelTools = this.toolDefs;
     const schemas = this.getToolSchemas();
@@ -1144,8 +1146,8 @@ export class MainLoop {
       // 后续轮输入超限时结束本批，由批末检查执行交接。
       // 首轮仍处理本批新投递的事件；上一批的容量检查已在批末执行。
       if (round > 1) {
-        const hard = this.d.context.hardTokens();
-        if (hard !== null && this.estTokens() > hard) {
+        const hard = this.exceededHardLimit();
+        if (hard !== null) {
           log.warn('计数越过模型上下文上限,本批在轮边界收束,批末交接', { round, estTokens: this.estTokens(), hardTokens: hard });
           this.finishTurn();
           return;
@@ -1256,8 +1258,10 @@ export class MainLoop {
         }
         flight.controller.signal.throwIfAborted();
         const hardTokens = this.d.context.hardTokens();
-        if (hardTokens !== null && requestContext.estimatedInputTokens > hardTokens) {
+        if (hardTokens !== null && hardTokens !== this.hardLimitUnreachable
+          && requestContext.estimatedInputTokens > hardTokens) {
           log.warn('完整请求估算越过模型上下文上限,交接后继续', { ...requestContext, hardTokens, reservedOutputTokens: spec.maxTokens ?? null });
+          this.forcedHandoffHard = hardTokens;
           this.handoffRequested = true;
           noteRound('overflow');
           this.finishTurn();
@@ -1339,18 +1343,10 @@ export class MainLoop {
           // 已向外发送的部分输出必须保存；已执行的工具调用使用真实结果配对。
           await this.recordAbortedStream(responseRecords(e.partial, e.origin), eager, generation);
           if (!this.active(generation)) {
-            try {
-              tap.onAbort?.(ABORT_SHUTDOWN);
-            } catch (tapErr) {
-              log.warn('outputTap.onAbort异常', { err: tapErr });
-            }
+            this.tapAbort(tap, ABORT_SHUTDOWN);
             return;
           }
-          try {
-            tap.onAbort?.(e.message);
-          } catch (tapErr) {
-            log.warn('outputTap.onAbort异常', { err: tapErr });
-          }
+          this.tapAbort(tap, e.message);
         }
         // 提前执行的工具可能已消费队列；失败后将这些事件退回总线。
         // 重试前重新接收已就绪事件，否则随下一批投递。
@@ -1406,7 +1402,6 @@ export class MainLoop {
       if (!projected && meters && meters.input !== null && meters.output !== null) {
         this.anchor = { records: session.records.length, tokens: meters.input + meters.output, reasoningTokens: meters.reasoning ?? 0 };
       }
-      if (!this.active(generation)) return;
       if (tap) {
         try {
           tap.onRoundEnd?.();
@@ -1485,7 +1480,6 @@ export class MainLoop {
       toolMs = Date.now() - toolsStart;
       flight.phase = 'done';
 
-      if (!this.active(generation)) return;
       if (round === caps.soft && results.length > 0) {
         const hint = caps.softHint?.();
         if (hint) results[results.length - 1] = withText(results[results.length - 1], `${textOf(results[results.length - 1])}\n${hint}`);
@@ -1633,7 +1627,6 @@ export class MainLoop {
 
   /** 一批结束后调用 Persona 钩子，再检查是否超过模型容量；超限时强制交接。 */
   private async batchEndCheck(generation: number): Promise<void> {
-    if (!this.active(generation)) return;
     const { persona, log } = this.d;
     try {
       persona.onBatchEnd?.();
@@ -1642,11 +1635,35 @@ export class MainLoop {
     }
     if (await this.flushRequestedHandoff(generation)) return;
     if (!this.active(generation)) return;
-    const hard = this.d.context.hardTokens();
-    if (hard !== null && this.estTokens() > hard) {
+    const hard = this.exceededHardLimit();
+    if (hard !== null) {
       log.warn('计数越过模型上下文上限,强制交接', { estTokens: this.estTokens(), hardTokens: hard, model: this.d.spec().model });
+      this.forcedHandoffHard = hard;
       await this.handoffContext();
     }
+  }
+
+  /**
+   * 计数检查：越过 hardTokens 且应按计数收束或强制交接时返回该上限，否则返回 null。
+   * 计数在上限内时清空连续记录与不可达标记。上一批已按计数强制交接、计数仍越过同一上限时，
+   * 记该上限不可达并报一次错，不再交接；服务拒绝超长输入与手动交接不经过这里，不改变两项记录。
+   */
+  private exceededHardLimit(): number | null {
+    const hard = this.d.context.hardTokens();
+    if (hard === null) return null;
+    const estTokens = this.estTokens();
+    if (estTokens <= hard) {
+      this.forcedHandoffHard = null;
+      this.hardLimitUnreachable = null;
+      return null;
+    }
+    if (hard === this.hardLimitUnreachable) return null;
+    if (hard !== this.forcedHandoffHard) return hard;
+    this.hardLimitUnreachable = hard;
+    this.d.log.error('上一批按计数强制交接后,计数仍越过模型上下文上限,这个上限下不再按计数收束或强制交接;计数回到上限内或上限改变后恢复', {
+      hardTokens: hard, estTokens, model: this.d.spec().model,
+    });
+    return null;
   }
 
   /**
@@ -1785,7 +1802,6 @@ export class MainLoop {
   }
 
   private async performClearSession(generation: number): Promise<void> {
-    if (!this.active(generation)) return;
     const { session, log } = this.d;
     const sysMsg = await this.buildSystem();
     if (!this.active(generation)) return;
@@ -1834,7 +1850,6 @@ export class MainLoop {
   }
 
   private async performSystemPrefixReload(generation: number): Promise<void> {
-    if (!this.active(generation)) return;
     const { session, log } = this.d;
     const sysMsg = await this.buildSystem();
     if (!this.active(generation)) return;
@@ -1944,9 +1959,8 @@ export class MainLoop {
     const latest = store.latestCursor();
     const { behind, oldest } = this.watermarkBacklog();
     const stalledForMs = oldest ? Date.now() - Date.parse(oldest.ts) : 0;
-    const stalled = oldest !== null && Number.isFinite(stalledForMs) && stalledForMs > WATERMARK_STALL_MS;
 
-    if (!stalled) {
+    if (oldest === null || !(stalledForMs > WATERMARK_STALL_MS)) {
       if (this.watermarkStallAt >= 0 && this.watermarkStallAt !== watermark) {
         log.warn('投递水位停滞已解除:水位又开始推进了', {
           stalledAtCursor: this.watermarkStallAt,
@@ -1957,7 +1971,7 @@ export class MainLoop {
       }
       return;
     }
-    if (oldest === null) return; // stalled 为真时 backlog 非空，此处分支用于类型收窄。同一水位按退避表重报告警，并带上落后增量。
+    // 同一水位按退避表重报告警，并带上落后增量。
     if (this.watermarkStallAt === watermark) {
       const idx = this.watermarkStallReports - 1;
       if (idx >= WATERMARK_RESTATE_MS.length) return;

@@ -41,6 +41,8 @@ a reason.
 - One problem per issue: what happened, what you expected, how to reproduce it.
 - For a bot misbehaving at runtime, attach lines from its run directory (`data/runs/<run>/`),
   not a screenshot.
+- For a bug, attach `git diff <tag>` against the Pal-AI-Lab/Cortico release your code is based
+  on, or say you run the npm package or an unmodified release.
 - For a feature request, say why a Persona hook, a World or an extension cannot do it today.
 - A security problem goes through [SECURITY.md](SECURITY.md), not a public issue.
 

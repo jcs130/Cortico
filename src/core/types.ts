@@ -134,7 +134,7 @@ export interface EventRangeQuery {
   /** 游标区间(含端点) */
   fromCursor?: number;
   toCursor?: number;
-  /** ISO时间区间(含端点) */
+  /** 带偏移的 ISO 8601 时刻区间(含端点),按时刻比较 */
   fromTs?: string;
   toTs?: string;
   senderKey?: string;
@@ -747,7 +747,7 @@ export interface WorldHost {
   blob(handle: string): { bytes: Uint8Array; mime: string } | null;
   /**
    * 记录 World 自有模型的用量，写入 session 统计和 usage.jsonl。
-   * 仅记录主动上报的用量；Core 不管理 World 自有模型的运行时。
+   * 仅记录主动上报的用量；Core 不管理 World 自有模型的运行时。`label` 是 session 列表里的显示名,缺省为 World id。
    */
   reportUsage(usage: LLMUsage, opts?: { model?: string; label?: string; charges?: import('./generation.ts').Charge[] }): void;
   /**
@@ -982,9 +982,9 @@ export interface World {
   onRunPhase?(phase: RunPhase): void;
   /**
    * stop() 完成后返回外部状态检查的同步只读快照。
-   * 网络检查须在 stop() 的既有期限内完成并缓存。
+   * 网络检查须在 stop() 的既有期限内完成并缓存。label、detail 与 manualAction 按 `language` 给。
    */
-  shutdownVerification?(): readonly ShutdownExternalCheck[];
+  shutdownVerification?(language: Language): readonly ShutdownExternalCheck[];
 }
 
 /** text 按序拼入 system 前缀；title 仅用于显示。 */
@@ -1315,6 +1315,10 @@ export interface CoreConfig {
     memory: string;
 
     data: string;
+  };
+  usage?: {
+    /** 1 USD 合多少该币种(ISO 代码为键)。用量报告选的币种没有原价时，按它从别的币种换算;0 表示不换算。 */
+    rates?: Record<string, number>;
   };
   logging: {
     /** 低于此级别的记录不写入 log.jsonl。 */

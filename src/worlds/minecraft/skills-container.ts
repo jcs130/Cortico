@@ -6,39 +6,45 @@
 import type { Bot } from 'mineflayer';
 import pathfinderPkg from 'mineflayer-pathfinder';
 import { Vec3 } from 'vec3';
-import {
-  INVENTORY_SLOTS, awaitInvConfirm, invCount, invCountIn, invGains, invGainsSplit, invSnapshot,
-  itemAsked, itemIdHint, itemPredOf, lootNote, moveExactSlot, noSuchItem, playerInvIn, type InvItem,
-  type InvPred,
-} from './inventory.ts';
-import { isSpawnAnchorBlock } from './policy.ts';
-import { roman, zhDimension, zhEnchant, zhName } from './names.ts';
-import { Aborted, SkillBlocked, SkillNoop, checkAbort, sleep, type SkillContext } from './skill-context.ts';
-import { AIR_NAMES, LIQUIDS, blockAtCell, cellKeyOf, cellText, dimensionOf, feetOf, resolveAt } from './cell-facts.ts';
-import { droppedStackOf, type ItemStack } from './terrain.ts';
-import { CONTAINER_FIND, FURNACE_KINDS, matchItemName, matchMaterialName } from './chests.ts';
-import { dropGoal, gotoGoal } from './travel.ts';
-import { type SkillCall } from './skills.ts';
-import { itemMatchesPick, pickMissText, pickTargetOf, pickedText, type PickTarget } from './item-pick.ts';
-import {
-  AUTO_CONTAINER_OPEN_LIMIT, clearStorageMenu, clearStorageWriteFailure, containerStacks,
-  findContainers, furnaceDoneAt, noContainerNearby, openNearbyContainer,
-  openWindowGuarded, orderForStow, orderForTake, rememberChest, rememberNonStorageMenu,
-  rememberStorageAccessFailure, rememberStorageWriteFailure, storageSkipReason, slotStack, smeltPerItemMs,
-  BREW_BOTTLE_SLOTS, BREW_FUEL_SLOT, BREW_INPUT_SLOT, BREW_PROP_FUEL, BREW_PROP_TIME,
-  brewStandText, potionText, windowProp, WINDOW_SETTLE_MS,
-  type GenericWindow,
-} from './containers.ts';
-import { contentsText, zhErrorText } from './receipt.ts';
-import { ShowPacer } from './show.ts';
-import { type Anchor, type Cell } from './geometry.ts';
-import { FURNACE_STATION, ensureStation, type Station, type StationAt } from './placement.ts';
-import { readEnchants, type ItemEnchant } from './item-facts.ts';
-import { normalizeDimension } from './escape.ts';
-import { consumesOpenWindow, selectionMenuTitle } from './window-semantics.ts';
-import { itemCustomName, itemProfileSkinHash } from './item-display.ts';
-import { inventoryReadConfirmed } from './inventory-window-sync.ts';
+import { AIR_NAMES,LIQUIDS,blockAtCell,cellKeyOf,cellText,dimensionOf,feetOf,resolveAt } from './cell-facts.ts';
+import { CONTAINER_FIND,FURNACE_KINDS,matchItemName,matchMaterialName } from './chests.ts';
 import { withdrawStack } from './container-withdraw.ts';
+import {
+AUTO_CONTAINER_OPEN_LIMIT,
+BREW_BOTTLE_SLOTS,BREW_FUEL_SLOT,BREW_INPUT_SLOT,BREW_PROP_FUEL,BREW_PROP_TIME,
+WINDOW_SETTLE_MS,
+brewStandText,
+clearStorageMenu,clearStorageWriteFailure,containerStacks,
+findContainers,furnaceDoneAt,noContainerNearby,openNearbyContainer,
+openWindowGuarded,orderForStow,orderForTake,
+potionText,
+rememberChest,rememberNonStorageMenu,
+rememberStorageAccessFailure,rememberStorageWriteFailure,
+slotStack,smeltPerItemMs,
+windowProp,
+type GenericWindow
+} from './containers.ts';
+import { normalizeDimension } from './escape.ts';
+import { type Anchor,type Cell } from './geometry.ts';
+import { inventoryReadConfirmed } from './inventory-window-sync.ts';
+import {
+INVENTORY_SLOTS,awaitInvConfirm,invCount,invCountIn,invGains,invGainsSplit,invSnapshot,
+itemAsked,itemIdHint,itemPredOf,lootNote,moveExactSlot,noSuchItem,playerInvIn,type InvItem,
+type InvPred,
+} from './inventory.ts';
+import { itemCustomName,itemProfileSkinHash } from './item-display.ts';
+import { readEnchants,type ItemEnchant } from './item-facts.ts';
+import { itemMatchesPick,pickMissText,pickTargetOf,pickedText,type PickTarget } from './item-pick.ts';
+import { roman,zhDimension,zhEnchant,zhName } from './names.ts';
+import { FURNACE_STATION,ensureStation,type Station,type StationAt } from './placement.ts';
+import { isSpawnAnchorBlock } from './policy.ts';
+import { contentsText,zhErrorText } from './receipt.ts';
+import { ShowPacer } from './show.ts';
+import { Aborted,SkillBlocked,SkillNoop,checkAbort,sleep,type SkillContext } from './skill-context.ts';
+import { type SkillCall } from './skills.ts';
+import { droppedStackOf,type ItemStack } from './terrain.ts';
+import { dropGoal,gotoGoal } from './travel.ts';
+import { consumesOpenWindow,selectionMenuTitle } from './window-semantics.ts';
 
 const { goals } = pathfinderPkg;
 

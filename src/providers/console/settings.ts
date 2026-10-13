@@ -21,8 +21,8 @@ import type { ConsolePageSource } from '../../web/console-pages.ts';
 import { providerModules, type ProviderRegistry } from '../registry.ts';
 import { providerReferencePaths } from './references.ts';
 import type { ProviderAvailability, ProviderModule } from '../base.ts';
-import { endpointAvailability, validateEntry } from '../configuration.ts';
-import { quotePrices, validatePrices, type PriceDefinition } from '../pricebook.ts';
+import { endpointAvailability, validateEntry, withContextWindows } from '../configuration.ts';
+import { quotePrices, validatePrices } from '../pricebook.ts';
 import { GenerationError, type ResponseClient } from '../../core/generation.ts';
 import { readTextFile } from '../../core/util.ts';
 import { responseRequest } from '../../protocol/open-responses/context-helpers.ts';
@@ -326,7 +326,7 @@ export class ProviderSettings {
       ...extra,
       id: `llm:${module.id}`,
       kind: 'llm',
-      label: module.title,
+      label: module.localize?.(language)?.title ?? module.title,
       availability: 'active',
       lamps: [],
       badges: [{ label: S.instancesBadge, value: String(entries.length) }, ...(extra.badges ?? [])],
@@ -437,7 +437,9 @@ export class ProviderSettings {
         } else if (method === 'models') {
           const instance = this.registry.resolve(name);
           if (!instance.listModels) throw new Error(S.modelsUnsupported);
-          return { models: await instance.listModels() };
+          const models = await instance.listModels();
+          // llamacpp 的 contextWindow(id) 按模型向服务发 /props 探测;它的列表已带探测过的窗口。
+          return { models: entry.kind === 'llamacpp' ? models : withContextWindows(instance, models) };
         } else if (method === 'probe') {
           return this.probe(name, language);
         } else if (method === 'extras') {

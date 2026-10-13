@@ -1,6 +1,6 @@
 /** 主进程中的 Minecraft World 代理。游戏连接、执行器和客户端管理在引擎子进程；此处转发工具、事件、控制台及存储请求，并每秒推送配置。 */
 import { fork, type ChildProcess } from 'node:child_process';
-import { nowIso } from '../../core/util.ts';
+import { nowIso, SYSTEM_TIMEZONE } from '../../core/util.ts';
 import { emitLogNote, logChildStdio } from '../../core/ipc-logger.ts';
 import { childExecArgv } from '../../extensions/runtime.ts';
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
@@ -15,8 +15,10 @@ import type {
   ToolOutcome,
   WorldRequestFacts,
 } from '../../core/types.ts';
-import { COGNITION_ABSENT, MINECRAFT_PANEL_DECLS, MINECRAFT_STORAGE_DECLS, minecraftToolDecls, type MinecraftWorldOptions } from './world.ts';
-import { MINECRAFT_CLIENT_CONFIG_GROUP, MINECRAFT_CONFIG_GROUP, MINECRAFT_PLAYER_CONFIG_GROUP, MINECRAFT_RHYTHM_CONFIG_GROUP } from './config.ts';
+import { COGNITION_ABSENT, minecraftPanelDecls, minecraftStorageDecls, minecraftToolDecls, type MinecraftWorldOptions } from './world.ts';
+import { minecraftClientConfigGroup, minecraftConfigGroup, minecraftPlayerConfigGroup, minecraftRhythmConfigGroup, serverModeOf } from './config.ts';
+import { pick, type Language } from '../../core/language.ts';
+import { text } from './strings.ts';
 import type {
   ChildToMain,
   EngineCast,
@@ -76,7 +78,9 @@ export class MinecraftWorldProxy implements World {
   private stopping = false;
   private nextReqId = 1;
   private readonly pending = new Map<number, PendingRpc>();
-  private declCache: Pick<WorldConsoleDecl, 'lamps' | 'badges' | 'links'> = {};
+  private declCache: Record<'zh' | 'en', Pick<WorldConsoleDecl, 'lamps' | 'badges' | 'links'>> = { zh: {}, en: {} };
+  /** 子进程按当前连接目标算的世界身份行;子进程没起时按配置算 */
+  private worldLineCache: string | null = null;
   private storageCache: StorageStat[] = [];
   private requestFactsCache: WorldRequestFacts | null = null;
   private promptVars: Record<'minecraft.current_task' | 'minecraft.goals', string> = {
@@ -91,16 +95,15 @@ export class MinecraftWorldProxy implements World {
   constructor(private readonly opts: MinecraftWorldOptions) {}
 
   /**
-   * 前缀从子进程持有的落盘文件读取探索摘要与常驻规则，并从 server.properties 读取世界身份。
-   * 快照锚点由子进程设置。
+   * 前缀从子进程持有的落盘文件读取探索摘要与常驻规则。世界身份取子进程按当前连接目标算的
+   * 那一行;子进程还没报状态时按配置算。快照锚点由子进程设置。
    */
   envPromptVars(): Record<string, string> {
+    const { cfg } = this.opts;
+    const local = serverModeOf(cfg.serverMode, cfg.local.serverDir) === 'local';
     return {
       'minecraft.version': this.opts.cfg.version,
-      'minecraft.world': worldEnvLine(worldIdentityOf(
-        this.opts.cfg.local.serverDir,
-        `${this.opts.cfg.host}:${this.opts.cfg.port}`,
-      )),
+      'minecraft.world': this.worldLineCache ?? worldEnvLine(worldIdentityOf(local ? cfg.local.serverDir : '', `${cfg.host}:${cfg.port}`)),
       'minecraft.explored': renderExploredLedger(loadExplored(this.storageFileOf('minecraft-explored'))),
       'minecraft.policy': renderPolicyEnv(loadPolicy(this.storageFileOf('minecraft-policy'))),
       'minecraft.camera': this.opts.cfg.client.enabled
@@ -147,75 +150,67 @@ export class MinecraftWorldProxy implements World {
     }));
   }
 
-  console(): WorldConsoleDecl {
+  /** 灯、徽标、链接取子进程按这次请求的界面语言报上的那份;面板调用把语言带给子进程。 */
+  console(language: Language = 'zh'): WorldConsoleDecl {
+    const t = text(language);
+    const cached = pick(language, this.declCache);
     return {
-      lamps: this.declCache.lamps ?? [this.child
-        ? { label: '引擎', state: 'loading' as const, hint: '启动中' }
-        : { label: '引擎', state: 'offline' as const, hint: '未启动' }],
-      badges: this.declCache.badges ?? [
-        { label: '引擎', value: this.child ? '启动中' : '未启动', tone: 'off' },
+      label: t.label,
+      lamps: cached.lamps ?? [this.child
+        ? { label: t.engine, state: 'loading' as const, hint: t.engineStarting }
+        : { label: t.engine, state: 'offline' as const, hint: t.notStarted }],
+      badges: cached.badges ?? [
+        { label: t.engine, value: this.child ? t.engineStarting : t.notStarted, tone: 'off' },
       ],
-      panels: [...MINECRAFT_PANEL_DECLS],
+      panels: [...minecraftPanelDecls(language)],
       invoke: (panel, method, args) => {
         // 路径选择保存后紧接着会读状态或启动；同一 IPC 通道先投最新配置，
         // 让这次面板调用看到刚写入的值。
         this.pushConfigIfChanged();
-        return this.rpc({ kind: 'panel', panel, method, args }, PANEL_RPC_TIMEOUT_MS);
+        return this.rpc({ kind: 'panel', panel, method, args, language }, PANEL_RPC_TIMEOUT_MS);
       },
       promptDocs: [
         {
           key: 'worlds.minecraft.envPrompt',
-          title: 'Minecraft · 环境提示词',
-          description: 'Minecraft World 的常驻事实（技能序列、世界观察、反射层）。',
+          title: t.envPromptTitle,
+          description: t.envPromptDescription,
           path: ENV_PROMPT_FILE,
           role: 'envPrompt',
           vars: [
-            {
-              name: 'minecraft.world',
-              description: '世界身份:本地托管=「当前存档:名字」,外部服务器=「当前服务器:地址」。她的位置类记忆按它划界。',
-            },
-            {
-              name: 'minecraft.explored',
-              description: '探索覆盖摘要(8 方向历史最远与末端群系);一处没探过时为空。',
-            },
-            {
-              name: 'minecraft.policy',
-              description: 'mc_policy 六格里与默认不同的那几条;全默认时为空。',
-            },
-            {
-              name: 'minecraft.camera',
-              description: '观察者摄像机说明;没开客户端时为空。措辞在「摄像机说明」那份里改。',
-              multiline: true,
-            },
+            { name: 'minecraft.version', description: t.versionVar },
+            { name: 'minecraft.world', description: t.worldVar },
+            { name: 'minecraft.explored', description: t.exploredVar },
+            { name: 'minecraft.policy', description: t.policyVar },
+            { name: 'minecraft.camera', description: t.cameraVar, multiline: true },
             {
               name: 'minecraft.current_task',
-              description: '引擎同步的当前任务;引擎未就绪时提示用 mc_queue 现查。',
+              description: t.currentTaskVar,
             },
             {
               name: 'minecraft.goals',
-              description: '引擎同步的 mc_goal 目标摘要;引擎未就绪时提示用 mc_goal 现查。',
+              description: t.goalsVar,
             },
           ],
         },
         {
           key: 'worlds.minecraft.cameraNote',
-          title: 'Minecraft · 摄像机说明',
-          description: '开了观察者客户端时,追加到环境提示词末尾的那一段。',
+          title: t.cameraNoteTitle,
+          description: t.cameraNoteDescription,
           path: CAMERA_NOTE_FILE,
         },
       ],
-      storage: MINECRAFT_STORAGE_DECLS.map((d): StoragePart => ({
+      storage: minecraftStorageDecls(language).map((d): StoragePart => ({
         ...d,
         stat: () =>
           this.storageCache.find((s) => s.key === d.key)?.stat ?? this.storageStatOffline(d.key),
         clear: async () => this.storageClear(d.key),
       })),
-      links: this.declCache.links ?? [],
+      links: cached.links ?? [],
       config: [
-        MINECRAFT_CONFIG_GROUP,
-        MINECRAFT_RHYTHM_CONFIG_GROUP,
-        MINECRAFT_CLIENT_CONFIG_GROUP,
-        MINECRAFT_PLAYER_CONFIG_GROUP,
+        minecraftConfigGroup(language),
+        minecraftRhythmConfigGroup(language),
+        minecraftClientConfigGroup(language),
+        minecraftPlayerConfigGroup(language),
       ],
     };
   }
@@ -299,7 +294,7 @@ export class MinecraftWorldProxy implements World {
       {
         kind: 'init',
         init: {
-          timezone: this.opts.timezone ?? 'Asia/Shanghai',
+          timezone: this.opts.timezone ?? SYSTEM_TIMEZONE,
           botName: this.opts.botName ?? 'bot',
           dataDir: this.opts.dataDir ?? null,
           agentFriendEnabled: this.opts.agentFriendEnabled === true,
@@ -317,7 +312,8 @@ export class MinecraftWorldProxy implements World {
   private teardownChild(): void {
     this.child = null;
     this.ready = false;
-    this.declCache = {};
+    this.declCache = { zh: {}, en: {} };
+    this.worldLineCache = null;
     this.storageCache = [];
     this.requestFactsCache = null;
     this.promptVars = {
@@ -344,7 +340,7 @@ export class MinecraftWorldProxy implements World {
     this.host?.log.error(`Minecraft 引擎子进程意外退出(code=${code}),${RESTART_DELAY_MS / 1000}s 后重启`);
     this.host?.pushEvent(
       {
-        ts: nowIso(this.opts.timezone ?? 'Asia/Shanghai'),
+        ts: nowIso(this.opts.timezone ?? SYSTEM_TIMEZONE),
         source: this.id,
         type: 'minecraft.event',
         text: '[Minecraft] 游戏引擎崩了,正在自动重启;重新连上之前,游戏里的动作都不会生效。',
@@ -415,7 +411,7 @@ export class MinecraftWorldProxy implements World {
     if (!host) return;
     switch (note.kind) {
       case 'log':
-        emitLogNote(host.log, note, this.opts.timezone ?? 'Asia/Shanghai');
+        emitLogNote(host.log, note, this.opts.timezone ?? SYSTEM_TIMEZONE);
         return;
       case 'usage':
         host.reportUsage(note.usage, note.opts);
@@ -446,6 +442,7 @@ export class MinecraftWorldProxy implements World {
       }
       case 'status':
         this.declCache = note.decl;
+        this.worldLineCache = note.worldLine;
         this.storageCache = note.storage;
         this.promptVars = note.promptVars;
         this.requestFactsCache = note.requestFacts;

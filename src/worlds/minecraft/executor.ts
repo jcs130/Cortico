@@ -1,3 +1,7 @@
+import { hasItem,hasRoom } from './chests.ts';
+import { invCountById,invCountIn,itemPredOf,noSuchItem,playerInvIn } from './inventory.ts';
+import { zhThing } from './receipt.ts';
+import { CROP_MAX_AGE,canSeeBlockAt,canSeeEntity,cropAgeAt } from './terrain.ts';
 /**
  * 异步执行器:任务队列 + 逐步派发 + 自保反射。
  *
@@ -10,102 +14,178 @@
  * 调用方不必分辨两处。
  */
 import type { Bot } from 'mineflayer';
-import { observeDamage, type DamageEvidence } from './damage-evidence.ts';
 import pathfinderPkg from 'mineflayer-pathfinder';
 import { Vec3 } from 'vec3';
 import type { Logger } from '../../core/types.ts';
-import { nowIso } from '../../core/util.ts';
-import type { MinecraftLog } from './log.ts';
+import { SYSTEM_TIMEZONE,nowIso } from '../../core/util.ts';
 import {
-  BLOCK_FACES, cellOnFace, rasterize, resolveAnchors,
-  type Anchor, type AnchorCoord, type BlockFace, type BoxFill, type Cell, type ShapeName,
-} from './geometry.ts';
+stepCountThroughLayer,
+toWorld
+} from './blueprint-plan.ts';
+import { HOE_TILLED } from './blueprint-registry.ts';
 import {
-  CHEST_BLOCKS, ChestBook, FURNACE_BLOCKS, chestBlockName,
-  hasItem, hasRoom, matchItemName, matchMaterialName, type ChestRecord,
-} from './chests.ts';
-import { worksNote, WorksBook, type WorkHit } from './works.ts';
-import {
-  DRINKABLES, readDurability, readEnchants, readPotionId,
-  type EnchantRegistry, type ItemEnchant, type ItemLike,
-} from './item-facts.ts';
-import {
-  itemMatchesPick, pickLabel, pickMissText, pickTargetOf, pickedText, type PickTarget,
-} from './item-pick.ts';
-import {
-  FEED_ITEMS, TAME_ITEMS, dyeColorOf, readHorseTamed, readSaddled, readSheepColor, readSitting, readTamedBy, tamedByMe,
-} from './entity-facts.ts';
-import { roman, zhDimension, zhEnchant, zhEntity, zhName } from './names.ts';
-import {
-  CROP_MAX_AGE, DIRECTIONS, DIRECTION_ZH, bearing, biomeAt, canSeeBlockAt, canSeeEntity,
-  ESCAPE_SAFE_GAP, bodyInWater, cropAgeAt, droppedStackOf, findEscapeCell, hazardTouch, hazardsWithin, headInWater,
-  isDark, isNight, narrateInventory, nearestHazard, pocketScan, sampleLight, villagerNote, WATER_BLOCKS, wetNote,
-  type Direction, type HazardCell, type ItemStack,
-} from './terrain.ts';
-import {
-  chatInputError, FIND_STATIC_MAX, NEAR_DEFAULT, PROBE_WHERE_SHOWN, UNTIL_CATEGORIES, UNTIL_CATEGORY_DOC,
-  type AttackMode, type Expectation, type QueueMode, type SkillCall,
-} from './skills.ts';
-import {
-  FALLBACK_DEFAULTS, isGravityBlock, isSpawnAnchorBlock,
-  type PolicyDefaults, type PolicySettings,
-} from './policy.ts';
-import { HOE_TILLED, SHOVEL_PATH, blockStateItem } from './blueprint-registry.ts';
-import { ShowPacer, type ShowTempo } from './show.ts';
-import {
-  PLAYER_SLOTS, edibleInBag, notFoodText, precheckSteps, renderPrecheckNotes, type PrecheckDeps,
-} from './precheck.ts';
-import { normalizeDimension } from './escape.ts';
-import { InspectionGuard } from './inspection-guard.ts';
-import { DirectionalSweepBook } from './directional-sweeps.ts';
-import { farmingClickCell, isHoeUseItem } from './farming-target.ts';
-import { publishViewerCastCommand } from './viewer-cast.ts';
-import { skillGesture } from './skills-social.ts';
-import { skillLook } from './skills-look.ts';
-import { skillControl } from './skills-control.ts';
-import { flyToLanding, flyToPosition, landFlight, flightState, previewFlight } from './flight.ts';
-import { promoteTemporaryScaffold, reclaimPendingTemporaryScaffold } from './temporary-scaffold.ts';
-import { inventoryReadConfirmed } from './inventory-window-sync.ts';
-import { assertInventoryClicksReady, isInventoryClickError } from './inventory-click-sync.ts';
-import { ContainerWindowOwnership } from './container-window-ownership.ts';
-import { isBabyPiglin, piglinIsHostile } from './piglin.ts';
-import {
-  blockIdOf, normalizeBlockName, renderLayerMap,
-  type NormalizedBlueprint, type PositionXYZ,
+type PositionXYZ
 } from './blueprint.ts';
 import {
-  billForSteps, blueprintProgress, blueprintStepStateMatches, diffBlueprint, renderBlueprintAdvisories,
-  stepCountThroughLayer, stepToBuildCall, summarizeReadback, toWorld,
-  type BlueprintCheckCell, type BlueprintConflict, type BlueprintDiff, type BlueprintPlan, type BlueprintStep,
-  type ItemTally, type ReadbackEntry,
-} from './blueprint-plan.ts';
+AIR_NAMES,BUILD_CELL_CAP,EXCAVATE_CELL_CAP,
+LIQUIDS,NEIGHBORS6,
+blockAtCell,
+blockProp,
+cellKeyOf,cellText,
+dimensionOf,
+feetOf,
+resolveAt,shapeCells,skyVisibleAt,
+solidAt
+} from './cell-facts.ts';
+import { CONTAINER_FIND,ChestBook,FURNACE_KINDS,matchItemName } from './chests.ts';
+import { ContainerWindowOwnership } from './container-window-ownership.ts';
+import { containerStacks,findContainers,knownChestNote,recentStorageRouteFailure,storageSkipReason } from './containers.ts';
+import { observeDamage,type DamageEvidence } from './damage-evidence.ts';
+import { DirectionalSweepBook } from './directional-sweeps.ts';
+import { isKnownTarget } from './entity-facts.ts';
+import { normalizeDimension } from './escape.ts';
+import { farmingClickCell,isHoeUseItem } from './farming-target.ts';
+import { flightState,flyToLanding,flyToPosition,landFlight,previewFlight } from './flight.ts';
 import {
-  HYBRID_MELEE_AT, KITE_MAX_RANGE, KITE_MIN_RANGE,
-  bestRangedWeapon, chooseHybridWeapon, hasRangedLos, hasUsableArrows,
-  type BowEvent, type BowShotResult, type HybridWeapon, type RangedTarget,
+cellOnFace,rasterize,resolveAnchors,type Anchor,type AnchorCoord,type Cell,
+} from './geometry.ts';
+import { InspectionGuard } from './inspection-guard.ts';
+import { assertInventoryClicksReady,isInventoryClickError } from './inventory-click-sync.ts';
+import { inventoryReadConfirmed } from './inventory-window-sync.ts';
+import { invCount,invItemNamed } from './inventory.ts';
+import { itemCustomName } from './item-display.ts';
+import type { MinecraftLog } from './log.ts';
+import {
+MELEE_REACH,
+STRAFE_MS,aimAt,
+attackCooldownMs,
+bestWeapon,
+hostilesAround,meleeSwing,
+nearestHostileTo,pressMelee,
+releaseMelee,
+skillAttack,
+type HostileRead
+} from './melee.ts';
+import { zhDimension,zhEntity,zhName } from './names.ts';
+import {
+SEED_CROP,
+lastAteOf,
+placeMarksOf,
+placedNote
+} from './placed-ledger.ts';
+import {
+matchPlacedMaterialName
+} from './placement.ts';
+import {
+isGravityBlock,isSpawnAnchorBlock
+} from './policy.ts';
+import {
+PLAYER_SLOTS,
+precheckSteps,renderPrecheckNotes,type PrecheckDeps
+} from './precheck.ts';
+import {
+type BowEvent
 } from './ranged.ts';
-import { FindObservationCache, type FindKind, type SearchScope } from './search-observation.ts';
 import {
-  Aborted, Yielded, SkillBlocked, SkillNoop, checkAbort, dangerNoteText, sleep,
-  type BlueprintDesk, type BlueprintSite, type BlueprintSurvey, type BodyStateProbe,
-  type MarkDesk, type ProbeMemo, type ReserveHit, type ResourcePlacementGate,
-  type ResourcePlacementPermit, type ResourcePlacementPreview, type RouteProbe,
-  type SkillContext, type TargetDiag, type TaskAttackLease, type TaskRangedActions,
-  type ToolTrace,
+BAG_LOW_FREE,bagNow,blockedOnItems,blockedSourceOf,blockedText,
+contentsText,
+describeSkill,
+fmtDur,
+verdictNote,zhErrorText,
+type BlueprintCall,type ExpectVerdict,type PlaceCall,
+} from './receipt.ts';
+import { FindObservationCache } from './search-observation.ts';
+import {
+Aborted,
+SkillBlocked,SkillNoop,
+Yielded,
+checkAbort,dangerNoteText,sleep,
+type BlueprintDesk,
+type BodyStateProbe,
+type MarkDesk,type ProbeMemo,
+type ResourcePlacementGate,
+type ResourcePlacementPreview,
+type SkillContext,
+type TaskAttackLease,type TaskRangedActions
 } from './skill-context.ts';
+import {
+hasDryFooting,skillBuild,skillBuildBlueprint,skillSurfaceLand,stableDryFooting,
+surfaceStateText,withBlueprintGain,
+} from './skills-build.ts';
+import {
+LAPIS,protectedTossItem,reacquiredTossNote,skillBrew,skillCompact,skillEnchant,skillPickup,skillSmelt,skillStow,skillTake,skillToss,
+skillTransit,
+} from './skills-container.ts';
+import { skillControl } from './skills-control.ts';
+import {
+craftItemDef,craftNeeds,
+skillCraft,skillEat,skillEquip,smithingInputs,
+type CraftRecipeLike
+} from './skills-craft.ts';
+import { skillExcavate,skillTunnel } from './skills-dig.ts';
+import {
+collectVisible,skillCollect,skillFind,skillFish,skillProbe
+} from './skills-gather.ts';
+import {
+LEAD_ITEM,USE_SETTLE_MS,aimThenUse,skillAnvil,skillGrindstone,skillLead,skillRide,skillUse,
+} from './skills-interact.ts';
+import { skillLook } from './skills-look.ts';
+import { skillGesture } from './skills-social.ts';
+import {
+FIND_STATIC_MAX,NEAR_DEFAULT,
+chatInputError,
+type Expectation,type QueueMode,type SkillCall
+} from './skills.ts';
+import { spatialObservationText } from './spatial-observation.ts';
+import { promoteTemporaryScaffold,reclaimPendingTemporaryScaffold } from './temporary-scaffold.ts';
+import {
+DIRECTIONS,DIRECTION_ZH,ESCAPE_SAFE_GAP,
+WATER_BLOCKS,
+bodyInWater,findEscapeCell,hazardTouch,
+hazardsWithin,headInWater,nearestHazard,
+wetNote,type Direction,type HazardCell,
+} from './terrain.ts';
+import { equipDestOf,reserveNote,toolTraceNote } from './tools.ts';
+import {
+FLEE_DEADLINE_MS,clearEscapeGoalOwner,digBackoffScene,
+dropGoal,escapeIntent,
+findEntity,fmtDist,
+goalOwnerKind,
+gotoGoal,holdTreadWater,
+levelTravelGoal,
+matchBlockIds,
+nextLongTravelLeg,
+onEscapeGoal,
+releaseBody,
+renderRouteMenu,routeNote,setOwnedGoal,travelGoalReached,
+walkOnlyPath,withRouteScene,
+type DistanceMetric
+} from './travel.ts';
+import { publishViewerCastCommand } from './viewer-cast.ts';
+import { consumesOpenWindow,selectionMenuTitle,storageWindow } from './window-semantics.ts';
+import { WorksBook } from './works.ts';
 
 const { goals } = pathfinderPkg;
 
+export { HOSTILE,bestWeapon,meleeCooldownMs } from './melee.ts';
+export { describeSkill,zhErrorText } from './receipt.ts';
+export { dangerNoteText } from './skill-context.ts';
+export type {
+BlueprintDesk,BlueprintSurvey,MarkDesk,ResourcePlacementGate,ResourcePlacementPermit,
+RouteProbe,TargetDiag
+} from './skill-context.ts';
 export {
-  NEAR_DEFAULT, parseNoteText, parseQueueMode, parseScoutSteps, parseSteps,
-  QUEUE_MODES, QUEUE_SCHEMA,
-  SCOUT_SKILL_DOC, SCOUT_SKILL_NAMES, SCOUT_STEP_SCHEMA,
-  SKILL_DOC, SKILL_NAMES, SKILL_STEP_SCHEMA,
+findFishingSpot,fishWaitMs,isOpenFishingWater,planFishingCasts
+} from './skills-gather.ts';
+export {
+NEAR_DEFAULT,QUEUE_MODES,QUEUE_SCHEMA,
+SCOUT_SKILL_DOC,SCOUT_SKILL_NAMES,SCOUT_STEP_SCHEMA,
+SKILL_DOC,SKILL_NAMES,SKILL_STEP_SCHEMA,parseNoteText,parseQueueMode,parseScoutSteps,parseSteps
 } from './skills.ts';
 export type {
-  Expectation, MarkLookup, ParseNote, QueueMode, SkillCall, StepBounds,
+Expectation,MarkLookup,ParseNote,QueueMode,SkillCall,StepBounds
 } from './skills.ts';
-export { dangerNoteText } from './skill-context.ts';
+export { dropOwnedGoal,goalOwnerKind,releaseBody,renderRouteMenu,setOwnedGoal } from './travel.ts';
 
 type UsedBlockState = { name: string; stateId: number; open: string | null };
 
@@ -116,105 +196,6 @@ export function useChangeMayClearRouteFailure(before: UsedBlockState | null, aft
   if (isDoor && before.name === after.name) return before.open === 'false' && after.open === 'true';
   return true;
 }
-export { describeSkill, zhErrorText } from './receipt.ts';
-export { dropOwnedGoal, goalOwnerKind, releaseBody, renderRouteMenu, setOwnedGoal } from './travel.ts';
-export { HOSTILE, bestWeapon, meleeCooldownMs } from './melee.ts';
-export {
-  findFishingSpot, fishWaitMs, isOpenFishingWater, planFishingCasts,
-} from './skills-gather.ts';
-export type {
-  BlueprintDesk, BlueprintSurvey, MarkDesk, ResourcePlacementGate, ResourcePlacementPermit,
-  RouteProbe, TargetDiag,
-} from './skill-context.ts';
-import {
-  AIR_NAMES, BUILD_CELL_CAP, EXCAVATE_CELL_CAP, FACE_TRY_ORDER, FACE_ZH, LIQUIDS, NEIGHBORS6,
-  NO_PLACE_REFERENCE, PLACE_REACH, PROBE_CELLWISE_MAX, PROBE_CELL_CAP, PROBE_WHERE_CELL_CAP,
-  SHAPE_ZH, blockAtCell, blockNamesOf, cellKeyOf, cellText, chebyshev, cropAgeOfCell, faceText,
-  feetOf, fnv32, nearLavaAt, readRegion, resolveAt, shapeCells, skyVisibleAt,
-  solidAt, type RegionReading,
-} from './cell-facts.ts';
-import {
-  CRAFT_SETTLE_MS, INVENTORY_SLOTS, PICKUP_SETTLE_MS, askedLabel, awaitCraftGain, awaitInvConfirm,
-  dropNamesOf, invCount, invCountById, invCountIn, invGains, invGainsSplit, invItemNamed,
-  invLosses, invSnapshot, itemAsked, itemPredOf, lootNote, moveExactSlot, namedLike, noSuchItem,
-  playerInvIn, probabilisticDropsOf, type InvItem, type InvPred,
-} from './inventory.ts';
-import {
-  chooseTool, equipToolFor, harvestFact, minHarvestTool, miningToolPlan, nearBreak, reserveNote,
-  toolTraceNote,
-} from './tools.ts';
-import {
-  BAG_LOW_FREE, SIGN_RE, bagNow, blockedOnItems, blockedSourceOf, blockedText, describeSkill,
-  gridText, signLinesText, type BlueprintCall, type ExpectVerdict, type PlaceCall, verdictNote,
-  zhErrorText, zhThing,
-} from './receipt.ts';
-import { HANDHELD_SUFFIXES, equipDestOf } from './tools.ts';
-import { dimensionOf } from './cell-facts.ts';
-import { fmtDur } from './receipt.ts';
-import {
-  FLEE_DEADLINE_MS, clearEscapeGoalOwner, digBackoffScene, digBlock, dropGoal, escapeIntent,
-  findEntity, fmtDist, gotoGoal, holdTreadWater, onEscapeGoal, goalOwnerKind, levelTravelGoal, nextLongTravelLeg, matchBlockIds, readStamp, releaseBody,
-  renderRouteMenu, routeNote, setOwnedGoal, travelGoalReached, type DistanceMetric, walkOnlyPath, withRouteScene,
-} from './travel.ts';
-import {
-  HOSTILE, MELEE_CHASE, MELEE_REACH,
-  STRAFE_MS, aimAt,
-  attackCooldownMs, attackStats, bestWeapon, forcedRangedIssue, hostilesAround, meleeSwing,
-  nearestHostileTo, pressMelee, pressRanged, rangedBlockedText,
-  rangedTargetOf, releaseMelee, type HostileRead, underwaterOxygenNote,
-} from './melee.ts';
-import {
-  LEDGER_GUARD_BLOCKS, SEED_CROP, forgetPlaced, lastAteOf, ledgerBlockFact, noteAte, noteTilled,
-  noteWork, placeMarksOf, placedLedgerOf, placedNote,
-} from './placed-ledger.ts';
-import {
-  CRAFTING_STATION, FURNACE_STATION, Upkeep, buildSpots, ensureHolding, ensureStation, footprintOf,
-  footprintScene, gotoPlaceable, hitboxBlocks, inBox, jumpPlaceBelow, matchPlacedMaterialName,
-  materialCollides, nearestBoat, occupantOf, occupantText, occupiedByMe, permitPlacement,
-  permittedStockFor, placeIntoCell, placeReferenceFace, pushPocketLine, scaffoldNames,
-  siteAtCellAnywhere, siteBox, standableCell, stationNotes, stepOffCell, sweepDrops,
-  type BuildSpot, type Station, type StationAt,
-} from './placement.ts';
-import { contentsText } from './receipt.ts';
-import { itemCustomName } from './item-display.ts';
-import { consumesOpenWindow, selectionMenuTitle, storageWindow } from './window-semantics.ts';
-import {
-  UNTIL_DIG_RADIUS, UNTIL_TRAVEL_RADIUS, type UntilHit, untilBlockIds, untilHit, untilUnknownNote,
-} from './until.ts';
-import { blockProp } from './cell-facts.ts';
-import { compositionText, noDropMaterials } from './receipt.ts';
-import { settleOnGround } from './travel.ts';
-import {
-  collectVisible, skillCollect, skillFind, skillFish, skillProbe, skillTrade,
-} from './skills-gather.ts';
-import { spatialObservationText } from './spatial-observation.ts';
-import { CONTAINER_FIND, FURNACE_KINDS } from './chests.ts';
-import { skillExcavate, skillTunnel } from './skills-dig.ts';
-import { reachCell } from './travel.ts';
-import {
-  ANVIL_BLOCKS, STATION_FIND_R, WINDOW_SETTLE_MS, containerStacks, findContainers, findStationCell,
-  furnaceDoneAt, knownChestNote, noContainerNearby, openNearbyContainer, openStationWindow,
-  openWindowGuarded, orderForStow, orderForTake, putIntoStation, rememberChest, rememberWindow,
-  recentStorageRouteFailure, storageSkipReason,
-  slotStack, smeltPerItemMs, stationItemFacts, type GenericWindow,
-} from './containers.ts';
-import {
-  consumeHeldFood, craftItemDef, craftNeeds, equipNamed, skillCraft, skillEat, skillEquip, smithingInputs,
-  type CraftRecipeLike,
-} from './skills-craft.ts';
-import { isKnownTarget, unknownUseTargetText } from './entity-facts.ts';
-import { skillAttack } from './melee.ts';
-import {
-  LEAD_ITEM, USE_SETTLE_MS, aimThenUse, isBoat, skillAnvil, skillGrindstone, skillLead, skillRide, skillUse,
-} from './skills-interact.ts';
-import {
-  LAPIS, protectedTossItem, reacquiredTossNote, skillBrew, skillCompact, skillEnchant, skillPickup, skillSmelt, skillStow, skillTake, skillToss,
-  skillTransit,
-} from './skills-container.ts';
-import {
-  hasDryFooting, skillBuild, skillBuildBlueprint, skillSurfaceLand, stableDryFooting,
-  surfaceStateText, withBlueprintGain,
-} from './skills-build.ts';
 /**
  * 评估一步的 expect:读包、位置或方块,报达成与实测值。
  * 锚点以评估时刻脚下为原点解析;解析不出的锚点按落空处理,实测值写解析错误。
@@ -1719,7 +1700,7 @@ interface ExecutorOptions {
   log: Logger;
   /** 任务号发号器 */
   nextId: () => number;
-  /** 回执里 HH:MM:SS 按哪个时区渲染;不给按东八区(与世界快照的现实时间同一默认) */
+  /** 回执里 HH:MM:SS 按哪个时区渲染;不给按本机时区(与世界快照的现实时间同一默认) */
   timezone?: string;
   /** 战斗中生命跌破此值就收手撤退(与反射的脱战血线同源);不给 = 不撤 */
   fleeHealth?: () => number;
@@ -2001,7 +1982,7 @@ export class Executor {
 
   /** 挂钟时刻 HH:MM:SS。一场就是一天,不带日期 */
   private clock(ms: number): string {
-    return nowIso(this.opts.timezone ?? 'Asia/Shanghai', new Date(ms)).slice(11, 19);
+    return nowIso(this.opts.timezone ?? SYSTEM_TIMEZONE, new Date(ms)).slice(11, 19);
   }
 
   /** 仅供 mc_do 受理前使用；不改队列，也不为其他工具设置全局退避。 */
