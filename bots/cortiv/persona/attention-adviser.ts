@@ -1,8 +1,9 @@
 import type { CoreApi, EventEnvelope } from '../../../src/core/types.ts';
 import { parseTypedChoice } from '../../../src/protocol/typed-decision.ts';
+import { decisionAvailable, requestAdvice, type DecisionConnection } from './decision-connection.ts';
 
 /** Optional semantic advice; geometric player observations remain World facts. */
-export interface FastAttentionConfig {
+export interface FastAttentionConfig extends DecisionConnection {
   enabled: boolean;
   endpoint: string;
   timeoutMs: number;
@@ -70,7 +71,7 @@ export class CortiVSocialAttention {
 
   observe(events: readonly EventEnvelope[], core: CoreApi): void | Promise<void> {
     const cfg = this.config();
-    if (!cfg.enabled || !cfg.endpoint.trim() || this.controller) return;
+    if (!cfg.enabled || !decisionAvailable(cfg, core.decisions) || this.controller) return;
     const now = this.now();
     const candidates = events.map(observation).filter((item): item is Observation => item !== null)
       .filter(item => {
@@ -95,21 +96,17 @@ export class CortiVSocialAttention {
     const generation = this.generation;
     const started = this.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = Math.max(10, Math.min(500, cfg.timeoutMs));
+    const timeout = Math.max(10, Math.min(2000, cfg.timeoutMs));
     let outcome = 'unavailable';
     try {
       const request = (async () => {
-        const response = await this.fetchImpl(cfg.endpoint, {
-          method: 'POST', signal: controller.signal, headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        const response = await requestAdvice(cfg, {
             state: { situation: `可见的玩家${item.name}在距离${Math.round(item.distance * 10) / 10}格处${DESCRIPTIONS[item.kind]}。这只是动作事实，还不知道对方的意图。` },
             questions: { attention: { type: 'choice',
               instructions: '判断是否值得及时注意并考虑回应，不要求确定对方真实意图。不能凭动作断言已求助。只选分类，不生成台词或动作。',
               criteria: CRITERIA } },
-          }),
-        });
-        if (!response.ok) return null;
-        return readAnswer(await response.json());
+          }, controller.signal, this.fetchImpl, core.decisions);
+        return readAnswer(response);
       })();
       const answer = await Promise.race([request, new Promise<null>(resolve => {
         timer = setTimeout(() => { outcome = 'timeout'; controller.abort(); resolve(null); }, timeout);

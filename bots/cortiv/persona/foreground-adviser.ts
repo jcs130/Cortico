@@ -2,8 +2,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { EventEnvelope } from 'cortico/core/types.ts';
 import { parseTypedChoice } from 'cortico/protocol/typed-decision.ts';
+import type { DecisionHost } from 'cortico/protocol/typed-decision.ts';
+import { decisionAvailable, requestAdvice, type DecisionConnection } from './decision-connection.ts';
 
-export interface FastForegroundConfig {
+export interface FastForegroundConfig extends DecisionConnection {
   enabled: boolean;
   endpoint: string;
   timeoutMs: number;
@@ -103,7 +105,8 @@ export class ForegroundAdviser {
   private lastAttemptAt = -Infinity;
 
   constructor(private readonly config: () => FastForegroundConfig,
-    private readonly fetchImpl: typeof fetch = fetch, private readonly now: () => number = Date.now) {}
+    private readonly fetchImpl: typeof fetch = fetch, private readonly now: () => number = Date.now,
+    private readonly decisionHost: () => DecisionHost | undefined = () => undefined) {}
 
   reset(): void { this.generation++; this.controller?.abort(); this.controller = null; this.lastAttemptAt = -Infinity; }
 
@@ -112,7 +115,7 @@ export class ForegroundAdviser {
     const started = this.now();
     const base = { defer: false, cursors: scene.events.map(event => event.cursor) };
     if (signal?.aborted) return { ...base, kind: 'stale' };
-    if (!cfg.enabled || !cfg.endpoint.trim()) return { ...base, kind: 'disabled' };
+    if (!cfg.enabled || !decisionAvailable(cfg, this.decisionHost())) return { ...base, kind: 'disabled' };
     if (this.controller || started - this.lastAttemptAt < cfg.minIntervalMs) return { ...base, kind: 'cooldown' };
     this.lastAttemptAt = started;
     const opportunity = cfg.deferQueueTail ? queueTailOpportunity(scene.events, started) : null;
@@ -151,13 +154,9 @@ export class ForegroundAdviser {
     let timedOut = false;
     let onAbort: (() => void) | undefined;
     try {
-      const request = (async () => {
-        const response = await this.fetchImpl(cfg.endpoint, { method: 'POST', signal: controller.signal,
-          headers: { 'Content-Type': 'application/json' }, body });
-        return response.ok ? response.json() : null;
-      })();
+      const request = requestAdvice(cfg, JSON.parse(body), controller.signal, this.fetchImpl, this.decisionHost());
       const raw = await Promise.race([request, new Promise<null>(resolve => {
-        timer = setTimeout(() => { timedOut = true; controller.abort(); resolve(null); }, Math.max(1, Math.min(250, cfg.timeoutMs)));
+        timer = setTimeout(() => { timedOut = true; controller.abort(); resolve(null); }, Math.max(1, Math.min(2000, cfg.timeoutMs)));
       }), new Promise<null>(resolve => { onAbort = () => resolve(null); controller.signal.addEventListener('abort', onAbort, { once: true }); })]) as { answers?: Record<string, unknown>; latency_ms?: number } | null;
       const measured = { attemptId, elapsedMs: this.now() - started, inputChars: body.length,
         ...(typeof raw?.latency_ms === 'number' && Number.isFinite(raw.latency_ms) ? { latencyMs: raw.latency_ms } : {}) };

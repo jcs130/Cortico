@@ -526,7 +526,7 @@ export class CortiV extends Cormini {
     this.sleepReviewConfig = opts.sleepReview ?? (() => SLEEP_REVIEW_DEFAULTS);
     this.foregroundConfig = opts.foreground ?? (() => FOREGROUND_CONTEXT_DEFAULTS);
     this.fastForegroundConfig = opts.fastForeground ?? (() => FAST_FOREGROUND_DEFAULTS);
-    this.foregroundAdviser = new ForegroundAdviser(this.fastForegroundConfig);
+    this.foregroundAdviser = new ForegroundAdviser(this.fastForegroundConfig, undefined, undefined, () => this.core?.decisions);
     this.toolCallRecoveryConfig = opts.toolCallRecovery ?? (() => TOOL_CALL_RECOVERY_DEFAULTS);
     this.cognitionHistoryTokens = opts.cognitionHistoryTokens ?? (() => 4000);
     this.blueprintCognition = opts.blueprintCognition ?? (() => BLUEPRINT_COGNITION_DEFAULTS);
@@ -545,7 +545,7 @@ export class CortiV extends Cormini {
     });
     this.referenceLibrary = this.createReferenceLibrary();
     this.fastReferenceConfig = opts.fastReference ?? (() => FAST_REFERENCE_DEFAULTS);
-    this.referenceRouting = new ReferenceRouting(this.referenceLibrary, this.fastReferenceConfig);
+    this.referenceRouting = new ReferenceRouting(this.referenceLibrary, this.fastReferenceConfig, undefined, undefined, () => this.core?.decisions);
   }
 
   override attach(core: CoreApi): void {

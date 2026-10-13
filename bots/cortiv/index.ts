@@ -10,6 +10,7 @@ import type { BilibiliConfigSection } from 'cortico/worlds/bilibili/config.ts';
 import type { MinecraftConfigSection } from 'cortico/worlds/minecraft/config.ts';
 import { BLUEPRINT_COGNITION_DEFAULTS, CortiV } from './persona/persona.ts';
 import { FAST_ATTENTION_DEFAULTS } from './persona/attention-adviser.ts';
+import { decisionConnectionProperties } from './persona/decision-connection.ts';
 import { FAST_REFERENCE_DEFAULTS, type FastReferenceConfig } from './persona/reference-adviser.ts';
 import { REFERENCE_LIBRARY_DEFAULTS, type ReferenceLibraryConfig } from './persona/reference-library.ts';
 import { PLANNING_DEFAULTS, type PlanningConfig } from './persona/planning-review.ts';
@@ -76,8 +77,9 @@ export const CORTIV_FAST_ATTENTION_CONFIG_GROUP: ConfigGroup = {
     description: '用30秒以内的近距离观察辅助判断身边互动，超时保留原事件；对话与身体行动仍由主意识选择。',
     properties: {
       'fastAttention.enabled': { type: 'boolean', title: '启用快速注意力判断', 'x-hot': true },
+      ...decisionConnectionProperties('fastAttention'),
       'fastAttention.endpoint': { type: 'string', title: '判断服务地址', 'x-hot': true },
-      'fastAttention.timeoutMs': { type: 'integer', minimum: 1, title: '等待上限(毫秒)', 'x-hot': true },
+      'fastAttention.timeoutMs': { type: 'integer', minimum: 1, maximum: 2000, title: '等待上限(毫秒)', 'x-hot': true },
       'fastAttention.minConfidence': { type: 'number', minimum: 0, maximum: 1, title: '最低置信度', 'x-hot': true },
       'fastAttention.cooldownMs': { type: 'integer', minimum: 0, title: '互动提示间隔(毫秒)', 'x-hot': true },
     },
@@ -94,8 +96,9 @@ export const CORTIV_REFERENCE_CONFIG_GROUP: ConfigGroup = {
         description: '每行一个工作区相对路径。分类与活动取自文件内容，不固定游戏或服务器。' },
       'references.maxContextTokens': { type: 'integer', minimum: 512, title: '当前阅读分支预算(token估算)', 'x-hot': true },
       'fastReference.enabled': { type: 'boolean', title: '启用资料快判断', 'x-hot': true },
+      ...decisionConnectionProperties('fastReference'),
       'fastReference.endpoint': { type: 'string', title: '判断服务地址', 'x-hot': true },
-      'fastReference.timeoutMs': { type: 'integer', minimum: 1, maximum: 500, title: '等待上限(毫秒)', 'x-hot': true },
+      'fastReference.timeoutMs': { type: 'integer', minimum: 1, maximum: 2000, title: '等待上限(毫秒)', 'x-hot': true },
       'fastReference.minIntervalMs': { type: 'integer', minimum: 0, title: '查询间隔(毫秒)', 'x-hot': true },
       'fastReference.minConfidence': { type: 'number', minimum: 0, maximum: 1, title: '最低联合置信度', 'x-hot': true },
       'fastReference.maxResultAgeMs': { type: 'integer', minimum: 1, title: '结果有效期(毫秒)', 'x-hot': true },
@@ -184,8 +187,9 @@ export const CORTIV_FOREGROUND_CONFIG_GROUP: ConfigGroup = {
       'foreground.currentStateOnly': { type: 'boolean', title: '仅保留当前状态副本', 'x-hot': true,
         description: '当前事实放在近期历史之后，每轮替换旧副本；原始事件账本不变。' },
       'fastForeground.enabled': { type: 'boolean', title: '启用即时阅读快判断', 'x-hot': true },
+      ...decisionConnectionProperties('fastForeground'),
       'fastForeground.endpoint': { type: 'string', title: '判断服务地址', 'x-hot': true },
-      'fastForeground.timeoutMs': { type: 'integer', minimum: 1, maximum: 250, title: '判断等待上限(毫秒)', 'x-hot': true },
+      'fastForeground.timeoutMs': { type: 'integer', minimum: 1, maximum: 2000, title: '判断等待上限(毫秒)', 'x-hot': true },
       'fastForeground.minConfidence': { type: 'number', minimum: 0, maximum: 1, title: '首选概率下限', 'x-hot': true },
       'fastForeground.minIntervalMs': { type: 'integer', minimum: 0, title: '判断调用间隔(毫秒)', 'x-hot': true },
       'fastForeground.focusedHistoryTokens': { type: 'integer', minimum: 1024, title: '集中阅读的历史预算(token估算)', 'x-hot': true,

@@ -20,6 +20,15 @@ const scene = (events = [tail()]) => ({ events, facts: [{ source: 'game', text: 
   agenda: '把借来的工具还给原主人，尚未完成。', intent: { tool: 'game_do', arguments: '{"queue":"append"}', receipt: '任务已受理，尚未完成。' } });
 
 describe('foreground reading and timing fallback', () => {
+  it('uses the saved host choice without sending to a retained endpoint', async () => {
+    const fetcher = vi.fn();
+    const request = vi.fn(async (_input: unknown, _options: unknown) => answer());
+    const adviser = new ForegroundAdviser(() => ({ ...config(), connection: 'host', decisionProvider: 'Choice' }),
+      fetcher, () => now, () => ({ request } as any));
+    expect(await adviser.advise(scene())).toMatchObject({ kind: 'advice', reading: 'focused' });
+    expect(request.mock.calls[0][1]).toMatchObject({ provider: 'Choice' });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
   it('accepts reasoning independently of reading confidence and does not grant action or timing authority', async () => {
     let request: any;
     const adviser = new ForegroundAdviser(() => ({ ...config(), reasoningEnabled: true, reasoningModel: 'local-model' }),

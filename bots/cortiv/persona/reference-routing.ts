@@ -1,6 +1,7 @@
 /** Persona selects bounded reference material; classifier answers never execute World actions. */
 import { createHash } from 'node:crypto';
 import type { CoreApi, EventEnvelope } from 'cortico/core/types.ts';
+import type { DecisionHost } from 'cortico/protocol/typed-decision.ts';
 import type { ReferenceLibrary } from './reference-library.ts';
 import { ReferenceAdviceClient, REFERENCE_MAX_TOPICS, REFERENCE_MAX_SUMMARY_CHARS, type FastReferenceConfig } from './reference-adviser.ts';
 
@@ -22,8 +23,9 @@ export class ReferenceRouting {
 
   constructor(private readonly library: ReferenceLibrary,
     private readonly config: () => FastReferenceConfig,
-    fetchImpl: typeof fetch = fetch, private readonly now: () => number = Date.now) {
-    this.adviser = new ReferenceAdviceClient(config, fetchImpl, now);
+    fetchImpl: typeof fetch = fetch, private readonly now: () => number = Date.now,
+    decisionHost: () => DecisionHost | undefined = () => undefined) {
+    this.adviser = new ReferenceAdviceClient(config, fetchImpl, now, decisionHost);
   }
 
   reset(): void { this.generation++; this.adviser.reset(); this.manualSelection = false; this.latestSceneKey = null; }

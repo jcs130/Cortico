@@ -1,6 +1,8 @@
 import { parseTypedChoice } from '../../../src/protocol/typed-decision.ts';
+import type { DecisionHost } from '../../../src/protocol/typed-decision.ts';
+import { AdviceTransportError, decisionAvailable, requestAdvice, type DecisionConnection } from './decision-connection.ts';
 
-export interface FastReferenceConfig {
+export interface FastReferenceConfig extends DecisionConnection {
   enabled: boolean;
   endpoint: string;
   timeoutMs: number;
@@ -16,7 +18,7 @@ export const FAST_REFERENCE_DEFAULTS: FastReferenceConfig = {
 
 export const REFERENCE_MAX_TOPICS = 16;
 export const REFERENCE_MAX_STATE_CHARS = 2400;
-export const REFERENCE_MAX_TIMEOUT_MS = 500;
+export const REFERENCE_MAX_TIMEOUT_MS = 2000;
 export const REFERENCE_MAX_SUMMARY_CHARS = 80;
 
 export interface FastReferenceTopic {
@@ -78,7 +80,8 @@ export class ReferenceAdviceClient {
   private readonly recent = new Map<string, number>();
 
   constructor(private readonly config: () => FastReferenceConfig,
-    private readonly fetchImpl: typeof fetch = fetch, private readonly now: () => number = Date.now) {}
+    private readonly fetchImpl: typeof fetch = fetch, private readonly now: () => number = Date.now,
+    private readonly decisionHost: () => DecisionHost | undefined = () => undefined) {}
 
   reset(): void {
     this.generation++;
@@ -90,7 +93,7 @@ export class ReferenceAdviceClient {
 
   advise(state: Record<string, unknown>, topics: readonly FastReferenceTopic[], sceneKey: string): Promise<ReferenceAdviceResult> {
     const cfg = { ...this.config() };
-    if (!cfg.enabled || !cfg.endpoint.trim()) return Promise.resolve({ kind: 'skipped', reason: 'disabled' });
+    if (!cfg.enabled || !decisionAvailable(cfg, this.decisionHost())) return Promise.resolve({ kind: 'skipped', reason: 'disabled' });
     if (this.operation) return this.operation.sceneKey === sceneKey
       ? this.operation.promise : Promise.resolve({ kind: 'skipped', reason: 'busy' });
     // A transport that ignores abort keeps its slot until it actually settles.
@@ -137,15 +140,13 @@ export class ReferenceAdviceClient {
   private async request(body: string, topicKeys: readonly string[], sampledAtMs: number,
     cfg: FastReferenceConfig, operation: Operation): Promise<ReferenceAdviceResult> {
     const transport = (async (): Promise<ReferenceAdviceResult> => {
-      let response: Response;
-      try {
-        response = await this.fetchImpl(cfg.endpoint, { method: 'POST',
-          headers: { 'content-type': 'application/json' }, body, signal: operation.controller.signal });
-      } catch { return { kind: 'error', reason: 'transport' }; }
-      if (!response.ok) return { kind: 'error', reason: 'http', status: response.status };
       let payload: unknown;
-      try { payload = await response.json(); }
-      catch { return { kind: 'error', reason: 'invalid-response' }; }
+      try {
+        payload = await requestAdvice(cfg, JSON.parse(body), operation.controller.signal, this.fetchImpl, this.decisionHost());
+      } catch (error) { return error instanceof AdviceTransportError
+        ? { kind: 'error', reason: error.reason, ...(error.status ? { status: error.status } : {}) }
+        : { kind: 'error', reason: 'transport' }; }
+      if (!payload) return { kind: 'error', reason: 'http' };
       const advice = parseAdvice(payload, topicKeys, sampledAtMs);
       if (!advice) return { kind: 'error', reason: 'invalid-response' };
       if (this.now() - sampledAtMs > cfg.maxResultAgeMs) return { kind: 'skipped', reason: 'stale' };
