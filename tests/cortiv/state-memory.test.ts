@@ -9,6 +9,7 @@ import { DREAM_DEFAULTS } from '../../bots/cortiv/persona/dream-context.ts';
 import { StateMemory, STATE_MEMORY_FILE, STATE_MEMORY_MAX_CHARS } from '../../bots/cortiv/persona/state-memory.ts';
 import { functionCall, functionResult, itemText, message } from '../../src/protocol/open-responses/context.ts';
 import { nullLogger } from '../../src/core/util.ts';
+import { toolOutcomeText } from '../../src/core/tool-outcome.ts';
 import { makeFakeHarnessApi } from '../core/helpers.ts';
 
 const dirs: string[] = [];
@@ -125,10 +126,44 @@ describe('versioned current memory', () => {
     const projected = state.project(records, () => false);
     expect(JSON.parse(itemText(projected[1].item)).claims[0]).toMatchObject({ revision: 1, value: '较早有效结论' });
     expect(itemText(projected[3].item)).toBe('[memory failed] 版本冲突；未写入');
+    const failed = toolOutcomeText({ failed: true, text: '[memory failed] 证据ID无效；未写入' });
+    const failedRecords = [functionCall('bad-evidence', 'memory_record', JSON.stringify({
+      operation: 'set', key: 'project/portal/access', expected_revision: 1, evidence_id: 'unknown', value: '新结论',
+    })), functionResult('bad-evidence', failed)];
+    expect(itemText(state.project(failedRecords, () => false)[1].item)).toBe(failed);
   });
 });
 
 describe('current memory across Persona read surfaces', () => {
+  it('rejects an invalid history flag and reads the original after a boolean retry', async () => {
+    const { dir, memory } = rig();
+    const original = '2026-08-01T10:00:00Z 旧取材点 (-10,64,20)';
+    memory.writeFileAtomic(RECENT_FILE, original);
+    const persona = new CortiV({ memoryDir: dir, dream: () => ({ ...DREAM_DEFAULTS, enabled: false }) });
+    personas.push(persona); persona.attach(makeFakeHarnessApi());
+    const tools = persona.declareSessions().find(session => session.id === 'main')!.tools();
+    const reader = tools.find(tool => tool.name === 'read_file')!;
+    const grep = tools.find(tool => tool.name === 'grep_files')!;
+    for (const history of ['True', 'false', null]) {
+      for (const [tool, args] of [[reader, { path: RECENT_FILE }], [grep, { pattern: '旧取材点' }]] as const) {
+        const result = await tool.handler({ ...args, history }, ctx);
+        expect(result).toMatchObject({ failed: true, text: expect.stringContaining('history:true（不加引号）') });
+        expect(JSON.stringify(result)).not.toContain('(-10,64,20)');
+        expect(JSON.stringify(result)).not.toContain('[当前记忆视图；');
+        const receipt = typeof result === 'string' ? result : toolOutcomeText(result);
+        const records = [functionCall('invalid', tool.name, JSON.stringify({ ...args, history })),
+          functionResult('invalid', receipt), message('user', '核对读取结果')];
+        const prepared = persona.prepareRequest({ sessionId: 'main', round: 2, messages: records }) ?? records;
+        const reply = prepared.find(record => record.item.type === 'function_call_output')!;
+        expect(itemText(reply.item)).toBe(receipt);
+      }
+    }
+    expect(await reader.handler({ path: RECENT_FILE, history: false }, ctx)).not.toContain(original);
+    expect(await reader.handler({ path: RECENT_FILE, history: true }, ctx)).toContain(original);
+    expect(await grep.handler({ pattern: '旧取材点', history: true }, ctx)).toContain(`${RECENT_FILE}:1:`);
+    expect(memory.readFile(RECENT_FILE)).toBe(original);
+  });
+
   it('discloses the current view before pagination and retrieves original coordinates through explicit history', async () => {
     const { dir, memory } = rig();
     const journal = [...Array.from({ length: 60 }, (_, index) => `旧经历 ${index + 1}`),

@@ -1336,6 +1336,9 @@ export class CortiV extends Cormini {
         history: { type: 'boolean', description: 'Explicitly read historical prose; it cannot update current state by being copied into a new note.' } } },
       description: tool.description + ' Current-state notes return a managed view by default; its offsets refer to that view. Use history:true to find original experiences, coordinates or receipts in historical prose.',
       handler: async (args, ctx) => {
+        if (args.history !== undefined && typeof args.history !== 'boolean') {
+          return { failed: true, text: 'history 须为布尔值 true 或 false；查历史原文用 history:true（不加引号）。本次未读取。' };
+        }
         const base = args.history === true ? historyTools.find(entry => entry.name === tool.name)! : tool;
         const result = await provenance.readTool(base).handler(args, ctx);
         if (typeof result !== 'string') return result;

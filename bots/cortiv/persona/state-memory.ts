@@ -213,6 +213,7 @@ export class StateMemory {
     }));
     return records.map(record => {
       if (record.item.type !== 'function_call_output') return record;
+      if (itemText(record.item).startsWith('[tool failed]')) return record;
       const call = calls.get(record.item.call_id);
       if (!call || call.args.history === true || call.args.operation === 'history') return record;
       if (call.name === 'memory_record' && ['read', 'set', 'retire'].includes(call.args.operation)) {
