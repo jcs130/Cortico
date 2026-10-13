@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { GitWorkspaceMemory } from '../../bots/cormini/persona/memory.ts';
@@ -7,6 +7,7 @@ import { CortiV, RECENT_FILE } from '../../bots/cortiv/persona/persona.ts';
 import { FOREGROUND_CONTEXT_DEFAULTS } from '../../bots/cortiv/persona/foreground-context.ts';
 import { DREAM_DEFAULTS } from '../../bots/cortiv/persona/dream-context.ts';
 import { StateMemory, STATE_MEMORY_FILE, STATE_MEMORY_MAX_CHARS } from '../../bots/cortiv/persona/state-memory.ts';
+import { ActivityAgenda, AGENDA_FILE } from '../../bots/cortiv/persona/activity-agenda.ts';
 import { functionCall, functionResult, itemText, message } from '../../src/protocol/open-responses/context.ts';
 import { nullLogger } from '../../src/core/util.ts';
 import { toolOutcomeText } from '../../src/core/tool-outcome.ts';
@@ -135,6 +136,45 @@ describe('versioned current memory', () => {
 });
 
 describe('current memory across Persona read surfaces', () => {
+  it('reports an unadopted agenda update as failed and accepts a verified retry after adoption', async () => {
+    const { dir } = rig();
+    const agenda = new ActivityAgenda(dir);
+    agenda.propose(JSON.stringify({ summary: '先核验交付', items: [{ id: 'finish-fish', title: '交付鱼汤',
+      why: '已接委托', doneWhen: '服务端确认交付', when: '物资够时', ifBlocked: '查实际缺项', references: [] }] }), agenda.revision(), newAt);
+    const before = readFileSync(join(dir, AGENDA_FILE), 'utf8');
+    const persona = new CortiV({ memoryDir: dir, dream: () => ({ ...DREAM_DEFAULTS, enabled: false }) });
+    personas.push(persona); persona.attach(makeFakeHarnessApi());
+    const tool = persona.declareSessions().find(session => session.id === 'main')!.tools().find(tool => tool.name === 'activity_plan')!;
+    const args = { operation: 'update', id: 'finish-fish', status: 'done', note: '服务端确认已交付' };
+    const result = await tool.handler(args, ctx);
+    expect(result).toMatchObject({ failed: true, text: expect.stringContaining('尚未采用') });
+    expect(readFileSync(join(dir, AGENDA_FILE), 'utf8')).toBe(before);
+    const receipt = typeof result === 'string' ? result : toolOutcomeText(result);
+    const records = [functionCall('agenda-error', tool.name, JSON.stringify(args)), functionResult('agenda-error', receipt)];
+    const prepared = persona.prepareRequest({ sessionId: 'main', round: 2, messages: records }) ?? records;
+    expect(itemText(prepared.find(record => record.item.type === 'function_call_output')!.item)).toBe(receipt);
+    expect(receipt).toContain('[tool failed]');
+    await tool.handler({ operation: 'adopt', id: 'finish-fish' }, ctx);
+    expect(await tool.handler(args, ctx)).not.toHaveProperty('failed');
+    expect(new ActivityAgenda(dir).state().items.find(item => item.id === 'finish-fish')?.status).toBe('done');
+  });
+
+  it('reports an invalid wait as failed without creating a task, then persists a valid retry', async () => {
+    const { dir } = rig();
+    const persona = new CortiV({ memoryDir: dir, dream: () => ({ ...DREAM_DEFAULTS, enabled: false }) });
+    personas.push(persona); persona.attach(makeFakeHarnessApi());
+    const tool = persona.declareSessions().find(session => session.id === 'main')!.tools().find(tool => tool.name === 'pending_work')!;
+    const file = join(dir, 'pending-work.json');
+    const before = existsSync(file) ? readFileSync(file, 'utf8') : null;
+    const result = await tool.handler({ operation: 'defer', id: 'fish', note: '等新的钓竿' }, ctx);
+    expect(result).toMatchObject({ failed: true, text: expect.stringContaining('after_seconds 或 wait_for') });
+    expect(existsSync(file) ? readFileSync(file, 'utf8') : null).toBe(before);
+    expect(await tool.handler({ operation: 'defer', id: 'fish', note: '等新的钓竿', after_seconds: 120 }, ctx)).not.toHaveProperty('failed');
+    expect(JSON.parse(readFileSync(file, 'utf8')).entries.find((entry: { id: string }) => entry.id === 'fish')?.status).toBe('waiting');
+    await tool.handler({ operation: 'resolve', id: 'fish', result: '已确认新钓竿入包' }, ctx);
+    expect(JSON.parse(readFileSync(file, 'utf8')).entries.find((entry: { id: string }) => entry.id === 'fish')?.status).toBe('resolved');
+  });
+
   it('rejects an invalid history flag and reads the original after a boolean retry', async () => {
     const { dir, memory } = rig();
     const original = '2026-08-01T10:00:00Z 旧取材点 (-10,64,20)';

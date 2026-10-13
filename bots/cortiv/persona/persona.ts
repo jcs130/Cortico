@@ -753,7 +753,11 @@ export class CortiV extends Cormini {
         },
         required: ['operation'],
       },
-      handler: async (args) => this.pendingWork?.operate(args) ?? '[pending_work unavailable] Persona is not attached.',
+      handler: async (args) => {
+        const text = this.pendingWork?.operate(args) ?? '[pending_work unavailable] Persona is not attached.';
+        return text.startsWith('[pending_work 输入错误]') || text.startsWith('[pending_work unavailable]')
+          ? { failed: true, text } : text;
+      },
     }, {
       name: 'activity_plan',
       description: 'Read a persistent flexible activity agenda; review requests asynchronous planning and returns immediately. '
@@ -788,11 +792,15 @@ export class CortiV extends Cormini {
           ifBlocked: { type: 'string', minLength: 1, maxLength: 240, description: 'update: revised response to a blocker, with fresh supporting evidence in note; objective id and completion criteria stay unchanged.' },
         }, required: ['operation'],
       },
-      handler: async (args) => args.operation === 'review'
-        ? JSON.stringify(this.planningReview?.review(typeof args.question === 'string' ? args.question : '',
+      handler: async (args) => {
+        if (args.operation === 'review') return JSON.stringify(this.planningReview?.review(
+          typeof args.question === 'string' ? args.question : '',
           typeof args.publicTopic === 'string' ? args.publicTopic : '')
-          ?? { accepted: false, reason: 'Persona未连接' })
-        : this.activityAgenda?.operate(args) ?? '[日程 unavailable] Persona is not attached.',
+          ?? { accepted: false, reason: 'Persona未连接' });
+        const text = this.activityAgenda?.operate(args) ?? '[日程 unavailable] Persona is not attached.';
+        return text.startsWith('[日程输入错误]') || text.startsWith('[日程 unavailable]')
+          ? { failed: true, text } : text;
+      },
     }, ...super.mainTailTools()];
   }
 
