@@ -13,6 +13,8 @@ import type { PriceDefinition, QuoteTime } from './pricebook.ts';
 import type { Request } from '../protocol/open-responses/index.ts';
 import type { ContextRecord } from '../protocol/open-responses/context.ts';
 import type { GenerateOptions, Generation, GenerationError, ResponseClient } from '../core/generation.ts';
+import type { ProviderPreset } from './presets.ts';
+import type { DecisionRequest, DecisionResult } from '../protocol/typed-decision.ts';
 
 /** Providers expose standard Responses and own their native transport semantics. */
 export abstract class BaseProvider implements ResponseClient {
@@ -57,6 +59,7 @@ export interface ListedModel {
 
 export interface ProviderInstance {
   client: BaseProvider;
+  decide?(input: DecisionRequest, options?: { signal?: AbortSignal; conversationId?: string }): Promise<DecisionResult>;
   /** Models the endpoint advertises (`GET /models`). */
   listModels?(): Promise<ListedModel[]>;
   /** Module-owned control object; interpreted by that module's console contribution. */
@@ -82,9 +85,12 @@ export interface ProviderAvailability {
 
 export interface ProviderModule {
   id: string;
+  /** False for a decision-only connection; it cannot become the active text model. */
+  generation?: boolean;
   title: string;
   description?: string;
   defaultBaseUrl?: string;
+  presets?: readonly ProviderPreset[];
   /** Candidate endpoint URLs offered on the URL field. Candidates only: any URL is accepted. */
   baseUrlSuggestions?: readonly string[];
   /** Empty = open: `reasoningEffort` accepts any non-empty string; `effortSuggestions` supplies the candidates. */

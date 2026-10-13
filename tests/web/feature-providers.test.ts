@@ -11,15 +11,15 @@ const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve()
 const entry = { kind: 'sample', baseUrl: 'https://model.test', spec: { model: 'test-model', thinking: false } };
 const BLOCKS = { endpoint: { id: 'endpoint', title: '连接', builtin: 'connection-endpoint', defaultOpen: true }, model: { id: 'model', title: '模型与生成', builtin: 'connection-model', defaultOpen: true }, pricing: { id: 'pricing', title: '成本与计价', builtin: 'connection-pricing', defaultOpen: false }, protocol: { id: 'protocol', title: '高级协议', builtin: 'connection-protocol', defaultOpen: false } };
 const DEFAULT_SECTIONS = [BLOCKS.endpoint, BLOCKS.model, BLOCKS.pricing, BLOCKS.protocol];
-interface FixtureOptions { sections?: typeof DEFAULT_SECTIONS; models?: unknown[]; usage?: Array<{ name: string; running: boolean }>; readiness?: string; secretConfigured?: string }
-async function fixture(names = ['Alpha', 'Beta'], active = names[0] ?? '', { sections = DEFAULT_SECTIONS, models = [], usage = [], readiness = 'ready', secretConfigured = 'none' }: FixtureOptions = {}) {
+interface FixtureOptions { sections?: typeof DEFAULT_SECTIONS; models?: unknown[]; usage?: Array<{ name: string; running: boolean }>; readiness?: string; secretConfigured?: string; presets?: unknown[]; generation?: boolean }
+async function fixture(names = ['Alpha', 'Beta'], active = names[0] ?? '', { sections = DEFAULT_SECTIONS, models = [], usage = [], readiness = 'ready', secretConfigured = 'none', presets = [], generation = true }: FixtureOptions = {}) {
   const calls: Array<{ path: string; body: any }> = [];
   const detail = (name: string) => ({ name, entry: structuredClone(entry), revision: 'r1', secretConfigured, readiness: { state: 'ready' }, config: [], references: [] });
   vi.stubGlobal('fetch', async (path: string, init: any) => {
     calls.push({ path, body: init.body ? JSON.parse(init.body) : null });
     let result: unknown = {};
     if (path === '/api/providers') result = { active, providers: names.map(name => ({ id: name, name, module: 'sample', moduleTitle: 'Sample driver', model: 'test-model', baseUrl: entry.baseUrl, active: name === active, usage, readiness: { state: readiness }, revision: 'r1' })) };
-    else if (path === '/api/provider-modules') result = [{ id: 'sample', title: 'Sample driver', description: 'A sample connection', defaultBaseUrl: entry.baseUrl, reasoningTiers: [], serviceTiers: [], sections }];
+    else if (path === '/api/provider-modules') result = [{ id: 'sample', title: 'Sample driver', description: 'A sample connection', defaultBaseUrl: entry.baseUrl, reasoningTiers: [], serviceTiers: [], sections, presets, generation }];
     else if (path === '/api/provider-modules/config') result = [];
     else if (/\/activate$/.test(path)) active = decodeURIComponent(path.split('/')[3]);
     else if (/\/delete$/.test(path)) names = names.filter(name => name !== decodeURIComponent(path.split('/')[3]));
@@ -35,6 +35,45 @@ async function fixture(names = ['Alpha', 'Beta'], active = names[0] ?? '', { sec
   await mountProviders(ctx); await flush(); return { root, calls, ctx };
 }
 afterEach(() => { lifecycles.splice(0).forEach(life => life.dispose()); vi.unstubAllGlobals(); document.body.replaceChildren(); localStorage.clear(); });
+it('restores separate preset drafts and keys without sending a previous provider key to the next one', async () => {
+  const { root, calls } = await fixture(['Saved'], 'Saved', { presets: [
+    { id: 'alpha', title: 'Alpha API', baseUrl: 'https://alpha.test' },
+    { id: 'beta', title: 'Beta API', baseUrl: 'https://beta.test' },
+  ] });
+  const button = (label: string) => [...root.querySelectorAll('button')].find(item => item.textContent === label)!;
+  const field = (label: string) => root.querySelector(`[aria-label="${label}"]`) as HTMLInputElement;
+  const choose = async (value: string) => { const select = field('服务预设'); select.value = value; select.dispatchEvent(new Event('change')); await flush(); };
+  const edit = (label: string, value: string) => { const input = field(label); input.value = value; input.dispatchEvent(new Event('input')); };
+  button('+ 新建供应商实例').click(); await flush();
+  await choose('alpha'); edit('供应商名称', 'MyAlpha'); edit('模型', 'alpha-model'); edit('API Key', 'alpha-private'); edit('API 地址', 'https://alpha.test/custom');
+  await choose('beta'); expect(field('API Key').value).toBe('');
+  edit('供应商名称', 'MyBeta'); edit('模型', 'beta-model'); edit('API Key', 'beta-private');
+  button('测试连接').click(); await flush();
+  expect(calls.filter(call => call.path.endsWith('/test')).at(-1)?.body).toMatchObject({ entry: { baseUrl: 'https://beta.test' }, secretValue: 'beta-private' });
+  await choose('alpha');
+  expect([field('供应商名称').value, field('模型').value, field('API Key').value, field('API 地址').value])
+    .toEqual(['MyAlpha', 'alpha-model', 'alpha-private', 'https://alpha.test/custom']);
+  (root.querySelector('[data-provider="Saved"]') as HTMLElement).click(); await flush();
+  (root.querySelector('[data-provider="/new"]') as HTMLElement).click(); await flush();
+  expect(field('API Key').value).toBe('alpha-private');
+  await choose('beta'); expect(field('API Key').value).toBe('beta-private');
+  expect(Object.values(localStorage).join('')).not.toMatch(/alpha-private|beta-private/);
+  expect(calls.some(call => call.path.endsWith('/activate'))).toBe(false);
+});
+it('preserves unsaved key edits while navigating saved connections', async () => {
+  const { root } = await fixture();
+  const key = root.querySelector('[aria-label="API Key"]') as HTMLInputElement;
+  key.value = 'edited-private'; key.dispatchEvent(new Event('input'));
+  (root.querySelector('[data-provider="Beta"]') as HTMLElement).click(); await flush();
+  expect((root.querySelector('[aria-label="API Key"]') as HTMLInputElement).value).toBe('');
+  (root.querySelector('[data-provider="Alpha"]') as HTMLElement).click(); await flush();
+  expect((root.querySelector('[aria-label="API Key"]') as HTMLInputElement).value).toBe('edited-private');
+  expect(Object.values(localStorage).join('')).not.toContain('edited-private');
+});
+it('keeps decision-only connections out of main-model activation', async () => {
+  const { root } = await fixture(['Choice'], '', { generation: false });
+  expect((root.querySelector('.connection-activate') as HTMLButtonElement).parentElement!.hidden).toBe(true);
+});
 it('uses one connection navigation entry without provider lamps', () => { expect(providersFeature.route).toBe('providers'); expect(providersFeature.lampId).toBeUndefined(); });
 it('selection preserves active connection and card DOM', async () => {
   const { root, calls } = await fixture();

@@ -3,11 +3,12 @@ import { get, post } from '../../core/api.ts';
 import { Lifecycle } from '../../core/lifecycle.ts';
 import { configField, type ConfigGroup } from '../config/view.ts';
 import { validateProviderName } from '../../../../providers/name.ts';
-import { connectionPath, type Detail, type Editing, type ListedModel, type Module } from './types.ts';
+import { connectionPath, editingVariant, type Detail, type Editing, type ListedModel, type Module } from './types.ts';
 import { LANGUAGE } from '../../core/language.ts';
 import { pricingEditor } from '../../console-pages/builtins/llm-settings/pricing-panel.ts';
 import type { Disposable } from '../../../shared/client-panel.ts';
 import { S } from './strings.ts';
+import { presetEntry } from '../../../../providers/presets.ts';
 
 export interface DetailController { dispose(): void; }
 interface Options {
@@ -16,6 +17,7 @@ interface Options {
   changed(editing: Editing, invalid: boolean, dirty: boolean): void;
   onSaved(name: string, select?: boolean): Promise<void>; cancelled(): Promise<void>;
   deleted(): Promise<void>; duplicate(editing: Editing): Promise<void>;
+  variants: { get(name: string): Editing | null; set(value: Editing, name: string): void };
 }
 type Section = Module['sections'][number];
 type Spec = NonNullable<Detail['entry']['spec']>;
@@ -51,9 +53,17 @@ export async function mountDetail(options: Options): Promise<DetailController> {
   /** A saved connection shows the discard button only while the form differs from what is saved. */
   let cancel: HTMLButtonElement | null = null;
   const change = () => {
+    if (!saved) options.variants.set(editing, editingVariant(editing));
     if (cancel) cancel.hidden = !!saved && !dirty();
     options.changed(editing, !!form.querySelector('[aria-invalid="true"]'), dirty());
   };
+  function switchVariant(next: Editing) {
+    options.variants.set(editing, editingVariant(editing));
+    const restored = options.variants.get(editingVariant(next)) ?? next;
+    for (const key of Object.keys(editing)) delete (editing as unknown as Record<string, unknown>)[key];
+    Object.assign(editing, structuredClone(restored));
+    change(); run(render);
+  }
   const run = (work: () => Promise<unknown>, source?: HTMLElement) => {
     if (source) source.after(report);
     report.textContent = '';
@@ -261,11 +271,20 @@ export async function mountDetail(options: Options): Promise<DetailController> {
       basic.append(ui.field(S.module, module), ui.msgline(S.fixedModule));
     }
     else {
+      const presets = modules.flatMap(module => (module.presets ?? []).map(preset => ({ ...preset, kind: module.id })));
+      const preset = ui.select({ value: editing.presetId ?? '', options: [{ value: '', label: S.custom }, ...presets.map(item => ({ value: item.id, label: item.title }))], onChange: id => {
+        const item = presets.find(candidate => candidate.id === id);
+        const module = modules.find(module => module.id === (item?.kind ?? editing.entry.kind));
+        switchVariant({ original: null, name: '', entry: item ? presetEntry(item.kind, item, module?.reasoningTiers[0]?.thinking ?? true)
+          : { kind: module?.id ?? '', baseUrl: module?.defaultBaseUrl ?? '', spec: { model: '', thinking: module?.reasoningTiers[0]?.thinking ?? true } },
+          secretValue: '', raw: {}, ...(item ? { presetId: id } : {}) });
+      } });
+      preset.setAttribute('aria-label', S.preset);
+      basic.append(ui.field(S.preset, preset), ui.msgline(S.presetHint));
       const select = ui.select({ value: editing.entry.kind, options: [{ value: '', label: '—' }, ...modules.map(module => ({ value: module.id, label: module.title }))],
         onChange: kind => {
           const module = modules.find(module => module.id === kind);
-          editing.entry = { kind, baseUrl: module?.defaultBaseUrl ?? '', spec: { model: '', thinking: module?.reasoningTiers[0]?.thinking ?? true, ...(module?.reasoningTiers[0]?.effort ? { reasoningEffort: module.reasoningTiers[0].effort } : {}) } };
-          editing.raw = {}; change(); run(render);
+          switchVariant({ original: null, name: '', entry: { kind, baseUrl: module?.defaultBaseUrl ?? '', spec: { model: '', thinking: module?.reasoningTiers[0]?.thinking ?? true, ...(module?.reasoningTiers[0]?.effort ? { reasoningEffort: module.reasoningTiers[0].effort } : {}) } }, secretValue: '', raw: {} });
         } });
       select.setAttribute('aria-label', S.module);
       const moduleField = ui.field(S.module + ' *', select);

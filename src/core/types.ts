@@ -513,6 +513,7 @@ export interface ContextHandoffResult {
 
 /** Persona 访问 Core 的接口。 */
 export interface CoreApi {
+  decisions?: import('../protocol/typed-decision.ts').DecisionHost;
   /** 向接收事件的 session 注入内部事件；立即落库，正文由 Persona 提供。 */
   injectInternal(text: string, kind?: string): void;
   /** 注入内部事件，在投递时调用 render；渲染与持久化规则见 DeferredEventSpec。 */
@@ -694,6 +695,8 @@ export interface PersonaCognition {
 
 /** Core 提供给 World 的宿主接口；事件写入、队列消费和认知请求支持跨进程异步实现。 */
 export interface WorldHost {
+  /** Host-owned saved decision connections. Omitted by hosts without this capability. */
+  decisions?: import('../protocol/typed-decision.ts').DecisionHost;
   /**
    * 保存事件并分配游标，按 opts 投递；返回已保存记录。origin 缺省为 external。
    * internal 仅用于内部机制或已认证操作员通道，不得用于来源未经认证的外部内容。
@@ -1270,6 +1273,8 @@ export interface CoreConfig {
   providers: Record<string, LLMProviderEntry>;
   /** providers 中的端点名；新模型调用读取当前值。 */
   activeProvider: string;
+  /** Saved typed-decision connection; empty disables inherited decision requests. */
+  decisionProvider?: string;
   /** Shared across all provider bindings; one generation per conversation is always enforced. */
   generation?: { maxConcurrent: number };
   /** provider 配置格式版本，保存配置时写入。 */

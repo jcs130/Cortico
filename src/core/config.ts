@@ -107,6 +107,11 @@ export function coreConfigGroup(language: Language): ConfigGroup {
       title: t.title,
       description: t.description,
       properties: {
+        decisionProvider: {
+          type: 'string', title: language === 'zh' ? '默认快决策连接' : 'Default decision connection', 'x-hot': true,
+          'x-options': 'decision-providers',
+          description: language === 'zh' ? '引用已保存的 System One 连接；留空禁用继承。Persona 与 World 可显式覆盖连接名。' : 'Saved System One connection; empty disables inheritance. Persona and World callers may explicitly override it.',
+        },
         displayName: {
           type: 'string',
           title: t.displayName.title,
@@ -199,6 +204,7 @@ export const CORE_DEFAULTS = {
   timezone: 'Asia/Shanghai',
   providers: {} as Record<string, import('./types.ts').LLMProviderEntry>,
   activeProvider: '',
+  decisionProvider: '',
   generation: { maxConcurrent: 2 },
   web: { port: 7777, theme: 'mint' },
   paths: { memory: 'memory', data: 'data' },

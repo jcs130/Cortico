@@ -48,6 +48,7 @@ import { GenerationScheduler } from './generation-scheduler.ts';
 import { createPersistedConversationId, loadAgentId } from './conversation-id.ts';
 import { DEFAULT_MODEL_CONCURRENCY, ModelCallGate, limitModelCalls } from './model-calls.ts';
 import { HOST_LIFECYCLE_ENDED } from './markers.ts';
+import { decisionHost } from '../providers/decisions.ts';
 
 /** 单个 World 的停止期限；失败或超时写入结果，其他停止操作继续。 */
 const MODULE_STOP_MS = 20_000;
@@ -230,6 +231,7 @@ export class Core<C extends CoreConfig = CoreConfig> {
           model: entry?.spec?.model ?? null, inputHardLimit: status.context.hardTokens };
       },
       llm: this.llm,
+      decisions: this.makeDecisions('persona'),
       timers: this.timers,
       deliveryGate: {
         set: (gate) => this.bus.setDeliveryGate(gate),
@@ -538,6 +540,14 @@ export class Core<C extends CoreConfig = CoreConfig> {
     };
   }
 
+  private makeDecisions(caller: string, active?: () => boolean) {
+    return decisionHost({ registry: this.providers, config: () => this.config, caller, agentId: this.agentId,
+      active, signal: this.generationScheduler.signal, observe: event => {
+        this.log.emit('debug', 'Decision request metadata', { event: 'provider-decision', data: event });
+        this.persona.onModelObservation?.(event);
+      } });
+  }
+
   /** World 宿主接口;每个 World 使用以自身 id 命名的子 logger。 */
   private makeHost(mod: World): WorldHost {
     const previous = this.moduleHostLeases.get(mod);
@@ -632,6 +642,7 @@ export class Core<C extends CoreConfig = CoreConfig> {
       promotePending: async (cursor, trigger) => lease.active
         && this.bus.promote((it) => it.event?.cursor === cursor && it.event.source === mod.id, trigger),
       modelFacts: this.modelFacts(),
+      decisions: this.makeDecisions(mod.id, () => lease.active),
       blob: (handle) => this.resolveBlob(handle),
       reportUsage: (usage, opts) => {
         if (lease.active) this.reportWorldUsage(mod.id, usage, opts);

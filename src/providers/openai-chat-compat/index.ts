@@ -5,6 +5,7 @@ import { isContextOverflow } from '../transport/errors.ts';
 import { ModelCatalog } from '../openai-responses-compat/native.ts';
 import { ChatCompatProvider, chatCompatHeaders, type ChatCompatProviderOptions } from './native.ts';
 import { protocolConfig } from './config.ts';
+import { CHAT_PRESETS } from '../presets.ts';
 
 export type ChatCompatOptions = Pick<ChatCompatProviderOptions,
   'endpointPath' | 'extraHeaders' | 'extraBody' | 'reasoningMode' | 'replayReasoning'> & { maxContextImages?: number };
@@ -30,6 +31,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 export default {
   id: 'openai-chat-compat',
+  presets: CHAT_PRESETS,
   title: 'OpenAI Chat Completions Compatible',
   description: 'Connect to Chat Completions-compatible model services.',
   localize: language => ({ description: language === 'zh' ? '连接兼容 Chat Completions API 的模型服务。' : 'Connect to Chat Completions-compatible model services.' }),

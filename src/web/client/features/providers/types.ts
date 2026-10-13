@@ -12,5 +12,7 @@ export interface Editing {
   revision?: string;
   secretValue: string;
   raw: Record<string, string>;
+  presetId?: string;
 }
+export const editingVariant = (editing: Editing) => `/variant/${editing.presetId ? `preset:${editing.presetId}` : `custom:${editing.entry.kind}`}`;
 export const connectionPath = (name: string) => `/api/providers/${encodeURIComponent(name)}`;

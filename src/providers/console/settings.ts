@@ -1,3 +1,4 @@
+import { probeDecision } from '../system-one/native.ts';
 import type {
   CoreConfig,
   LLMProviderEntry,
@@ -18,6 +19,7 @@ import type { Language } from '../../core/language.ts';
 import { isConnectionEditorBlock, type ConsoleLamp, type ConsolePageContribution } from '../../web/shared/console-protocol.ts';
 import type { ConsolePageSource } from '../../web/console-pages.ts';
 import { providerModules, type ProviderRegistry } from '../registry.ts';
+import { providerReferencePaths } from './references.ts';
 import type { ProviderAvailability, ProviderModule } from '../base.ts';
 import { endpointAvailability, validateEntry } from '../configuration.ts';
 import { quotePrices, validatePrices, type PriceDefinition } from '../pricebook.ts';
@@ -138,6 +140,7 @@ export class ProviderSettings {
     const S = text(language);
     const entry = this.config.providers[name];
     if (!entry) throw new Error(S.unknownInstance);
+    if (this.module(entry.kind).generation === false) throw new Error('Decision-only connections cannot be the active text model.');
     const requested = { ...entry, ...(spec ? { spec } : {}) };
     if (!requested.spec) throw new Error(S.specRequired);
     const next = validateEntry(this.module(entry.kind), requested, language);
@@ -148,7 +151,7 @@ export class ProviderSettings {
   delete(name: string, language: Language = 'zh'): void {
     const S = text(language);
     if (!this.config.providers[name]) throw new Error(S.unknownInstance);
-    if (name === this.config.activeProvider) throw new Error(S.deleteActive);
+    if (providerReferencePaths(this.config as unknown as Record<string, unknown>, name).length) throw new Error(S.deleteActive);
     this.registry.invalidate(name);
     const { [name]: _dropped, ...rest } = this.config.providers;
     this.config.providers = rest;
@@ -204,6 +207,8 @@ export class ProviderSettings {
     const entry = this.config.providers[name];
     if (!entry) throw new Error(S.unknownInstance);
     if (!entry.spec) throw new Error(S.specRequired);
+    const decide = this.registry.resolve(name).decide;
+    if (decide) return probeDecision(decide);
     return this.probeClient(this.registry.bind(name), entry.spec, language);
   }
 

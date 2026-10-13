@@ -32,3 +32,19 @@ export function parseTypedChoice<Key extends string>(value: unknown, keys: reado
   if (Math.min(Math.abs(answer.confidence - choiceProbability), Math.abs(answer.confidence - aboveChance)) > 0.01) return null;
   return { choice, confidence: answer.confidence, choiceProbability, probabilities };
 }
+export interface DecisionRequest {
+  state: unknown;
+  questions: Record<string, { type: 'choice'; instructions: string; criteria: Record<string, string> }>;
+}
+
+export interface DecisionResult {
+  answers: Record<string, TypedChoice<string>>;
+  model?: string;
+  latency_ms?: number;
+  usage: { input_tokens: number | null; output_tokens: number | null; cached_input_tokens: number | null };
+}
+
+/** The host resolves saved connections; callers provide only the question and optional connection name. */
+export interface DecisionHost {
+  request(input: DecisionRequest, options?: { provider?: string; signal?: AbortSignal; timeoutMs?: number }): Promise<DecisionResult>;
+}

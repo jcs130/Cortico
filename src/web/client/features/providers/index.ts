@@ -4,7 +4,7 @@ import { NEW_DRAFT_ID, providerDrafts } from './drafts.ts';
 import type { FeatureContext, FrameworkFeature } from '../feature.ts';
 import { get, post } from '../../core/api.ts';
 import { S } from './strings.ts';
-import { connectionPath, type HubState, type Connection, type Module, type Detail, type Editing } from './types.ts';
+import { connectionPath, editingVariant, type HubState, type Connection, type Module, type Detail, type Editing } from './types.ts';
 import { mountDetail, type DetailController } from './detail.ts';
 
 /** How often the card list re-reads other deployments' usage. */
@@ -95,7 +95,8 @@ export async function mountProviders(ctx: FeatureContext): Promise<void> {
       if (stopped.length) notes.push(S.selectedBy(stopped.join('、')));
       node.secondary.textContent = notes.join(' · ');
       node.secondary.dataset.tone = (active || running.length) && readiness !== 'ready' ? 'error' : 'draft';
-      node.activate.parentElement!.hidden = active || identity === NEW_DRAFT_ID || readiness !== 'ready' || running.length > 0;
+      node.activate.parentElement!.hidden = active || identity === NEW_DRAFT_ID || readiness !== 'ready' || running.length > 0
+        || modules.find(module => module.id === (item as Connection).module)?.generation === false;
       if (identity === NEW_DRAFT_ID) rows.delete(identity); else rows.set(identity, item as Connection);
     }
   }
@@ -119,6 +120,7 @@ export async function mountProviders(ctx: FeatureContext): Promise<void> {
   }
   async function remove(identity: string): Promise<void> {
     if (identity === NEW_DRAFT_ID) {
+      if (newDraft) drafts.remove(editingVariant(newDraft));
       drafts.remove(NEW_DRAFT_ID); newDraft = null; invalid.delete(identity);
       if (selected === NEW_DRAFT_ID) await select(fallback(), true); else paint();
       return;
@@ -150,7 +152,7 @@ export async function mountProviders(ctx: FeatureContext): Promise<void> {
     const saved = identity === NEW_DRAFT_ID ? null : await get<Detail>(connectionPath(identity), opts);
     if (gen !== renderId || ctx.signal.aborted) return;
     const detailView = ui.h('div');
-    const mounted = await mountDetail({ ctx, root: detailView, modules, saved, draft: identity === NEW_DRAFT_ID ? newDraft : drafts.get(identity),
+    const mounted = await mountDetail({ ctx, root: detailView, modules, saved, draft: identity === NEW_DRAFT_ID ? newDraft : drafts.get(identity), variants: drafts,
       // Edits persist as a browser draft as they happen; a form back at its saved state drops the draft.
       changed: (editing, hasErrors, dirty) => {
         if (hasErrors) invalid.add(identity); else invalid.delete(identity);
@@ -158,8 +160,8 @@ export async function mountProviders(ctx: FeatureContext): Promise<void> {
         else if (dirty) drafts.set(editing); else drafts.remove(identity);
         paint();
       },
-      onSaved: async (name, show = true) => { drafts.remove(identity); invalid.delete(identity); if (identity === NEW_DRAFT_ID) newDraft = null; await refresh(); if (show) await select(name, true); },
-      cancelled: async () => { drafts.remove(identity); invalid.delete(identity); if (identity === NEW_DRAFT_ID) newDraft = null; await select(identity === NEW_DRAFT_ID ? state.providers.find(item => item.name === state.active)?.name || state.providers[0]?.name || '' : identity, true); },
+      onSaved: async (name, show = true) => { drafts.remove(identity); invalid.delete(identity); if (identity === NEW_DRAFT_ID) { if (newDraft) drafts.remove(editingVariant(newDraft)); newDraft = null; } await refresh(); if (show) await select(name, true); },
+      cancelled: async () => { drafts.remove(identity); invalid.delete(identity); if (identity === NEW_DRAFT_ID) { if (newDraft) drafts.remove(editingVariant(newDraft)); newDraft = null; } await select(identity === NEW_DRAFT_ID ? state.providers.find(item => item.name === state.active)?.name || state.providers[0]?.name || '' : identity, true); },
       deleted: async () => { drafts.remove(identity); invalid.delete(identity); await refresh(); await select(state.providers.find(item => item.name === state.active)?.name || state.providers[0]?.name || '', true); },
       duplicate: async editing => {
         if (newDraft) { await select(NEW_DRAFT_ID); return; }

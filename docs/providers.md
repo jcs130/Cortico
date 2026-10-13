@@ -1,4 +1,4 @@
-<!-- Owner: src/providers/base.ts, src/providers/console/hub.ts, src/providers/hub-api.ts, src/providers/name.ts, src/providers/registry.ts, src/providers/console/settings.ts, src/providers/console/config.ts, src/providers/openai-responses-compat/config.ts, src/providers/openai-responses-compat/native.ts, src/providers/llamacpp/config.ts, src/providers/llamacpp/options.ts, src/providers/llamacpp/native.ts, src/providers/llamacpp/huggingface.ts, src/providers/transport/responses-input.ts, src/providers/pricebook.ts, src/core/generation.ts (PriceSnapshot, priceUsage) -->
+<!-- Owner: src/providers/base.ts, src/providers/console/hub.ts, src/providers/hub-api.ts, src/providers/name.ts, src/providers/registry.ts, src/providers/console/settings.ts, src/providers/console/config.ts, src/providers/openai-responses-compat/config.ts, src/providers/openai-responses-compat/native.ts, src/providers/llamacpp/config.ts, src/providers/llamacpp/options.ts, src/providers/llamacpp/native.ts, src/providers/llamacpp/huggingface.ts, src/providers/transport/responses-input.ts, src/providers/pricebook.ts, src/core/generation.ts (PriceSnapshot, priceUsage), src/providers/presets.ts, src/providers/system-one/index.ts, src/providers/decisions.ts -->
 
 # Provider
 
@@ -33,9 +33,13 @@ provider 模块不预设任何模型名;端点
 
 模型供应商页列出共享端点,一次编辑其中一条。选中一条不改变 `activeProvider`,「设为当前」只写
 当前部署的那一项。字段改动随手暂存在浏览器,切走再回来接着编,「放弃更改」丢掉暂存;保存时整条端点
-一次写入配置与密钥;暂存不进共享配置,API Key 不写入浏览器。保存带上读取时的 revision,配置或密钥
-已被别处改过就返回 409,重新加载后再保存。改名连带目录和部署根内各部署的 `activeProvider` 引用一起改;
+一次写入配置与密钥;暂存不进共享配置,API Key 不写入浏览器存储，未保存的密钥仅在当前编辑页内存中保留。保存带上读取时的 revision,配置或密钥
+已被别处改过就返回 409,重新加载后再保存。改名连带目录和部署根内各部署的 `activeProvider`、`decisionProvider` 引用一起改;
 还被引用的端点不能删。`kind` 保存后不可更改。
+
+新建连接可从常用云服务预设开始，地址、协议与模型仍可编辑，自定义入口保留。切换预设分别保留草稿，再切回来恢复原填写。保存过的连接独立保留，选用其他连接不会删除原配置和密钥。
+
+`system-one` 是独立快决策协议，不能设为主对话连接。Core 的 `decisionProvider` 指定默认快决策；Persona 或 World 可通过 `decisions.request` 继承或引用另一已保存连接。参见 [System One 连接](../src/providers/system-one/README.md)。
 
 编辑页的段落顺序由模块声明:模块在 `console()` 的 `panels` 里把编辑页自带的
 四块(`connection-endpoint` 地址与密钥、`connection-model` 模型与生成、`connection-pricing` 计价、

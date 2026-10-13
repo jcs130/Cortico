@@ -17,6 +17,8 @@ import { connectionGroup } from './config.ts';
 import { instanceIsRunning } from '../../core/instance-lock.ts';
 import { CORE_DEFAULTS } from '../../core/config.ts';
 import { text } from './strings.ts';
+import { probeDecision } from '../system-one/native.ts';
+import { providerReferencePaths, renameProviderReferences } from './references.ts';
 
 export class ProviderHubError extends Error {
   constructor(message: string, readonly status = 400) { super(message); }
@@ -62,6 +64,8 @@ export class ProviderHub {
   }
   moduleList(language: Language) {
     return this.modules.map(module => ({ id: module.id, title: module.title,
+      presets: module.presets ?? [],
+      generation: module.generation !== false,
       description: module.localize?.(language)?.description ?? module.description ?? module.title, defaultBaseUrl: module.defaultBaseUrl ?? '',
       reasoningTiers: module.localize?.(language)?.reasoningTiers ?? module.reasoningTiers,
       effortSuggestions: module.effortSuggestions ?? [], serviceTiers: module.localize?.(language)?.serviceTiers ?? module.serviceTiers,
@@ -158,7 +162,7 @@ export class ProviderHub {
       const file = join(parent, dir.name, 'config.json');
       if (existsSync(file) && existsSync(join(parent, dir.name, 'deployment.json'))) files.add(file);
     }
-    return [...files].filter(file => readJsonObject(file).activeProvider === name);
+    return [...files].filter(file => providerReferencePaths(readJsonObject(file), name).length > 0);
   }
   private locked<T>(work: () => T): T {
     mkdirSync(this.root, { recursive: true });
@@ -234,7 +238,7 @@ export class ProviderHub {
           writeFileSync(file, lines.filter(Boolean).join('\n') + '\n');
         }
         if (source !== target) { renameSync(dir, target); moved = true; }
-        for (const file of refs) updateJsonObject(file, raw => { raw.activeProvider = name; });
+        for (const file of refs) updateJsonObject(file, raw => renameProviderReferences(raw, original!, name));
       } catch (error) {
         if (moved) renameSync(target, source ?? stage);
         for (const [file, contents] of backups) {
@@ -244,6 +248,7 @@ export class ProviderHub {
       } finally { if (existsSync(stage)) rmSync(stage, { recursive: true, force: true }); }
       if (original) this.registry.invalidate(original);
       this.registry.invalidate(name);
+      if (original && name !== original) renameProviderReferences(this.config as unknown as Record<string, unknown>, original, name);
       this.refresh();
       return this.detail(name, language);
     });
@@ -252,6 +257,8 @@ export class ProviderHub {
     this.locked(() => {
       const entry = this.config.providers[name];
       if (!entry) throw new ProviderHubError('Provider does not exist.', 404);
+      if (this.modules.find(module => module.id === entry.kind)?.generation === false)
+        throw new ProviderHubError('快决策连接请在默认快决策配置中选择，不能作为主对话模型。');
       const readiness = this.readiness(name, entry, language);
       if (readiness.state !== 'ready') throw new ProviderHubError(readiness.reason ?? readiness.state);
       updateJsonObject(this.file, raw => { raw.activeProvider = name; });
@@ -297,6 +304,8 @@ export class ProviderHub {
       return { models: await instance.listModels() };
     }
     if (!entry.spec) throw new ProviderHubError('Model is required.');
+    const decision = registry.resolve(name).decide;
+    if (decision) return probeDecision(decision);
     return this.settings.probeClient(registry.bind(name), entry.spec, language);
   }
 }

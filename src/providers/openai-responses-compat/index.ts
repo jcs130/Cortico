@@ -7,6 +7,7 @@ import { ModelCatalog, ResponsesProvider, type ResponsesProviderOptions } from '
 import { text } from './strings.ts';
 import { protocolConfig } from './config.ts';
 import { compatConsole } from './console/server.ts';
+import { RESPONSES_PRESETS } from '../presets.ts';
 
 /** Suggested base URLs for the console field; operators may enter other URLs. */
 const BASE_URLS: readonly string[] = [
@@ -61,6 +62,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 export default {
   id: 'openai-responses-compat',
+  presets: RESPONSES_PRESETS,
   title: 'OpenAI Responses Compatible',
   description: 'Connect to Responses-compatible model services.',
   localize: (language) => ({ description: text(language).description }),

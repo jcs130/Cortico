@@ -24,6 +24,31 @@ function fixture() {
   return { hub, cfg, root, file, temp, registry, settings };
 }
 const entry = { kind: 'openai-responses-compat', baseUrl: 'https://model.test', spec: { model: 'test-model', thinking: false } };
+it('retains both saved connections and keys through activation, editing and registry reconstruction', () => {
+  const { hub, cfg, registry, settings, root, file } = fixture();
+  hub.save(null, { name: 'Alpha', entry, secretValue: 'alpha-key' }, 'en');
+  hub.save(null, { name: 'Beta', entry: { ...entry, baseUrl: 'https://other.test' }, secretValue: 'beta-key' }, 'en');
+  hub.activate('Alpha', 'en'); hub.activate('Beta', 'en'); hub.activate('Alpha', 'en');
+  const before = hub.detail('Alpha', 'en');
+  hub.save('Alpha', { name: 'Alpha', entry: { ...before.entry, spec: { ...entry.spec, model: 'changed' } }, expectedRevision: before.revision }, 'en');
+  const reloaded = new ProviderHub(cfg, registry, settings, file, root);
+  expect(reloaded.list('en').providers.map(p => p.name).sort()).toEqual(['Alpha', 'Beta']);
+  expect(reloaded.detail('Alpha', 'en').entry.spec?.model).toBe('changed');
+  expect(readFileSync(join(root, 'Alpha', '.env'), 'utf8')).toContain('alpha-key');
+  expect(readFileSync(join(root, 'Beta', '.env'), 'utf8')).toContain('beta-key');
+  expect(JSON.stringify(reloaded.list('en'))).not.toMatch(/alpha-key|beta-key/);
+});
+it('protects referenced decision connections and keeps nested references on rename', () => {
+  const { hub, cfg, file } = fixture();
+  const saved = hub.save(null, { name: 'Choice', entry: { ...entry, kind: 'system-one' }, secretValue: 'choice-key' }, 'en');
+  cfg.decisionProvider = 'Choice';
+  writeFileSync(file, JSON.stringify({ activeProvider: '', decisionProvider: 'Choice', worlds: { sample: { decisionProvider: 'Choice' } } }));
+  expect(() => hub.delete('Choice', saved.revision)).toThrow('used by');
+  expect(() => hub.activate('Choice', 'en')).toThrow();
+  hub.save('Choice', { name: 'Renamed', entry: saved.entry, expectedRevision: saved.revision }, 'en');
+  expect(JSON.parse(readFileSync(file, 'utf8'))).toMatchObject({ activeProvider: '', decisionProvider: 'Renamed', worlds: { sample: { decisionProvider: 'Renamed' } } });
+  expect(cfg.decisionProvider).toBe('Renamed');
+});
 
 it('new environments remain empty until a validated connection is saved', () => {
   const { hub, root } = fixture();

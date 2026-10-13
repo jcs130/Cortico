@@ -1174,6 +1174,9 @@ export function createBot<C extends CoreConfig>(
         },
 
         options: (kind, language) => {
+          if (kind === 'decision-providers') return [{ value: '', label: language === 'zh' ? '未选择 / 继承宿主' : 'Unset / inherit host' },
+            ...Object.entries(cfg.providers).filter(([, entry]) => providerModules.find(module => module.id === entry.kind)?.generation === false)
+              .map(([name]) => ({ value: name, label: name }))];
           const own = contribution.configOptions?.(kind, language);
           if (own?.length) return own;
           for (const def of definition.worlds ?? []) {

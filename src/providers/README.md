@@ -39,9 +39,13 @@ effort 收任意非空串)、`serviceTiers`、`create(name, entry, host)`。可�
 `connectionBlocks`)与模块自己的面板排成一列。`console()` 显式给空 `config` 表示这一页不另开配置页签,
 声明仍参与服务端校验。启停与模型操作这类动作走面板 invoke。
 
-`create()` 返回 `ProviderInstance`:`client`(实现 `respond`)、`listModels?`、`control?`、
+`create()` 返回 `ProviderInstance`:`client`(实现 `respond`)、`decide?`、`listModels?`、`control?`、
 `compatibilityKey?`、`start?` / `stop?`、`contextWindow?(model)`。`listModels()` 返回 `ListedModel[]`:
 `id` 必有,`displayName`、`contextWindow`、`maxOutputTokens`、`inputImages` 只在上游给出时才有。
+
+`presets` 提供新建连接的地址与协议初值；每条连接独立保存，预设不覆盖已有配置。
+`generation: false` 声明仅供类型决策的模块，不允许成为主对话连接。`decide` 处理 `DecisionRequest`
+并返回经验证的选项概率；Core/World 的 `DecisionHost` 负责引用已保存连接、等待上限、取消及元数据统计。
 
 `ProviderHost` 给实例:`stateDir`(`<部署根>/providers/<端点名>/`,归实例独占)、`repoRoot`、
 `resource()`、`currentEntry()`、`secret(name)`(进程环境优先,否则现读 `stateDir/.env`)、
