@@ -1,9 +1,10 @@
 {
   "name": "cortico",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "private": true,
   "type": "module",
   "description": "A TypeScript framework for event-driven, long-running persona bots",
+  "author": "Pal AI Lab",
   "license": "MIT",
   "repository": {
     "type": "git",

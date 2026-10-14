@@ -91,6 +91,37 @@ bot 的展示名。面板、配置组与提示词文档由贡献方声明;
 `log`、`toast`、`confirm`、`drawer`、`lightbox`、`promptInput`…)。面板不碰 `document.body`,不直连
 `/api/`,不用裸定时器。
 
+## HTTP API 的公开范围
+
+下游产品的前端由下游自己维护，只经下表的公开路由读写 Core 的状态。公开路由的破坏性变更(删除路由、改方法或路径、
+删除或改名请求参数与体字段、新增必填参数、删除回应字段或改变已有字段的含义)按提交规则带 `!` 与 `BREAKING CHANGE:` 脚注，写明迁移办法。
+
+| 路由 | 内容 |
+|---|---|
+| `GET /api/capabilities` | 框架级表面的挂载情况 |
+| `GET /api/status` | 运行状态快照与 `uptimeSec` |
+| `GET /api/config`、`POST /api/config` | 配置组;POST 体 `{ group, values }`,按 schema 校验 |
+| `GET /api/config/options/:kind` | schema 里 `x-options` 为 `kind` 的配置项的当前候选值 |
+| `GET /api/blob?handle=` | 附件字节 |
+| `GET /api/worlds`、`POST /api/worlds/activation` | World 清单;激活或停用,体 `{ id, enabled }` |
+| `POST /api/storage/clear?key=` | 清除一个存储部分;`key` 取自各页 manifest 的 `storageKeys`,Core 自己的对话历史是 `session` |
+| `GET /api/theme`、`POST /api/theme` | 部署的配色;GET 回 `{ defaultScheme, theme }`,POST 体是 `StoredTheme`(`src/web/shared/theme.ts`),回 `{ ok, theme }` |
+| `GET /api/avatar`、`POST /api/avatar` | bot 头像 PNG,没有时 404;POST 体是 `image/png` 原始字节，不是 PNG 时回 400 |
+| `GET /api/usage` | 用量聚合;查询参数 `bucket`(`auto`/`minute`/`hour`/`day`/`week`/`month`)、`currency`、`basis`(`marginal`/`equivalent`)、`from`、`to`、`days`(不小于 1 的整数) |
+| `POST /api/run/pause`、`POST /api/run/resume`、`POST /api/run/shutdown` | 暂停、继续与关机，见「运行控制」 |
+| `GET /api/prompts`、`POST /api/prompts` | 固定提示词的列表与编辑;POST 体 `{ key, content, baseRevision? }`,带上的 `baseRevision` 过期时回 409 并带 `conflict: true`,成功回新的 `revision` |
+| `GET /api/prompts/prefix`、`POST /api/prompts/reset`、`POST /api/session/reload-prefix` | 整条系统前缀的分段预览，回 `{ segments: [{ title, text, sourceKey? }] }`;移除一条固定提示词的部署覆盖，体 `{ key }`,回 `{ ok, result }`;用当前提示词重载当前 session 的系统前缀，对话保留，回 `{ ok, result }`。服务没挂时回 503 |
+| `GET /api/auth/status`、`POST /api/auth/login`、`POST /api/auth/logout` | 部署设了访问密码时的登录与登出;登录态在 Cookie 里，未登录的请求回 401 并带 `x-cortico-auth: required` 头，WebSocket 握手直接断开 |
+| `GET /api/providers`、`GET /api/providers/:name`、`POST /api/providers`、`POST /api/providers/:name/save`、`POST /api/providers/:name/activate`、`POST /api/providers/:name/test` | 模型端点：列出、详情、新建、保存(体带 `expectedRevision`)、设为当前端点、测试连通;没挂 provider 时 503 |
+| `GET /api/console/manifest` | 每页一条 `ConsolePageManifest`,以及框架级能力;形状见 `console-protocol.ts` |
+| `GET`/`POST /api/console/providers/<page>/panels/<panel>/<method>`、WebSocket `/ws/providers/<page>/panels/<panel>` | 面板契约：路径两段都 `encodeURIComponent`(page id 的冒号写作 `%3A`);POST 体 `{ args: [...] }`,GET 只对 `getMethods` 点名的方法开放，参数放在查询串 `args`(JSON 数组);WebSocket 是该面板的推送通道 |
+
+请求带 `x-cortico-language` 头(WebSocket 握手用查询串 `language`)时，回应里的文案按该语言给出。其余路由都是内部路由，包括框架更新提示用的
+`GET /api/framework/release` 和左栏状态灯的轮询 `GET /api/console/lamps`。
+
+控制台网页本身(页面、DOM、类名与 `src/web/client/` 下的模块)是随 Cortico 发布、给开发者用的入口，
+对下游不作承诺。下游可以复制其中的组件起步，复制后由下游维护。
+
 ## 框架更新提示
 
 打开控制台时查询 GitHub 上 Cortico 的最新正式 Release。它的版本高于 `package.json` 的版本时，
