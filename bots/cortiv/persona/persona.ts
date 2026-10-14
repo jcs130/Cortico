@@ -89,6 +89,7 @@ import { MEMORY_HISTORY_DIR,STATE_MEMORY_FILE,STATE_MEMORY_SEARCH_NOTICE,StateMe
 import { TOOL_CALL_RECOVERY_DEFAULTS,ToolCallRecoveryFallback,projectToolCallRecovery,type ToolCallRecoveryConfig } from './tool-call-recovery.ts';
 import { VIEWER_CONVERSATION_RECALL_LIMITS,ViewerConversationRecall } from './viewer-conversation-recall.ts';
 import { ViewerEncounters } from './viewer-encounters.ts';
+import { viewerProfileContext } from './viewer-profile-context.ts';
 import { ViewerIdentityLinks } from './viewer-identity-links.ts';
 import { ViewerRecallContext } from './viewer-recall-context.ts';
 import { VIEWERS_DIR,VIEWER_MEMORY_NOTE_FILE,viewerMemoryNote } from './viewers.ts';
@@ -1975,7 +1976,9 @@ export class CortiV extends Cormini {
     if (!key || !e.source) return false;
     const seenKey = `${e.source}/${key}`;
     const arrival = [`${e.source}.enter`, `${e.source}.enter-guard`].includes(e.type);
-    const presence = arrival || e.type === `${e.source}.leave`;
+    const playerObservation = e.meta?.minecraftPlayerObservation;
+    const encounterLookup = arrival || !!(playerObservation && typeof playerObservation === 'object');
+    const presence = encounterLookup || e.type === `${e.source}.leave`;
     const interaction = identity !== null;
     const hits = (this.viewerHits.get(seenKey) ?? 0) + (interaction ? hitBy : 0);
     if (interaction) this.viewerHits.set(seenKey, hits);
@@ -1995,24 +1998,24 @@ export class CortiV extends Cormini {
     try {
       content = readFileSync(file, 'utf8');
     } catch { /* 没档案:走下面的立档提示 */ }
-    const arrivalHistory = arrival ? this.viewerArrivalHistory.get(seenKey) : undefined;
+    const arrivalHistory = encounterLookup ? this.viewerArrivalHistory.get(seenKey) : undefined;
     let history = arrivalHistory ?? '';
     if (this.viewerHistoryReadsRemaining > 0 && arrivalHistory === undefined
-      && (arrival || interaction)) {
+      && (encounterLookup || interaction)) {
       this.viewerHistoryReadsRemaining--;
       try {
         const recall = this.viewerConversationRecall.recall({ source: e.source, senderKey: key,
           beforeCursor: e.cursor, beforeAt: e.ts,
           ...(identity?.conversation ? { conversation: identity.conversation } : {}),
-          ...(arrival ? {} : { query: (identity?.body ?? e.text).slice(0, VIEWER_CONVERSATION_RECALL_LIMITS.queryChars) }) });
+          ...(encounterLookup ? {} : { query: (identity?.body ?? e.text).slice(0, VIEWER_CONVERSATION_RECALL_LIMITS.queryChars) }) });
         if (recall.entries.length || !recall.searchComplete) history = recall.text;
       } catch (error) { this.core?.log.warn('旧观众发言检索失败', { error: String(error) }); }
     }
-    if (arrival) this.viewerArrivalHistory.set(seenKey, history);
-    const summary = content?.split('\n').map((l) => l.trim()).find(Boolean);
+    if (encounterLookup) this.viewerArrivalHistory.set(seenKey, history);
+    const summary = viewerProfileContext(content);
     const identityLink = this.viewerIdentityLinks.note(e.source, key);
     const note = [`${e.source}/${key}${uname ? `「${uname}」` : ''}`,
-      identityLink, summary ? `档案首行：${clip(summary, 600)}` : '', history].filter(Boolean).join('\n');
+      identityLink, summary ? `档案 ${VIEWERS_DIR}/${e.source}/${key}.md\n${summary}` : '', history].filter(Boolean).join('\n');
     if (summary || history || identityLink) this.viewerRecallContext.update(seenKey, note);
     if (history && !this.foregroundConfig().enabled) {
       const digest = createHash('sha256').update(history).digest('base64url');
@@ -2033,7 +2036,7 @@ export class CortiV extends Cormini {
     const digest = createHash('sha256').update((summary ?? '') + (identityLink ? '\n' + identityLink : '')).digest('base64url');
     if (this.recalledSummary.get(seenKey) === digest) return false;
     const line = (summary
-      ? `[memory] 你记得${e.source}的${key}（档案 ${VIEWERS_DIR}/${e.source}/${key}.md；历史资料重现不是新进场，不代表另一平台的同名账号）:${summary}`
+      ? `[memory] 历史档案 ${e.source}/${key}（${VIEWERS_DIR}/${e.source}/${key}.md；资料重现不是新进场，不代表另一平台的同名账号）:\n${summary}`
       : `[memory] ${e.source}/${key} 的账号关联资料；没有人物档案正文。`)
       + (identityLink ? '\n' + identityLink : '');
     if (!this.injectViewerMemory(line, budget)) return false;

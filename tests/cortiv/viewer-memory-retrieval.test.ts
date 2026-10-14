@@ -38,6 +38,42 @@ function arrival(cursor: number, senderKey = '901', type = 'enter'): EventEnvelo
 }
 
 describe('Persona viewer memory retrieval', () => {
+  it('recalls recent dated records before greeting a nearby player and replaces the excerpt when only the body changes', async () => {
+    const { persona, memoryDir, injected } = rig();
+    const first = 'Alex：2026-10-09 同场游戏。';
+    profile(memoryDir, 'game', 'Alex', first + '\n\n- 2026-10-09 旧相遇 OLD\n- 2026-10-13 对方说「我带了面包」。来源 game.chat #20\n');
+    const nearby = (cursor: number): EventEnvelope => ({ ...event(cursor, 'Alex 挥手', 'game', 'Alex'),
+      type: 'game.event', meta: { uname: 'Alex', minecraftPlayerObservation: { kind: 'gesture', visible: true } } });
+    persona.onDelivery({ events: [nearby(1)] });
+    const request = recalledText(persona);
+    expect(request).toContain('2026-10-13 对方说「我带了面包」');
+    expect(request).toContain('game.chat #20');
+    expect(request).toContain('viewers/game/Alex.md');
+    expect(request).toContain('未重新核验');
+    expect(injected.filter(text => text.startsWith('[memory] 历史档案'))).toHaveLength(1);
+    profile(memoryDir, 'game', 'Alex', first + '\n- 2026-10-14 新经历 NEW，来源 #30\n');
+    persona.onDelivery({ events: [nearby(2)] });
+    expect(recalledText(persona)).toContain('新经历 NEW');
+    expect(recalledText(persona)).not.toContain('我带了面包');
+    expect(injected.filter(text => text.startsWith('[memory] 历史档案'))).toHaveLength(2);
+    await persona.onHandoff([message('user', 'prior context')], { hardTokens: null });
+    const restored = rig(memoryDir).persona;
+    restored.onDelivery({ events: [nearby(3)] });
+    expect(recalledText(restored)).toContain('新经历 NEW');
+  });
+
+  it('does not turn archived proximity into recall, or put unrelated same-name profiles in the request', () => {
+    const { persona, memoryDir } = rig();
+    profile(memoryDir, 'game', 'Alex', 'GAME_ONLY');
+    profile(memoryDir, 'other', 'Alex', 'OTHER_PRIVATE');
+    const nearby: EventEnvelope = { ...event(1, '附近', 'game', 'Alex'), type: 'game.event',
+      contextDelivery: 'archive-only', meta: { uname: 'Alex', minecraftPlayerObservation: { kind: 'movement' } } };
+    persona.onDelivery({ events: [nearby] });
+    expect(recalledText(persona)).not.toContain('GAME_ONLY');
+    persona.onDelivery({ events: [{ ...nearby, cursor: 2, contextDelivery: undefined }] });
+    expect(recalledText(persona)).toContain('GAME_ONLY');
+    expect(recalledText(persona)).not.toContain('OTHER_PRIVATE');
+  });
   it('recalls the QQ account relationship without assigning it to a same-name sender or conversation', () => {
     const { persona, memoryDir } = rig();
     profile(memoryDir, 'chatworld', '42', 'Operator：可米的主人，另一位游戏 Agent 是 seedling。');
@@ -101,7 +137,7 @@ describe('Persona viewer memory retrieval', () => {
     profile(memoryDir, 'platform', '901', '喜欢讨论音乐的老观众\n\n私人完整长档案。');
     persona.onDelivery({ events: [event(1, '你好')] });
     persona.onDelivery({ events: [event(2, '又来了')] });
-    expect(injected.filter(text => text.startsWith('[memory] 你记得'))).toHaveLength(1);
+    expect(injected.filter(text => text.startsWith('[memory] 历史档案'))).toHaveLength(1);
     const request = persona.prepareRequest({ sessionId: 'main', round: 1, messages: [message('system', 'Contract')] })!;
     const text = request.map(record => itemText(record.item)).join('\n');
     expect(text).toContain('喜欢讨论音乐的老观众');

@@ -68,14 +68,15 @@ describe('CortiV 观众档案唤起', () => {
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  it('首见注入档案首行;同 session 第二次出现不再注入', () => {
+  it('首见注入档案首行及近期有日期记录;同 session 第二次出现不再注入', () => {
     p.onDelivery({ events: [ev({ senderKey: '314544096' })] });
     const recalls = injected.filter((t) => t.startsWith('[memory]'));
     expect(recalls).toHaveLength(1);
     expect(recalls[0]).toContain('314544096');
     expect(recalls[0]).toContain('五子棋赢过她一次');
-    // 摘要只取首行,不吐全文
-    expect(recalls[0]).not.toContain('第一次来');
+    // 有日期的原文仍带历史边界，重复事件不重复唤回。
+    expect(recalls[0]).toContain('2026-08-01 第一次来');
+    expect(recalls[0]).toContain('未重新核验');
 
     p.onDelivery({ events: [ev({ senderKey: '314544096' })] });
     expect(injected.filter((t) => t.startsWith('[memory]'))).toHaveLength(1);
@@ -97,7 +98,7 @@ describe('CortiV 观众档案唤起', () => {
       },
     })] });
 
-    const recalls = injected.filter((text) => text.startsWith('[memory] 你记得'));
+    const recalls = injected.filter((text) => text.startsWith('[memory] 历史档案'));
     expect(recalls).toHaveLength(2);
     expect(recalls.join('\n')).toContain('五子棋赢过她一次');
     expect(recalls.join('\n')).toContain('总在关键时刻提醒她看背包');
@@ -121,7 +122,7 @@ describe('CortiV 观众档案唤起', () => {
       },
     })] });
 
-    const recalls = injected.filter((text) => text.startsWith('[memory] 你记得'));
+    const recalls = injected.filter((text) => text.startsWith('[memory] 历史档案'));
     expect(recalls).toHaveLength(1);
     expect(recalls[0]).toContain('314544096');
     expect(recalls[0]).not.toContain('271828182');
@@ -158,7 +159,7 @@ describe('CortiV 观众档案唤起', () => {
       meta: { audienceAdmission: { limitingActive: true, importantParticipants: participants } },
     })] });
 
-    const recalls = injected.filter((text) => text.startsWith('[memory] 你记得'));
+    const recalls = injected.filter((text) => text.startsWith('[memory] 历史档案'));
     expect(recalls.length).toBeGreaterThan(0);
     expect(recalls.length).toBeLessThan(participants.length);
     expect(recalls.reduce((sum, text) => sum + estimateTokens(text), 0)).toBeLessThanOrEqual(2445);
@@ -179,7 +180,7 @@ describe('CortiV 观众档案唤起', () => {
     await p.onHandoff(records([{ role: 'user', content: 'x' }]), HANDOFF_CTX);
     p.onDelivery({ events: [ev({ senderKey: '314544096' })] });
     p.onDelivery({ events: [ev({ senderKey: '314544096' })] });
-    expect(injected.filter((t) => t.startsWith('[memory] 你记得'))).toHaveLength(2);
+    expect(injected.filter((t) => t.startsWith('[memory] 历史档案'))).toHaveLength(2);
   });
 
   /** 重启清空进程内状态，load 从模拟磁盘恢复；保存使用 JSON 序列化隔离对象身份。 */
@@ -207,7 +208,7 @@ describe('CortiV 观众档案唤起', () => {
     p.attach(disk.api(injected, () => { saves++; }));
     p.onOpening({ reason: 'new' });
     p.onDelivery({ events: [ev({ senderKey: '314544096' })] });
-    expect(injected.filter((t) => t.startsWith('[memory] 你记得'))).toHaveLength(1);
+    expect(injected.filter((t) => t.startsWith('[memory] 历史档案'))).toHaveLength(1);
     expect(saves).toBe(1);
 
     const afterRestart: string[] = [];
@@ -217,13 +218,13 @@ describe('CortiV 观众档案唤起', () => {
     restarted.attach(disk.api(afterRestart, () => { saves++; }));
     restarted.onOpening({ reason: 'restarted' });
     restarted.onDelivery({ events: [ev({ senderKey: '314544096' })] });
-    expect(afterRestart.filter((t) => t.startsWith('[memory] 你记得'))).toHaveLength(0);
+    expect(afterRestart.filter((t) => t.startsWith('[memory] 历史档案'))).toHaveLength(0);
 
     // ——边界二:开新场(同一进程里换 session)照旧归零,跨场去重不打开——
     restarted.onOpening({ reason: 'new' });
     expect(disk.peekDisk()).toEqual({});
     restarted.onDelivery({ events: [ev({ senderKey: '314544096' })] });
-    expect(afterRestart.filter((t) => t.startsWith('[memory] 你记得'))).toHaveLength(1);
+    expect(afterRestart.filter((t) => t.startsWith('[memory] 历史档案'))).toHaveLength(1);
   });
 
   it('交接归零的指纹落盘:之后热重启不会把交接前念过的人当成已念', async () => {
@@ -241,7 +242,7 @@ describe('CortiV 观众档案唤起', () => {
     restarted.attach(disk.api(afterRestart));
     restarted.onOpening({ reason: 'restarted' });
     restarted.onDelivery({ events: [ev({ senderKey: '314544096' })] });
-    expect(afterRestart.filter((t) => t.startsWith('[memory] 你记得'))).toHaveLength(1);
+    expect(afterRestart.filter((t) => t.startsWith('[memory] 历史档案'))).toHaveLength(1);
   });
 
   /**
@@ -271,7 +272,7 @@ describe('CortiV 观众档案唤起', () => {
       before.attach(apiFor(first, firstInjected));
       before.onOpening({ reason: 'new' });
       before.onDelivery({ events: keys.map((senderKey) => ev({ senderKey })) });
-      expect(firstInjected.filter((t) => t.startsWith('[memory] 你记得'))).toHaveLength(keys.length);
+      expect(firstInjected.filter((t) => t.startsWith('[memory] 历史档案'))).toHaveLength(keys.length);
 
       const second = new CoreState(dataDir);
       second.load();
@@ -280,7 +281,7 @@ describe('CortiV 观众档案唤起', () => {
       after.attach(apiFor(second, secondInjected));
       after.onOpening({ reason: 'restarted' });
       after.onDelivery({ events: keys.map((senderKey) => ev({ senderKey })) });
-      expect(secondInjected.filter((t) => t.startsWith('[memory] 你记得'))).toHaveLength(0);
+      expect(secondInjected.filter((t) => t.startsWith('[memory] 历史档案'))).toHaveLength(0);
 
       // 同一份盘上状态,开的是新场:整表归零,四个人都重新唤起一次
       const third = new CoreState(dataDir);
@@ -290,7 +291,7 @@ describe('CortiV 观众档案唤起', () => {
       fresh.attach(apiFor(third, thirdInjected));
       fresh.onOpening({ reason: 'new' });
       fresh.onDelivery({ events: keys.map((senderKey) => ev({ senderKey })) });
-      expect(thirdInjected.filter((t) => t.startsWith('[memory] 你记得'))).toHaveLength(keys.length);
+      expect(thirdInjected.filter((t) => t.startsWith('[memory] 历史档案'))).toHaveLength(keys.length);
     } finally {
       rmSync(dataDir, { recursive: true, force: true });
     }
@@ -305,7 +306,7 @@ describe('CortiV 观众档案唤起', () => {
     );
     await p.onHandoff(records([{ role: 'user', content: 'x' }]), HANDOFF_CTX);
     p.onDelivery({ events: [ev({ senderKey: '314544096' })] });
-    const recalls = injected.filter((t) => t.startsWith('[memory] 你记得'));
+    const recalls = injected.filter((t) => t.startsWith('[memory] 历史档案'));
     expect(recalls).toHaveLength(2);
     expect(recalls[1]).toContain('象棋高手');
   });
@@ -380,7 +381,7 @@ describe('CortiV 观众档案唤起', () => {
     for (let i = 0; i < 5; i++) p.onDelivery({ events: [ev(who)] });
     const recalls = injected.filter((t) => t.startsWith('[memory]'));
     expect(recalls).toHaveLength(1);
-    expect(recalls[0]).toContain('你记得');
+    expect(recalls[0]).toContain('历史档案');
   });
 
   it('前缀树 viewers/ 折叠为计数;list_files 保持全量', async () => {
