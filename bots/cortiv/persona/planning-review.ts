@@ -1,6 +1,6 @@
 /** Persona periodic review: read activity and Memory, propose intentions without World execution. */
 import { createHash } from 'node:crypto';
-import type { CoreApi, TimerEntry } from 'cortico/core/types.ts';
+import type { CoreApi, EventEnvelope, TimerEntry } from 'cortico/core/types.ts';
 import { estimateTokens } from 'cortico/core/util.ts';
 import { message, itemText, type ContextRecord } from 'cortico/protocol/open-responses/context.ts';
 import type { ActivityAgenda } from './activity-agenda.ts';
@@ -142,6 +142,37 @@ function clipTokens(text: string, budget: number, tail = false): string {
   return tail ? marker + kept : kept + marker;
 }
 
+/** Keep complete source units so clipping cannot remove the result of an action sentence. */
+export function reviewEventEvidence(event: EventEnvelope, budget: number): string {
+  const header = `【本次执行证据 ${event.ts} ${event.source}/${event.type} 游标${event.cursor}】\n`;
+  const omitted = '[部分原始证据未展开；省略不代表未执行、失败或成功，完整原文按事件游标核对。]';
+  const units: string[] = [];
+  // Some producers attach structured execution evidence to the original event.
+  const execution = (event as EventEnvelope & { execution?: unknown }).execution;
+  if (execution && typeof execution === 'object' && !Array.isArray(execution)) {
+    const { evidence, ...state } = execution as Record<string, unknown>;
+    units.push(`execution=${JSON.stringify(state)}`);
+    for (const [key, value] of Object.entries(evidence && typeof evidence === 'object' && !Array.isArray(evidence) ? evidence : {})) {
+      // The original receipt is included as complete lines below, without a second copy.
+      if (key === 'receipt') continue;
+      if (Array.isArray(value)) value.forEach((entry, index) => {
+        units.push(`execution.evidence.${key}[${index}]=${JSON.stringify(entry)}`);
+      });
+      else units.push(`execution.evidence.${key}=${JSON.stringify(value)}`);
+    }
+  }
+  units.push(...event.text.split(/\r?\n/).filter(Boolean).map(line => `原始回执行=${JSON.stringify(line)}`));
+  const kept: string[] = [];
+  let used = estimateTokens(header + omitted) + 2;
+  let skipped = 0;
+  for (const unit of units) {
+    const size = estimateTokens(unit) + 1;
+    if (used + size <= budget) { kept.push(unit); used += size; }
+    else skipped++;
+  }
+  return header + kept.join('\n') + (skipped ? `\n${omitted}` : '');
+}
+
 export interface PlanningMaterial {
   constitution: string;
   memories: Array<{ file: string; text: string }>;
@@ -153,11 +184,12 @@ export interface PlanningMaterial {
   observations?: string;
 }
 
-export function planningMessages(material: PlanningMaterial, maxTokens: number, agenda = false, question = ''): ContextRecord[] {
+export function planningMessages(material: PlanningMaterial, maxTokens: number, agenda = false, question = '', trigger?: EventEnvelope): ContextRecord[] {
   const prompt = question ? FOCUSED_REVIEW_PROMPT : agenda ? AGENDA_PROMPT : REVIEW_PROMPT;
   const system = message('system', prompt);
   const questionText = question ? `【本次复核问题；待核验的材料】\n${clipTokens(question, Math.floor(maxTokens / 8))}\n\n` : '';
-  const available = Math.max(0, maxTokens - estimateTokens(prompt + questionText) - 40);
+  const evidenceText = trigger ? reviewEventEvidence(trigger, Math.min(4_000, Math.floor(maxTokens / 4))) + '\n\n' : '';
+  const available = Math.max(0, maxTokens - estimateTokens(prompt + questionText + evidenceText) - 40);
   const memoryParts = [
     ...(material.runtime ? [`【当前 World 运行状态；适用于本次复盘】\n${material.runtime}`] : []),
     `【人格】\n${material.constitution}`,
@@ -172,7 +204,7 @@ export function planningMessages(material: PlanningMaterial, maxTokens: number, 
   const memoryText = memoryParts.map(part => clipTokens(part, sourceBudget)).join('\n\n');
   const heading = `【近期活动记录；采样于 ${material.capturedAt}】\n`;
   const activityBudget = Math.max(0, available - estimateTokens(memoryText + heading) - 4);
-  return [system, message('user', questionText + memoryText + '\n\n' + heading
+  return [system, message('user', questionText + evidenceText + memoryText + '\n\n' + heading
     + clipTokens(material.activity, activityBudget, true))];
 }
 
@@ -296,7 +328,7 @@ export class PeriodicPlanningReview {
   }
 
   /** Manual console requests use the same single-flight, read-only review as the periodic timer. */
-  review(question = '', publicTopic = ''): { accepted: boolean; reason: string } {
+  review(question = '', publicTopic = '', trigger?: EventEnvelope): { accepted: boolean; reason: string } {
     // The config owner hot-updates the same object; capture the request's provider and budgets once.
     const cfg = { ...PLANNING_DEFAULTS, ...this.options.config() };
     question = question.trim().slice(0, QUESTION_MAX_CHARS);
@@ -364,7 +396,7 @@ export class PeriodicPlanningReview {
           agenda: this.options.agenda ? this.options.agenda.summary() + '\n'
             + this.options.agenda.planningReadout() : material.agenda,
           activity: this.activities.map((activity) => activity.text).join('\n\n') || '(没有近期活动记录)', capturedAt,
-        }, contextTokens, agendaReview, question);
+        }, contextTokens, agendaReview, question, trigger);
         core.log.emit('debug', '后台复盘阅读材料', { event: 'planning-context', data: {
           profile, provider, contextTokens, outputTokens, timeoutMs, capturedAt,
           requestRecords: messages.length, estimatedInputTokens: estimateTokens(messages.map(r => itemText(r.item)).join('\n')),

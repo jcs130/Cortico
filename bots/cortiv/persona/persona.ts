@@ -1857,10 +1857,8 @@ export class CortiV extends Cormini {
       // onDelivery precedes appending this batch to the session. Include the triggering
       // receipt explicitly so a review cannot see only the earlier acceptance.
       const event = repeated.event;
-      const receipt = event.text.length <= 650 ? event.text
-        : event.text.slice(0, 250) + '\n[回执中段未展开]\n' + event.text.slice(-399);
       const review = this.planningReview?.review(
-        `异步执行终态 ${event.ts} ${event.source}/${event.type} 游标${event.cursor}\n${receipt}\n${reflection}`,
+        `异步执行终态 ${event.ts} ${event.source}/${event.type} 游标${event.cursor}\n${reflection}`, '', event,
       );
       this.core?.log.emit('debug', '异步任务终态复核入口', { event: 'task-causal-review', data: {
         cursor: event.cursor, source: event.source, taskId: repeated.taskId, attempts: repeated.attempts, ...review,

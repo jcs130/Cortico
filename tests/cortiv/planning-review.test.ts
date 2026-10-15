@@ -2,13 +2,13 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { PeriodicPlanningReview, planningMessages, PLANNING, PLANNING_DEFAULTS,
+import { PeriodicPlanningReview, planningMessages, reviewEventEvidence, PLANNING, PLANNING_DEFAULTS,
   PLANNING_TIMER_OWNER, type PlanningConfig } from '../../bots/cortiv/persona/planning-review.ts';
 import { CortiV } from '../../bots/cortiv/persona/persona.ts';
 import definition, { CORTIV_PLANNING_CONFIG_GROUP, CORTIV_FAST_ATTENTION_CONFIG_GROUP } from '../../bots/cortiv/index.ts';
 import { coerceGroupValues, readGroupValues } from '../../src/core/config-schema.ts';
 import { TimerStore } from '../../src/core/timers.ts';
-import { nullLogger, estimateMessagesTokens } from '../../src/core/util.ts';
+import { nullLogger, estimateMessagesTokens, estimateTokens } from '../../src/core/util.ts';
 import type { CoreApi, EventEnvelope, ForkOptions } from '../../src/core/types.ts';
 import { message, functionCall, functionResult, itemText, type ContextRecord } from '../../src/protocol/open-responses/context.ts';
 import { makeFakeHarnessApi, makeFakeIO } from '../core/helpers.ts';
@@ -52,6 +52,60 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2026-01-01T10:
 afterEach(() => { for (const run of cleanup.splice(0).reverse()) run(); vi.useRealTimers(); });
 
 describe('Persona长期复盘', () => {
+  it('mixed async outcomes reach the review before delivery with complete failure clauses and step evidence', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'task-mixed-review-'));
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+    const forks: ForkOptions[] = [];
+    const persona = new CortiV({ memoryDir: dir, tickDelayMs: () => null,
+      planning: () => ({ ...PLANNING_DEFAULTS, enabled: true, provider: 'configured-planner' }) });
+    persona.attach({ ...makeFakeHarnessApi(),
+      sessionInfo: () => ({ id: 'main', running: 0, snapshot: [
+        functionResult('accepted-only', '任务#21已受理，尚未执行'),
+      ], estTokens: null, hardTokens: null }),
+      spawnFork: async options => { forks.push(options); return '(nothing)'; } });
+    persona.startRhythm(); cleanup.push(() => persona.stopRhythm());
+    const receipt = '任务#21：吃饭、抛物、取物。' + '行动说明。'.repeat(50)
+      + '\n第2步抛物没做成：目标不足2格，尚未抛出。'
+      + '\n第3步抛物没做成：目标不足2格，尚未抛出。'
+      + '\n第1步吃饭成功，饥饿15→20。'
+      + '\n第4步取工具成功；箱内物品：' + '材料×100、'.repeat(2_000)
+      + '\n第5步取食物成功，背包新增食物×8。';
+    const task = { cursor: 24, ts: stamp(), source: 'mymc', type: 'mymc.task', origin: 'external' as const,
+      text: receipt, meta: { repeatFailure: { taskId: 21, attempts: 2, scope: 'target', observation: 'changed' } },
+      execution: { kind: 'task', id: 'run:21', phase: 'blocked', terminal: true, goalCompleted: false,
+        evidence: { receipt, steps: [
+          { step: 1, outcome: 'ok', why: null },
+          { step: 2, outcome: 'fail', why: '目标不足2格，尚未抛出' },
+          { step: 3, outcome: 'fail', why: '目标不足2格，尚未抛出' },
+          { step: 4, outcome: 'ok', why: null },
+          { step: 5, outcome: 'ok', why: null },
+        ] } } };
+    await persona.onDelivery({ events: [task] });
+    expect(forks).toHaveLength(1);
+    const input = forks[0].messages.map(record => itemText(record.item)).join('\n');
+    expect(input).toContain('游标24');
+    expect(input).toContain('"phase":"blocked","terminal":true,"goalCompleted":false');
+    for (const step of task.execution.evidence.steps) expect(input).toContain(JSON.stringify(step));
+    expect(input).toContain('第2步抛物没做成：目标不足2格，尚未抛出。');
+    expect(input).toContain('第5步取食物成功，背包新增食物×8。');
+    expect(input).toContain('部分原始证据未展开');
+    expect(input).not.toContain('材料×100');
+    expect(estimateMessagesTokens(forks[0].messages)).toBeLessThanOrEqual(PLANNING_DEFAULTS.reflectionMaxContextTokens);
+    expect(forks[0].tools).toEqual([]);
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it('an overlong receipt sentence is omitted whole so its negation cannot be clipped off', () => {
+    const task: EventEnvelope = { cursor: 25, ts: stamp(), source: 'another-game', type: 'another-game.task',
+      origin: 'external', text: '第1步尝试移动：' + '路径条件。'.repeat(2_000) + '没做成，原地未移动。\n第2步取消。' };
+    const text = reviewEventEvidence(task, 200);
+    expect(text).not.toContain('第1步尝试移动');
+    expect(text).toContain('第2步取消');
+    expect(text).toContain('省略不代表未执行、失败或成功');
+    expect(estimateTokens(text)).toBeLessThanOrEqual(200);
+    expect(task.text).toContain('没做成，原地未移动');
+  });
+
   it('actual Persona review includes lifecycle state and drops a result sampled before World deactivation', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'planning-lifecycle-'));
     cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
