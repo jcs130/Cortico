@@ -72,6 +72,7 @@ WakeItem,
 World,
 } from './types.ts';
 import { defaultExternalizes } from './types.ts';
+import { OutputTapGate } from './output-tap.ts';
 
 import { nowIso,prefixFingerprint,renderEventLines } from './util.ts';
 
@@ -1213,15 +1214,22 @@ export class MainLoop {
           requestModel: { model: spec.model, thinking: spec.thinking, reasoningEffort: spec.reasoningEffort ?? null, reasoningSelectionMs }, ...extra,
         } });
       };
-      const tapEvents = tap ? {
+      const tapGate = tap ? new OutputTapGate(
+        name => modelTools.some(tool => tool.name === name && tool.barrierAfter),
+        name => RESERVED_FRAME_NAMES.has(name),
+        event => {
+          if (tap.externalizes ? tap.externalizes(event) : defaultExternalizes(event)) flight.externalized = true;
+          try { tap.onEvent(event); } catch (error) { log.warn('outputTap.onEvent异常', { err: error }); }
+        },
+      ) : null;
+      const tapEvents = tapGate ? {
         onEvent: (event: StreamEvent): void => {
           if (!this.active(generation) || flight.controller.signal.aborted) return;
           if (event.type === 'response.created') setAnchors({ resp: event.response.id });
           if (ttftMs === null && ('delta' in event || event.type === 'response.output_item.added')) ttftMs = Date.now() - roundStart;
-          const tappedEffect = tap.externalizes ? tap.externalizes(event) : defaultExternalizes(event);
-          if (tappedEffect || (event.type === 'response.output_item.done' && event.item?.type === 'function_call' && event.item.status === 'completed')) flight.externalized = true;
           eager?.onEvent(event);
-          try { tap.onEvent(event); } catch (error) { log.warn('outputTap.onEvent异常', { err: error }); }
+          if (event.type === 'response.output_item.done' && event.item?.type === 'function_call' && eager?.has(event.item.call_id)) flight.externalized = true;
+          tapGate.onEvent(event);
         },
       } : undefined;
       let assistant: ContextRecord[];

@@ -2487,6 +2487,41 @@ describe('MainLoop 输出旁路(outputTap)', () => {
     assertPairing(rig.session.messages);
   });
 
+  it('externalizes an announcement once when the model retries a barrier-skipped call in the next round', async () => {
+    const rendered: string[] = [];
+    const calls = new Map<number, { name: string; args: string }>();
+    const stage = { ...makeTool('stage', 'inspect this result'), barrierAfter: true };
+    const announce = makeTool('announce', 'streamed');
+    rig = makeRig({
+      worlds: [makeFakeIO('test', [stage, announce])],
+      outputTap: {
+        onDelta(delta) {
+          if (delta.type === 'tool_call.begin') calls.set(delta.index, { name: delta.name, args: '' });
+          if (delta.type === 'tool_call.delta') calls.get(delta.index)!.args += delta.argsFragment;
+          if (delta.type === 'tool_call.end') {
+            const call = calls.get(delta.index)!;
+            if (call.name === 'announce') rendered.push(JSON.parse(call.args).text);
+          }
+        },
+        onRoundEnd: () => calls.clear(),
+      },
+    });
+    rig.start();
+    await until(() => rig.llm.calls.length >= 1);
+    rig.llm.script(
+      toolReply([{ name: 'stage', id: 'stage1' }, { name: 'announce', id: 'skipped', args: { text: 'Finished' } }]),
+      toolReply([{ name: 'announce', id: 'retry', args: { text: 'Finished again' } }]),
+      textReply('done'),
+    );
+    rig.pushEvent('go');
+    await until(() => rig.session.messages.at(-1)?.content === 'done');
+    expect(rendered).toEqual(['Finished again']);
+    expect(rig.session.messages.find(message => message.tool_call_id === 'skipped')?.content)
+      .toBe('[not executed: review the preceding tool result first]');
+    expect(rig.session.messages.find(message => message.tool_call_id === 'retry')?.content).toBe('streamed');
+    assertPairing(rig.session.messages);
+  });
+
   it('断流时已提前派发的调用用真实执行结果配对,不补假回执', async () => {
     rig = makeRig({
       outputTap: { onDelta: () => {}, onAbort: () => {} },

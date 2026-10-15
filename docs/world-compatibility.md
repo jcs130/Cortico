@@ -41,7 +41,7 @@
 
 ## L4 实时
 
-- `outputTap()`:把主 session 的模型输出流逐段交给 World;`externalizes` 返回 true 后,该轮不再被 `preempt` 取消。
+- `outputTap()`:把主 session 的执行投影逐段交给 World；工具屏障后的调用和保留调用不转发，Item ID 保留，`output_index` 按投影重新编号。`externalizes` 返回 true 后，该轮不再被 `preempt` 取消。完整契约见 [Session](sessions.md)。
 - `cognition`:World 向 Persona 请求后台认知计算。
 - `llmStalls(withinMs)`:最近一段时间内模型调用失败或流中断的次数。
 - `onRunPhase(phase)`:主循环进入投递、模型调用、工具执行、重试等待、交接或空闲时,以及工具开始或结束时同步通知。

@@ -428,7 +428,10 @@ export interface SessionDecl {
   tools: () => ToolDef[];
 }
 
-/** 接收模型输出流；Core 不解释增量中的语义。 */
+/**
+ * 接收输出流的执行投影：屏障之后及保留的函数调用不转发，交错调用等待前序调用闭合。
+ * Item ID 保留，output_index 按投影重新编号；会话仍保存完整模型响应。
+ */
 export interface OutputTap {
   onEvent(event: StreamEvent): void;
   /**
