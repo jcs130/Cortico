@@ -169,9 +169,10 @@ describe('Memory 概览', () => {
 });
 
 describe('浏览器扩展', () => {
-  it('default export 的面板键 = 声明的三个局部 id,且都能 mount', async () => {
+  it('default export covers every Persona and Memory panel declaration', async () => {
     const bundle = ((await import(BUNDLE_ENTRY)) as any).default;
-    const declared = personaPanels().map((p) => p.id);
+    const decl = new CortiV({ memoryDir: join(tmpdir(), 'unused-console-declaration') }).console();
+    const declared = [...(decl.panels ?? []), ...(decl.memory?.panels ?? [])].map((p) => p.id);
     expect(Object.keys(bundle.panels).sort()).toEqual([...declared].sort());
     for (const id of declared) expect(typeof bundle.panels[id].mount).toBe('function');
   });
