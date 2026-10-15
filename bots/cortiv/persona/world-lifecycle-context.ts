@@ -65,6 +65,7 @@ export class WorldLifecycleContext {
       `${state.label} (${state.id})：${state.mounted ? '已挂载' : '未挂载'}${state.visible === undefined ? ''
         : state.visible ? '，对你可见' : '，对你隐藏，事件不再投递'}；${state.source === 'lifecycle' ? '生命周期通知' : '装配清单核对'} ${state.observedAt}`
     ).join('\n') + '\n未挂载 World 的旧位置、库存和任务回执仅供历史参考，当前不能通过它观察或行动。'
-      + '停用本身不表示任务失败、卡顿或完成；按操作员安排保留待续目标。已挂载也不证明外部连接正常或任务已完成，仍需现场回执。';
+      + '停用本身不表示任务失败、卡顿或完成；按操作员安排保留待续目标。已挂载也不证明外部连接正常或任务已完成，仍需现场回执。'
+      + '\n按事件 source 和工具所属 World 分别核对角色、位置、背包、货币、行动点、时钟及任务；同名人物或物品不证明跨世界相同。一个 World 的等待或断线只约束相关步骤，其他 World 的行动按各自现场判断。';
   }
 }

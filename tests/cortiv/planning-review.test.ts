@@ -451,7 +451,7 @@ describe('Persona长期复盘', () => {
     r.review.review();
     const input = r.forks[0].messages.map((entry) => itemText(entry.item)).join('\n');
     expect(input.match(/没有鱼竿/g)).toHaveLength(1);
-    expect(input).toContain('调用 mc_do'); expect(input).toContain('实际工具回执');
+    expect(input).toContain('调用 mc_do'); expect(input).toContain('实际工具回执 tool=mc_do call_id=c1');
     await vi.advanceTimersByTimeAsync(0);
     r.snapshot([message('user', '上周刷塔', { ts: '2025-12-25T10:00:00Z' }),
       ...['planning', 'causal_review'].map((type, i) => message('user', '自己的复盘', { frame: { events: [

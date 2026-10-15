@@ -31,6 +31,57 @@ function adopt(agenda: ActivityAgenda, value = plan()) {
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
 describe('persistent Persona activity agenda', () => {
+  it('preserves separate World attribution through adoption, focus, restart and planning', () => {
+    const { agenda, dir } = rig(), value = plan();
+    value.items[0].worlds = ['garden']; value.items[1].worlds = ['arena'];
+    adopt(agenda, value);
+    agenda.operate({ operation: 'focus', id: 'river' });
+    agenda.operate({ operation: 'update', id: 'river', status: 'deferred', note: 'arena 的行动点等待恢复' });
+    agenda.operate({ operation: 'focus', id: 'finish-home' });
+    const restored = new ActivityAgenda(dir, now);
+    expect(restored.state().items).toMatchObject([
+      { id: 'finish-home', worlds: ['garden'], status: 'active' },
+      { id: 'river', worlds: ['arena'], status: 'deferred' },
+    ]);
+    expect(restored.summary()).toContain('World=garden');
+    expect(JSON.parse(restored.planningReadout()).items.map((item: { worlds: string[] }) => item.worlds)).toEqual([['garden'], ['arena']]);
+  });
+  it('leaves legacy attribution unknown until an evidenced revision correction and rejects late proposals', () => {
+    const { agenda, dir } = rig(); adopt(agenda);
+    const file = join(dir, AGENDA_FILE), before = readFileSync(file, 'utf8');
+    const restored = new ActivityAgenda(dir, now);
+    expect(readFileSync(file, 'utf8')).toBe(before);
+    expect(restored.summary()).toContain('World=未标注');
+    const revision = restored.revision(), draft = JSON.stringify({ ...plan(), items: [{ ...plan().items[1], id: 'new' }] });
+    restored.propose(draft, revision, stamp);
+    const proposed = readFileSync(file, 'utf8');
+    expect(restored.operate({ operation: 'update', id: 'river', worlds: ['arena'], note: '来源 arena/state', expected_revision: revision - 1 })).toContain('输入错误');
+    expect(readFileSync(file, 'utf8')).toBe(proposed);
+    restored.operate({ operation: 'update', id: 'river', worlds: ['arena'], note: '来源 arena/state', expected_revision: revision });
+    const corrected = new ActivityAgenda(dir, now), item = JSON.parse(corrected.operate({ operation: 'read', id: 'river' })).items[0];
+    expect(item).toMatchObject({ worlds: ['arena'], doneWhen: plan().items[1].doneWhen, worldHistory: [{ correctedAt: stamp, correctionNote: '来源 arena/state' }] });
+    expect(corrected.state().proposal).toBeNull();
+    expect(corrected.propose(draft, revision, stamp)).toContain('日程候选未保存');
+    expect(JSON.parse(corrected.planningReadout()).items[1].worldHistory).toBeUndefined();
+  });
+  it('does not let a proposal transfer existing progress to another World', () => {
+    const { agenda } = rig(), value = plan(); value.items[0].worlds = ['garden']; adopt(agenda, value);
+    agenda.operate({ operation: 'focus', id: 'finish-home' });
+    const original = agenda.state().items;
+    value.items[0].worlds = ['arena']; agenda.propose(JSON.stringify(value), agenda.revision(), stamp);
+    expect(agenda.operate({ operation: 'adopt' })).toContain('世界归属订正');
+    expect(agenda.state().items).toEqual(original);
+  });
+  it('validates World attribution without treating an explicit personal intention as unknown', () => {
+    const { agenda, dir } = rig(), value = plan(); value.items[0].worlds = []; adopt(agenda, value);
+    agenda.operate({ operation: 'focus', id: 'finish-home' });
+    expect(agenda.summary()).toContain('World=无特定世界');
+    const before = readFileSync(join(dir, AGENDA_FILE), 'utf8');
+    for (const worlds of [['garden', 'garden'], ['not an id'], ['a','b','c','d','e'], 'garden', null]) {
+      expect(agenda.operate({ operation: 'update', id: 'river', worlds, expected_revision: agenda.revision(), note: '验证来源' })).toContain('输入错误');
+      expect(readFileSync(join(dir, AGENDA_FILE), 'utf8')).toBe(before);
+    }
+  });
   it('invalidates dependent candidates after a premise correction, including a late result across restart', () => {
     const { agenda, dir } = rig(); adopt(agenda);
     const candidate = { ...plan().items[1], id: 'new-route', title: '沿新路线探索' };
@@ -796,7 +847,8 @@ describe('persistent Persona activity agenda', () => {
     expect(new ActivityAgenda(dir, now).state().items.find(item => item.id === 'river')?.status).toBe('cancelled');
   });
   it('short foreground requests retain a deferred goal and its resumption evidence after Persona restoration', () => {
-    const { dir, agenda } = rig(); adopt(agenda);
+    const { dir, agenda } = rig(), value = plan();
+    value.items[0].worlds = ['garden']; value.items[1].worlds = ['arena']; adopt(agenda, value);
     agenda.operate({ operation: 'focus', id: 'finish-home' });
     agenda.operate({ operation: 'update', id: 'river', status: 'deferred', note: '缺少返程口粮，补足后复核' });
     const persona = new CortiV({ memoryDir: dir, tickDelayMs: () => null,
@@ -808,6 +860,8 @@ describe('persistent Persona activity agenda', () => {
     expect(context).toContain('缺少返程口粮，补足后复核');
     expect(context).toContain(stamp);
     expect(context).toContain('改善入口');
+    expect(context).toContain('World=garden');
+    expect(context).toContain('World=arena');
     expect(new ActivityAgenda(dir, now).state().items.find(item => item.id === 'river')?.status).toBe('deferred');
   });
 

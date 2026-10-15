@@ -1,5 +1,11 @@
 Owner: CortiV Persona (`activity-agenda.ts`, `planning-review.ts`).
 
+阶段的 `worlds` 保存证据对应的 World id，最多四项；`[]` 表示无特定世界，省略表示尚未归属。
+旧账本按原样读取，不从标题或工具名猜测归属。`update worlds` 需要当前 `expected_revision` 和
+`note` 中的来源依据；订正历史通过定向 `read id` 查阅。订正使依赖旧归属的候选失效，迟到候选也不复用。
+前台摘要、后台规划和重新加载均保留归属；各世界的资源、时钟与等待条件单独核验。
+同一个 id 的目标与完成标准保持不变；新的阶段通过 review/adopt 使用新 id，原进展仍保留。
+
 # 活动日程
 
 `planning.agendaEnabled` 启用结构化后台候选。沿用已有 planning provider、间隔、

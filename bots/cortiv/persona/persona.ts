@@ -770,13 +770,14 @@ export class CortiV extends Cormini {
         + 'or marks a stage done/deferred/queued/cancelled with evidence or an explicit cancellation reason in note. update can revise when/ifBlocked with fresh evidence in note while preserving the objective and completion criteria. update with why corrects an obsolete premise using the exact expected_revision from read and evidence in note; it retains dated premise history and the original objective. A changed premise retires dependent proposals, including late results captured before that correction; review requests a fresh proposal. Adoption preserves existing stage conditions and evidence. Cancelled is not completed; neither closed status can be reopened by an old proposal. Plans do not execute World actions; '
          + 'amend corrects the note of a closed stage using the expected_revision from read; it preserves status and prior note history. '
          + 'reopen corrects a mistaken completion using the exact expected_revision from read and fresh contradictory evidence in note. It returns that done stage to queued, preserves its prior closure and objective, and keeps the current active stage. Cancelled stages cannot reopen. '
-         + 'completion is never inferred from time or task acceptance. Details and references are loaded only when needed.',
+        + 'worlds records the World ids supported by a stage\'s evidence; omitted legacy attribution is unknown, [] means no particular World. update worlds requires expected_revision and evidence in note, preserves attribution history, and retires dependent proposals. Inventory, resources, clocks, prerequisites and completion evidence remain specific to each World. '
+        + 'completion is never inferred from time or task acceptance. Details and references are loaded only when needed.',
       tags: ['write'],
       parameters: {
         type: 'object', additionalProperties: false,
         properties: {
           operation: { type: 'string', enum: ['read', 'review', 'adopt', 'focus', 'update', 'amend', 'reopen'] },
-          expected_revision: { type: 'integer', minimum: 0, description: 'Exact current agenda revision from read; required for amend/reopen and update with why. Stale premise corrections leave the agenda unchanged.' },
+          expected_revision: { type: 'integer', minimum: 0, description: 'Exact current agenda revision from read; required for amend/reopen and update with why/worlds. Stale corrections leave the agenda unchanged.' },
           question: { type: 'string', minLength: 1, maxLength: 1200,
             description: 'review: focused question about evidence, a difficult strategy or an uncertain cause; selects the reflection profile. Omit for a routine agenda proposal.' },
           publicTopic: { type: 'string', minLength: 1, maxLength: 120,
@@ -789,6 +790,8 @@ export class CortiV extends Cormini {
           status: { type: 'string', enum: ['queued', 'deferred', 'done', 'cancelled'], description: 'update: cancelled explicitly abandons a goal without claiming completion; omit to retain the current stage status.' },
           note: { type: 'string', minLength: 1, maxLength: 400, description: 'update: actual evidence, progress, blocker or explicit reason for cancellation; amend: corrected closure evidence; reopen: fresh evidence contradicting the completion.' },
           why: { type: 'string', minLength: 1, maxLength: 240, description: 'update: corrected premise with verification evidence in note and the exact expected_revision from read; retains prior values and timestamps. Does not change the objective or completion criteria.' },
+          worlds: { type: 'array', maxItems: 4, uniqueItems: true, items: { type: 'string', minLength: 1, maxLength: 80, pattern: '^[a-zA-Z0-9_.:-]+$' },
+            description: 'update: World ids from actual event/tool sources, with expected_revision and attribution evidence in note. [] means no specific World; omit when unknown. Does not transfer items, permissions or progress between Worlds.' },
           when: { type: 'string', minLength: 1, maxLength: 240, description: 'update: revised execution or resumption conditions, with fresh supporting evidence in note; omit to retain existing conditions.' },
           ifBlocked: { type: 'string', minLength: 1, maxLength: 240, description: 'update: revised response to a blocker, with fresh supporting evidence in note; objective id and completion criteria stay unchanged.' },
         }, required: ['operation'],
@@ -2101,6 +2104,7 @@ export class CortiV extends Cormini {
   /** 主播口径:入参是拟播内容,观众听没听到看回执;另加后台整理那两句。 */
   protected override handoffNoteLines(): string[] {
     const lines = super.handoffNoteLines();
+    lines.push('交接中的现场与进展按事件 source、工具所属 World 分别解释；旧库存、行动点、时钟和等待条件不能移用到另一个世界。日程 worlds 未标注时保留未知并核验来源。');
     const at = lines.findIndex((l) => l.startsWith('入参是当时拟发出的内容'));
     lines[at] = '入参是当时拟发出的内容,观众是否听到、听到多少要看回执和后续事件;已受理或已开演不代表已经播完。';
     const empty = lines.findIndex((l) => l.startsWith('对外交流的工具不要输出空内容'));

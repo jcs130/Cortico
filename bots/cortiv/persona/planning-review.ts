@@ -74,6 +74,7 @@ export function causalReviewTail(snapshot: readonly ContextRecord[], maxAgeMs: n
 
 const CAUSAL_EVIDENCE_PROMPT = [
   '按时间与来源还原目标→调用意图→执行终态→后续观察，核对目标状态的净变化；中间成功或暂时变化不代表效果保留。',
+  '事件 source 和工具所属 World 限定事实适用范围。分别核对各世界的角色、库存、货币、行动点、时钟与任务；一个世界的等待不构成另一个世界的前提，历史归属未知时先查来源。',
   'assistant自述、旧笔记和待办中的解释是待核验的前提，不能拿重复自述证明原因。后来的实际观测可以否定早先的推断；记录不充分时明确未知。',
   '工具参数中的期望值、目标名称和空间归属是调用者的假设。回执不符只否定该项期望，不能据此证明缺块或认定坐标属于结构内部；先与已核验的边界、坐标及测量范围对齐，无法对齐时保留未知。后台建议也须按原始测量复核，不能仅凭更新或重复就覆盖实测事实。',
   '没有证据支持与已有反证否定要分开；时间先后或结果相同不能证明因果机制。只给尚未验证的原因标为候选解释，不改写成已证实的新原因。',
@@ -106,6 +107,7 @@ const AGENDA_PROMPT = [
   '你是同一个人格的后台日程规划线程，主意识继续行动和交流。你没有World工具。',
   '为接下来一个游戏日或几小时提出灵活、丰富但做得完的活动安排。不是固定打卡，也不按比例强迫换活动。',
   '结合真实进展、人格、当前长期目标、现场前提、待办和玩法目录，考虑创造、探索、学习、交往与休闲。',
+  '每项 worlds 填写证据对应的 World id，未知时省略，不属于特定世界时填 []。多个世界的角色、背包、货币、行动点、时钟、同伴与任务分别核对；一个世界的休息、断线或资源短缺只约束它自己的步骤。跨世界目的须分别写明各自条件与成果。',
   '已经完成的阶段应收尾，补给、整理、取料只做到下一阶段够用；避免因熟悉某活动而无限重复。',
   '当前观察与阶段证据用于复核前提，规划时的背景说明不代表当前库存；近期明确的新意向应与原目标一起考虑，准备活动不能自动成为所有方向的前置条件。',
   '保留仍在乎的未完成目标及受阻条件；为每项写完成标准、可执行时机和受阻后能继续什么。',
@@ -118,7 +120,7 @@ const AGENDA_PROMPT = [
   '材料注明未展开时不能推断能力不存在。方法、配方与技能参数需要已有证据；不确定时安排核验，不能编造解决方案。',
   '同一目标保持已有 id、title、doneWhen，便于保留进展；已完成阶段不再次列为要重做的事。',
   '只返回JSON，不加代码块。结构为 {"summary":"安排理由","items":[{"id":"稳定短ID","title":"做什么",',
-  '"why":"依据","doneWhen":"做到什么算够","when":"前提/适宜时机与大致时长，非严格时钟",',
+  '"worlds":["材料中实际出现的 World id"],"why":"依据","doneWhen":"做到什么算够","when":"前提/适宜时机与大致时长，非严格时钟",',
   '"ifBlocked":"暂缓/复核条件以及可换的方向","references":["资料入口"]}]}。',
   'items为1至8项，优先给少量有依据的不同方向，不为凑数编造任务；summary不超过300字，title100字，其余文本240字以内。',
   '本结果只是候选，不能宣布已经执行或已学会；主意识核验后才采用。',
@@ -230,6 +232,8 @@ export class PeriodicPlanningReview {
 
   /** Capture each record once, retaining tool intents and actual receipts across context handoffs. */
   noteSnapshot(snapshot: readonly ContextRecord[]): void {
+    const callNames = new Map(snapshot.flatMap(record => record.item.type === 'function_call'
+      ? [[record.item.call_id, record.item.name] as const] : []));
     for (const record of snapshot) {
       const item = record.item;
       if (record.context.head || item.type === 'reasoning'
@@ -247,7 +251,7 @@ export class PeriodicPlanningReview {
       const text = item.type === 'function_call'
         ? `[调用 ${item.name}，call_id=${item.call_id}] ${item.arguments}`
         : item.type === 'function_call_output'
-          ? `[实际工具回执 call_id=${item.call_id}] ${itemText(item)}`
+          ? `[实际工具回执${callNames.has(item.call_id) ? ` tool=${callNames.get(item.call_id)}` : ''} call_id=${item.call_id}] ${itemText(item)}`
           : item.type === 'message' ? `${item.role === 'assistant'
             ? '[assistant自述；解释与成功声明尚未核验]' : `[${item.role}]`} ${itemText(item)}` : '';
       if (!text) continue;
