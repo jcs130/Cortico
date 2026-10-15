@@ -129,10 +129,25 @@ export class StateMemory {
           if (!entry) throw new Error('未找到该观察');
           return JSON.stringify(entry);
         }
-        const entries = [...this.observations.values()].filter(entry => !args.query
-          || `${entry.source}\n${entry.text}`.includes(String(args.query))).slice(-4).reverse()
-          .map(entry => ({ ...entry, text: entry.text.slice(0, 600), chars: entry.text.length }));
-        return JSON.stringify({ observations: entries, interpretation: '实际观察原文；包含失败的回执。结论仍需判断，读文件和自己的台词不产生观察证据。' });
+        if (args.query !== undefined && (typeof args.query !== 'string' || args.query.length > 300)) {
+          throw new Error('query 需要不超过 300 字符的字符串；空格分隔关键词，同一观察需包含全部关键词');
+        }
+        const terms = String(args.query ?? '').trim().toLowerCase().split(/\s+/u).filter(Boolean);
+        const offset = args.offset ?? 0;
+        const limit = args.limit ?? 4;
+        if (!Number.isSafeInteger(offset) || Number(offset) < 0 || !Number.isSafeInteger(limit)
+          || Number(limit) < 1 || Number(limit) > 20) throw new Error('分页 offset >= 0，limit 为 1 至 20');
+        const matches = [...this.observations.values()].reverse().filter(entry => {
+          const searchable = `${entry.source}\n${entry.reference ?? ''}\n${entry.id}\n${entry.text}`.toLowerCase();
+          return terms.every(term => searchable.includes(term));
+        }).sort((a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt));
+        const entries = matches.slice(Number(offset), Number(offset) + Number(limit))
+          .map(entry => ({ ...entry, text: entry.text.slice(0, 600), chars: entry.text.length, truncated: entry.text.length > 600 }));
+        return JSON.stringify({ observations: entries, total: matches.length,
+          nextOffset: Number(offset) + Number(limit) < matches.length ? Number(offset) + Number(limit) : null,
+          scope: { kind: 'retained_observations', retained: this.observations.size, capacity: 128 },
+          queryTerms: terms, match: 'all_terms_case_insensitive',
+          interpretation: '实际观察原文，包含失败回执；id 用于 evidence_id，reference 只是来源编号。truncated 表示仅预览，用 evidence_id 读取全文再解释。未命中仅说明当前保留的观察没有匹配项；读文件和自己的台词不产生观察证据。' });
       }
       if (args.operation === 'read' || args.operation === 'history') {
         if (args.operation === 'history' && !text(args.key, 120)) throw new Error('history 需要 key');
@@ -152,7 +167,7 @@ export class StateMemory {
         || !Number.isSafeInteger(args.expected_revision) || Number(args.expected_revision) < 0
         || !text(args.value, 600)) throw new Error('set/retire 需要 key、expected_revision 和 value（结论或撤回原因）');
       const observation = this.observations.get(String(args.evidence_id));
-      if (!observation) throw new Error('evidence_id 不属于已收到的外部观察；先 evidence 查原始回执');
+      if (!observation) throw new Error('evidence_id 不属于已收到的外部观察；先 evidence 查原始回执，使用返回的 id，不能用任务号、消息号或 reference 代替。query 可用单个关键词，省略时列最近观察');
       const expiresAt = args.expires_at ?? null;
       if (expiresAt !== null && (!dated(expiresAt) || Date.parse(expiresAt) <= this.now()
         || Date.parse(expiresAt) <= Date.parse(observation.observedAt))) throw new Error('expires_at 必须晚于观察和当前时刻');
@@ -199,7 +214,10 @@ export class StateMemory {
         operation: { type: 'string', enum: ['read', 'history', 'evidence', 'set', 'retire'] },
         key: { type: 'string', minLength: 1, maxLength: 120 },
         expected_revision: { type: 'integer', minimum: 0 }, value: { type: 'string', minLength: 1, maxLength: 600 },
-        evidence_id: { type: 'string', maxLength: 80 }, expires_at: { type: 'string' }, query: { type: 'string', maxLength: 300 },
+        evidence_id: { type: 'string', maxLength: 80, description: 'Exact id returned by evidence. A task number, message id or reference is not this id.' },
+        expires_at: { type: 'string' },
+        query: { type: 'string', maxLength: 300,
+          description: 'Evidence search: whitespace-separated literal terms, case-insensitive; all terms must occur in one retained observation (source, reference, id or text). Omit to list recent observations. Searches up to 128 retained observations, newest observation time first; offset/limit paginate results. Read a truncated preview in full using its id before interpreting it.' },
         offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 20 },
       }, required: ['operation'] }, handler: async args => this.operate(args) };
   }

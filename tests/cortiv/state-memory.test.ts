@@ -89,6 +89,43 @@ describe('versioned current memory', () => {
     expect(state.operate({ operation: 'set', key: 'a', value: '已完成', expected_revision: 0, evidence_id: 'file:old.md' })).toMatchObject({ failed: true });
   });
 
+  it('finds all query terms in one delivered observation and keeps its source and write identity', () => {
+    const { state } = rig();
+    const body = '[World] Scout: 复核后，登记的路线仍在北边；下界近路尚未验证，desert 只是一条线索。';
+    state.observeRecords([message('user', body, { ts: newAt, frame: { events: [
+      { source: 'world', type: 'world.chat', cursor: 101, ts: newAt, start: 0, chars: body.length },
+    ] } })], new Set());
+    state.observe({ source: 'other/chat', observedAt: newAt, text: 'Scout 复核 登记' });
+    state.observe({ source: 'other/chat', observedAt: newAt, text: '下界 近路 desert' });
+    const result = JSON.parse(state.operate({ operation: 'evidence', query: '  scout  复核\n登记 下界 近路 DESERT ' }) as string);
+    expect(result.observations).toHaveLength(1);
+    const entry = result.observations[0];
+    expect(entry).toMatchObject({ source: 'world/world.chat', reference: '101', observedAt: newAt, text: body, truncated: false });
+    expect(JSON.parse(state.operate({ operation: 'evidence', query: 'world/world.chat 101' }) as string).observations[0].id).toBe(entry.id);
+    expect(state.operate({ operation: 'set', key: 'route/north', expected_revision: 0, value: '尚未验证', evidence_id: '101' })).toMatchObject({ failed: true });
+    expect(state.operate({ operation: 'set', key: 'route/north', expected_revision: 0, value: '尚未验证', evidence_id: entry.id })).not.toHaveProperty('failed');
+    expect(JSON.parse(state.operate({ operation: 'read', key: 'route/north' }) as string).claims[0].observation.text).toBe(body);
+  });
+
+  it('paginates evidence by observation time and reports the bounded search scope when no terms match', () => {
+    const { state } = rig();
+    const newest = state.observe({ source: 'world/task', observedAt: newAt, text: 'route 三' });
+    state.observe({ source: 'world/task', observedAt: oldAt, text: 'route 二' });
+    state.observe({ source: 'world/task', observedAt: '2026-08-01T09:00:00Z', text: 'route 一' });
+    const first = JSON.parse(state.operate({ operation: 'evidence', query: 'ROUTE', limit: 1 }) as string);
+    expect(first.observations.map((entry: { id: string }) => entry.id)).toEqual([newest]);
+    expect(first).toMatchObject({ total: 3, nextOffset: 1 });
+    const remaining = JSON.parse(state.operate({ operation: 'evidence', query: 'route', offset: first.nextOffset, limit: 2 }) as string);
+    expect(remaining.observations.map((entry: { text: string }) => entry.text)).toEqual(['route 二', 'route 一']);
+    expect(remaining.nextOffset).toBeNull();
+    expect(JSON.parse(state.operate({ operation: 'evidence', query: 'unknown' }) as string)).toMatchObject({
+      observations: [], total: 0, nextOffset: null, scope: { kind: 'retained_observations', retained: 3, capacity: 128 },
+    });
+    for (const args of [{ offset: -1 }, { limit: 0 }, { limit: 21 }, { query: false }]) {
+      expect(state.operate({ operation: 'evidence', ...args })).toMatchObject({ failed: true });
+    }
+  });
+
   it('re-resolves replayed Memory reads and writes without changing the original event records', () => {
     const { state } = rig(); set(state, '新观察已完成', newAt, 0);
     const records = [functionCall('old', 'memory_record', '{"operation":"read"}'), functionResult('old', '旧版本待办'),
@@ -111,6 +148,7 @@ describe('versioned current memory', () => {
     const preview = state.operate({ operation: 'evidence' }) as string;
     expect(preview.length).toBeLessThan(4000);
     const id = JSON.parse(preview).observations[0].id;
+    expect(JSON.parse(preview).observations[0].truncated).toBe(true);
     expect((state.operate({ operation: 'evidence', evidence_id: id }) as string).length).toBeGreaterThan(7000);
   });
 
