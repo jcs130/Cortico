@@ -14,6 +14,7 @@ import { functionCall, functionResult, message } from '../src/protocol/open-resp
  *   CORTICO_DEV_PASSWORD=xxx npx tsx scripts/dev-console.ts → 带访问密码起,用来看登录页
  */
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -28,7 +29,7 @@ import { QQWorld } from '../src/worlds/qq/world.ts';
 import { qqConfigGroup } from '../src/worlds/qq/config.ts';
 import { TerminalWorld } from '../src/worlds/terminal/world.ts';
 import { WebSearchWorld } from '../src/worlds/websearch/world.ts';
-import type { Language } from '../src/core/language.ts';
+import { LocalizedError, type Language } from '../src/core/language.ts';
 import { webSearchConfigGroup } from '../src/worlds/websearch/config.ts';
 import { minecraftClientConfigGroup, minecraftConfigGroup, MINECRAFT_DEFAULTS, minecraftPlayerConfigGroup, minecraftRhythmConfigGroup, type MinecraftConfigSection } from '../src/worlds/minecraft/config.ts';
 import { minecraftPanelDecls } from '../src/worlds/minecraft/world.ts';
@@ -1135,6 +1136,9 @@ const devPersonaPageSources = deriveConsolePageSources(
   { id: 'corti-soulmate', label: devCfg.displayName, memoryName: 'GitMem' },
 );
 
+/** 扩展页 npm 源输入框写下的值;只存在内存里。 */
+let devNpmRegistry: string | null = null;
+
 /** 扩展页的假清单(见下面 `extensions` 依赖)。kind 缺了会被归进「未识别」组。 */
 const devExtensions: ExtensionInfo[] = [
   {
@@ -1320,7 +1324,7 @@ const app = new WebApp({
       const doc = devPromptDocs.find((item) => item.key === key);
       if (!doc) throw new Error(`未知提示词模板: ${key}`);
       if (baseRevision && baseRevision !== doc.revision) throw new PromptRevisionConflict(`${doc.title} 已在别处被修改，请重新载入后再保存`);
-      doc.content = content; doc.revision = `dev-${Date.now()}`;
+      doc.content = content; doc.revision = createHash('sha256').update(content).digest('hex');
       return `已保存 ${doc.title} (dev)`;
     },
   },
@@ -1349,6 +1353,13 @@ const app = new WebApp({
       }));
     },
     searchPartial: () => false,
+    npmRegistry: async () => devNpmRegistry ?? 'https://registry.npmjs.org',
+    configuredRegistry: () => devNpmRegistry,
+    setRegistry: (url) => {
+      const value = url.trim();
+      if (value && !/^https?:\/\/\S+$/i.test(value)) throw new LocalizedError(() => `npm 源要填 http:// 或 https:// 开头的地址,现在是 ${value} (dev)`);
+      devNpmRegistry = value || null;
+    },
     check: async (target, kind) => {
       await new Promise((r) => setTimeout(r, 300));
       if ('path' in target) return { name: `local-${target.path.split(/[\\/]/).filter(Boolean).pop() ?? 'module'}`, version: '0.0.1', kind: kind ?? 'world' };

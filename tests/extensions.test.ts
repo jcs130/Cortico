@@ -453,6 +453,32 @@ describe('ExtensionManager', () => {
     expect(await mgr.npmRegistry()).toBe('https://mirror.example.invalid/npm');
   });
 
+  it('setRegistry 只换 .npmrc 的 registry 行,之后的查询改问 pnpm 用新源;空串删掉这一行', async () => {
+    const dir = join(root, 'extensions');
+    const npmrc = join(dir, '.npmrc');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(npmrc, '@acme:registry=https://scoped.example.invalid/\r\nregistry=https://old.example.invalid/\r\nstrict-ssl=false\r\n');
+    const hosts: string[] = [];
+    const mgr = new ExtensionManager(root, { dir, records: [], worlds: [], providers: [], consoleAssets: [] }, {
+      // 与 pnpm 一样读 cwd 的 .npmrc,没有 registry 行时是官方源
+      run: async (_args, cwd) => {
+        const file = join(cwd, '.npmrc');
+        return { code: 0, output: (existsSync(file) ? /^registry=(.*)$/m.exec(readFileSync(file, 'utf8'))?.[1].trim() : undefined) ?? 'https://registry.npmjs.org/' };
+      },
+      fetchJson: async (url) => { hosts.push(new URL(url).host); return { objects: [] }; },
+    });
+    await mgr.search('world');
+    expect(() => mgr.setRegistry('ftp://mirror.example.invalid/')).toThrow('ftp://mirror.example.invalid/');
+    mgr.setRegistry('https://new.example.invalid/npm/');
+    await mgr.search('world');
+    expect(hosts).toEqual(['old.example.invalid', 'old.example.invalid', 'new.example.invalid', 'new.example.invalid']);
+    expect(readFileSync(npmrc, 'utf8')).toBe('@acme:registry=https://scoped.example.invalid/\r\nregistry=https://new.example.invalid/npm/\r\nstrict-ssl=false\r\n');
+    mgr.setRegistry('');
+    expect(readFileSync(npmrc, 'utf8')).toBe('@acme:registry=https://scoped.example.invalid/\r\nstrict-ssl=false\r\n');
+    expect(mgr.configuredRegistry()).toBeNull();
+    expect(await mgr.npmRegistry()).toBe('https://registry.npmjs.org');
+  });
+
   it('search:registry 不认 keywords: 写法(空列表)时按关键字文本搜,只留带关键字的包', async () => {
     const queries: string[] = [];
     const mgr = new ExtensionManager(root, { dir: join(root, 'extensions'), records: [], worlds: [], providers: [], consoleAssets: [] }, {
@@ -494,6 +520,32 @@ describe('ExtensionManager', () => {
     expect(errors).toHaveLength(1);
     expect(errors[0].error).toContain(`127.0.0.1:${port}: fetch failed`);
     expect(errors[0].error).toContain('ECONNREFUSED');
+  });
+
+  it('回应正文读到一半断开或不是 JSON 时，错误同样带主机与底层原因', async () => {
+    installFake('cut-mod');
+    installFake('html-mod');
+    const server = createServer((req, res) => {
+      if (req.url?.includes('cut-mod')) {
+        res.writeHead(200, { 'content-type': 'application/json', 'content-length': '1000' });
+        res.write('{"dist-tags":');
+        setTimeout(() => res.socket?.destroy(), 20);
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'text/html' }).end('<html>blocked</html>');
+    });
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    const { port } = server.address() as AddressInfo;
+    try {
+      const mgr = new ExtensionManager(root, { dir: join(root, 'extensions'), records: [], worlds: [], providers: [], consoleAssets: [] }, { registry: `http://127.0.0.1:${port}` });
+      const errors = new Map((await mgr.updates()).errors.map((e) => [e.name, e.error]));
+      expect(errors.get('cut-mod')).toContain(`127.0.0.1:${port}: terminated`);
+      expect(errors.get('cut-mod')).toContain('UND_ERR_SOCKET');
+      expect(errors.get('html-mod')).toContain(`127.0.0.1:${port}: `);
+      expect(errors.get('html-mod')).toContain('JSON');
+    } finally {
+      await new Promise((done) => server.close(done));
+    }
   });
 
   it.each([
