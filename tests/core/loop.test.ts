@@ -60,7 +60,7 @@ interface RigOptions {
   /** fork 工具的执行函数。 */
   onFork?: (args: Record<string, unknown>) => Promise<string>;
   /** 上下文交接策略。 */
-  onHandoff?: (snapshot: ChatMessage[], ctx: { hardTokens: number | null }) => Promise<ContextHandoffResult>;
+  onHandoff?: (snapshot: ChatMessage[], ctx: { hardTokens: number | null; timezone?: string }) => Promise<ContextHandoffResult>;
   /** 主 session 的上下文事实(缺省:窗口读活跃 provider 的 spec.contextWindow,估算走字数比例,不认超长错误) */
   context?: Partial<ContextFacts>;
   pressureNotice?: string | null;
@@ -1775,12 +1775,15 @@ describe('MainLoop user事件协议', () => {
 
   it('交接策略拿到物理上限:模型窗口减单轮生成上限;窗口未知则 null', async () => {
     let seen: number | null | undefined;
+    let timezone: string | undefined;
     rig = makeRig({
       cfgPatch: (cfg) => {
         Object.assign(activeSpec(cfg), { contextWindow: 3000, maxTokens: 500 });
+        cfg.timezone = 'America/New_York';
       },
       onHandoff: async (_snapshot, ctx) => {
         seen = ctx.hardTokens;
+        timezone = ctx.timezone;
         return { tail: [] };
       },
     });
@@ -1789,6 +1792,7 @@ describe('MainLoop user事件协议', () => {
       await until(() => rig.llm.calls.length >= 1);
       await rig.loop.handoffContext();
       expect(seen).toBe(2500);
+      expect(timezone).toBe('America/New_York');
     } finally {
       await rig.cleanup();
     }

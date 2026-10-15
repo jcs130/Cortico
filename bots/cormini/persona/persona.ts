@@ -567,7 +567,7 @@ export class Cormini implements Persona {
    * 切成"更早"与"最近"两段渲染成交接笔记,写进 handoffs/,再各以外部事件投递进新 session
    * 第一批;醒来那句话经 injectInternal 同批到达。事务期间总线不投递。
    */
-  async onHandoff(snapshot: ContextRecord[], _ctx: { hardTokens: number | null }): Promise<ContextHandoffResult> {
+  async onHandoff(snapshot: ContextRecord[], ctx: { hardTokens: number | null; timezone?: string }): Promise<ContextHandoffResult> {
     const tagged = (tag: ToolTag): ReadonlySet<string> => this.core?.toolsTagged(tag) ?? new Set<string>();
     const now = new Date();
     const { maxTokens, keepRatio } = this.context();
@@ -576,6 +576,7 @@ export class Cormini implements Persona {
       flowTools: tagged('flow'),
       snapshotTools: tagged('snapshot'),
       now,
+      timezone: ctx.timezone,
       // 笔记预算 = 阶段预算 × keepRatio:清空前最近的一段按它装进笔记
       budgetTokens: Math.floor(maxTokens * keepRatio),
       // 软阈值那一刻之后的是"当前语境",之前的是"更早的历史";分两条投递。

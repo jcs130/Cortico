@@ -1733,7 +1733,9 @@ export class MainLoop {
     const before = this.estTokens();
     let result: ContextHandoffResult = { tail: null };
     try {
-      if (persona.onHandoff) result = await persona.onHandoff(snapshot, { hardTokens: this.d.context.hardTokens() });
+      if (persona.onHandoff) result = await persona.onHandoff(snapshot, {
+        hardTokens: this.d.context.hardTokens(), timezone: this.d.cfg.timezone,
+      });
     } catch (e) {
       log.error('上下文交接策略失败,继续机械重建', { err: e });
     }

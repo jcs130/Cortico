@@ -1,6 +1,6 @@
 import { records } from '../core/fixture-protocol.ts';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Core } from "../core/fixture-core.ts";
@@ -164,9 +164,13 @@ describe('Cormini', () => {
   });
 
   it('交接交回空尾,笔记写进 handoffs/,醒来消息经注入原语进新 session', async () => {
-    const r = await persona.onHandoff!(records([{ role: 'user', content: 'x' }]), { hardTokens: null });
+    const r = await persona.onHandoff!(records([{
+      role: 'user', content: 'x', ts: '2026-09-03T16:36:00Z',
+    }]), { hardTokens: null, timezone: 'America/New_York' });
     expect(r.tail).toEqual([]);
     expect(existsSync(join(memoryDir, 'handoffs'))).toBe(true);
+    const file = readdirSync(join(memoryDir, 'handoffs')).find(name => name.endsWith('.md'))!;
+    expect(readFileSync(join(memoryDir, 'handoffs', file), 'utf8')).toContain('## 12:36');
     await waitFor(
       () =>
         core.session.messages.some(

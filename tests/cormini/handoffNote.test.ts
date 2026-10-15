@@ -50,9 +50,41 @@ function frameMsg(
 }
 
 const oneNote = (snapshot: ChatMessage[], opts: Partial<Parameters<typeof renderHandoffNote>[1]> = {}) =>
-  renderHandoffNote(snapshot, { speechTools: speech, now, ...opts });
+  renderHandoffNote(snapshot, { speechTools: speech, now, timezone: 'Asia/Shanghai', ...opts });
 
 describe('renderHandoffNote', () => {
+  it('UTC 事件与带偏移的工具时间统一显示，跨日换算不改来源与先后分段', () => {
+    const snapshot = [
+      ...frameMsg('older', [{ text: 'older event', ts: '2026-09-03T16:35:00Z' }]),
+      call('action', 'inspect', '{}', { ts: '2026-09-04T00:36:01+08:00' }),
+      result('action', 'observed'),
+      ...frameMsg('later', [{ text: 'later event', ts: '2026-09-03T16:36:02Z' }]),
+    ];
+    const original = structuredClone(snapshot);
+    const note = oneNote(snapshot, { splitAtMs: Date.parse('2026-09-03T16:36:00Z') });
+    expect(note.parts).toHaveLength(2);
+    expect(note.parts[0].text).toContain('更早的一段(00:35)');
+    expect(note.parts[1].text).toContain('最近的一段(00:36)');
+    expect(note.parts[1].text.match(/## 00:36/g)).toHaveLength(1);
+    expect(note.parts[1].text).toContain('最后一条是 00:36 的事');
+    expect(note.text).not.toContain('16:3');
+    expect(snapshot).toEqual(original);
+  });
+
+  it('部署时区决定标题，夏令时按事件时刻换算，坏时间不虚构钟点', () => {
+    const note = oneNote(frameMsg('dst', [
+      { text: 'before clock change', ts: '2026-03-08T06:59:00Z' },
+      { text: 'after clock change', ts: '2026-03-08T07:01:00Z' },
+      { text: 'invalid timestamp retained', ts: '2026-99-03T16:36:02Z' },
+    ]), { timezone: 'America/New_York' });
+    expect(note.text).toContain('最近的一段(01:59–03:01)');
+    expect(note.text).toContain('## 01:59');
+    expect(note.text).toContain('## 03:01');
+    expect(note.text).toContain('invalid timestamp retained');
+    expect(note.text.match(/## /g)).toHaveLength(2);
+    expect(note.text).toContain('最后一条是 03:01 的事');
+  });
+
   it('台词结果按事件标签保留最近段，原调用已离开上下文时仍可独立收录', () => {
     const snapshot = frameMsg('results', [
       { type: 'playback.outcome', text: '旧台词结果 call_id=old', tags: ['speak'], ts: '2026-09-03T14:00:00+08:00' },

@@ -13,7 +13,7 @@ import { RESERVED_FRAME_NAMES } from 'cortico/core/loop.ts';
 import { EVENT_FRAME_HEADER_RE } from 'cortico/core/markers.ts';
 import type { ContextRecord } from 'cortico/protocol/open-responses/context.ts';
 import { hasRole, textOf } from 'cortico/protocol/open-responses/context-helpers.ts';
-import { estimateTokens } from 'cortico/core/util.ts';
+import { estimateTokens, parseTimeIn, SYSTEM_TIMEZONE } from 'cortico/core/util.ts';
 
 /** 交接笔记自己的事件 type:投递用它,渲染时按它跳过上一份笔记 */
 export const HANDOFF_NOTE_TYPE = 'handoff-note';
@@ -31,6 +31,8 @@ export interface HandoffNoteOptions {
   snapshotTools?: ReadonlySet<string>;
   /** 笔记落款的时刻 */
   now: Date;
+  /** 所有来源的时间标题统一使用部署时区；旧调用方未提供时沿用系统默认时区。 */
+  timezone?: string;
   budgetTokens?: number;
   foldTokens?: number;
   /** 软阈值(epoch ms):不早于它的是最近段;缺失时整份算最近段。有分界但无 ts 的条目归早段。 */
@@ -82,11 +84,22 @@ export function foldToBudget(text: string, budgetTokens: number): string {
   return `${text.slice(0, keepChars)}\n…[后面约 ${total - budgetTokens} token 已折叠]`;
 }
 
-/** 入库 ISO(config 时区)→「HH:MM」;认不出形状就没有分段标题 */
-function minuteOf(ts: string | undefined): string | null {
-  if (!ts) return null;
-  const m = /^\d{4}-\d{2}-\d{2}T(\d{2}:\d{2})/.exec(ts);
-  return m ? m[1] : null;
+type MinuteOf = (ts: string | undefined) => string | null;
+
+/** 保留来源时间戳，只在标题显示时转换；每份笔记复用格式器与转换结果。 */
+function minuteFormatter(timezone: string): MinuteOf {
+  const formatter = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: timezone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  });
+  const cache = new Map<string, string | null>();
+  return (ts) => {
+    if (!ts || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(ts)) return null;
+    if (cache.has(ts)) return cache.get(ts)!;
+    const ms = parseTimeIn(timezone, ts);
+    const value = Number.isFinite(ms) ? formatter.format(ms) : null;
+    cache.set(ts, value);
+    return value;
+  };
 }
 
 /**
@@ -135,7 +148,7 @@ function deliveryEntries(m: ContextRecord, skipHeader: boolean): Entry[] {
 }
 
 /** 按分钟分段渲染一串条目 */
-function renderSection(entries: Entry[], caps: number[]): string {
+function renderSection(entries: Entry[], caps: number[], minuteOf: MinuteOf): string {
   const out: string[] = [];
   let minute: string | null = null;
   entries.forEach((e, i) => {
@@ -149,13 +162,14 @@ function renderSection(entries: Entry[], caps: number[]): string {
   return out.join('\n\n');
 }
 
-function rangeOf(entries: Entry[]): string {
+function rangeOf(entries: Entry[], minuteOf: MinuteOf): string {
   const stamps = entries.map((e) => minuteOf(e.ts)).filter((m): m is string => m !== null);
   if (stamps.length === 0) return '';
   return stamps[0] === stamps[stamps.length - 1] ? stamps[0] : `${stamps[0]}–${stamps[stamps.length - 1]}`;
 }
 
 export function renderHandoffNote(snapshot: readonly ContextRecord[], opts: HandoffNoteOptions): HandoffNote {
+  const minuteOf = minuteFormatter(opts.timezone ?? SYSTEM_TIMEZONE);
   const budget = opts.budgetTokens ?? HANDOFF_NOTE_TOKENS;
   const fold = opts.foldTokens ?? HANDOFF_FOLD_TOKENS;
   const flow = opts.flowTools ?? new Set<string>();
@@ -247,7 +261,7 @@ export function renderHandoffNote(snapshot: readonly ContextRecord[], opts: Hand
     }
   });
 
-  // 「现在」的钟点跟着条目自己的时间走(config 时区),不用本机时区重新算一遍。
+  // 最后一条、分段标题与范围均使用部署时区，不混用来源的 UTC 与偏移钟点。
   const lastClock = [...current].reverse().map((e) => minuteOf(e.ts)).find((m) => m !== null) ?? null;
   const common = '同一项状态读数只留了最后一次,更早的长回执只留了个头。';
   const archiveNotice = '工具行是过去请求与回执的文字摘要；新行动使用当前原生工具接口，执行结果以实际回执为准。';
@@ -255,18 +269,18 @@ export function renderHandoffNote(snapshot: readonly ContextRecord[], opts: Hand
   // 衔接规则由 handoffNoteLines 提供；段标题只描述时间、收录内容和省略项。
   const parts: HandoffNotePart[] = [];
   if (history.length > 0) {
-    const range = rangeOf(history);
+    const range = rangeOf(history, minuteOf);
     parts.push({
       text:
         `# 交接笔记 · 更早的一段${range ? `(${range})` : ''}\n\n` +
         '这一段已经过去了,只作参考。里面是外来事件和工具调用与回执,对外发言类调用已整条省略。' +
         `${common}${archiveNotice}\n` +
         (omitted ? `${omitted}\n` : '') +
-        `\n${renderSection(history, historyCaps)}\n`,
+        `\n${renderSection(history, historyCaps, minuteOf)}\n`,
       entries: history.length,
     });
   }
-  const curRange = rangeOf(current);
+  const curRange = rangeOf(current, minuteOf);
   if (current.length > 0 || history.length === 0) parts.push({
     text:
       `# 交接笔记 · 最近的一段${curRange ? `(${curRange})` : ''}\n\n` +
@@ -274,7 +288,7 @@ export function renderHandoffNote(snapshot: readonly ContextRecord[], opts: Hand
       '这里保留对外发言类调用的具体入参与实际回执。' +
       `${common}${archiveNotice}\n` +
       (history.length === 0 && omitted ? `${omitted}\n` : '') +
-      `\n${renderSection(current, currentCaps)}\n`,
+      `\n${renderSection(current, currentCaps, minuteOf)}\n`,
     entries: current.length,
   });
 

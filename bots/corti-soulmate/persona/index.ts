@@ -313,7 +313,7 @@ export class CortiSoulmate extends Cormini {
   }
 
   /** 交接照 Cormini(空尾 + 交接笔记);交接前的快照另排进并行梦。 */
-  override async onHandoff(snapshot: ContextRecord[], ctx: { hardTokens: number | null }): Promise<ContextHandoffResult> {
+  override async onHandoff(snapshot: ContextRecord[], ctx: { hardTokens: number | null; timezone?: string }): Promise<ContextHandoffResult> {
     if (snapshot.some((m) => !hasRole(m, 'system'))) this.dream.schedule(snapshot);
     return super.onHandoff(snapshot, ctx);
   }

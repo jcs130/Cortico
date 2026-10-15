@@ -344,7 +344,7 @@ export interface FakePersonaOptions {
   /** fork 工具的执行函数。 */
   onFork?: (args: Record<string, unknown>) => Promise<string>;
   /** 覆盖交接策略时，开场后的通知也由该策略提供。 */
-  onHandoff?: (snapshot: ChatMessage[], ctx: { hardTokens: number | null }) => Promise<ContextHandoffResult>;
+  onHandoff?: (snapshot: ChatMessage[], ctx: { hardTokens: number | null; timezone?: string }) => Promise<ContextHandoffResult>;
   /** 默认内部文本注入前调用，供测试观察 onDelivery。 */
   onDelivery?: (ctx: { events: EventEnvelope[] }) => void;
   /** 完全接管批末时机钩子(压力裁量测试用) */

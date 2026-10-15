@@ -2082,7 +2082,7 @@ export class CortiV extends Cormini {
   /**
    * 交接时清空唤起指纹与 enrollNudged，使新上下文窗口可重新收到档案和立档提示；将不可变快照排入后台梦。交接笔记、空尾和醒来告知由 Cormini 处理。
    */
-  override async onHandoff(snapshot: ContextRecord[], ctx: { hardTokens: number | null }): Promise<ContextHandoffResult> {
+  override async onHandoff(snapshot: ContextRecord[], ctx: { hardTokens: number | null; timezone?: string }): Promise<ContextHandoffResult> {
     this.planningReview?.noteSnapshot(snapshot);
     this.captureRecentSpeech(snapshot);
     this.recalledSummary.clear();

@@ -36,7 +36,7 @@ Persona 声明,Core 只把 `role` 当分类标签。
 
 Core 的输入上限为 `hardTokens = max(0, 生效窗口 − (spec.maxTokens ?? 0))`。生效窗口取服务探测值与配置的
 `contextWindow` 中的较小者；两者都缺失时不设置此上限。超过上限或服务拒绝超长输入时，
-Core 调用 `Persona.onHandoff(snapshot, { hardTokens })`。Persona 决定保留的上下文和交接笔记，
+Core 调用 `Persona.onHandoff(snapshot, { hardTokens, timezone })`，传入当前部署时区供 Persona 统一显示不同来源的时间；该字段在类型中可选以兼容旧调用方。Persona 决定保留的上下文和交接笔记，
 Core 重建 system 前缀、按容量截断保留内容并重置 session。
 上一批已按计数强制交接、其间没有一次计数检查回到上限内,计数又越过同一上限时(窗口不大于最大输出,或交接后的
 前缀仍超限),Core 不交接,记一条 error,在这个上限下不再按计数收束或强制交接;计数检查看到计数回到上限内,

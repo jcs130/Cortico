@@ -1111,7 +1111,7 @@ export interface Persona {
    * Core 校验工具配对，并将前缀与保留上下文限制在 hardTokens 内；保留比例由 Persona 决定。
    * 钩子内注入的事件在重建完成后投递。
    */
-  onHandoff?(snapshot: ContextRecord[], ctx: { hardTokens: number | null }): Promise<ContextHandoffResult>;
+  onHandoff?(snapshot: ContextRecord[], ctx: { hardTokens: number | null; timezone?: string }): Promise<ContextHandoffResult>;
   /**
    * 认知任务实现；上下文和预算归 Persona，模型配置归当前 provider。
    * 未实现时，WorldHost 不提供 cognition。
