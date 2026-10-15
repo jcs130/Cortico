@@ -6,12 +6,12 @@
 import type { Bot } from 'mineflayer';
 import { SkillBlocked, checkAbort, sleep, type SkillContext } from './skill-context.ts';
 import { type SkillCall } from './skills.ts';
-import { zhEffect, zhName } from './names.ts';
+import { zhName } from './names.ts';
 import { gridText, zhErrorText } from './receipt.ts';
 import {
   CRAFT_SETTLE_MS, INVENTORY_SLOTS, awaitCraftGain, invCount, invCountById, invGains,
   invItemNamed, invSnapshot, invVariantGains, invVariantSnapshot,
-  itemsInReach, namedLike, noSuchItem, offHandItem,
+  namedLike, noSuchItem, offHandItem,
 } from './inventory.ts';
 import { CRAFTING_STATION, ensureStation, type Station } from './placement.ts';
 import {
@@ -22,11 +22,6 @@ import { DRINKABLES } from './item-facts.ts';
 import { noteAte } from './placed-ledger.ts';
 import { edibleInBag, notFoodText } from './precheck.ts';
 import { pickLabel, pickTargetOf } from './item-pick.ts';
-import { itemCustomName } from './item-display.ts';
-import { taggedCraftChoice } from './tagged-crafting.ts';
-import { isInventoryClickError, resumeInventoryCursor } from './inventory-click-sync.ts';
-import { inventoryReadConfirmed } from './inventory-window-sync.ts';
-import { clearOffHandConfirmed, equipSlotConfirmed } from './equipment.ts';
 
 /**
  * `bot.craft` 吃的配方数据面(见 mineflayer-fixes 的覆写版):
@@ -91,13 +86,6 @@ export function recipeFromGrid(bot: Bot, grid: string[][]): CraftRecipeLike {
 export async function skillCraft(
   bot: Bot, call: Extract<SkillCall, { skill: 'craft' }>, ctx: SkillContext,
 ): Promise<string> {
-  // A late authoritative snapshot can leave materials on the cursor. Restore
-  // them before selecting a recipe, rather than misdiagnosing them as missing.
-  try { await resumeInventoryCursor(bot); }
-  catch (err) {
-    if (!isInventoryClickError(err)) throw err;
-    throw new SkillBlocked(`合成前归还游标物品未完成: ${(err as Error).message}`, [], 'server', 'inventory-click-sync');
-  }
   const nameOf = (id: number): string => {
     const raw = (bot.registry.items as Record<number, { name: string }>)[id]?.name;
     return raw ? zhName(raw) : `#${id}`;
@@ -121,35 +109,23 @@ export async function skillCraft(
     if (smithing) return smithNetherite(bot, def.name, smithing, call.count, ctx);
     // 配方表里同一样东西可能有好几种摆法(木棍:竹子/木板)。挑手上材料齐的那一种;
     // 都不齐就把配方要的直接材料照实说出来 —— 不再往下递归找"材料的材料"。
-    const tagged = taggedCraftChoice(bot, def.name);
-    if (tagged?.recipe) {
-      recipe = tagged.recipe;
-    } else if (tagged) {
+    const all = bot.recipesAll(def.id, null, true as never) as unknown as CraftRecipeLike[];
+    if (all.length === 0) throw new SkillBlocked(`游戏的配方表里没有${label}的做法;要自己摆就写 grid`);
+    const have = new Map<number, number>();
+    for (const it of bot.inventory.items()) have.set(it.type, (have.get(it.type) ?? 0) + it.count);
+    const ready = all.find((r) => [...craftNeeds(r)].every(([id, n]) => (have.get(id) ?? 0) >= n));
+    if (!ready) {
+      const options = all.map((r) => [...craftNeeds(r)]
+        .map(([id, n]) => `${nameOf(id)}×${n}`).join(' + ')).join('  或  ');
+      // 现有库存已满足本步需求时不判失败，允许依赖该物品的后续步骤继续。
       const stock = invCountById(bot, def.id);
       if (stock >= call.count) {
-        return `没现搓${label}:配方需要 ${tagged.needs},包里凑不齐;`
-          + `不过包里本来就有 ${stock} 个,够这一步要的 ${call.count} 个了`;
+        return `没现搓${label}:配方要 ${options},包里凑不齐;` +
+          `不过包里本来就有 ${stock} 个,够这一步要的 ${call.count} 个了`;
       }
-      throw new SkillBlocked(`${label}的官方配方需要 ${tagged.needs};包里凑不齐`);
-    } else {
-      const all = bot.recipesAll(def.id, null, true as never) as unknown as CraftRecipeLike[];
-      if (all.length === 0) throw new SkillBlocked(`游戏的配方表里没有${label}的做法;要自己摆就写 grid`);
-      const have = new Map<number, number>();
-      for (const it of bot.inventory.items()) have.set(it.type, (have.get(it.type) ?? 0) + it.count);
-      const ready = all.find((r) => [...craftNeeds(r)].every(([id, n]) => (have.get(id) ?? 0) >= n));
-      if (!ready) {
-        const options = all.map((r) => [...craftNeeds(r)]
-          .map(([id, n]) => `${nameOf(id)}×${n}`).join(' + ')).join('  或  ');
-        // 现有库存已满足本步需求时不判失败，允许依赖该物品的后续步骤继续。
-        const stock = invCountById(bot, def.id);
-        if (stock >= call.count) {
-          return `没现搓${label}:配方要 ${options},包里凑不齐;` +
-            `不过包里本来就有 ${stock} 个,够这一步要的 ${call.count} 个了`;
-        }
-        throw new SkillBlocked(`${label}的配方要:${options};包里凑不齐`);
-      }
-      recipe = ready;
+      throw new SkillBlocked(`${label}的配方要:${options};包里凑不齐`);
     }
+    recipe = ready;
   }
 
   const times = call.grid
@@ -192,8 +168,7 @@ export async function skillCraft(
       const msg = zhErrorText((err as Error).message);
       throw new SkillBlocked(
         n === 0 ? `合成 ${label}: ${msg}` : `合成 ${label} 做到第 ${n + 1} 次时: ${msg}。${doneSoFar()}`,
-        err instanceof SkillBlocked ? err.scene : [], 'server',
-        isInventoryClickError(err) ? 'inventory-click-sync' : undefined,
+        [], 'server',
       );
     }
     if (targetId !== null && beforeOne !== null) {
@@ -234,11 +209,7 @@ export async function skillCraft(
   }
   // 合成出来的手持工具和武器立即拿上;运输用的方块不动。
   const held = targetId !== null ? await equipIfHandheld(bot, nameOfId(bot, targetId)) : false;
-  // Returning old grid materials is an inventory gain, not a crafted product.
-  const product = targetId === null ? gains : [`${zhName(nameOfId(bot, targetId))}×${targetGain}`];
-  const otherGains = targetId === null ? [] : gains.filter((gain) => !product.includes(gain));
-  return `${made.length > 0 ? `${made.join('、')};` : ''}合成出来:${product.join('、')}` +
-    (otherGains.length ? `;此外库存净增:${otherGains.join('、')}(不计作本次产物)` : '') +
+  return `${made.length > 0 ? `${made.join('、')};` : ''}合成出来:${gains.join('、')}` +
     (targetId !== null && targetGain < call.count ? `(要 ${call.count} 个,只多出 ${targetGain} 个)${late}` : '') +
     (held ? ',已经拿在手上' : '');
 }
@@ -345,36 +316,11 @@ export async function equipIfHandheld(bot: Bot, itemName: string): Promise<boole
 /** 等背包扣掉那一个食物的上限:原版进食动画 1.61 秒,余量给背包同步 */
 export const EAT_SETTLE_MS = 2_500;
 
-type ActiveEffect = { id: number; amplifier: number; duration: number };
-
-function activeEffects(bot: Bot): Map<number, ActiveEffect> {
-  const effects = bot.entity?.effects as unknown as Record<string, ActiveEffect | undefined> | undefined;
-  const out = new Map<number, ActiveEffect>();
-  for (const effect of Object.values(effects ?? {})) {
-    if (effect && Number.isInteger(effect.id) && effect.duration > 0) out.set(effect.id, effect);
-  }
-  return out;
-}
-
-function newEffectText(bot: Bot, before: Map<number, ActiveEffect>): string {
-  const names = bot.registry.effects as Record<number, { name: string }>;
-  const changed: string[] = [];
-  for (const effect of activeEffects(bot).values()) {
-    const old = before.get(effect.id);
-    // 服务端可能刷新已有状态的时长；小于一秒的网络与计时误差不算新结果。
-    if (old && effect.amplifier <= old.amplifier && effect.duration <= old.duration + 20) continue;
-    const name = zhEffect(names?.[effect.id]?.name ?? `effect_${effect.id}`);
-    changed.push(`${name}${effect.amplifier > 0 ? ` ${effect.amplifier + 1} 级` : ''}约 ${Math.ceil(effect.duration / 20)} 秒`);
-  }
-  return changed.length ? `;进食后观察到状态:${changed.join('、')}` : '';
-}
-
 export async function consumeHeldFood(bot: Bot, foodName: string): Promise<string> {
   // 牛奶这类东西不给饱食度,拿 food 读数当结果就是编:它的结果是状态效果没了、
   // 手里剩个空桶(见 DRINKABLES)。判成没成仍用同一条「包里少了一个」的因果事实。
   const drink = DRINKABLES[foodName] ?? null;
   const before = bot.food;
-  const effectsBefore = activeEffects(bot);
   const bagBefore = invCount(bot, (n) => n === foodName);
   const emptyBefore = drink ? invCount(bot, (n) => n === drink.empty) : 0;
   try {
@@ -405,15 +351,8 @@ export async function consumeHeldFood(bot: Bot, foodName: string): Promise<strin
     // 不记进食时刻:这一口不管饱,`[口粮]` 那行说「上次进食」就得是真吃过东西
     return `喝了${drink.label},${drink.effect}${back}`;
   }
-  // 库存扣除与状态效果是独立的服务端包，留一小段时间接收后者。
-  await sleep(200);
   noteAte(bot);
-  const bagAfter = invCount(bot, (n) => n === foodName);
-  const removed = bagBefore - bagAfter;
-  if (removed > 1) {
-    return `使用了${zhName(foodName)}，但随身数量 ${bagBefore} → ${bagAfter}，一次少了 ${removed} 个；这不符合正常一次进食，不能当作只吃了一个。先核对背包和服务端库存同步${newEffectText(bot, effectsBefore)}`;
-  }
-  return `吃了一个${zhName(foodName)},饥饿 ${before} → ${bot.food}/20${newEffectText(bot, effectsBefore)}`;
+  return `吃了一个${zhName(foodName)},饥饿 ${before} → ${bot.food}/20`;
 }
 
 export async function skillEat(bot: Bot, itemName: string): Promise<string> {
@@ -421,22 +360,8 @@ export async function skillEat(bot: Bot, itemName: string): Promise<string> {
   if (!foods[itemName] && !DRINKABLES[itemName]) {
     throw new SkillBlocked(notFoodText(bot, itemName));
   }
-  if (bot.currentWindow) {
-    if (!inventoryReadConfirmed(bot)) {
-      throw new SkillBlocked('进食前容器与背包尚未同步，未关窗或使用食物', [], 'server', 'inventory-click-sync');
-    }
-    try { await resumeInventoryCursor(bot); }
-    catch (err) {
-      if (!isInventoryClickError(err)) throw err;
-      throw new SkillBlocked(`进食前归还游标物品未完成: ${(err as Error).message}`, [], 'server', 'inventory-click-sync');
-    }
-    bot.closeWindow(bot.currentWindow);
-    if (bot.currentWindow || !inventoryReadConfirmed(bot)) {
-      throw new SkillBlocked('进食前容器未关闭或背包尚未同步，未使用食物', [], 'server', 'inventory-click-sync');
-    }
-  }
   // eat 的 item 是完整物品 id。这里不做后缀或模糊匹配，避免把另一样食物替换进来。
-  const food = itemsInReach(bot).find((item) => item.name === itemName && item.count > 0);
+  const food = bot.inventory.items().find((item) => item.name === itemName && item.count > 0);
   if (!food) {
     // 手边还有什么能吃是她下一单要用的事实;一样都没有就是「包里没有任何食物」那一句
     throw new SkillBlocked(`包里没有点名的${zhName(itemName)};${edibleInBag(bot) ?? '包里没有任何食物'}`);
@@ -447,34 +372,26 @@ export async function skillEat(bot: Bot, itemName: string): Promise<string> {
 
 /** 按名字拿到手上 */
 export async function equipNamed(bot: Bot, name: string): Promise<string> {
-  const item = invItemNamed(bot, name);
-  if (!item) throw noSuchItem(bot, name);
+  const item = bot.inventory.items().find((i) => i.name === name || i.name.endsWith(`_${name}`));
+  if (!item) throw new SkillBlocked(`包里没有${zhName(name)}`);
   await bot.equip(item, 'hand');
   return item.name;
 }
 
 /**
- * mineflayer 的 unequip('hand') 在没有空位时会直接丢弃主手物品。
- * 先核对快捷栏和背包空位，避免把武器或专属物品扔到地上。
+ * equipEmpty 优先切换到空快捷栏，再将主手物品移入背包。
+ * 背包也满时会将主手栈丢到地上，回执须说明。
  */
 export async function emptyHand(bot: Bot): Promise<string> {
   const held = bot.heldItem;
   if (!held) return '主手本来就是空的';
-  const label = itemCustomName(held) ?? zhName(held.name);
-  const slots = bot.inventory.slots;
-  const emptyQuickBar = slots.slice(36, 45).some((item) => !item);
-  if (!emptyQuickBar && bot.inventory.firstEmptyInventorySlot() == null) {
-    throw new SkillBlocked(
-      `主手拿着${label}，快捷栏和背包都没有空格；先把其他物品存入箱子，再腾空主手`,
-    );
-  }
   const before = invCount(bot, (n) => n === held.name);
   await bot.unequip('hand');
   const left = invCount(bot, (n) => n === held.name);
   if (left < before) {
-    return `主手腾空了;包是满的,${label}×${before - left}被扔在了脚下`;
+    return `主手腾空了;包是满的,${zhName(held.name)}×${before - left}被扔在了脚下`;
   }
-  return `主手腾空了(原来拿的是${label})`;
+  return `主手腾空了(原来拿的是${zhName(held.name)})`;
 }
 
 /**
@@ -484,7 +401,6 @@ export async function emptyHand(bot: Bot): Promise<string> {
 async function emptyOffHand(bot: Bot): Promise<string> {
   const held = offHandItem(bot);
   if (!held) return '副手本来就是空的';
-  const label = itemCustomName(held) ?? zhName(held.name);
   const bag = bot.inventory.items();
   if (bag.length >= INVENTORY_SLOTS && !bag.some((i) => i.type === held.type && i.count < i.stackSize)) {
     throw new SkillBlocked(
@@ -493,12 +409,12 @@ async function emptyOffHand(bot: Bot): Promise<string> {
     );
   }
   const before = invCount(bot, (n) => n === held.name);
-  await clearOffHandConfirmed(bot);
+  await bot.unequip('off-hand');
   const left = invCount(bot, (n) => n === held.name);
   if (left < before + held.count) {
-    return `副手腾空了;包是满的,${label}×${before + held.count - left}被扔在了脚下`;
+    return `副手腾空了;包是满的,${zhName(held.name)}×${before + held.count - left}被扔在了脚下`;
   }
-  return `副手腾空了(原来挂的是${label})`;
+  return `副手腾空了(原来挂的是${zhName(held.name)})`;
 }
 
 /** item 缺省时腾空 hand 指的那只手(默认主手)；air 别名由 parseEquip 归一化。 */
@@ -511,19 +427,19 @@ export async function skillEquip(bot: Bot, call: Extract<SkillCall, { skill: 'eq
   const item = invItemNamed(bot, want, call.pick);
   const fromOffHand = !!item && item === offHandItem(bot);
   const worn = item && !fromOffHand ? null : equippedAlready(bot, want, call.hand, call.pick);
-  if (worn) return `${worn.displayName ?? zhName(worn.name)}本来就${worn.where}`;
+  if (worn) return `${zhName(worn.name)}本来就${worn.where}`;
   if (!item) {
-    const same = items.filter((i) => namedLike(want, i.name, bot?.registry));
+    const same = items.filter((i) => namedLike(want, i.name));
     if (call.pick && same.length > 0) throw noSuchItem(bot, want, call.pick, same);
     const near = items.filter((i) => i.name.includes(want)).map((i) => zhName(i.name));
-    throw new SkillBlocked(noSuchItem(bot, want).message
-      + (near.length > 0 ? `;名字带这几个字的有:${near.join('、')}` : ''));
+    throw new SkillBlocked(
+      `包里没有${zhName(want)}` + (near.length > 0 ? `;名字带这几个字的有:${near.join('、')}` : ''),
+    );
   }
   const dest = call.hand === 'off' ? 'off-hand' : call.hand === 'main' ? 'hand' : equipDestOf(item.name, bot.registry);
-  if (dest === 'hand') await bot.equip(item, dest);
-  else await equipSlotConfirmed(bot, item, dest);
+  await bot.equip(item, dest);
   // 点名拿的时候回执念全标签:「拿起了弓」答不了「拿的是无限那把吗」
-  const what = call.pick ? pickLabel(pickTargetOf(item, bot.registry as never)) : itemCustomName(item) ?? zhName(item.name);
+  const what = call.pick ? pickLabel(pickTargetOf(item, bot.registry as never)) : zhName(item.name);
   if (dest === 'hand' && fromOffHand) {
     // 从副手挪到快捷栏时,目标格原有的东西会被换进副手
     const nowOff = offHandItem(bot);
@@ -534,3 +450,4 @@ export async function skillEquip(bot: Bot, call: Extract<SkillCall, { skill: 'eq
   if (dest === 'off-hand') return `${what}挂上了副手`;
   return `穿上了${what}`;
 }
+

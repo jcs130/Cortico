@@ -16,31 +16,7 @@ import {
   type ParsedBlockState,
 } from './blueprint.ts';
 
-/** 蓝图校验/补全的默认注册表版本。**运行时随实际连接的服务器版本对齐,见 setBlueprintMcVersion。** */
-export const DEFAULT_BLUEPRINT_MC_VERSION = '1.20.6';
-
-let activeBlueprintMcVersion: string = DEFAULT_BLUEPRINT_MC_VERSION;
-
-/** 当前蓝图注册表版本(默认 1.20.6,通常已被世界对齐到实际连接的服务器版本)。 */
-export function blueprintMcVersion(): string {
-  return activeBlueprintMcVersion;
-}
-
-/**
- * 把蓝图注册表对齐到实际连接的服务器版本。
- *
- * 不跟着走的话,蓝图会拿 1.20.6 的表去认方块状态与默认属性,而 bot 收发的 stateId
- * 属于服务器版本 —— 1.21 起连 attributes 组件都少了一个字段,默认状态就对不上。
- * 换版本必须丢缓存,否则仍按旧表校验。
- */
-export function setBlueprintMcVersion(version: string): boolean {
-  if (typeof version !== 'string' || version.length === 0) return false;
-  if (version === activeBlueprintMcVersion) return false;
-  activeBlueprintMcVersion = version;
-  cachedRegistry = null;
-  cachedBlockFactory = null;
-  return true;
-}
+export const BLUEPRINT_MC_VERSION = '1.20.6' as const;
 
 interface RegistryStateDefinition {
   name: string;
@@ -81,7 +57,7 @@ function fromMineflayer<T>(moduleName: string): T {
 function registry(): MinecraftRegistry {
   if (cachedRegistry === null) {
     const factory = fromMineflayer<(version: string) => MinecraftRegistry>('minecraft-data');
-    cachedRegistry = factory(activeBlueprintMcVersion);
+    cachedRegistry = factory(BLUEPRINT_MC_VERSION);
   }
   return cachedRegistry;
 }
@@ -89,7 +65,7 @@ function registry(): MinecraftRegistry {
 function blockFactory(): PrismarineBlock {
   if (cachedBlockFactory === null) {
     const factory = fromMineflayer<(version: string) => PrismarineBlock>('prismarine-block');
-    cachedBlockFactory = factory(activeBlueprintMcVersion);
+    cachedBlockFactory = factory(BLUEPRINT_MC_VERSION);
   }
   return cachedBlockFactory;
 }
@@ -143,7 +119,7 @@ export interface BlueprintStateFailure {
 
 interface RegistryValidation {
   valid: boolean;
-  minecraft_version: string;
+  minecraft_version: typeof BLUEPRINT_MC_VERSION;
   /** 去重后的状态条数;每种只校验一次 */
   unique_states: number;
   failures: BlueprintStateFailure[];
@@ -218,7 +194,7 @@ function validateState(state: string, path: string): BlueprintStateFailure | nul
   }
   const block = registry().blocksByName[name];
   if (block === undefined) {
-    return { path, state, reason: `Java ${activeBlueprintMcVersion} 里没有 ${parsed.id} 这个方块` };
+    return { path, state, reason: `Java ${BLUEPRINT_MC_VERSION} 里没有 ${parsed.id} 这个方块` };
   }
   const problems = propertyProblems(parsed, block);
   return problems.length === 0 ? null : { path, state, reason: problems.join(';') };
@@ -234,7 +210,7 @@ export function validateBlueprintRegistry(blueprint: NormalizedBlueprint): Regis
   }
   return {
     valid: failures.length === 0,
-    minecraft_version: activeBlueprintMcVersion,
+    minecraft_version: BLUEPRINT_MC_VERSION,
     unique_states: paths.size,
     failures,
   };

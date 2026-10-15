@@ -2,9 +2,6 @@
 import { createIpcLogger } from '../../core/ipc-logger.ts';
 import { withAnchors } from '../../core/log-context.ts';
 import { MinecraftWorld } from './world.ts';
-import { DeferredRenders } from './deferred-renders.ts';
-import { AsyncLocalStorage } from 'node:async_hooks';
-import { encodeBlobs } from './engine-blobs.ts';
 import type {
   ChildToMain,
   CognitionReply,
@@ -21,6 +18,7 @@ import type {
   WorldHost,
   Logger,
   StoragePart,
+  DeferredRendered,
   ToolOutcome,
 } from '../../core/types.ts';
 
@@ -64,16 +62,23 @@ const store: EventStoreReader = {
   grep: () => unavailable('store.grep'),
 };
 
-const deferredRenders = new DeferredRenders();
+/** 按事件类型保存延迟渲染回调。 */
+const textRender = (render: () => DeferredRendered | null | Promise<DeferredRendered | null>) =>
+  async (): Promise<string | null> => {
+    const out = await render();
+    return out === null || typeof out === 'string' ? out : out.text;
+  };
+const deferredRenders = new Map<string, () => Promise<string | null>>();
 
 /** IPC 走 JSON:回执里的图片字节转成 base64,主进程 proxy 还原(见 ipcToolOutcome) */
 function toolOutcomeOverIpc(out: string | ToolOutcome): string | IpcToolOutcome {
   if (typeof out === 'string') return out;
-  const { blobs, ...plain } = out;
-  if (!blobs) return plain;
+  if (!out.blobs) return { text: out.text, ...(out.failed ? { failed: out.failed } : {}) };
   return {
-    ...plain,
-    blobs: encodeBlobs(blobs),
+    ...out,
+    blobs: out.blobs.map((b) => ('bytes' in b
+      ? { b64: Buffer.from(b.bytes).toString('base64'), mime: b.mime, fallbackText: b.fallbackText, ...(b.name ? { name: b.name } : {}) }
+      : b)),
   };
 }
 
@@ -90,17 +95,15 @@ const cognitionHost: NonNullable<WorldHost['cognition']> = {
   },
 };
 
-const selectedBlobs = new AsyncLocalStorage<ReadonlyMap<string, {bytes: Uint8Array; mime: string}>>();
 const host: WorldHost = {
-  pushEvent: (e, opts) => hostRpc({ kind: 'push', evt: { ...e, blobs: encodeBlobs(e.blobs) }, opts }) as Promise<EventEnvelope>,
+  pushEvent: (e, opts) => hostRpc({ kind: 'push', evt: e as Parameters<typeof host.pushEvent>[0] & { blobs?: undefined }, opts }) as Promise<EventEnvelope>,
   pushDeferred: (e, opts) => {
-    const renderId = deferredRenders.arm(e.type, e.render);
+    deferredRenders.set(e.type, textRender(e.render));
     send({
       t: 'note',
       note: {
         kind: 'arm-deferred',
         type: e.type,
-        renderId,
         ...(e.senderKey !== undefined ? { senderKey: e.senderKey } : {}),
         ...(e.meta !== undefined ? { meta: e.meta } : {}),
         ...(e.tags !== undefined ? { tags: e.tags } : {}),
@@ -115,7 +118,7 @@ const host: WorldHost = {
     accepts: () => unavailable('modelFacts.accepts'),
     contextWindow: () => unavailable('modelFacts.contextWindow'),
   },
-  blob: handle => selectedBlobs.getStore()?.get(handle) ?? null,
+  blob: () => unavailable('blob'),
   reportUsage: (usage, opts) => send({ t: 'note', note: { kind: 'usage', usage, opts } }),
   /** 能力随配置消息更新。 */
   get cognition(): WorldHost['cognition'] {
@@ -173,8 +176,6 @@ function pushStatus(): void {
     },
     worldLine: mod.worldLine(),
     storage: storageStats(zh.storage ?? []),
-    promptVars: mod.envPromptRuntimeVars(),
-    requestFacts: mod.requestFacts(),
   };
   const key = JSON.stringify(note);
   if (key === lastStatus) return;
@@ -190,7 +191,6 @@ async function handleRequest(req: EngineRequest): Promise<unknown> {
       cfg,
       timezone: req.init.timezone,
       botName: req.init.botName,
-      agentFriendEnabled: req.init.agentFriendEnabled === true,
       ...(req.init.dataDir ? { dataDir: req.init.dataDir } : {}),
     });
     await mod.start(host);
@@ -208,19 +208,19 @@ async function handleRequest(req: EngineRequest): Promise<unknown> {
   }
   if (req.kind === 'render-deferred') {
     /** 渲染失败返回 null。 */
-    return deferredRenders.render(req.type, req.renderId);
+    const render = deferredRenders.get(req.type);
+    return render ? await render() : null;
   }
   if (!mod) throw new Error('Minecraft 引擎还没 init');
   if (req.kind === 'tool') {
     const tool = mod.tools().find((t) => t.name === req.name);
     if (!tool) throw new Error(`未知工具「${req.name}」`);
-    const blobs = new Map(req.selectedBlobs?.map(b => [b.handle, {bytes: Buffer.from(b.b64, 'base64'), mime: b.mime}]));
-    const out = await selectedBlobs.run(blobs, () => withAnchors({ sess: req.role, ...(req.callId ? { call: req.callId } : {}), ...(req.round !== null ? { round: req.round } : {}) }, () => tool.handler(req.args, {
+    const out = await withAnchors({ sess: req.role, ...(req.callId ? { call: req.callId } : {}), ...(req.round !== null ? { round: req.round } : {}) }, () => tool.handler(req.args, {
       role: req.role,
       log,
       ...(req.callId ? { callId: req.callId } : {}),
       ...(req.round !== null ? { round: req.round } : {}),
-    })));
+    }));
     return toolOutcomeOverIpc(out);
   }
   if (req.kind === 'storage-clear') {

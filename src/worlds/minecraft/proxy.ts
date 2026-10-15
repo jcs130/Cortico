@@ -13,9 +13,8 @@ import type {
   StoragePart,
   ToolDef,
   ToolOutcome,
-  WorldRequestFacts,
 } from '../../core/types.ts';
-import { COGNITION_ABSENT, minecraftPanelDecls, minecraftStorageDecls, minecraftToolDecls, type MinecraftWorldOptions } from './world.ts';
+import { COGNITION_ABSENT, minecraftPanelDecls, minecraftStorageDecls, MINECRAFT_TOOL_DECLS, type MinecraftWorldOptions } from './world.ts';
 import { minecraftClientConfigGroup, minecraftConfigGroup, minecraftPlayerConfigGroup, minecraftRhythmConfigGroup, serverModeOf } from './config.ts';
 import { pick, type Language } from '../../core/language.ts';
 import { text } from './strings.ts';
@@ -32,9 +31,6 @@ import { roundTokenOf } from './round.ts';
 import { loadExplored, renderExploredLedger } from './explored.ts';
 import { loadPolicy, renderPolicyEnv } from './policy.ts';
 import { worldEnvLine, worldIdentityOf } from './server-config.ts';
-import { decodeBlobs } from './engine-blobs.ts';
-import { resolveProcedure, procedureReference } from '../../protocol/procedure.ts';
-import { METHOD_ADAPTER } from './method-runner.ts';
 
 const ENV_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
 const CAMERA_NOTE_FILE = fileURLToPath(new URL('./ENV_PROMPT_CAMERA.md', import.meta.url));
@@ -65,7 +61,9 @@ function ipcToolOutcome(out: string | IpcToolOutcome): string | ToolOutcome {
   if (typeof out === 'string' || !out.blobs) return out as string | ToolOutcome;
   return {
     ...out,
-    blobs: decodeBlobs(out.blobs),
+    blobs: out.blobs.map((b) => ('b64' in b
+      ? { bytes: Buffer.from(b.b64, 'base64'), mime: b.mime, fallbackText: b.fallbackText, ...(b.name ? { name: b.name } : {}) }
+      : b)),
   };
 }
 
@@ -82,11 +80,6 @@ export class MinecraftWorldProxy implements World {
   /** 子进程按当前连接目标算的世界身份行;子进程没起时按配置算 */
   private worldLineCache: string | null = null;
   private storageCache: StorageStat[] = [];
-  private requestFactsCache: WorldRequestFacts | null = null;
-  private promptVars: Record<'minecraft.current_task' | 'minecraft.goals', string> = {
-    'minecraft.current_task': '(引擎尚未报告任务状态；用 mc_queue 现查)',
-    'minecraft.goals': '(引擎尚未报告目标状态；用 mc_goal 现查)',
-  };
   private lastConfigJson = '';
   private lastCaps: boolean | null = null;
   private configTimer: ReturnType<typeof setInterval> | null = null;
@@ -102,44 +95,25 @@ export class MinecraftWorldProxy implements World {
     const { cfg } = this.opts;
     const local = serverModeOf(cfg.serverMode, cfg.local.serverDir) === 'local';
     return {
-      'minecraft.version': this.opts.cfg.version,
       'minecraft.world': this.worldLineCache ?? worldEnvLine(worldIdentityOf(local ? cfg.local.serverDir : '', `${cfg.host}:${cfg.port}`)),
       'minecraft.explored': renderExploredLedger(loadExplored(this.storageFileOf('minecraft-explored'))),
       'minecraft.policy': renderPolicyEnv(loadPolicy(this.storageFileOf('minecraft-policy'))),
       'minecraft.camera': this.opts.cfg.client.enabled
         ? readFileSync(CAMERA_NOTE_FILE, 'utf8').trim()
         : '',
-      ...this.promptVars,
     };
   }
 
-  /** 引擎已有采样的同步缓存；不发 RPC，也不读取存储。 */
-  requestFacts(): WorldRequestFacts | null {
-    if (!this.ready || !this.child?.connected || !this.requestFactsCache) return null;
-    return { ...this.requestFactsCache, snapshotTypes: [...this.requestFactsCache.snapshotTypes] };
-  }
-
   tools(): ToolDef[] {
-    return minecraftToolDecls(this.opts.agentFriendEnabled === true).map((decl) => ({
+    return MINECRAFT_TOOL_DECLS.map((decl) => ({
       ...decl,
       handler: async (args, ctx) => {
-        const selected = new Map<string, {handle: string; b64: string; mime: string}>();
-        if (decl.name === 'mc_script' && args.procedure !== undefined) {
-          try {
-            resolveProcedure(procedureReference(args.procedure), METHOD_ADAPTER, handle => {
-              const got = this.host?.blob(handle);
-              if (got) selected.set(handle, {handle, b64: Buffer.from(got.bytes).toString('base64'), mime: got.mime});
-              return got ?? null;
-            });
-          } catch (error) { return {text: `[${decl.name} 失败] ${String(error)}`, failed: true}; }
-        }
         try {
           return ipcToolOutcome((await this.rpc(
             {
               kind: 'tool', name: decl.name, args, role: ctx.role,
               callId: ctx.callId ?? null,
               round: roundTokenOf(ctx),
-              ...(selected.size ? {selectedBlobs: [...selected.values()]} : {}),
             },
             RPC_TIMEOUT_MS,
           )) as string | IpcToolOutcome);
@@ -177,19 +151,10 @@ export class MinecraftWorldProxy implements World {
           path: ENV_PROMPT_FILE,
           role: 'envPrompt',
           vars: [
-            { name: 'minecraft.version', description: t.versionVar },
             { name: 'minecraft.world', description: t.worldVar },
             { name: 'minecraft.explored', description: t.exploredVar },
             { name: 'minecraft.policy', description: t.policyVar },
             { name: 'minecraft.camera', description: t.cameraVar, multiline: true },
-            {
-              name: 'minecraft.current_task',
-              description: t.currentTaskVar,
-            },
-            {
-              name: 'minecraft.goals',
-              description: t.goalsVar,
-            },
           ],
         },
         {
@@ -280,9 +245,6 @@ export class MinecraftWorldProxy implements World {
     const child = fork(CHILD_ENTRY, [], {
       execArgv: [...childExecArgv(), '--import', DEPENDENCY_PATCHES_URL],
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-      // ToolOutcome may contain screenshot bytes. JSON IPC turns a Buffer into
-      // a plain object, which Core cannot persist as a BlobInput.
-      serialization: 'advanced',
     });
     this.child = child;
     if (this.host) logChildStdio(child, this.host.log);
@@ -297,7 +259,6 @@ export class MinecraftWorldProxy implements World {
           timezone: this.opts.timezone ?? SYSTEM_TIMEZONE,
           botName: this.opts.botName ?? 'bot',
           dataDir: this.opts.dataDir ?? null,
-          agentFriendEnabled: this.opts.agentFriendEnabled === true,
           cfg: JSON.parse(this.lastConfigJson) as MinecraftWorldOptions['cfg'],
         },
       },
@@ -315,11 +276,6 @@ export class MinecraftWorldProxy implements World {
     this.declCache = { zh: {}, en: {} };
     this.worldLineCache = null;
     this.storageCache = [];
-    this.requestFactsCache = null;
-    this.promptVars = {
-      'minecraft.current_task': '(引擎尚未报告任务状态；用 mc_queue 现查)',
-      'minecraft.goals': '(引擎尚未报告目标状态；用 mc_goal 现查)',
-    };
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
       p.reject(new Error('Minecraft 引擎子进程已退出'));
@@ -390,7 +346,7 @@ export class MinecraftWorldProxy implements World {
       if (!host) throw new Error('宿主未接线');
       let value: unknown;
       if (req.kind === 'push') {
-        value = await host.pushEvent({ ...req.evt, blobs: decodeBlobs(req.evt.blobs) }, req.opts);
+        value = await host.pushEvent(req.evt, req.opts);
       } else if (req.kind === 'drain') {
         value = await host.drainPendingEvents((e) => e.source === this.id);
       } else if (req.kind === 'cognition') {
@@ -428,7 +384,7 @@ export class MinecraftWorldProxy implements World {
             render: async () => {
               try {
                 return (await this.rpc(
-                  { kind: 'render-deferred', type, renderId: note.renderId },
+                  { kind: 'render-deferred', type },
                   DEFERRED_RENDER_TIMEOUT_MS,
                 )) as string | null;
               } catch {
@@ -444,8 +400,6 @@ export class MinecraftWorldProxy implements World {
         this.declCache = note.decl;
         this.worldLineCache = note.worldLine;
         this.storageCache = note.storage;
-        this.promptVars = note.promptVars;
-        this.requestFactsCache = note.requestFacts;
         return;
     }
   }

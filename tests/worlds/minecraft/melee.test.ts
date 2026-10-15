@@ -14,7 +14,6 @@ describe('skillAttack 找目标的半径', () => {
       players: {},
       registry: { entitiesByName: { end_crystal: {} } },
       inventory: { items: () => [] as never[] },
-      world: { raycast: () => null },
     };
     const ctx = { attack: { ranged: null, acquire: () => ({}) } } as unknown as SkillContext;
     // 远程控制器不可用时强制远程在找到目标之后才受阻:能走到这一句,说明目标找到了
@@ -46,7 +45,6 @@ describe('skillAttack auto 的弓受阻', () => {
       lookAt: async () => undefined,
       setControlState: () => undefined,
       blockAt: () => null,
-      world: { raycast: () => null },
       pathfinder: { setGoal: () => undefined },
     };
     const bow = new BowController({ getBot: () => bot as never, hasLos: () => false, leaseValid: () => true, emit: () => undefined });
@@ -85,7 +83,6 @@ describe('skillAttack 打末影水晶', () => {
       setControlState: () => undefined,
       lookAt: async () => undefined,
       blockAt: () => null,
-      world: { raycast: () => null },
     };
     const lease = { token: {}, targetId: 7, swings: 0, meleeHits: 0, arrows: 0, rangedHits: 0, hurts: 0, dead: false, disconnected: false };
     const ctx = {

@@ -5,7 +5,6 @@ import { MinecraftWorldProxy } from './proxy.ts';
 export const MINECRAFT: WorldDefinition<MinecraftConfigSection> = {
   id: 'minecraft',
   label: 'Minecraft',
-  exclusiveResource: 'minecraft-client',
   defaults: () => structuredClone(MINECRAFT_DEFAULTS as unknown as MinecraftConfigSection),
   // The child process isolates Mineflayer physics and pathfinding from the main loop.
   create: (ctx) =>

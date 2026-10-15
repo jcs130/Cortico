@@ -3,7 +3,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  V, log, makeExecutorOn, nextTaskId, waitUntil, withMinecraftCollisionShapes,
+  V, log, makeExecutorOn, nextTaskId, waitUntil,
 } from './executor-harness.ts';
 import { Executor, type TaskReport } from '../../../src/worlds/minecraft/executor.ts';
 
@@ -75,7 +75,7 @@ function placeBot(cells: Record<string, string>, at: { x: number; y: number; z: 
     food: 20,
     game: { minY: -64, height: 384, dimension: 'minecraft:the_nether' },
     inventory: { items: () => bag },
-    registry: withMinecraftCollisionShapes({ blocksByName, itemsByName: {}, items: {} }),
+    registry: { blocksByName, itemsByName: {}, items: {} },
     heldItem: bag[0],
     equip: async () => {},
     lookAt: async () => {},

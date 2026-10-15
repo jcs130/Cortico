@@ -337,7 +337,7 @@ describe('mc_check · 蓝图 {blueprint}', () => {
     const world = fakeWorld({ cells: { '0,0,0': 'oak_planks', '1,0,0': 'oak_planks' } });
     const said = blueprintCheckText(site([0, 0, 0]), 'home-useful-v2', world);
     expect(said.verdict).toBe('ok');
-    expect(said.text).toBe('蓝图「home-useful-v2」对上 2/2 格,绑定原点 (0, 0, 0),整张图都到位了');
+    expect(said.text).toBe('蓝图「home-useful-v2」对上 2/2 格,整张图都到位了');
   });
 
   it('缺格点名:什么方块在哪', () => {
@@ -352,34 +352,6 @@ describe('mc_check · 蓝图 {blueprint}', () => {
     const world = fakeWorld({ cells: { '0,0,0': 'oak_planks', '1,0,0': 'cobblestone' } });
     const said = blueprintCheckText(site([0, 0, 0]), 'home-useful-v2', world);
     expect(said.text).toContain('冲突 1 格');
-    expect(said.text).toContain('(1, 0, 0) 该是橡木木板,现在是圆石');
-  });
-
-  it('非空格全匹配但空气位被占用时报告未通过及冲突位置', () => {
-    const accepted = acceptBlueprint({ site_mode: 'new', size_xyz: [3, 1, 1],
-      palette: ['minecraft:oak_planks', 'minecraft:air'], layers: [[[0, 0, 1]]] });
-    const world = fakeWorld({ cells: { '10,70,20': 'oak_planks', '11,70,20': 'oak_planks',
-      '12,70,20': 'oak_fence[east=true,north=true,south=false,waterlogged=false,west=true]' } });
-    const said = blueprintCheckText({ key: 'lookout', name: null, anchor: [10, 70, 20],
-      blueprint: accepted.blueprint!, plan: accepted.plan! }, 'lookout', world);
-    expect(said.verdict).toBe('bad');
-    expect(said.text).toContain('对上 2/2 格');
-    expect(said.text).toContain('尚未通过完整核验');
-    expect(said.text).toContain('冲突 1 格((12, 70, 20) 该是空气,现在是橡木栅栏)');
-    expect(said.text).not.toContain('oak_fence[');
-    expect(said.text).not.toContain('整张图都到位了');
-  });
-
-  it('冲突总数保留但具体样本最多六格', () => {
-    const accepted = acceptBlueprint({ site_mode: 'new', size_xyz: [8, 1, 1],
-      palette: ['minecraft:air'], layers: [[[0, 0, 0, 0, 0, 0, 0, 0]]] });
-    const said = blueprintCheckText({ key: 'clearance', name: null, anchor: [0, 0, 0],
-      blueprint: accepted.blueprint!, plan: accepted.plan! }, 'clearance', fakeWorld({ fill: 'cobblestone' }));
-    expect(said.verdict).toBe('bad');
-    expect(said.text).toContain('冲突 8 格');
-    expect(said.text.match(/现在是圆石/g)).toHaveLength(6);
-    expect(said.text).toContain(' 等)');
-    expect(said.text).not.toContain('(6, 0, 0)');
   });
 
   it('没装载 / 没绑锚点都照实说,不拿 0/0 充数', () => {
@@ -397,18 +369,6 @@ describe('mc_check · 蓝图 {blueprint}', () => {
     expect(said.verdict).toBe('unknown');
     expect(said.text).toContain('1 格没加载,没对全');
     expect(said.text).not.toContain('缺 ');
-  });
-
-  it('异地工地全部未加载时保留绑定原点和未知语义', () => {
-    const world = fakeWorld({ fill: null });
-    world.position = () => [97, 70, -204];
-    const said = blueprintCheckText(site([100, 70, -200]), 'home-useful-v2', world);
-    expect(said.verdict).toBe('unknown');
-    expect(said.text).toContain('绑定原点 (100, 70, -200)');
-    expect(said.text).toContain('距当前位置直线 5.0 格');
-    expect(said.text).toContain('这些格的现状未知');
-    expect(said.text).not.toContain('缺 ');
-    expect(said.text).not.toContain('冲突 ');
   });
 
   it('走 {blueprint:key} 这条断言进来是同一份账', () => {

@@ -5,12 +5,10 @@
  */
 import type { Bot } from 'mineflayer';
 import { itemMatchesPick, pickLabel, pickMissText, pickTargetOf } from './item-pick.ts';
-import { isRealId, matchItemName, type NameRegistry } from './chests.ts';
+import { matchItemName } from './chests.ts';
 import { readMapId, type ItemLike } from './item-facts.ts';
 import { SkillBlocked, checkAbort, sleep, type SkillContext } from './skill-context.ts';
 import { zhName } from './names.ts';
-import { itemCustomName } from './item-display.ts';
-import { inventoryReadConfirmed } from './inventory-window-sync.ts';
 
 
 /** 原版背包格数:9 快捷栏 + 27 主仓。盔甲 4 格与副手 1 格不在其中 */
@@ -31,22 +29,20 @@ export function itemsInReach(bot: Bot): InvItem[] {
 }
 
 /**
- * equip 的找法:已注册 ID 只认自身；其余查询先找显示名，再按类别后缀/前缀匹配。
+ * equip 的找法:精确名优先,退而求其次才用后缀/前缀(类别名 pickaxe→iron_pickaxe)。
  * 副手那件也在候选里;同一档名字下包里的先于副手的。
  */
 export function invItemNamed(bot: Bot, want: string, pick?: string) {
   const items = itemsInReach(bot)
     .filter((i) => itemMatchesPick(pick, i, bot.registry as never));
-  const exact = items.find((i) => i.name === want);
-  if (exact || isRealId(bot.registry, want)) return exact;
-  return items.find((i) => itemCustomName(i) === want)
+  return items.find((i) => i.name === want)
     ?? items.find((i) => i.name.endsWith(`_${want}`))
     ?? items.find((i) => i.name.startsWith(`${want}_`));
 }
 
 /** invItemNamed 的名字口径,摊开给"这个名字下有哪几件"用 */
-export function namedLike(want: string, name: string, reg?: NameRegistry | null): boolean {
-  return matchItemName(want, name, reg) || (!isRealId(reg, want) && name.startsWith(`${want}_`));
+export function namedLike(want: string, name: string): boolean {
+  return name === want || name.endsWith(`_${want}`) || name.startsWith(`${want}_`);
 }
 
 /**
@@ -86,18 +82,7 @@ export function invCount(bot: Bot, pred: InvPred): number {
 
 /** 这一步点名的是哪一件:名字口径 + 挑选词,两道都过才算 */
 export function itemPredOf(bot: Bot, item: string, pick?: string): InvPred {
-  return (n, it) => matchItemName(item, n, bot?.registry) && itemMatchesPick(pick, it, bot.registry as never);
-}
-
-/** 显示名未命中工具选择器时，报告实际库存中对应的注册表 ID，不自动改写选择器。 */
-export function itemIdHint(bot: Bot, query: string, candidates: readonly { name: string }[]): string {
-  const label = query.trim().toLowerCase();
-  const ids = [...new Set(candidates.map(item => item.name))].filter(name =>
-    !matchItemName(query, name, bot?.registry) && (zhName(name).toLowerCase() === label
-      || bot.registry?.itemsByName?.[name]?.displayName?.toLowerCase() === label));
-  return ids.length > 0
-    ? `;显示名「${query}」对应当前物品 ID:${ids.join('、')}。普通物品参数请使用这些 ID；显示名不自动改写成 ID`
-    : '';
+  return (n, it) => matchItemName(item, n) && itemMatchesPick(pick, it, bot.registry as never);
 }
 
 /**
@@ -107,19 +92,12 @@ export function itemIdHint(bot: Bot, query: string, candidates: readonly { name:
 export function noSuchItem(
   bot: Bot, item: string, pick?: string, candidates?: readonly ItemLike[],
 ): SkillBlocked {
-  if (!inventoryReadConfirmed(bot)) {
-    return new SkillBlocked(`背包玩家槽还没完整同步，无法确认有没有${zhName(item)}`);
-  }
-  const same = candidates ?? bot.inventory.items().filter((i) => matchItemName(item, i.name, bot?.registry));
+  const same = candidates ?? bot.inventory.items().filter((i) => matchItemName(item, i.name));
   if (pick && same.length > 0) {
     const targets = same.map((i) => pickTargetOf(i, bot.registry as never));
     return new SkillBlocked(pickMissText('包里', item, pick, targets));
   }
-  const stock = itemsInReach(bot);
-  const hint = itemIdHint(bot, item, stock);
-  const missing = hint ? `物品选择器「${item}」未命中当前库存${hint}` : `包里没有${zhName(item)}`;
-  const available = [...new Set(stock.map((i) => i.name))];
-  return new SkillBlocked(`${missing}${available.length > 0 ? `；可用工具物品名: ${available.join('、')}` : ''}`);
+  return new SkillBlocked(`包里没有${zhName(item)}`);
 }
 
 /** 「附魔书(带「无限」的)」:点名到具体一件时,受阻话里也要带上挑选词 */
@@ -127,10 +105,9 @@ export function itemAsked(item: string, pick?: string): string {
   return `${zhName(item)}${pick ? `(带「${pick}」的)` : ''}`;
 }
 
-/** 有实际物品时优先显示名称；挑选回执同时附上附魔与耐久。 */
+/** 回执里怎么念这一件:点名挑过就念全标签(带附魔括号),没挑就念 id 的中文名 */
 export function askedLabel(bot: Bot, name: string, pick?: string, item?: ItemLike | null): string {
-  if (!item) return zhName(name);
-  return pick ? pickLabel(pickTargetOf(item, bot.registry as never)) : itemCustomName(item) ?? zhName(item.name);
+  return pick && item ? pickLabel(pickTargetOf(item, bot.registry as never)) : zhName(name);
 }
 
 /**
@@ -145,9 +122,8 @@ export async function moveExactSlot(bot: Bot, from: number, to: number): Promise
   await bot.moveSlotItem(from, to);
 }
 
-/** minecraft-data 的 drops 简表不含概率或依方块状态变化的掉落；补充表用于入包对账。 */
+/** minecraft-data 的 drops 简表不含概率掉落；补充表同时用于入包对账和按掉落物反查方块。 */
 export function probabilisticDropsOf(name: string): string[] {
-  if (name === 'sweet_berry_bush') return ['sweet_berries'];
   if (['short_grass', 'tall_grass', 'grass', 'fern', 'large_fern'].includes(name)) return ['wheat_seeds'];
   if (name === 'dead_bush') return ['stick'];
   if (name.endsWith('_leaves')) {
@@ -209,8 +185,8 @@ export type InvConfirm =
  *
  * `settleMs > 0` 时增量还得在这段窗口里持续存在才算数——合成走这一条:
  * 服务端可能先把产物塞进来再撤回,单次读取会把临时产物误报成功。
- * 容器关闭后读 window 0 的回灌；同窗连续存取则读该窗口的玩家槽并等待稳定，
- * 关闭或替换的窗口不能继续用于对账。
+ * 容器搬运不需要这段:`close()` 里的 `copyInventory()` 是一次确定的灌回,
+ * 见到就是准的,白等只会让每次存取多花半秒。
  */
 export async function awaitInvConfirm(
   read: () => number,
@@ -288,7 +264,7 @@ export function invGainsSplit(
   for (const [name, n] of invSnapshot(bot)) {
     const d = n - (before.get(name) ?? 0);
     if (d <= 0) continue;
-    (matchItemName(item, name, bot?.registry) ? wanted : alongside).push(`${zhName(name)}×${d}`);
+    (matchItemName(item, name) ? wanted : alongside).push(`${zhName(name)}×${d}`);
   }
   return { wanted, alongside };
 }
@@ -319,7 +295,7 @@ export function invVariantGains(before: Map<string, number>, bot: Bot): string[]
     if (d <= 0) continue;
     const it = bot.inventory.items().find((i) => variantKey(i as ItemLike) === key)!;
     const mapId = readMapId(it as ItemLike);
-    out.push(`${itemCustomName(it) ?? zhName(it.name)}×${d}(换成了新的一份${mapId !== null ? `,地图编号 #${mapId}` : ''})`);
+    out.push(`${zhName(it.name)}×${d}(换成了新的一份${mapId !== null ? `,地图编号 #${mapId}` : ''})`);
   }
   return out;
 }
@@ -337,3 +313,4 @@ export function invLosses(before: Map<string, number>, bot: Bot): string[] {
 
 /** 窗口/背包里的一摞。`slot` 是**它所在那扇窗**的槽位号,点名搬运只认它 */
 export type InvItem = ReturnType<Bot['inventory']['items']>[number];
+

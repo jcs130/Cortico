@@ -14,8 +14,6 @@ import { defaultPolicy } from '../../../src/worlds/minecraft/policy.ts';
 import { ChestBook } from '../../../src/worlds/minecraft/chests.ts';
 import { MinecraftLog } from '../../../src/worlds/minecraft/log.ts';
 import { BowController, type BowEvent } from '../../../src/worlds/minecraft/ranged.ts';
-import { installOwnedFishing, ownedFishingBobber } from '../../../src/worlds/minecraft/fishing.ts';
-import { findBobber } from '../../../src/worlds/minecraft/skills-gather.ts';
 import {
   log,
   nextTaskId,
@@ -31,7 +29,6 @@ import {
   tableCraftBot,
   furnaceBot,
   fakePathfinder,
-  withBotEvents,
 } from './executor-harness.ts';
 
 beforeEach(() => {
@@ -217,7 +214,7 @@ describe('显式维度穿越', () => {
     Object.assign(bot, { pathfinder: pf });
     const { exec, reports } = makeExecutorOn(bot);
     exec.submit([{ skill: 'goto', at: [1093, -13, 843] }]);
-    expect(exec.submitDetailed([{ skill: 'goto', at: [1094, -13, 843] }], 'append').accepted).toBe(true);
+    exec.submit([{ skill: 'goto', at: [1093, -13, 843] }]);
     await waitUntil(() => pf.goal !== null);
 
     (bot as unknown as { game: { dimension: string } }).game.dimension = 'the_end';
@@ -425,51 +422,6 @@ describe('队列:排着等,一件一件做', () => {
     exec.shutdown();
   });
 
-  it('反射战斗占着身体时不接受攻击任务，包括多步攻击，其他任务仍可排队', () => {
-    const bot = combatBot({});
-    const exec = new Executor({
-      getBot: () => bot as never,
-      report: () => undefined,
-      log,
-      nextId: nextTaskId(),
-      busyWith: () => '正在跟怪打',
-      bodyState: () => ({ combatActive: true, environmentOwnerKind: null }),
-    });
-    for (const target of ['zombie', 'skeleton', 'pillager']) {
-      const receipt = exec.submit([{ skill: 'attack', target }]);
-      expect(receipt).toContain('这一单我没接');
-      expect(receipt).toContain('反射战斗正在处理附近敌人');
-    }
-    expect(exec.submit([
-      { skill: 'attack', target: 'zombie' },
-      { skill: 'attack', target: 'spider' },
-    ])).toContain('这一单我没接');
-    expect(exec.submit([{ skill: 'attack', target: 'zombie' }], 'append'))
-      .toContain('反射战斗正在处理附近敌人');
-    expect(exec.status().waiting).toEqual([]);
-    expect(exec.submit([{ skill: 'chat', text: '/mycli cast selfheal' }])).toContain('排上了');
-    expect(exec.status().waiting).toHaveLength(1);
-    exec.shutdown();
-  });
-
-  it('排着一张攻击计划时不再叠加新目标', () => {
-    const bot = combatBot({});
-    const exec = new Executor({
-      getBot: () => bot as never,
-      report: () => undefined,
-      log,
-      nextId: nextTaskId(),
-      busyWith: () => '正在处理别的动作',
-      bodyState: () => ({ combatActive: false, environmentOwnerKind: null }),
-    });
-    expect(exec.submit([{ skill: 'attack', target: 'zombie' }], 'append')).toContain('排上了');
-    const blocked = exec.submit([{ skill: 'attack', target: 'skeleton' }], 'append');
-    expect(blocked).toContain('这一单我没接');
-    expect(blocked).toContain('攻击任务#1 还没结案');
-    expect(exec.status().waiting).toHaveLength(1);
-    exec.shutdown();
-  });
-
   /**
    * elapsedMs 是当前步骤的用时,不是整条任务的累计用时。混入前序步骤的耗时会
    * 误判卡点:前面走了 70 秒、合成刚开始时若按整条任务算,会读成"合成卡住了",
@@ -537,7 +489,6 @@ describe('queue 三模式:她说了要撤才撤', () => {
     const receipt = exec.submit([{ skill: 'chat', text: '改主意了' }]);
     // 撤掉了谁必须点名:排队深度从此最多一层,这是这个缺省唯一的对冲
     expect(receipt).toContain('撤掉了排在后面的 任务#2「说: 排着的」');
-    expect(receipt).toContain('都还没轮到跑第 1 步');
     expect(receipt).toContain('前面还有 1 件');
     expect(exec.status().running!.id).toBe(1); // 手上这件没被动
     expect(exec.status().waiting).toEqual([{ id: 3, label: '说: 改主意了' }]);
@@ -563,10 +514,9 @@ describe('queue 三模式:她说了要撤才撤', () => {
     await waitUntil(() => exec.status().running !== null);
     const receipt = exec.submit([{ skill: 'chat', text: '先插火把' }], 'now');
     expect(receipt).toContain('已叫停任务#1');
-    expect(receipt).toContain('已做成 0/1 步');
-    expect(receipt).toContain('叫停前正在执行第 1/1 步');
-    expect(receipt).not.toContain('一步都没跑过');
-    expect(receipt).not.toContain('卡在第');
+    // 被顶替的任务尚未执行任何步骤时，回执须明确说明。
+    expect(receipt).toContain('一步都没跑过');
+    expect(receipt).toContain('它卡在第 1/1 步');
     expect(receipt).toContain('任务#3 收下了,排在第 1/1 步:说: 先插火把');
     // 被顶替任务补一条 cancelled 终态，避免结果只出现在受理时的上下文窗口。
     expect(reports.map((r) => [r.kind, r.taskId])).toEqual([['cancelled', 1]]);
@@ -577,31 +527,6 @@ describe('queue 三模式:她说了要撤才撤', () => {
     await waitUntil(() => reports.length === 3, 5000);
     expect(reports.map((r) => r.taskId)).toEqual([1, 3, 2]); // 被掐掉的 #1 排在最前
     release();
-  });
-
-  it('now 顶替已移动但 goto 尚未结束的首步:零完成步骤不等于没有执行', async () => {
-    let release: (() => void) | null = null;
-    const bot = combatBot({
-      goto: async () => {
-        bot.entity.position = new V(4.5, 64, 4.5);
-        await new Promise<void>((resolve) => { release = resolve; });
-      },
-    });
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'goto', at: [10, 64, 10] }]);
-    await waitUntil(() => release !== null);
-    expect(bot.entity.position).toEqual(new V(4.5, 64, 4.5));
-    expect(reports).toEqual([]);
-
-    const receipt = exec.submit([{ skill: 'chat', text: '换一件' }], 'now');
-    expect(receipt).toContain('已做成 0/1 步');
-    expect(receipt).toContain('叫停前正在执行第 1/1 步「去坐标 (10,64,10)」');
-    expect(receipt).not.toContain('一步都没跑过');
-    expect(receipt).not.toContain('卡在第');
-    expect(reports.find((report) => report.taskId === 1)?.text).toContain('做到一半被撤');
-    release!();
-    await waitUntil(() => reports.some((report) => report.taskId === 2 && report.kind === 'done'));
-    expect(reports.filter((report) => report.taskId === 1)).toHaveLength(1);
   });
 
   it('now 不抢正在逃的那件:急件排队头,逃完立刻做', async () => {
@@ -639,10 +564,7 @@ describe('queue 三模式:她说了要撤才撤', () => {
       { skill: 'chat', text: '轮不到' },
     ]);
     await waitUntil(() => release !== null, 3000);
-    const receipt = exec.submit([{ skill: 'chat', text: '急件' }], 'now');
-
-    expect(receipt).toContain('已做成 1/3 步');
-    expect(receipt).toContain('叫停前正在执行第 2/3 步「去坐标 (10,64,10)」');
+    exec.submit([{ skill: 'chat', text: '急件' }], 'now');
 
     const cut = reports.find((r) => r.kind === 'cancelled' && r.taskId === 1)!;
     expect(cut.text).toContain('做到第 2/3 步');
@@ -667,7 +589,6 @@ describe('queue 三模式:她说了要撤才撤', () => {
     const queued = reports.find((r) => r.kind === 'cancelled' && r.taskId === 2)!;
     expect(queued.text).toContain('一步都没开始');
     expect(queued.text).not.toContain('各步下场');
-    expect(bot.said).not.toContain('排着的');
   });
 
   it('自保反射抢占:被打飞那一单的各步下场也一起回投', async () => {
@@ -697,25 +618,6 @@ describe('queue 三模式:她说了要撤才撤', () => {
 });
 
 describe('战逃与水面', () => {
-  it('flee 只走已有通路，任务结束后恢复挖掘与搭路能力', async () => {
-    const bot = combatBot({
-      entities: { '1': { name: 'zombie', type: 'mob', position: new V(3, 64, 4), isValid: true } },
-    });
-    const movements = { canDig: true, scafoldingBlocks: [1, 2] };
-    Object.assign(bot.pathfinder, { movements });
-    bot.pathfinder.goto = async (goal: FakeGoal) => {
-      expect(movements.canDig).toBe(false);
-      expect(movements.scafoldingBlocks).toEqual([]);
-      bot.entity.position = new V(goal.x!, 64, goal.z!);
-    };
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'flee', distance: 24 }]);
-    await waitUntil(() => reports.length === 1, 5000);
-    expect(reports[0].kind).toBe('done');
-    expect(movements.canDig).toBe(true);
-    expect(movements.scafoldingBlocks).toEqual([1, 2]);
-  });
-
   it('flee 的目标只判 XZ:背对敌人的水平方向,高度不进判据', async () => {
     const goalsSeen: FakeGoal[] = [];
     const bot = combatBot({
@@ -870,52 +772,6 @@ describe('战逃与水面', () => {
     expect(reports[0].text).toContain('没跟骷髅动手');
   });
 
-  it('追击不可达的目标会及时受阻，不在原地无限重发寻路目标', async () => {
-    const bot = combatBot({
-      entities: { '1': { name: 'skeleton', type: 'mob', position: new V(12, 64, 0.5), isValid: true, height: 2 } },
-    });
-    let attempts = 0;
-    bot.pathfinder.goto = async () => { attempts++; throw new Error('No path to the goal!'); };
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'attack', target: 'skeleton', mode: 'melee' }]);
-    await waitUntil(() => reports.length === 1, 5000);
-    expect(attempts).toBe(1);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('追不上骷髅');
-  });
-
-  it('主动攻击不把墙后的协议实体当成可见目标', async () => {
-    const bot = combatBot({
-      entities: { '1': { name: 'creeper', type: 'mob', position: new V(2, 64, 0.5), isValid: true, height: 2 } },
-    });
-    (bot.registry.entitiesByName as Record<string, object>).creeper = {};
-    (bot.world as any).raycast = () => ({ position: new V(1, 65, 0) });
-    let paths = 0;
-    let swings = 0;
-    bot.pathfinder.goto = async () => { paths++; };
-    bot.attack = () => { swings++; };
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'attack', target: 'creeper' }]);
-    await waitUntil(() => reports.length === 1, 5_000);
-    expect(reports[0].text).toContain('没看见苦力怕');
-    expect(paths).toBe(0);
-    expect(swings).toBe(0);
-  });
-
-  it('寻路空路径直接返回也只试两次', async () => {
-    const bot = combatBot({
-      entities: { '1': { name: 'skeleton', type: 'mob', position: new V(12, 64, 0.5), isValid: true, height: 2 } },
-    });
-    let attempts = 0;
-    bot.pathfinder.goto = async () => { attempts++; };
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'attack', target: 'skeleton', mode: 'melee' }]);
-    await waitUntil(() => reports.length === 1, 5000);
-    expect(attempts).toBeLessThanOrEqual(2);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('追不上骷髅');
-  });
-
   it('撤退线只管会还手的:3/20 血也能打猪,那是去找吃的', async () => {
     const pig = { id: 1, name: 'pig', type: 'mob', position: new V(2, 64, 0.5), isValid: true, height: 1 };
     const bot = combatBot({ health: 3, entities: { '1': pig } });
@@ -969,7 +825,6 @@ describe('战逃与水面', () => {
       lookAt: async () => {},
       attack: () => {},
       blockAt: (p: V) => (p.y === 65 ? { name: 'water' } : null),
-      world: { raycast: () => null },
       setControlState: () => {},
       pathfinder: { stop() {}, setGoal() {}, goto: async () => {} },
     };
@@ -999,7 +854,6 @@ describe('战逃与水面', () => {
       lookAt: async () => {},
       attack: () => {},
       blockAt: () => null,
-      world: { raycast: () => null },
       setControlState: () => {},
       pathfinder: { stop() {}, setGoal() {}, goto: async () => {} },
     };
@@ -1136,25 +990,6 @@ describe('战逃与水面', () => {
     expect(reports[0].text).toContain('没有射线');
     expect(reports[0].text).toContain('ranged 不会改用近战');
     expect(melee).toBe(0);
-  });
-
-  it('自动远程在 8 格外无射线时收手，不反复切换近战追击', async () => {
-    const { bot } = hybridBot(26);
-    let shots = 0;
-    let chases = 0;
-    bot.pathfinder.goto = async () => { chases++; throw new Error('No path to the goal!'); };
-    const ranged: NonNullable<ConstructorParameters<typeof Executor>[0]['ranged']> = {
-      ready: () => true,
-      abort: () => {},
-      shoot: async () => { shots++; return { kind: 'blocked', reason: 'no_los' }; },
-    };
-    const { exec, reports } = makeExecutorOn(bot, 0, ranged);
-    exec.submit([{ skill: 'attack', target: 'zombie' }]);
-    await waitUntil(() => reports.length === 1, 5000);
-    expect(shots).toBe(1);
-    expect(chases).toBe(0);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('auto 在 8 格外不改近战');
   });
 
   it('kite 先拉回 8–14 格再放箭,中窗横移而不挥刀', async () => {
@@ -1424,12 +1259,12 @@ describe('战逃与水面', () => {
     surfaceAfterMs?: number;
     land?: boolean;
     roofY?: number;
-    skyUnknownFromY?: number;
     goto?: (bot: ReturnType<typeof diveBot>) => Promise<void>;
-    /** 寻路报到达后，物理状态延迟多久才变成着地。 */
-    landAfterMs?: number;
+    /** 寻路报到达时人还在登岸那一跳的半空,再过这么多 tick 才着地 */
+    landAfterTicks?: number;
   }) {
     const controls: Array<[string, boolean]> = [];
+    let airTicks = 0;
     const startedAt = Date.now();
     const bot = {
       controls,
@@ -1451,7 +1286,6 @@ describe('战逃与水面', () => {
       },
       blockAt: (p: V) => {
         const [x, y, z] = [Math.floor(p.x), Math.floor(p.y), Math.floor(p.z)];
-        if (opts.skyUnknownFromY !== undefined && y >= opts.skyUnknownFromY) return null;
         if (opts.roofY === y && x === 1 && z === 0) {
           return { name: 'stone', boundingBox: 'block' };
         }
@@ -1462,13 +1296,16 @@ describe('战逃与水面', () => {
         }
         return y <= 63 ? { name: 'water', boundingBox: 'empty' } : { name: 'air', boundingBox: 'empty' };
       },
+      waitForTicks: async (n: number) => {
+        airTicks += n;
+        if (opts.landAfterTicks !== undefined && airTicks >= opts.landAfterTicks) bot.entity.onGround = true;
+      },
       pathfinder: {
         stop() {},
         setGoal() {},
         goto: async () => {
           await opts.goto?.(bot);
-          if (opts.landAfterMs === undefined) bot.entity.onGround = true;
-          else setTimeout(() => { bot.entity.onGround = true; }, opts.landAfterMs);
+          if (opts.landAfterTicks === undefined) bot.entity.onGround = true;
         },
       },
     };
@@ -1532,25 +1369,9 @@ describe('战逃与水面', () => {
     expect(reports[0].text).not.toContain('这里能看见天空');
   });
 
-  it('surface 登岸后天空未知:离水并站稳仍完成,只报告天空未知', async () => {
-    const bot = diveBot({
-      land: true,
-      skyUnknownFromY: 70,
-      goto: async (b) => { b.entity.position = new V(1.5, 64, 0.5); },
-    });
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'surface' }]);
-    await waitUntil(() => reports.length === 1, 18_000);
-    expect(reports[0].kind).toBe('done');
-    expect(reports[0].text).toContain('我脱离液体并站稳了');
-    expect(reports[0].text).toContain('sky_visible=unknown');
-    expect(reports[0].text).not.toContain('这里能看见天空');
-    expect(bot.controls.at(-1)).toEqual(['jump', false]);
-  });
-
   // 寻路器在登岸那一跳的半空就报到达;当场读落脚会把已经上岸判成失败
   it('surface 到达时人还在半空:等着地再判落脚,上岸照实报成功', async () => {
-    const bot = diveBot({ land: true, landAfterMs: 200, goto: async (b) => { b.entity.position = new V(1.5, 64.4, 0.5); } });
+    const bot = diveBot({ land: true, landAfterTicks: 4, goto: async (b) => { b.entity.position = new V(1.5, 64.4, 0.5); } });
     bot.entity.position = new V(0.5, 63, 0.5);
     const { exec, reports } = makeExecutorOn(bot);
     exec.submit([{ skill: 'surface' }]);
@@ -1623,13 +1444,13 @@ describe('采草:无碰撞箱方块走得近、对得上账', () => {
     return bot;
   }
 
-  it('已经够得着的草直接挖,不再额外走近,种子对得上账', async () => {
+  it('对草不用 GoalLookAtBlock:按距离走近就挖,种子对得上账', async () => {
     const bot = grassBot();
     const { exec, reports } = makeExecutorOn(bot);
     exec.submit([{ skill: 'collect', block: 'short_grass', count: 1 }]);
     await waitUntil(() => reports.length === 1, 5000);
     expect(reports[0].kind).toBe('done');
-    expect(bot.gotoGoals).toEqual([]);
+    expect(bot.gotoGoals[0]).toBe('GoalNear');
     expect(reports[0].text).toContain('实际入包 1 个');
   });
 
@@ -1722,7 +1543,7 @@ describe('reserve:收着不主动拿的家伙什', () => {
       stopDigging: () => {},
       pathfinder: { stop() {}, setGoal() {}, goto: async () => {} },
     };
-    return withBotEvents(bot);
+    return bot;
   }
 
   function rigWith(bot: unknown, reserve: string[]) {
@@ -2117,51 +1938,6 @@ describe('要工作台:只摆事实,不代她权衡', () => {
     expect(reports[0].kind).toBe('done');
     expect(counts.get(PICK)).toBe(1);
     expect(reports[0].text).toContain('包里没有工作台,走过去用了现成的那个 (12, 64, 0),约 12 格外');
-  });
-
-  it('最近的工作台走不过时改走另一座，并报告前一座的失败', async () => {
-    const { bot, counts, TABLE, PICK } = tableCraftBot('lands');
-    counts.set(TABLE, 0);
-    const first = new V(8, 64, 0);
-    const second = new V(12, 64, 0);
-    const inner = bot.blockAt;
-    bot.findBlocks = () => [first, second];
-    bot.blockAt = (p: V) => p.y === 64 && p.z === 0 && (p.x === 8 || p.x === 12)
-      ? { name: 'crafting_table', boundingBox: 'block', position: p }
-      : inner(p);
-    const attempted: number[] = [];
-    bot.pathfinder.goto = async (...args: unknown[]) => {
-      const goal = args[0] as { x: number };
-      attempted.push(goal.x);
-      if (goal.x === 8) throw new Error('No path to the goal!');
-      bot.entity.position = new V(11.5, 64, 0.5);
-    };
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'craft', item: 'wooden_pickaxe', count: 1 }]);
-    await waitUntil(() => reports.length === 1, 5000);
-    expect(reports[0].kind).toBe('done');
-    expect(attempted).toEqual([8, 12]);
-    expect(counts.get(PICK)).toBe(1);
-    expect(reports[0].text).toContain('工作台 (8, 64, 0) 走不过去');
-    expect(reports[0].text).toContain('用了现成的那个 (12, 64, 0)');
-  });
-
-  it('走不过的工作台短期内不再反复寻路', async () => {
-    const { bot, counts, TABLE } = tableCraftBot('lands');
-    counts.set(TABLE, 0);
-    withNearbyTable(bot, new V(8, 64, 0));
-    let attempted = 0;
-    bot.pathfinder.goto = async () => { attempted++; throw new Error('No path to the goal!'); };
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'craft', item: 'wooden_pickaxe', count: 1 }]);
-    await waitUntil(() => reports.length === 1, 5000);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('目前没有可走到的工作台');
-    exec.submit([{ skill: 'craft', item: 'wooden_pickaxe', count: 1 }]);
-    await waitUntil(() => reports.length === 2, 5000);
-    expect(reports[1].kind).toBe('blocked');
-    expect(reports[1].text).toContain('上次走不过');
-    expect(attempted).toBe(1);
   });
 });
 
@@ -2593,7 +2369,7 @@ describe('Reflexes 摔落', () => {
     reflexes.stop();
   });
 
-  it('深坠后落在仙人掌或水下:危险仍在时不恢复', () => {
+  it('深坠后落在仙人掌或水里:危险仍在时不恢复', () => {
     const bot = fallBot();
     const { hold, reflexes, resumed } = recoveryReflex(bot);
     crossStopThreshold(bot, reflexes);
@@ -2716,106 +2492,6 @@ describe('Reflexes 摔落', () => {
     return { bot, exec, reflexes, reports };
   }
 
-  it('深坠后浮出水面:连续换气窗口后执行排队的上岸动作', async () => {
-    const diag = new MinecraftLog();
-    const { bot, exec, reflexes, reports } = fallHoldRig(diag);
-    exec.submit([{ skill: 'goto', at: [20, 80, 0] }]);
-    crossStopThreshold(bot, reflexes);
-    await vi.advanceTimersByTimeAsync(50);
-    exec.submit([
-      { skill: 'goto', at: [2, 73, 0] },
-      { skill: 'chat', text: '上岸后继续' },
-    ], 'append');
-    bot.entity.velocity.y = 0;
-    bot.blockAt = ((p: V) => Math.floor(p.y) <= 73
-      ? { name: 'water', boundingBox: 'empty' }
-      : { name: 'air', boundingBox: 'empty' }) as typeof bot.blockAt;
-    bot.pf.goto = async () => {
-      bot.entity.position = new V(2.5, 73, 0.5);
-      bot.entity.onGround = true;
-      bot.blockAt = ((p: V) => Math.floor(p.y) === 72
-        ? { name: 'stone', boundingBox: 'block' }
-        : { name: 'air', boundingBox: 'empty' }) as typeof bot.blockAt;
-    };
-
-    for (let tick = 0; tick < 3; tick++) {
-      bot.entity.position = new V(0.5, tick % 2 ? 73.2 : 73, 0.5);
-      await vi.advanceTimersByTimeAsync(200);
-    }
-    expect(exec.status().hold).toContain('深坠落');
-    expect(bot.said).toEqual([]);
-    await vi.advanceTimersByTimeAsync(250);
-
-    expect(exec.status().hold).toBeNull();
-    expect(bot.entity.position).toEqual(new V(2.5, 73, 0.5));
-    expect(bot.said).toEqual(['上岸后继续']);
-    expect(reports.some((r) => r.kind === 'done' && r.taskId === 2)).toBe(true);
-    expect(diag.after(0).some((e) => e.event === 'falling-safe'
-      && e.msg.includes('浮在水面') && e.data?.resumed === true)).toBe(true);
-    expect(diag.after(0).some((e) => e.event === 'hold-timeout')).toBe(false);
-    reflexes.stop();
-    exec.shutdown();
-  });
-
-  it('深坠后短暂出水又下沉:连续换气窗口重新计时', () => {
-    const bot = fallBot();
-    const { hold, reflexes, resumed } = recoveryReflex(bot);
-    crossStopThreshold(bot, reflexes);
-    bot.entity.velocity.y = 0;
-    let submerged = false;
-    bot.blockAt = ((p: V) => Math.floor(p.y) <= (submerged ? 75 : 73)
-      ? { name: 'water', boundingBox: 'empty' }
-      : { name: 'air', boundingBox: 'empty' }) as typeof bot.blockAt;
-    vi.advanceTimersByTime(400);
-    submerged = true;
-    vi.advanceTimersByTime(200);
-    submerged = false;
-    vi.advanceTimersByTime(600);
-    expect(resumed).toEqual([]);
-    vi.advanceTimersByTime(200);
-    expect(resumed).toEqual([hold]);
-    reflexes.stop();
-  });
-
-  it('深坠后水面头部方块未加载:不把未知当作已能换气', () => {
-    const bot = fallBot();
-    const { hold, reflexes, resumed } = recoveryReflex(bot);
-    crossStopThreshold(bot, reflexes);
-    bot.entity.velocity.y = 0;
-    let loaded = false;
-    bot.blockAt = ((p: V) => Math.floor(p.y) <= 73
-      ? { name: 'water', boundingBox: 'empty' }
-      : loaded ? { name: 'air', boundingBox: 'empty' } : null) as typeof bot.blockAt;
-    vi.advanceTimersByTime(1_000);
-    expect(resumed).toEqual([]);
-    loaded = true;
-    vi.advanceTimersByTime(800);
-    expect(resumed).toEqual([hold]);
-    reflexes.stop();
-  });
-
-  it('深坠后浮出水面只解除坠落租约:独立环境冻结仍保留', async () => {
-    const diag = new MinecraftLog();
-    const { bot, exec, reflexes } = fallHoldRig(diag);
-    const environment = exec.pauseForEnvironment('独立环境接管');
-    crossStopThreshold(bot, reflexes);
-    exec.submit([{ skill: 'chat', text: '环境恢复后再执行' }], 'append');
-    bot.entity.velocity.y = 0;
-    bot.blockAt = ((p: V) => Math.floor(p.y) <= 73
-      ? { name: 'water', boundingBox: 'empty' }
-      : { name: 'air', boundingBox: 'empty' }) as typeof bot.blockAt;
-    await vi.advanceTimersByTimeAsync(800);
-    expect(exec.status().hold).toBe('独立环境接管');
-    expect(bot.said).toEqual([]);
-    expect(diag.after(0).some((e) => e.event === 'hold-partial-release'
-      && e.data?.slot === 'fall')).toBe(true);
-    exec.resumeAfterEnvironment(environment);
-    await vi.advanceTimersByTimeAsync(50);
-    expect(bot.said).toEqual(['环境恢复后再执行']);
-    reflexes.stop();
-    exec.shutdown();
-  });
-
   it('深坠冻结期间 mc_stop:冻结跟着撤单一起解除,后来的任务照常开跑', async () => {
     const { bot, exec, reflexes } = fallHoldRig();
     exec.submit([{ skill: 'goto', at: [20, 80, 0] }]);
@@ -2850,12 +2526,12 @@ describe('Reflexes 摔落', () => {
     exec.submit([{ skill: 'chat', text: '解冻后才轮到我' }], 'append');
     crossStopThreshold(bot, reflexes);
 
-    // 仍在水下，恢复条件一直不成立。
+    // 落进一格水坑:onGround 了,但身体泡在水里 —— 干燥落脚这个条件永远不成立
     bot.entity.velocity.y = 0;
     bot.entity.onGround = true;
     bot.blockAt = ((p: V) => {
       const y = Math.floor(p.y);
-      if (y === 73 || y === 74) return { name: 'water', boundingBox: 'empty' };
+      if (y === 73) return { name: 'water', boundingBox: 'empty' };
       if (y === 72) return { name: 'stone', boundingBox: 'block' };
       return { name: 'air', boundingBox: 'empty' };
     }) as typeof bot.blockAt;
@@ -2886,12 +2562,12 @@ describe('Reflexes 摔落', () => {
     crossStopThreshold(bot, reflexes);
     expect(exec.status().hold).toBe('防溺水上浮找岸、深坠落超过 6 格');
 
-    // 仍在水下，深坠那一槽由看门狗释放。
+    // 落进一格水坑:干燥落脚永远不成立,深坠那一槽只能靠看门狗
     bot.entity.velocity.y = 0;
     bot.entity.onGround = true;
     bot.blockAt = ((p: V) => {
       const y = Math.floor(p.y);
-      if (y === 73 || y === 74) return { name: 'water', boundingBox: 'empty' };
+      if (y === 73) return { name: 'water', boundingBox: 'empty' };
       if (y === 72) return { name: 'stone', boundingBox: 'block' };
       return { name: 'air', boundingBox: 'empty' };
     }) as typeof bot.blockAt;
@@ -2982,7 +2658,6 @@ describe('build 单锚点 / use:位置由她定,结果按服务端回读认', ()
       currentWindow: null,
       closeWindow: () => {},
       equip: async (item: { name: string; count: number }) => { heldItem = item; },
-      unequip: async () => { heldItem = null; },
       lookAt: async () => {},
       setControlState: () => {},
       waitForTicks: async () => {},
@@ -3121,114 +2796,6 @@ describe('build 单锚点 / use:位置由她定,结果按服务端回读认', ()
     expect(reports[0].text).toContain('那一格现在是');
   });
 
-  it('同一作物上空手右键与先装备再右键交替无进展时，只在节点附复盘事实', async () => {
-    const bot = placeBot({ ...GROUND, '1,64,0': 'wheat' }, [{ name: 'iron_hoe', count: 1 }]);
-    Object.assign(bot.registry, { itemsByName: { iron_hoe: {} } });
-    bot.activateBlock = async () => {}; // 服务端收下右键但作物未变，也没有物品进包。
-    const { exec, reports } = makeExecutorOn(bot);
-    const bare: SkillCall[] = [{ skill: 'equip' }, { skill: 'use', at: [1, 64, 0] }];
-    const hoe: SkillCall[] = [{ skill: 'equip', item: 'iron_hoe' }, { skill: 'use', item: 'iron_hoe', at: [1, 64, 0] }];
-    for (let attempt = 1; attempt <= 5; attempt++) {
-      exec.submit(attempt % 2 === 0 ? hoe : bare);
-      await waitUntil(() => reports.length === attempt, 8000);
-    }
-    expect(reports[0].kind).toBe('done');
-    expect(reports[0].text).toContain('包里一样没动');
-    expect(reports[1].kind).toBe('blocked');
-    expect(reports[1].text).toContain('手里拿起了');
-    expect(reports[1].repeatFailure).toMatchObject({ attempts: 2, scope: 'target', observation: 'unchanged' });
-    expect(reports[2].repeatFailure).toBeUndefined();
-    expect(reports[3].repeatFailure).toBeUndefined();
-    expect(reports[4].repeatFailure).toMatchObject({ attempts: 5, scope: 'target', observation: 'unchanged' });
-    expect(reports[4].repeatFailure?.previousReceipt).toContain('小麦');
-
-    bot.cells.set('1,64,0', 'wheat_open');
-    exec.submit(bare);
-    await waitUntil(() => reports.length === 6, 8000);
-    expect(reports[5].repeatFailure).toBeUndefined();
-    exec.submit(bare);
-    await waitUntil(() => reports.length === 7, 8000);
-    expect(reports[6].repeatFailure).toMatchObject({ attempts: 2, scope: 'target' });
-  });
-
-  it('转头与操作同一格分别记进展，重复看向已朝向的目标不误报失败', async () => {
-    const bot = placeBot({ ...GROUND, '1,64,0': 'wheat' }, []);
-    const facing = Object.assign(bot.entity, { yaw: 0, pitch: 0, height: 1.62 });
-    bot.lookAt = (async (point: V) => {
-      const delta = point.minus(facing.position.offset(0, facing.height, 0));
-      facing.yaw = Math.atan2(-delta.x, -delta.z);
-      facing.pitch = Math.atan2(delta.y, Math.hypot(delta.x, delta.z));
-    }) as typeof bot.lookAt;
-    bot.activateBlock = async () => {};
-    const { exec, reports } = makeExecutorOn(bot);
-    const use: SkillCall[] = [{ skill: 'use', at: [1, 64, 0] }];
-    const look: SkillCall[] = [{ skill: 'look', at: [1, 64, 0] }];
-    exec.submit(use);
-    await waitUntil(() => reports.length === 1, 8000);
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      exec.submit(look);
-      await waitUntil(() => reports.length === attempt + 1, 8000);
-      expect(reports[attempt].kind).toBe('done');
-      expect(reports[attempt].repeatFailure).toBeUndefined();
-    }
-    expect(facing.yaw).toBeCloseTo(-Math.PI / 2);
-    expect(facing.position).toEqual(new V(0.5, 64, 0.5));
-    exec.submit(use);
-    await waitUntil(() => reports.length === 5, 8000);
-    expect(reports[4].repeatFailure).toMatchObject({ attempts: 2, scope: 'target', observation: 'unchanged' });
-  });
-
-  it('往返移动后同一目标仍受阻，保留整单未完成次数并如实报告现场变化', async () => {
-    const bot = placeBot({ ...GROUND }, []);
-    let direction = 1;
-    bot.pathfinder.goto = async () => {
-      bot.entity.position = bot.entity.position.offset(direction, 0, 0);
-      direction *= -1;
-      throw new Error('No path');
-    };
-    const { exec, reports } = makeExecutorOn(bot);
-    const steps: SkillCall[] = [{ skill: 'goto', at: [20, 64, 0], exact: true }];
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      exec.submit(steps);
-      await waitUntil(() => reports.length === attempt, 8000);
-    }
-    expect(reports.map(report => report.kind)).toEqual(['blocked', 'blocked']);
-    expect(bot.entity.position).toEqual(new V(0.5, 64, 0.5));
-    expect(reports[1].repeatFailure).toMatchObject({ attempts: 2, scope: 'target', observation: 'changed' });
-    exec.submit([{ skill: 'goto', at: [40, 64, 0], exact: true }]);
-    await waitUntil(() => reports.length === 3, 8000);
-    expect(reports[2].repeatFailure).toBeUndefined();
-  });
-
-  it('批次末尾转头不会把未成功的交互目标改为取景目标', async () => {
-    const bot = placeBot({ ...GROUND, '1,64,0': 'wheat' }, []);
-    bot.activateBlock = async () => {};
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'use', at: [1, 64, 0] }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    exec.submit([{ skill: 'use', at: [1, 64, 0] }, { skill: 'look', at: [3, 68, 0] }]);
-    await waitUntil(() => reports.length === 2, 8000);
-    expect(reports[1].repeatFailure).toMatchObject({ attempts: 2, scope: 'target', observation: 'unchanged' });
-  });
-
-  it('开门改变通路后，近处旧寻路失败账失效', async () => {
-    const bot = placeBot({ ...GROUND, '1,64,0': 'oak_door' }, []);
-    bot.pathfinder.goto = (async () => { throw new Error('找不到可行路线'); }) as never;
-    const { exec, reports } = makeExecutorOn(bot);
-    const far = { skill: 'goto' as const, at: [20, 64, 0] as [number, number, number] };
-    exec.submit([far]);
-    await waitUntil(() => reports.length === 1);
-    await vi.advanceTimersByTimeAsync(16_000);
-    exec.submit([far]);
-    await waitUntil(() => reports.length === 2);
-    await vi.advanceTimersByTimeAsync(16_000);
-    expect(exec.submit([far])).toContain('连续走不通 2 次');
-    exec.submit([{ skill: 'use', at: [1, 64, 0] }]);
-    await waitUntil(() => reports.length === 3);
-    expect(reports[2].kind).toBe('done');
-    expect(exec.submit([far])).toContain('收下了');
-  });
-
   it('use + target:对活物右键,按包里多没多出羊毛判', async () => {
     const sheep = { name: 'sheep', type: 'animal', position: new V(2.5, 64, 0.5), isValid: true, height: 1 };
     const bag = [{ name: 'shears', count: 1 }];
@@ -3245,30 +2812,19 @@ describe('build 单锚点 / use:位置由她定,结果按服务端回读认', ()
     expect(reports[0].text).toContain('包里羊毛 0 → 2 个');
   });
 
-  it('use 不写 item 点门:先安全腾手，再按实际空手回报', async () => {
+  /**
+   * 「空手右键了 (-158,65,-18) 的空气,那一格现在是丛林门」——同一批事件里包里少了
+   * 丛林门×1。不写 item 时既不腾手也不读手上,一律标空手,而 activateBlock 照样把手里
+   * 那件东西放出去。
+   */
+  it('use 不写 item:按手上现在拿着的报,不再一律说"空手"', async () => {
     const bot = placeBot({ ...GROUND, '1,64,0': 'oak_door' }, [{ name: 'jungle_door', count: 1 }]);
     await bot.equip({ name: 'jungle_door', count: 1 });
     const { exec, reports } = makeExecutorOn(bot);
     exec.submit([{ skill: 'use', at: [1, 64, 0] }]);
     await waitUntil(() => reports.length === 1);
-    expect(reports[0].text).toContain('空手右键了 (1, 64, 0)');
-    expect(bot.heldItem).toBeNull();
-    expect(bot.activated).toEqual(['oak_door@1,64,0']);
-  });
-
-  it('自定义背包占主手时点门，不触发背包而是开门', async () => {
-    const bot = placeBot({ ...GROUND, '1,64,0': 'oak_door' }, [{ name: 'player_head', count: 1 }]);
-    await bot.equip({ name: 'player_head', count: 1 });
-    const original = bot.activateBlock;
-    bot.activateBlock = async (b) => {
-      if (bot.heldItem) return; // 服务端的自定义右键物品拦截了开门
-      await original(b);
-    };
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'use', at: [1, 64, 0] }]);
-    await waitUntil(() => reports.length === 1);
-    expect(reports[0].kind).toBe('done');
-    expect(bot.activated).toEqual(['oak_door@1,64,0']);
+    expect(reports[0].text).toContain('右键了 (1, 64, 0)');
+    expect(reports[0].text).not.toContain('空手');
   });
 
   it('use 只给 item:对自己/面前用,报包里前后的数', async () => {
@@ -3327,7 +2883,7 @@ describe('build 单锚点 / use:位置由她定,结果按服务端回读认', ()
     // times>1 两句制:整段净差在前,最后一次现场读数在后 —— 只报最后一次会自相矛盾
     // (第 3 次对已驯服的狼用骨头不消耗,「包里一样没动」逐字属实却把前两根说没了)
     expect(reports[0].text).toContain('这 2 次合计');
-    expect(reports[0].text).toContain('背包净减:骨粉');
+    expect(reports[0].text).toContain('用掉:骨粉');
   });
 
   it('parseSteps:build 不写 shape 就是"就这些格";use 的 at 与 target 互斥,且不能三样都不给', () => {
@@ -3417,8 +2973,6 @@ describe('fish:走到水边钓一竿,收获按物品栏差分照实报', () => {
     /** 实心方块 */
     solid?: Array<[number, number, number]>;
   }) {
-    const protocol = new EventEmitter();
-    const lifecycle = new EventEmitter();
     const inv: Array<{ name: string; count: number; type: number }> = [];
     if (opts.rod !== false) inv.push({ name: 'fishing_rod', count: 1, type: 30 });
     const water = new Set((opts.water ?? []).map(([x, y, z]) => `${x},${y},${z}`));
@@ -3428,7 +2982,6 @@ describe('fish:走到水边钓一竿,收获按物品栏差分照实报', () => {
     let pending: { reject: (e: Error) => void } | null = null;
     let overlapped = 0;
     const bot = {
-      _client: protocol, once: lifecycle.once.bind(lifecycle), removeListener: lifecycle.removeListener.bind(lifecycle),
       reeledCount: () => reeled,
       overlapCount: () => overlapped,
       entity: { id: 9, position: new V(0.5, 64, 0.5), onGround: true },
@@ -3436,15 +2989,12 @@ describe('fish:走到水边钓一竿,收获按物品栏差分照实报', () => {
         ? { 7: { id: 7, name: 'fishing_bobber', position: new V(...opts.bobberAt) } }
         : {},
       inventory: { items: () => inv },
-      registry: { blocksByName: { water: { id: 1, name: 'water' } }, itemsByName: {},
-        entitiesByName: { fishing_bobber: { id: 129 } }, particlesByName: {} },
+      registry: { blocksByName: { water: { id: 1, name: 'water' } }, itemsByName: {} },
       findBlocks: () => (opts.water ?? []).map(([x, y, z]) => new V(x, y, z)),
       canSeeBlock: () => true,
       blockAt: (p: V) => {
         const k = `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`;
-        if (solid.has(k) || (Math.floor(p.y) <= 63 && !water.has(k))) {
-          return { name: 'stone', position: p.floored(), boundingBox: 'block', diggable: true };
-        }
+        if (solid.has(k)) return { name: 'stone', position: p.floored(), boundingBox: 'block', diggable: true };
         const name = water.has(k) ? 'water' : 'air';
         return { name, position: p.floored(), boundingBox: 'empty', diggable: true };
       },
@@ -3452,15 +3002,9 @@ describe('fish:走到水边钓一竿,收获按物品栏差分照实报', () => {
       lookAt: async () => {},
       look: async () => {},
       activateItem: () => {
+        reeled++;
         const cast = pending;
-        if (cast) {
-          reeled++;
-          setTimeout(() => {
-            cast.reject(new Error('Fishing cancelled'));
-            protocol.emit('entity_destroy', { entityIds: [7] });
-            delete (bot.entities as Record<number, unknown>)[7];
-          }, 30);
-        }
+        if (cast) setTimeout(() => cast.reject(new Error('Fishing cancelled')), 30);
       },
       fish: () => new Promise<void>((resolve, reject) => {
         if (pending) overlapped++;
@@ -3475,20 +3019,6 @@ describe('fish:走到水边钓一竿,收获按物品栏差分照实报', () => {
         }, opts.biteAfterMs);
       }),
       pathfinder: { stop() {}, setGoal() {}, goto: async () => {} },
-    };
-    const simulatedCast = bot.fish;
-    installOwnedFishing(bot as never);
-    const ownedCast = bot.fish;
-    bot.fish = () => {
-      const cast = ownedCast();
-      const at = opts.bobberAt ?? opts.water?.[0] ?? [2, 63, 0];
-      const position = new V(...at);
-      (bot.entities as Record<number, unknown>)[7] ??= { id: 7, name: 'fishing_bobber', position };
-      protocol.emit('spawn_entity', { entityId: 7, type: 129, objectData: 9 });
-      void simulatedCast().then(() => protocol.emit('world_particles', {
-        particle: { type: 'fishing' }, amount: 6, ...bot.entities[7]!.position,
-      }), () => undefined);
-      return cast;
     };
     return bot;
   }
@@ -3511,19 +3041,13 @@ describe('fish:走到水边钓一竿,收获按物品栏差分照实报', () => {
     expect(reports[0].text).toContain('没看见能下竿的水面');
   });
 
-  it('错误 at 报实测方块和当前可选水面，未抛竿；修正目标可继续收获', async () => {
-    const bot = fishBot({ water: [[2, 63, 0]], biteAfterMs: 50, loot: { name: 'salmon', type: 21 } });
+  it('at 指定的那格不是水:受阻并说它是什么', async () => {
+    const bot = fishBot({ water: [[2, 63, 0]] });
     const { exec, reports } = makeExecutorOn(bot);
     exec.submit([{ skill: 'fish', at: [5, 63, 5] }]);
     await waitUntil(() => reports.length === 1);
     expect(reports[0].kind).toBe('blocked');
     expect(reports[0].text).toContain('不是水');
-    expect(reports[0].text).toContain('当前已观察到水面 (2, 63, 0)');
-    expect(findBobber(bot as never)).toBeNull();
-    exec.submit([{ skill: 'fish', at: [2, 63, 0] }]);
-    await waitUntil(() => reports.length === 2, 8000);
-    expect(reports[1].kind).toBe('done');
-    expect(reports[1].text).toContain('生鲑鱼×1');
   });
 
   it('离水面远:先走到岸上的干格站,不停在离水面 3 格的水里', async () => {
@@ -3575,84 +3099,6 @@ describe('fish:走到水边钓一竿,收获按物品栏差分照实报', () => {
     await waitUntil(() => reports.length === 1, 8000);
     expect(reports[0].kind).toBe('done');
     expect(reports[0].text).toContain('钓上来生鲑鱼×1');
-  });
-
-  it('成功目标技能熔断按步骤归并，过期后放行且不影响其他技能', async () => {
-    const bot = fishBot({ water: [[2, 63, 0]], biteAfterMs: 50,
-      loot: { name: 'salmon', type: 21 } });
-    const { exec, reports } = makeExecutorOn(bot);
-    const config = { enabled: true, skillsCsv: 'fish,chat,attack',
-      maxSuccesses: 3, windowMinutes: 1 };
-    const fish: SkillCall = { skill: 'fish' };
-    for (let i = 1; i <= 3; i++) {
-      expect(exec.repeatSuccessHold([fish], config)).toBeNull();
-      exec.submit([fish]);
-      await waitUntil(() => reports.length === i, 8000);
-      expect(reports.at(-1)?.kind).toBe('done');
-    }
-    const queueBefore = exec.status();
-    const hold = exec.repeatSuccessHold([
-      { skill: 'goto', at: [4, 64, 0] }, fish,
-    ], config);
-    expect(hold).toContain('成功 3 次');
-    expect(hold).toContain('可再受理');
-    expect(exec.repeatSuccessHold([{ skill: 'equip', item: 'fishing_rod' }, fish], config)).toBe(hold);
-    expect(exec.repeatSuccessHold([fish, { skill: 'chat', text: '收竿了' }], config)).toBe(hold);
-    expect(exec.repeatSuccessHold([{ skill: 'collect', block: 'stone', count: 1 }], config)).toBeNull();
-    expect(exec.repeatSuccessHold([{ skill: 'chat', text: '你好' }], config)).toBeNull();
-    expect(exec.repeatSuccessHold([{ skill: 'attack', target: 'zombie' }], config)).toBeNull();
-    expect(exec.status()).toEqual(queueBefore);
-    expect(exec.repeatSuccessHold([fish], { ...config, enabled: false })).toBeNull();
-    vi.setSystemTime(Date.now() + 60_001);
-    expect(exec.repeatSuccessHold([fish], config)).toBeNull();
-    exec.clear();
-  });
-
-  it('未成功的钓鱼不计入成功窗口', async () => {
-    const { exec, reports } = makeExecutorOn(fishBot({}));
-    exec.submit([{ skill: 'fish' }]);
-    await waitUntil(() => reports.length === 1);
-    expect(reports[0].kind).toBe('blocked');
-    expect(exec.repeatSuccessHold([{ skill: 'fish' }], {
-      enabled: true, skillsCsv: 'fish', maxSuccesses: 2, windowMinutes: 15,
-    })).toBeNull();
-  });
-
-  it('同一整单多次钓鱼逐步计数，超额步骤不下竿，后面的聊天仍执行', async () => {
-    const bot = fishBot({ water: [[2, 63, 0]], biteAfterMs: 50,
-      loot: { name: 'salmon', type: 21 } });
-    const casts = vi.spyOn(bot, 'fish');
-    const said: string[] = [];
-    Object.assign(bot, { chat: (text: string) => { said.push(text); } });
-    const reports: TaskReport[] = [];
-    const config = { enabled: true, skillsCsv: 'fish', maxSuccesses: 2, windowMinutes: 15 };
-    const exec = new Executor({ getBot: () => bot as never, report: (r) => reports.push(r),
-      log, nextId: nextTaskId(), repeatSuccessFallback: () => config });
-    exec.submit([{ skill: 'fish' }, { skill: 'fish' }, { skill: 'fish' },
-      { skill: 'chat', text: '收竿了' }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(casts).toHaveBeenCalledTimes(2);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('第 3 步');
-    expect(reports[0].text).toContain('成功 2 次');
-    expect(said).toEqual(['收竿了']);
-    exec.clear();
-  });
-
-  it('旧队列中的钓鱼到执行刻也重读额度，成功次数只数真正下过的竿', async () => {
-    const bot = fishBot({ water: [[2, 63, 0], [2, 63, 1], [2, 63, 2]], biteAfterMs: 50,
-      loot: { name: 'salmon', type: 21 } });
-    const casts = vi.spyOn(bot, 'fish');
-    const reports: TaskReport[] = [];
-    const config = { enabled: true, skillsCsv: 'fish', maxSuccesses: 2, windowMinutes: 15 };
-    const exec = new Executor({ getBot: () => bot as never, report: (r) => reports.push(r),
-      log, nextId: nextTaskId(), repeatSuccessFallback: () => config });
-    for (let i = 0; i < 3; i++) exec.submit([{ skill: 'fish', at: [2, 63, i] }], 'append');
-    await waitUntil(() => reports.length === 3, 8000);
-    expect(reports.map((r) => r.kind)).toEqual(['done', 'done', 'blocked']);
-    expect(casts).toHaveBeenCalledTimes(2);
-    expect(exec.status().waiting).toEqual([]);
-    exec.clear();
   });
 
   it('弹道瞄准:远处的水直瞄会抛短,选出来的仰角比直瞄平', () => {
@@ -4179,8 +3625,6 @@ describe('queue:"now" 抢占战斗', () => {
     expect(state.stoodDown).toBe(0);
     expect(r).toContain('排上了');
     expect(r).toContain('腾出手就做');
-    expect(r).toContain('本单尚未执行');
-    expect(r).toContain('queue:"now"');
   });
 
   it('救命撤退拒绝 standDown 时:now 如实说仍在排队', () => {
@@ -4232,25 +3676,11 @@ describe('find 的行军代价上受理刻', () => {
     exec.shutdown();
   });
 
-  it('尚未读取重生点时报告未知,不推断它不存在', () => {
+  it('没有重生点就照实说,不编一个距离出来', () => {
     const { exec } = makeExecutorOn(combatBot({}));
     const r = exec.submit([{ skill: 'find', target: 'spider', direction: 'south', distance: 48 }]);
-    expect(r).toContain('你的个人重生点尚未核实');
-    expect(r).not.toContain('你现在没有重生点');
+    expect(r).toContain('走满时你现在没有重生点');
     expect(r).not.toContain('离重生点 (');
-    exec.shutdown();
-  });
-
-  it('服务端确认失效后报告没有重生点,仍然受理行军', () => {
-    const bot = combatBot({});
-    const exec = new Executor({
-      getBot: () => bot as never, report: () => {}, log, nextId: nextTaskId(),
-      spawnAnchor: () => null,
-    });
-    const r = exec.submit([{ skill: 'find', target: 'spider', direction: 'south', distance: 48 }]);
-    expect(r).toContain('你现在没有重生点');
-    expect(r).not.toContain('尚未核实');
-    expect(exec.status().running).not.toBeNull();
     exec.shutdown();
   });
 
@@ -4292,7 +3722,7 @@ describe('Reflexes 防溺水:换气点、登岸通路与计时兜底', () => {
     return bot;
   }
 
-  function reflexesOn(bot: unknown, onWaterTrap?: () => void) {
+  function reflexesOn(bot: unknown) {
     const diag = new MinecraftLog();
     const reports: TaskReport[] = [];
     const { exec: environmentExec } = makeExecutorOn(bot);
@@ -4311,7 +3741,6 @@ describe('Reflexes 防溺水:换气点、登岸通路与计时兜底', () => {
       reactCooldownSec: () => 8,
       antiDrown: () => true,
       antiLava: () => false,
-      onWaterTrap,
     });
     const events = () => diag.after(0).map((e) => e.event);
     return { reflexes, reports, diag, events };
@@ -4353,21 +3782,6 @@ describe('Reflexes 防溺水:换气点、登岸通路与计时兜底', () => {
     reflexes.stop();
     expect(setGoals(bot)).toEqual([]);
     expect(events()).toContain('drown-noland');
-  });
-
-  it('水井九十秒无岸且水平未推进时只触发一次安全落点逃逸', () => {
-    const sealed = (x: number, y: number, z: number): string =>
-      x === 0 && z === 0 && y <= 62 ? 'water' : y <= 63 ? 'stone' : 'air';
-    const bot = waterBot(sealed, 3);
-    const onWaterTrap = vi.fn();
-    const { reflexes, events } = reflexesOn(bot, onWaterTrap);
-    reflexes.start();
-    vi.advanceTimersByTime(110_000);
-    expect(onWaterTrap).toHaveBeenCalledTimes(1);
-    expect(events()).toContain('drown-trap');
-    vi.advanceTimersByTime(30_000);
-    expect(onWaterTrap).toHaveBeenCalledTimes(1);
-    reflexes.stop();
   });
 
   it('零推进撤销过的登岸格进排除集:重找不再选同一格', () => {
@@ -4500,31 +3914,22 @@ describe('fish:开阔水域优先、视线放宽、包满与遮蔽的回执', ()
     loot?: { name: string; type: number };
     bobberAt?: [number, number, number];
     cover?: Set<string>;
-    gotoMoves?: boolean;
-    boat?: boolean;
   }) {
-    const protocol = new EventEmitter();
-    const lifecycle = new EventEmitter();
     const { lake } = opts;
     const inLake = (x: number, y: number, z: number): boolean =>
       x >= lake.x0 && x <= lake.x1 && z >= lake.z0 && z <= lake.z1 && y <= 63 && y > 63 - lake.depth;
     const inv = opts.bag ?? [{ name: 'fishing_rod', count: 1, type: 30 }];
     const me = new V(...(opts.me ?? [0.5, 64, 0.5]));
     const gotoGoals: string[] = [];
-    const casts: Array<{ x: number; y: number; z: number }> = [];
     const bot = {
-      _client: protocol, once: lifecycle.once.bind(lifecycle), removeListener: lifecycle.removeListener.bind(lifecycle),
       gotoGoals,
-      casts,
-      vehicle: opts.boat ? { name: 'oak_boat' } : null,
       entity: { id: 9, position: me, onGround: true, eyeHeight: 1.62 },
       entities: opts.bobberAt
         ? { 7: { id: 7, name: 'fishing_bobber', position: new V(...opts.bobberAt) } }
         : {},
       game: { minY: -64, height: 384 },
       inventory: { items: () => inv },
-      registry: { blocksByName: { water: { id: 1, name: 'water' } }, itemsByName: {},
-        entitiesByName: { fishing_bobber: { id: 129 } }, particlesByName: {} },
+      registry: { blocksByName: { water: { id: 1, name: 'water' } }, itemsByName: {} },
       world: { raycast: () => null },
       findBlocks: (o: { maxDistance: number }) => {
         const out: V[] = [];
@@ -4552,11 +3957,8 @@ describe('fish:开阔水域优先、视线放宽、包满与遮蔽的回执', ()
       equip: async () => {},
       lookAt: async () => {},
       look: async () => {},
-      activateItem: () => {
-        if (ownedFishingBobber(bot as never)) protocol.emit('entity_destroy', { entityIds: [7] });
-      },
+      activateItem: () => {},
       fish: () => new Promise<void>((resolve) => {
-        casts.push({ x: me.x, y: me.y, z: me.z });
         if (opts.biteAfterMs === undefined) return;
         setTimeout(() => {
           if (opts.loot) inv.push({ name: opts.loot.name, count: 1, type: opts.loot.type });
@@ -4565,28 +3967,8 @@ describe('fish:开阔水域优先、视线放宽、包满与遮蔽的回执', ()
       }),
       pathfinder: {
         stop() {}, setGoal() {},
-        goto: async (goal: { constructor: { name: string }; x?: number; y?: number; z?: number }) => {
-          gotoGoals.push(goal.constructor.name);
-          if (opts.gotoMoves && goal.x !== undefined && goal.y !== undefined && goal.z !== undefined) {
-            me.x = goal.x + 0.5;
-            me.y = goal.y;
-            me.z = goal.z + 0.5;
-          }
-        },
+        goto: async (goal: { constructor: { name: string } }) => { gotoGoals.push(goal.constructor.name); },
       },
-    };
-    const simulatedCast = bot.fish;
-    installOwnedFishing(bot as never);
-    const ownedCast = bot.fish;
-    bot.fish = () => {
-      const cast = ownedCast();
-      const position = new V(...(opts.bobberAt ?? [lake.x0 + .5, 63.5, lake.z0 + .5]));
-      (bot.entities as Record<number, unknown>)[7] = { id: 7, name: 'fishing_bobber', position };
-      protocol.emit('spawn_entity', { entityId: 7, type: 129, objectData: 9 });
-      void simulatedCast().then(() => protocol.emit('world_particles', {
-        particle: { type: 'fishing' }, amount: 6, ...position,
-      }));
-      return cast;
     };
     return bot;
   }
@@ -4666,75 +4048,24 @@ describe('fish:开阔水域优先、视线放宽、包满与遮蔽的回执', ()
     expect(reports[0].text).not.toContain('开阔水域');
   });
 
-  it('人在水中时先走到可站岸格再抛竿，回执记录实测站位', async () => {
-    const bot = lakeBot({
-      lake: DEEP, me: [3.5, 63, 0.5], gotoMoves: true,
-      biteAfterMs: 50, loot: { name: 'cod', type: 21 },
-    });
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'fish' }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('done');
-    expect(bot.gotoGoals).toContain('GoalBlock');
-    expect(bot.casts).toHaveLength(1);
-    expect(bot.casts[0].x).toBeLessThan(2);
-    expect(reports[0].text).toContain('已换到岸上站位');
-    const stand = bot.casts[0];
-    expect(reports[0].text).toContain(`(${Math.floor(stand.x)}, ${Math.floor(stand.y)}, ${Math.floor(stand.z)})`);
-  });
-
-  it('走岸路未真正离水就不抛竿，并提示换安全站位', async () => {
-    const bot = lakeBot({ lake: DEEP, me: [3.5, 63, 0.5], biteAfterMs: 50 });
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'fish' }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('不是安全站位');
-    expect(bot.casts).toHaveLength(0);
-  });
-
-  it('坐船且头在水面上方时可原地钓鱼', async () => {
-    const bot = lakeBot({
-      lake: DEEP, me: [3.5, 63, 0.5], boat: true,
-      biteAfterMs: 50, loot: { name: 'cod', type: 21 },
-    });
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'fish' }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('done');
-    expect(bot.gotoGoals).toEqual([]);
-    expect(reports[0].text).toContain('原地船上站位');
-  });
-
-  it('包满时收线没有净收获，受阻且不猜掉落去向', async () => {
+  it('包满时咬钩没进包:回执说包满了、战利品掉在脚边,不说掉进水里', async () => {
     const bag = [{ name: 'fishing_rod', count: 1, type: 30 }];
     while (bag.length < 36) bag.push({ name: 'cobblestone', count: 64, type: 1 });
     const bot = lakeBot({ lake: SHALLOW, bag, biteAfterMs: 50 });
     const { exec, reports } = makeExecutorOn(bot);
     exec.submit([{ skill: 'fish' }]);
     await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('包满了(36 格全占着)');
-    expect(reports[0].text).toContain('掉落去向未确认');
-    expect(reports[0].text).not.toContain('掉在脚边');
+    expect(reports[0].kind).toBe('done');
+    expect(reports[0].text).toContain('包满了(36 格全占着),战利品掉在脚边');
     expect(reports[0].text).not.toContain('水里');
   });
 
-  it('未入包的收线不记成功；依赖收获的后续步骤跳过，独立聊天继续', async () => {
+  it('包没满时咬钩没进包:报剩几格空位,不猜去向', async () => {
     const bot = lakeBot({ lake: SHALLOW, biteAfterMs: 50 });
     const { exec, reports } = makeExecutorOn(bot);
-    const said: string[] = [];
-    Object.assign(bot, { chat: (text: string) => { said.push(text); } });
-    exec.submit([{ skill: 'fish' }, { skill: 'equip', item: 'cod', needs: [1] },
-      { skill: 'chat', text: '这竿没收到东西', needs: [] }]);
+    exec.submit([{ skill: 'fish' }]);
     await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('未观察到物品入包(包里还有 35 格空位)');
-    expect(reports[0].text).toContain('跳过');
-    expect(said).toEqual(['这竿没收到东西']);
-    expect(exec.repeatSuccessHold([{ skill: 'fish' }], {
-      enabled: true, skillsCsv: 'fish', maxSuccesses: 1, windowMinutes: 15,
-    })).toBeNull();
+    expect(reports[0].text).toContain('东西没进包(包里还有 35 格空位)');
   });
 
   it('浮标头顶有遮盖:等待上限放宽到 60 秒,回执带「看不到天」', async () => {

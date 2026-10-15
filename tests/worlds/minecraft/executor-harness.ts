@@ -1,63 +1,17 @@
 /**
  * executor 各测试文件共用的假 bot、假寻路器和执行器工厂。
  */
-import { EventEmitter } from 'node:events';
-import { createRequire } from 'node:module';
 import { vi } from 'vitest';
 import {
   Executor, Reflexes, type SkillCall, type TaskReport,
 } from '../../../src/worlds/minecraft/executor.ts';
 import { ChestBook } from '../../../src/worlds/minecraft/chests.ts';
 import { trackWindowProps } from '../../../src/worlds/minecraft/containers.ts';
+import { EventEmitter } from 'node:events';
 import { WorksBook } from '../../../src/worlds/minecraft/works.ts';
 import type { Logger } from '../../../src/core/types.ts';
 
-const require = createRequire(import.meta.url);
-const minecraft1206 = require('minecraft-data')('1.20.6') as {
-  blocksByName: Record<string, { id: number; name: string; boundingBox: string } | undefined>;
-  blockCollisionShapes: {
-    blocks: Record<string, number | number[] | undefined>;
-    shapes: Record<number, readonly (readonly number[])[] | undefined>;
-  };
-};
-
-/** Keep fixture IDs/drop tables, but use the actual version's collision metadata. */
-export function withMinecraftCollisionShapes<T extends { blocksByName: Record<string, object> }>(
-  registry: T, extraBlockNames: Iterable<string> = [],
-): T & { blockCollisionShapes: typeof minecraft1206.blockCollisionShapes } {
-  const names = new Set([...Object.keys(registry.blocksByName), ...extraBlockNames]);
-  const blocksByName: Record<string, object> = { ...registry.blocksByName };
-  for (const name of names) {
-    const block = minecraft1206.blocksByName[name];
-    if (block) blocksByName[name] = blocksByName[name]
-      ? { boundingBox: block.boundingBox, ...blocksByName[name] }
-      : { id: block.id, name: block.name, boundingBox: block.boundingBox };
-  }
-  return Object.assign(registry, { blocksByName, blockCollisionShapes: minecraft1206.blockCollisionShapes });
-}
-
 export const log = { child() { return this; }, info() {}, warn() {}, error() {}, debug() {}, trace() {}, emit() {} } as unknown as Logger;
-
-type BotEventContract = Pick<EventEmitter, 'on' | 'once' | 'emit' | 'removeListener' | 'off' | 'listenerCount'>;
-
-/** Mineflayer Bots are EventEmitters; preserve fixtures that already own their event bus. */
-export function withBotEvents<T extends object>(bot: T): T & BotEventContract {
-  const client = (bot as { _client?: object })._client ?? { write() {} };
-  if (typeof (client as { on?: unknown }).on !== 'function') {
-    const clientEvents = new EventEmitter();
-    Object.assign(client, { on: clientEvents.on.bind(clientEvents), once: clientEvents.once.bind(clientEvents),
-      emit: clientEvents.emit.bind(clientEvents), removeListener: clientEvents.removeListener.bind(clientEvents),
-      off: clientEvents.off.bind(clientEvents), listenerCount: clientEvents.listenerCount.bind(clientEvents) });
-  }
-  Object.assign(bot, { _client: client });
-  if (typeof (bot as { on?: unknown }).on === 'function') return bot as T & BotEventContract;
-  const events = new EventEmitter();
-  return Object.assign(bot, {
-    on: events.on.bind(events), once: events.once.bind(events), emit: events.emit.bind(events),
-    removeListener: events.removeListener.bind(events), off: events.off.bind(events),
-    listenerCount: events.listenerCount.bind(events),
-  });
-}
 
 /** 每个执行器一条独立号段:测试之间不共享计数,断言里的 #1 才稳定 */
 export function nextTaskId(): () => number {
@@ -182,7 +136,6 @@ export function combatBot(opts: {
     setControlState: (k: string, v: boolean) => { controls.push([k, v]); if (v) head = 'air'; },
     clearControlStates: () => { controls.push(['clear', false]); },
     blockAt: (p: V) => (p.x === 0.5 && p.y === 65 && p.z === 0.5 ? { name: head } : null),
-    world: { raycast: () => null },
     pathfinder: { stop() {}, setGoal() {}, goto: async (_goal: FakeGoal) => {} },
   };
   const arrive = (goal: FakeGoal): void => {
@@ -202,7 +155,7 @@ export function makeExecutorOn(
 ) {
   const reports: TaskReport[] = [];
   const exec = new Executor({
-    getBot: () => withBotEvents(bot as object) as never,
+    getBot: () => bot as never,
     report: (r) => reports.push(r),
     log,
     nextId: nextTaskId(),
@@ -216,7 +169,7 @@ export function makeExecutorOn(
 export function makeExecutorWith(bot: unknown, chests: ChestBook) {
   const reports: TaskReport[] = [];
   const exec = new Executor({
-    getBot: () => withBotEvents(bot as object) as never,
+    getBot: () => bot as never,
     report: (r) => reports.push(r),
     log,
     nextId: nextTaskId(),
@@ -229,7 +182,7 @@ export function makeExecutorWith(bot: unknown, chests: ChestBook) {
 export function makeExecutorWithWorks(bot: unknown, works: WorksBook) {
   const reports: TaskReport[] = [];
   const exec = new Executor({
-    getBot: () => withBotEvents(bot as object) as never,
+    getBot: () => bot as never,
     report: (r) => reports.push(r),
     log,
     nextId: nextTaskId(),
@@ -421,12 +374,8 @@ export function chestBot(opts: {
   deaf?: boolean;
   /** 关窗不灌回:服务端没回灌确认 */
   noCopyBack?: boolean;
-  /** 点击曾在本地生效，随后服务端在窗口回读时撤销存入。 */
-  rejectAfterDeposit?: boolean;
   /** 点一下就抛这句(mineflayer 的原话) */
   throws?: string;
-  /** 指定物品被服务端拒绝，其他物品仍可存入。 */
-  rejectItem?: string;
   /** 关窗回灌时每样再多少掉几个:制造点击侧与库存侧对不上的那种情形 */
   drift?: number;
 } = {}) {
@@ -450,9 +399,6 @@ export function chestBot(opts: {
       : { name: 'air', position: p, boundingBox: 'empty' }),
     openContainer: async () => {
       const live = new Map(inv);
-      const beforeBox = new Map(box);
-      const beforeLive = new Map(live);
-      let rejectPending = false;
       const move = (from: Map<string, number>, to: Map<string, number>, name: string, n: number) => {
         if (opts.throws) throw new Error(opts.throws);
         const has = from.get(name) ?? 0;
@@ -463,22 +409,9 @@ export function chestBot(opts: {
       };
       return {
         items: () => stacks(live),
-        containerItems: () => {
-          if (rejectPending) {
-            box.clear();
-            for (const [name, count] of beforeBox) box.set(name, count);
-            live.clear();
-            for (const [name, count] of beforeLive) live.set(name, count);
-            rejectPending = false;
-          }
-          return stacks(box);
-        },
+        containerItems: () => stacks(box),
         inventoryStart: 27,
-        deposit: async (type: number, _m: number | null, n: number) => {
-          if (nameOf(type) === opts.rejectItem) throw new Error('destination full');
-          move(live, box, nameOf(type), n);
-          if (opts.rejectAfterDeposit) rejectPending = true;
-        },
+        deposit: async (type: number, _m: number | null, n: number) => move(live, box, nameOf(type), n),
         withdraw: async (type: number, _m: number | null, n: number) => move(box, live, nameOf(type), n),
         close: () => {
           if (opts.noCopyBack) return;
@@ -783,10 +716,10 @@ export function furnaceBot(opts: {
     entity: { id: 1, position: new V(0.5, 64, 0.5) },
     entities: {},
     game: { dimension: 'overworld' },
-    registry: withMinecraftCollisionShapes({
+    registry: {
       itemsByName: Object.fromEntries(Object.entries(SMELT_IDS).map(([name, id]) => [name, { id, name }])),
       blocksByName: { furnace: { id: 61, name: 'furnace' }, blast_furnace: { id: 62, name: 'blast_furnace' } },
-    }, ['dirt', 'cobblestone', ...inv.keys()]),
+    },
     inventory: {
       items: () => [...inv].filter(([, n]) => n > 0).map(([name, n]) => stack(name, n)),
     },
@@ -825,7 +758,6 @@ export function furnaceBot(opts: {
           // 烧出来是什么由服务端说了算:执行器不再有烧炼表。没配方的(泥土)就一直不出货
           const per = name === 'raw_iron' ? 'iron_ingot'
             : name === 'sand' ? 'glass'
-              : name === 'cod' ? 'cooked_cod'
               : name.endsWith('_log') ? 'charcoal' : null;
           const cap = fuel ? Math.floor((fuel.name === 'coal' ? 1600 : 300) * fuel.count / 200) : 0;
           const done = Math.min(n, cap);

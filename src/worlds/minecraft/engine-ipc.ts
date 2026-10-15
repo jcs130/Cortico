@@ -3,15 +3,11 @@
  * 主进程转发工具、面板及宿主调用；子进程上报日志、事件和状态缓存。
  */
 import type { LogNote } from '../../core/ipc-logger.ts';
-import type { Language } from '../../core/language.ts';
 import type {
-CognitionRequest,CognitionResult,
-EventTag,LLMUsage,
-PushOptions,TriggerMode,
-WorldConsoleDecl,
-WorldHost,
-WorldRequestFacts
+  CognitionRequest, CognitionResult, EventEnvelope, EventTag, LLMUsage, WorldConsoleDecl,
+  PushOptions, TriggerMode,
 } from '../../core/types.ts';
+import type { Language } from '../../core/language.ts';
 import type { MinecraftConfigSection } from './config.ts';
 
 /** 构造引擎子进程 World 的一次性参数。 */
@@ -20,7 +16,6 @@ export interface EngineInit {
   botName: string;
   /** 账本目录 data/;null = 只在内存 */
   dataDir: string | null;
-  agentFriendEnabled?: boolean;
   cfg: MinecraftConfigSection;
 }
 
@@ -31,14 +26,12 @@ export type EngineRequest =
   | {
       kind: 'tool'; name: string; args: Record<string, unknown>; role: string;
       callId: string | null; round: number | null;
-      /** Parent resolves only the explicitly selected procedure graph. */
-      selectedBlobs?: Array<{ handle: string; b64: string; mime: string }>;
     }
   /** 回执与错误按 language 措辞。 */
   | { kind: 'panel'; panel: string; method: string; args: unknown[]; language: Language }
   | { kind: 'storage-clear'; key: string }
   /** 投递时调用子进程登记的渲染回调；null 表示不生成事件正文。 */
-  | { kind: 'render-deferred'; type: string; renderId: number }
+  | { kind: 'render-deferred'; type: string }
   | { kind: 'shutdown' };
 
 /**
@@ -48,12 +41,11 @@ export type EngineRequest =
 export interface IpcToolOutcome {
   text: string;
   failed?: true;
-  blobs?: IpcBlob[];
+  blobs?: Array<
+    | { b64: string; mime: string; name?: string; fallbackText: string }
+    | { handle: string; fallbackText: string }
+  >;
 }
-
-export type IpcBlob =
-  | { b64: string; mime: string; name?: string; fallbackText: string }
-  | { handle: string; fallbackText: string };
 
 /** 主 → 子:单向投递 */
 export type EngineCast =
@@ -82,7 +74,6 @@ export type EngineNote =
   | {
       kind: 'arm-deferred';
       type: string;
-      renderId: number;
       senderKey?: string;
       meta?: Record<string, unknown>;
       tags?: readonly EventTag[];
@@ -95,15 +86,13 @@ export type EngineNote =
       /** 环境提示词的世界身份一行,按当前连接的目标算 */
       worldLine: string;
       storage: StorageStat[];
-      promptVars: Record<'minecraft.current_task' | 'minecraft.goals', string>;
-      requestFacts: WorldRequestFacts | null;
     };
 
 /** 子进程调用宿主并等待结果。跨进程 drain 仅支持读取本 World 来源的事件。 */
 export type HostRequest =
   | {
       kind: 'push';
-      evt: Omit<Parameters<WorldHost['pushEvent']>[0], 'blobs'> & { blobs?: IpcBlob[] };
+      evt: Omit<EventEnvelope, 'cursor' | 'origin'> & { origin?: EventEnvelope['origin'] };
       opts?: PushOptions;
     }
   | { kind: 'drain' }

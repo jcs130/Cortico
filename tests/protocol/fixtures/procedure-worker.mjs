@@ -20,6 +20,6 @@ try{
     onInvocation:event=>parentPort.postMessage({kind:'invocation',event}),
     capabilities:scope=>({document:harden({read:()=>rpc(scope,'read',[]),replace:(before,after)=>rpc(scope,'replace',[before,after])})}),
   });
-  const result=await program.run(workerData.params);
+  const result=workerData.validate?program.validate():await program.run(workerData.params);
   parentPort.postMessage({kind:'done',result});
 }catch(error){parentPort.postMessage({kind:'done',error:String(error)});}

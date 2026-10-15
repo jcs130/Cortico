@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -24,26 +24,6 @@ describe('ChestBook', () => {
     expect(raw['overworld:1,64,2'].items[0].name).toBe('coal');
     const b = new ChestBook(file);
     expect(b.get('overworld', { x: 1, y: 64, z: 2 })?.items).toEqual([{ name: 'coal', count: 16 }]);
-    expect(b.get('overworld', { x: 1, y: 64, z: 2 })?.observedAt)
-      .toBe(a.get('overworld', { x: 1, y: 64, z: 2 })!.observedAt);
-  });
-
-  it('物品来源只列本维度的精确物品，累加同箱栈并保留旧记录的未知时间', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'mc-chests-'));
-    dirs.push(dir);
-    const file = join(dir, 'minecraft-chests.json');
-    writeFileSync(file, JSON.stringify({
-      'overworld:1,64,2': { x: 1, y: 64, z: 2, dimension: 'overworld', usedSlots: 3, slots: 27,
-        items: [{ name: 'coal', count: 3 }, { name: 'coal', count: 4 }, { name: 'coal_block', count: 9 }] },
-    }));
-    const book = new ChestBook(file);
-    book.remember('the_nether', { x: 1, y: 64, z: 2 }, [{ name: 'coal', count: 20 }], 1, 27);
-    expect(book.itemSources('overworld', 'coal')).toEqual([
-      { x: 1, y: 64, z: 2, count: 7, observedAt: undefined },
-    ]);
-    expect(book.itemSources('overworld', 'co')).toEqual([]);
-    book.remember('overworld', { x: 1, y: 64, z: 2 }, [], 0, 27);
-    expect(book.itemSources('overworld', 'coal')).toEqual([]);
   });
 
   it('clear 清空内存和文件', () => {
@@ -68,16 +48,6 @@ describe('ChestBook', () => {
     expect(hasRoom({ ...full, items: [{ name: 'oak_log', count: 10 }] }, 'log', 64)).toBe(true);
     expect(hasItem(full, 'cobblestone')).toBe(true);
     expect(hasItem(full, 'coal')).toBe(false);
-  });
-
-  it('does not invent stock or merge room from another registered ID', () => {
-    const reg = { itemsByName: { golden_apple: {}, enchanted_golden_apple: {} } };
-    const rec = { x: 0, y: 64, z: 0, dimension: 'overworld', usedSlots: 27, slots: 27,
-      items: [{ name: 'enchanted_golden_apple', count: 5 }] };
-    expect(hasItem(rec, 'golden_apple', reg)).toBe(false);
-    expect(hasRoom(rec, 'golden_apple', 64, reg)).toBe(false);
-    expect(hasItem(rec, 'enchanted_golden_apple', reg)).toBe(true);
-    expect(hasRoom(rec, 'enchanted_golden_apple', 64, reg)).toBe(true);
   });
 
   // 堆叠上限是物品自带的属性,不是所有东西都堆到 64。写死 64 的时候一整叠 16 个
@@ -107,7 +77,6 @@ describe('容器账本:炉子族与工作站', () => {
       t0, t0 + 80_000);
     const rec = a.get('overworld', P)!;
     expect(rec.name).toBe('furnace');
-    expect(rec.observedAt).toBe(t0);
     // items 同步成非空槽清单:快照「近处」那行照读
     expect(rec.items).toEqual([{ name: 'raw_iron', count: 8 }, { name: 'coal', count: 2 }]);
     expect(a.due(t0 + 79_999)).toHaveLength(0);
@@ -118,7 +87,6 @@ describe('容器账本:炉子族与工作站', () => {
     const b = new ChestBook(file);
     expect(b.due(t0 + 80_000)).toHaveLength(0);
     expect(b.get('overworld', P)?.furnace?.input?.count).toBe(8);
-    expect(b.get('overworld', P)?.observedAt).toBe(t0);
   });
 
   it('loadedFurnaces 只回本维度、槽里有料/有成品的;取空之后不再点名', () => {

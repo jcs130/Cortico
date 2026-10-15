@@ -1,32 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { Vec3 } from 'vec3';
-import { EventEmitter } from 'node:events';
-import type { Bot } from 'mineflayer';
-import { watchFlightAbilities } from '../../../src/worlds/minecraft/flight.ts';
 import {
-  bearing, bodyInWater, canSeeBlockAt, classifyEntity, cropAgeAt, dayNightTransition, droppedStackOf, facingDegrees,
-  facingOf, farmlandMoistureAt, findBankCell, isNight, isBackground, isRaining, narrateWorld, narrateWorldSegments,
+  bearing, bodyInWater, classifyEntity, cropAgeAt, dayNightTransition, droppedStackOf, facingDegrees,
+  facingOf, findBankCell, isNight, isBackground, isRaining, narrateWorld, narrateWorldSegments,
   pitchPhrase, pocketScan, scanMatureCrops, snapshotFingerprint, snapshotFromBot, standCellsAround,
   timePhrase, villagerNote, wetNote, worldDelta,
   type BlockReader, type ItemStack, type WorldSnapshot,
 } from '../../../src/worlds/minecraft/terrain.ts';
 import { nowIso, SYSTEM_TIMEZONE } from '../../../src/core/util.ts';
-
-describe('canSeeBlockAt 的坐标契约', () => {
-  it('普通坐标对象经 Vec3 转换后交给 Mineflayer，不依赖调用方持有 Vec3 原型', () => {
-    let lookedUp: Vec3 | null = null;
-    const bot = {
-      blockAt: (point: Vec3) => {
-        lookedUp = point.floored();
-        return { name: 'oak_leaves', position: lookedUp };
-      },
-      canSeeBlock: () => true,
-    };
-    expect(canSeeBlockAt(bot, JSON.parse('{"x":2.5,"y":65,"z":-1.2}'))).toBe(true);
-    expect(lookedUp).toEqual(new Vec3(2, 65, -2));
-    expect(canSeeBlockAt({ ...bot, blockAt: () => null }, { x: 2, y: 65, z: -2 })).toBe(false);
-  });
-});
 
 function snap(over: Partial<WorldSnapshot> = {}): WorldSnapshot {
   return {
@@ -233,59 +213,8 @@ describe('snapshotFromBot 的现实时刻', () => {
     expect(snapshotFromBot(bareBot()).realTime.slice(-6)).toBe(nowIso(SYSTEM_TIMEZONE).slice(-6));
   });
 
-  it('reports unknown, granted and revoked flight from real ability packets without time-only snapshot churn', () => {
-    const client = new EventEmitter();
-    const bot = Object.assign(new EventEmitter(), bareBot(), { _client: client });
-    const stop = watchFlightAbilities(bot as unknown as Bot);
-    try {
-      expect(narrateWorld(snapshotFromBot(bot))).toContain('飞行权限尚未从服务端核实');
-      client.emit('abilities', { flags: 4 });
-      const granted = snapshotFromBot(bot);
-      expect(granted.flight).toMatchObject({ allowed: true, controlActive: false, serverFlying: false });
-      expect(narrateWorld(granted)).toContain('飞行权限：允许');
-      expect(narrateWorld(granted)).toContain('许可期限：服务端未提供');
-      expect(snapshotFingerprint({ ...granted, flight: { ...granted.flight!, observedAtMs: Date.now() + 1000 } }))
-        .toBe(snapshotFingerprint(granted));
-      client.emit('abilities', { flags: 6 });
-      const flying = snapshotFromBot(bot);
-      expect(narrateWorld(flying)).toContain('最近服务端飞行标志：开启');
-      expect(snapshotFingerprint(flying)).not.toBe(snapshotFingerprint(granted));
-      client.emit('abilities', { flags: 0 });
-      const revoked = snapshotFromBot(bot);
-      expect(narrateWorld(revoked)).toContain('飞行权限：未授予');
-      expect(snapshotFingerprint(revoked)).not.toBe(snapshotFingerprint(flying));
-    } finally { stop(); }
-  });
-
-  it('retains the observed hover termination reason and explicit deadline in world facts', () => {
-    const s = snap({ flight: { allowed: false, flying: false, controlActive: false, serverFlying: false,
-      observedAtMs: 1000, expiresAtMs: 4000, lastStop: { reason: '服务端已收回飞行权限', atMs: 4000 } } });
-    const text = narrateWorld(s);
-    expect(text).toContain('客户端悬停控制：未运行');
-    expect(text).toContain('上次停止飞行：服务端已收回飞行权限');
-    expect(text).toContain('1970-01-01T00:00:04.000Z');
-    expect(snapshotFingerprint(s)).not.toBe(snapshotFingerprint(snap({ flight: { ...s.flight!, lastStop: undefined } })));
-  });
-
   it('指定了就按指定的那个时区报', () => {
     expect(snapshotFromBot(bareBot(), { timezone: 'UTC' }).realTime).toMatch(/\+00:00$/);
-  });
-
-  it('active-window cursor is separate from the hand and inventory and changes snapshot facts', () => {
-    const bot = bareBot();
-    const cursor = { name: 'wooden_hoe', count: 1 };
-    const before = snapshotFromBot(bot);
-    const after = snapshotFromBot({ ...bot, currentWindow: { selectedItem: cursor } });
-    expect(after.cursorItem).toMatchObject(cursor);
-    expect(after.inventory).toEqual([]);
-    expect(after.heldItem).toBeNull();
-    expect(narrateWorld(after)).toContain('鼠标光标：木锄');
-    expect(snapshotFingerprint(after)).not.toBe(snapshotFingerprint(before));
-    const gear = (s: WorldSnapshot) => narrateWorldSegments(s).find(segment => segment.key === 'gear')!;
-    expect(gear(after).cmp).not.toBe(gear(before).cmp);
-    // An empty current-window cursor takes precedence over an old inventory-window copy.
-    const cleared = snapshotFromBot({ ...bot, inventory: { items: () => [], selectedItem: cursor }, currentWindow: { selectedItem: null } });
-    expect(cleared.cursorItem).toBeNull();
   });
 });
 
@@ -308,18 +237,6 @@ describe('天候读的是雨量不是 isRaining', () => {
     expect(isRaining({ rainState: 1, isRaining: false })).toBe(true);
     // 真晴天:reason 1 让 mineflayer 把 isRaining 置成了 true
     expect(isRaining({ rainState: 0, isRaining: true })).toBe(false);
-  });
-
-  it('雨量大于零但当前群系禁止降水时不显示雨', () => {
-    const bot = {
-      rainState: 1,
-      entity: { position: { x: -586, y: 87, z: -317 } },
-      blockAt: () => ({ biome: { id: 113 } }),
-      registry: { biomes: { 113: { has_precipitation: false } } },
-    };
-    expect(isRaining(bot)).toBe(false);
-    bot.registry.biomes[113].has_precipitation = true;
-    expect(isRaining(bot)).toBe(true);
   });
 });
 
@@ -652,8 +569,8 @@ describe('bearing / facingOf', () => {
   });
 
   it('yaw → 罗盘度数:北=0 东=90 南=180 西=270,给解说定位用', () => {
-    expect(facingDegrees(0)).toBe(0);
-    expect(facingDegrees(Math.PI)).toBe(180);
+    expect(facingDegrees(0)).toBe(180);
+    expect(facingDegrees(Math.PI)).toBe(0);
     expect(facingDegrees(Math.PI / 2)).toBe(270);
     expect(facingDegrees(-Math.PI / 2)).toBe(90);
     // 八方位只有 45° 分辨率;转头 20° 画面换一半,度数才对得上
@@ -664,14 +581,14 @@ describe('bearing / facingOf', () => {
   it('俯仰只在明显低头抬头时说一句', () => {
     expect(pitchPhrase(0)).toBeNull();
     expect(pitchPhrase(0.2)).toBeNull();
-    expect(pitchPhrase(Math.PI / 5)).toBe('抬头往上看');
-    expect(pitchPhrase(Math.PI / 3)).toBe('仰头看天');
-    expect(pitchPhrase(-Math.PI / 3)).toBe('几乎盯着脚下');
+    expect(pitchPhrase(Math.PI / 5)).toBe('低头看着地面');
+    expect(pitchPhrase(Math.PI / 3)).toBe('几乎盯着脚下');
+    expect(pitchPhrase(-Math.PI / 3)).toBe('仰头看天');
   });
 
-  it('yaw → 朝向:mineflayer 的 yaw=0 是朝北', () => {
-    expect(facingOf(0)).toBe('north');
-    expect(facingOf(Math.PI)).toBe('south');
+  it('yaw → 朝向:mineflayer 的 yaw=0 是朝南', () => {
+    expect(facingOf(0)).toBe('south');
+    expect(facingOf(Math.PI)).toBe('north');
     expect(facingOf(Math.PI / 2)).toBe('west');
   });
 });
@@ -765,30 +682,6 @@ describe('narrateWorld', () => {
     expect(text).toContain('西边 1.5 格是箱子（圆石×378、煤炭×6）');
     expect(text).toContain('东边 4 格是箱子（没开过）');
   });
-
-  it('可见交互对象提供绝对坐标，不从玩家站位或方位距离猜点击目标', () => {
-    const text = narrateWorld(snap({
-      position: { x: -573, y: 68, z: -483 },
-      nearbyBlocks: [
-        { name: 'green_bed', distance: 1.8, direction: 'west', dy: 0, x: -575, y: 68, z: -483 },
-        { name: 'furnace', distance: 2, direction: 'north', dy: 0, x: -573, y: 68, z: -485 },
-        { name: 'crafting_table', distance: 2, direction: 'east', dy: 0, x: -571, y: 68, z: -483 },
-        { name: 'chest', distance: 3, direction: 'south', dy: 0, x: -573, y: 68, z: -480, contents: null },
-      ],
-    }));
-    expect(text).toContain('绿色床（坐标 -575, 68, -483）');
-    expect(text).toContain('熔炉（坐标 -573, 68, -485）');
-    expect(text).toContain('工作台（坐标 -571, 68, -483）');
-    expect(text).toContain('箱子（没开过）（坐标 -573, 68, -480）');
-  });
-
-  it('同种方块落在相同方向与距离分桶时，坐标变化仍投递新事实', () => {
-    const block = { name: 'green_bed', distance: 4, direction: 'north' as const, dy: 0, x: 100, y: 64, z: -24 };
-    const before = narrateWorldSegments(snap({ nearbyBlocks: [block] })).find(s => s.key === 'structure')!;
-    const after = narrateWorldSegments(snap({ nearbyBlocks: [{ ...block, x: 101 }] })).find(s => s.key === 'structure')!;
-    expect(after.cmp).not.toBe(before.cmp);
-    expect(after.text).toContain('坐标 101, 64, -24');
-  });
 });
 
 describe('作物与耕地感知', () => {
@@ -844,15 +737,12 @@ describe('作物与耕地感知', () => {
       .not.toBe(narrateWorld(one({ name: 'farmland', moisture: { value: 5, max: 7 } })));
   });
 
-  it('snapshotFromBot 读作物与门状态，给多扇同材质门各自的精确坐标', () => {
-    const spots: Record<number, Pos[]> = {
-      1: [pos(3, 64, 0)], 2: [pos(0, 63, 3)],
-      3: [pos(1, 64, 0), pos(2, 64, 0)],
-    };
+  it('snapshotFromBot 读 age/moisture:小麦与耕地带着状态进快照', () => {
+    const spots: Record<number, Pos[]> = { 1: [pos(3, 64, 0)], 2: [pos(0, 63, 3)] };
     const bot = {
       entity: { position: pos(0.5, 64, 0.5) },
       entities: {},
-      registry: { biomes: {}, blocksByName: { wheat: { id: 1 }, farmland: { id: 2 }, spruce_door: { id: 3 } } },
+      registry: { biomes: {}, blocksByName: { wheat: { id: 1 }, farmland: { id: 2 } } },
       // 判据形态:水/岩浆仍按 id 数组各查一次,其余走一次函数判据(见 world.ts 的注释)
       findBlocks: ({ matching }: { matching: number[] | ((b: { type: number }) => boolean) }) =>
         (typeof matching === 'function'
@@ -860,9 +750,7 @@ describe('作物与耕地感知', () => {
           : matching.flatMap((id) => spots[id] ?? [])),
       blockAt: (p: Pos) => (p.y === 63
         ? { name: 'farmland', position: p, getProperties: () => ({ moisture: 4 }) }
-        : p.x === 1 || p.x === 2
-          ? { name: 'spruce_door', position: p, getProperties: () => ({ open: p.x === 2 }) }
-          : { name: 'wheat', position: p, getProperties: () => ({ age: 5 }) }),
+        : { name: 'wheat', position: p, getProperties: () => ({ age: 5 }) }),
       canSeeBlock: () => true,
       world: { raycast: () => null },
       game: { dimension: 'overworld', gameMode: 'survival' },
@@ -874,37 +762,10 @@ describe('作物与耕地感知', () => {
     };
     const s = snapshotFromBot(bot);
     expect(s.nearbyBlocks.find((b) => b.name === 'wheat')?.age).toEqual({ value: 5, max: 7 });
-    expect(s.nearbyBlocks.find((b) => b.name === 'wheat')?.soil).toEqual({ name: 'farmland', x: 3, y: 63, z: 0, moisture: { value: 4, max: 7 } });
     expect(s.nearbyBlocks.find((b) => b.name === 'farmland')?.moisture).toEqual({ value: 4, max: 7 });
-    expect(s.nearbyBlocks.filter((b) => b.name === 'spruce_door')).toMatchObject([
-      { x: 1, y: 64, z: 0, open: false },
-      { x: 2, y: 64, z: 0, open: true },
-    ]);
     const text = narrateWorld(s);
     expect(text).toContain('小麦（age 5/7）');
     expect(text).toContain('耕地（moisture 4/7）');
-    expect(text).toContain('该株正下方 3, 63, 0：耕地，moisture 4/7');
-    expect(text).toContain('云杉门（关着，坐标 1, 64, 0）');
-    expect(text).toContain('云杉门（开着，坐标 2, 64, 0）');
-    const changed = { ...bot, blockAt: (p: Pos) => p.x === 3 && p.y === 63
-      ? { name: 'farmland', position: p, getProperties: () => ({ moisture: 0 }) } : bot.blockAt(p) };
-    const dry = snapshotFromBot(changed);
-    expect(dry.nearbyBlocks.find(b => b.name === 'farmland')?.moisture?.value).toBe(4);
-    expect(narrateWorld(dry)).toContain('该株正下方 3, 63, 0：耕地，moisture 0/7');
-    expect(narrateWorldSegments(dry).find(segment => segment.key === 'structure')?.cmp)
-      .not.toBe(narrateWorldSegments(s).find(segment => segment.key === 'structure')?.cmp);
-    const unknown = snapshotFromBot({ ...bot, blockAt: (p: Pos) => p.x === 3 && p.y === 63 ? null : bot.blockAt(p) });
-    expect(narrateWorld(unknown)).toContain('该株正下方土壤未读到');
-  });
-
-  it('single-cell moisture requires an actual farmland property and accepts protocol strings', () => {
-    for (const [block, expected] of [
-      [null, null], [{ name: 'water', getProperties: () => ({ level: 0 }) }, null],
-      [{ name: 'farmland' }, null], [{ name: 'farmland', getProperties: () => ({ moisture: '0' }) }, { value: 0, max: 7 }],
-      [{ name: 'farmland', getProperties: () => ({ moisture: '7' }) }, { value: 7, max: 7 }],
-    ] as const) {
-      expect(farmlandMoistureAt({ blockAt: () => block }, { x: 2, y: 63, z: 0 })).toEqual(expected);
-    }
   });
 });
 
@@ -959,7 +820,7 @@ describe('narrateWorldSegments(分段去重的数据源)', () => {
     const segs = narrateWorldSegments(s);
     expect(segs.map((g) => g.key))
       .toEqual([
-        'place', 'flight', 'clock', 'realclock', 'body', 'gear', 'equip', 'life', 'structure', 'terrain', 'players',
+        'place', 'clock', 'realclock', 'body', 'gear', 'equip', 'life', 'structure', 'terrain', 'players',
       ]);
     expect(segs.map((g) => g.text).filter(Boolean).join('\n')).toBe(narrateWorld(s));
   });
@@ -1014,8 +875,8 @@ describe('narrateWorldSegments(分段去重的数据源)', () => {
     for (const t of ['火把', '刷怪', '能压掉']) expect(dark.text).not.toContain(t);
     expect(clockOf({ light: 1 }).text).toContain('什么都看不见');
     // 微光以上、以及采不到样,都不加字
-    expect(clockOf({ light: 2 }).text).toBe('游戏里现在是正午前后。');
-    expect(clockOf({ light: null }).text).toBe('游戏里现在是正午前后。');
+    expect(clockOf({ light: 2 }).text).toBe('现在是正午前后。');
+    expect(clockOf({ light: null }).text).toBe('现在是正午前后。');
   });
 
   it('现实时钟自成一段:报到分,与游戏内时辰互不牵连', () => {
@@ -1031,14 +892,6 @@ describe('narrateWorldSegments(分段去重的数据源)', () => {
     expect(segOf({ realTime: '2026-08-19T21:30:00+08:00' }, 'clock').cmp)
       .toBe(segOf({}, 'clock').cmp);
     expect(segOf({ timeOfDay: 18000 }, 'realclock').cmp).toBe(segOf({}, 'realclock').cmp);
-  });
-
-  it('游戏夜晚与现实白天同时标明各自的时间来源', () => {
-    const night = snap({ timeOfDay: 18000, realTime: '2026-08-19T10:15:00+08:00' });
-    const text = narrateWorld(night);
-    expect(text).toContain('游戏里现在是');
-    expect(text).toContain('天黑着');
-    expect(text).toContain('现实世界现在是 8 月 19 日 10:15。');
   });
 
   it('明暗只有黑与不黑两态:亮度数字变动不再牵动 clock 段', () => {
@@ -1067,17 +920,17 @@ describe('narrateWorldSegments(分段去重的数据源)', () => {
       narrateWorldSegments(snap(), null, prevBag).find((g) => g.key === 'gear')!.text;
     // 一条都没变
     expect(gear([{ name: 'oak_log', count: 17 }, { name: 'bread', count: 3 }]))
-      .toBe('手里拿着石镐。鼠标光标空着。');
+      .toBe('手里拿着石镐。');
     // 数字变了的按现在的存量印,没变的那条不印
     expect(gear([{ name: 'oak_log', count: 17 }, { name: 'bread', count: 1 }]))
-      .toBe('手里拿着石镐。包里变的：面包×3。鼠标光标空着。');
+      .toBe('手里拿着石镐。包里变的：面包×3。');
     // 新出现的一样按存量印
-    expect(gear([{ name: 'oak_log', count: 17 }])).toBe('手里拿着石镐。包里变的：面包×3。鼠标光标空着。');
+    expect(gear([{ name: 'oak_log', count: 17 }])).toBe('手里拿着石镐。包里变的：面包×3。');
     // 整个不见了的列不出存量,单说一句
     expect(gear([{ name: 'oak_log', count: 17 }, { name: 'bread', count: 3 }, { name: 'torch', count: 4 }]))
-      .toBe('手里拿着石镐。火把没了。鼠标光标空着。');
+      .toBe('手里拿着石镐。火把没了。');
     // 不给基线(全量锚那一拍、还没有基线)照旧整份印
-    expect(gear(null)).toBe('手里拿着石镐。包里有：橡木原木×17、面包×3。鼠标光标空着。');
+    expect(gear(null)).toBe('手里拿着石镐。包里有：橡木原木×17、面包×3。');
   });
 
   it('比对键只认当刻存量,与给不给基线无关', () => {
@@ -1275,7 +1128,7 @@ describe('snapshotFromBot 运动与方位', () => {
     const snap = snapshotFromBot(bot);
     expect(snap.motion).toBe('walking');
     expect(snap.heading).toBe('north');
-    expect(snap.facing).toBe('south'); // 可以朝南看、同时向北走，视线不等于速度方向
+    expect(snap.facing).toBe('north');
     const fast = { ...bot, entity: { ...bot.entity, velocity: { x: 0, y: 0, z: -0.3 } } };
     expect(snapshotFromBot(fast).motion).toBe('sprinting');
   });

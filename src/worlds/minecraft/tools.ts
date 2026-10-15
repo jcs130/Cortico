@@ -4,14 +4,12 @@
  * 挑与装备在这里,挖与放在技能族里;回执里的那一句由 toolTraceNote 出。
  */
 import type { Bot } from 'mineflayer';
-import type { Block } from 'prismarine-block';
 import { itemsInReach, namedLike, offHandItem, type InvItem } from './inventory.ts';
-import { readDurability, readEnchants } from './item-facts.ts';
 import { itemMatchesPick, pickLabel, pickTargetOf } from './item-pick.ts';
+import { readDurability } from './item-facts.ts';
 import { SkillBlocked, type ReserveHit, type SkillContext, type ToolTrace } from './skill-context.ts';
 import { matchItemName } from './chests.ts';
 import { zhName } from './names.ts';
-import { itemCustomName } from './item-display.ts';
 
 /**
  * 工具材质的等级序,好的在前;倒着读就是等级序的低往高。
@@ -123,36 +121,9 @@ export function reservedBy(ctx: SkillContext, name: string): boolean {
   return (ctx.policy?.get().reserve ?? []).some((r) => matchItemName(r, name));
 }
 
-type MiningBlock = { name: string; canHarvest?: Block['canHarvest']; digTime?: Block['digTime'] };
-
-/** 可徒手收获时，耗材工具至少省一个原版 tick 才有速度收益。 */
-function fasterThanHand(bot: Bot, block: MiningBlock, items: InvItem[]): InvItem[] {
-  if (!block.digTime) return [];
-  const creative = bot.game?.gameMode === 'creative';
-  const eyeHeight = (bot.entity as Bot['entity'] & { eyeHeight?: number })?.eyeHeight;
-  const eyeBlock = typeof eyeHeight === 'number'
-    ? bot.blockAt(bot.entity.position.offset(0, eyeHeight, 0)) : null;
-  const inWater = eyeBlock?.name === 'water' || eyeBlock?.name === 'flowing_water';
-  const notOnGround = bot.entity?.onGround === false;
-  const headSlot = bot.getEquipmentDestSlot?.('head');
-  const helmet = typeof headSlot === 'number' ? bot.inventory.slots?.[headSlot] : null;
-  const headEnchants = helmet ? readEnchants(helmet, bot.registry) : [];
-  const duration = (item: InvItem | null): number => block.digTime!(
-    item?.type ?? null, creative, inWater, notOnGround,
-    [...(item ? readEnchants(item, bot.registry) : []), ...headEnchants]
-      .map(({ name, level }) => ({ name, lvl: level })),
-    bot.entity?.effects as Parameters<Block['digTime']>[5],
-  );
-  const handMs = duration(null);
-  return items.filter((item) => {
-    const toolMs = duration(item);
-    return Number.isFinite(handMs) && Number.isFinite(toolMs) && handMs - toolMs >= 50;
-  });
-}
-
 export function chooseTool(
   bot: Bot,
-  block: MiningBlock,
+  block: { name: string; canHarvest?: (type: number | null) => boolean },
   ctx: SkillContext,
   plan: MiningToolPlan,
 ): ToolDecision {
@@ -187,6 +158,10 @@ export function chooseTool(
     };
   }
 
+  if (plan.mode === 'economy' && harvest.length === 0) {
+    return { pick: null, canDrop: true, need, error: null };
+  }
+
   const kinds = new Set(harvest.length > 0
     ? harvest.map(toolKindOf)
     : [...(def?.material ?? '').matchAll(/mineable\/(\w+)/g)].map((m) => m[1]));
@@ -196,12 +171,6 @@ export function chooseTool(
   // 副手那件只在包里没有能挖出掉落的同类工具时才动用,不拆掉副手上原来的安排
   const inBag = ofKind(bot.inventory.items());
   const inClass = inBag.some(canDrop) ? inBag : ofKind(itemsInReach(bot));
-  if (plan.mode === 'economy' && harvest.length === 0) {
-    const healthy = inClass.filter((item) => canDrop(item) && nearBreak(item) === null
-      && !reservedBy(ctx, item.name));
-    const pick = fasterThanHand(bot, block, healthy).sort(toolOrder('economy'))[0] ?? null;
-    return { pick, canDrop: true, need, error: null };
-  }
   if (inClass.length === 0 && harvest.length === 0) {
     return { pick: null, canDrop: true, need, error: null };
   }
@@ -257,7 +226,7 @@ export function recordToolChoice(
   if (first || changed) {
     if (pick === null) {
       trace.notes.push(first
-        ? `${zhName(block)}可徒手采集,已换下耐久工具`
+        ? `${zhName(block)}不需工具,已换下耐久工具`
         : `挖到${zhName(block)}时换下耐久工具`);
     } else if (plan.mode === 'exact') {
       trace.notes.push(`本步临时指定${pick}`);
@@ -284,7 +253,7 @@ export function toolTraceNote(trace: ToolTrace | undefined): string {
 /** harvestTools 限定能产出掉落的工具；没有此限制时，material 的 mineable/tool 只决定速度。 */
 export async function equipToolFor(
   bot: Bot,
-  block: MiningBlock,
+  block: { name: string; canHarvest?: (type: number | null) => boolean },
   ctx: SkillContext,
   plan?: MiningToolPlan,
 ): Promise<void> {
@@ -351,7 +320,7 @@ export function harvestFact(
   b: { name: string; canHarvest?: (t: number | null) => boolean },
 ): string | null {
   if (typeof b.canHarvest !== 'function' || b.canHarvest(bot.heldItem?.type ?? null)) return null;
-  const hand = bot.heldItem ? itemCustomName(bot.heldItem) ?? zhName(bot.heldItem.name) : '空手';
+  const hand = bot.heldItem ? zhName(bot.heldItem.name) : '空手';
   const need = minHarvestTool(bot, b.name);
   return `${hand}挖${zhName(b.name)}不掉东西${need ? `,要${zhName(need)}及以上` : ''}`;
 }
@@ -363,13 +332,12 @@ export function harvestFact(
  */
 export function equippedAlready(
   bot: Bot, item: string, hand?: 'main' | 'off', pick?: string,
-): { name: string; displayName?: string; where: string } | null {
+): { name: string; where: string } | null {
   const dest = hand === 'off' ? 'off-hand' : hand === 'main' ? 'hand' : equipDestOf(item, bot.registry);
   if (dest === 'hand') return null;
   const slot = bot.inventory?.slots?.[bot.getEquipmentDestSlot(dest)];
-  if (!slot || !namedLike(item, slot.name, bot?.registry) || !itemMatchesPick(pick, slot, bot.registry as never)) return null;
-  const displayName = pickTargetOf(slot, bot.registry as never).displayName;
-  return { name: slot.name, ...(displayName ? { displayName } : {}), where: dest === 'off-hand' ? '挂在副手' : '穿在身上' };
+  if (!slot || !namedLike(item, slot.name) || !itemMatchesPick(pick, slot, bot.registry as never)) return null;
+  return { name: slot.name, where: dest === 'off-hand' ? '挂在副手' : '穿在身上' };
 }
 
 export const HANDHELD_SUFFIXES = ['_pickaxe', '_axe', '_shovel', '_hoe', '_sword'];
@@ -377,10 +345,10 @@ export const HANDHELD_SUFFIXES = ['_pickaxe', '_axe', '_shovel', '_hoe', '_sword
 /**
  * equip 的目标槽位。盔甲的槽位是物品自带的属性(minecraft-data 的
  * `equipmentSlot`/`equipDest`),不必自己按名字猜——猜出来的表迟早跟不上版本。
- * 数据里没写的一律拿主手;盾牌与不死图腾的副手位按原版用途单列。
+ * 数据里没写的一律拿主手;盾牌的副手位是协议约定,数据里没有,单列一条。
  */
 export function equipDestOf(name: string, registry?: Bot['registry']): 'head' | 'torso' | 'legs' | 'feet' | 'off-hand' | 'hand' {
-  if (name === 'shield' || name === 'totem_of_undying') return 'off-hand';
+  if (name === 'shield') return 'off-hand';
   const def = registry
     ? (registry.itemsByName as Record<string, { equipDest?: string; equipmentSlot?: string } | undefined>)[name]
     : undefined;

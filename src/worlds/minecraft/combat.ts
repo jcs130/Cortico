@@ -28,22 +28,15 @@ import pathfinderPkg from 'mineflayer-pathfinder';
 import { Vec3 } from 'vec3';
 import type { Logger } from '../../core/types.ts';
 import type { MinecraftLog } from './log.ts';
-import type { SkillCall } from './skills.ts';
-import type { CombatResult, CombatScene } from './combat-tactics.ts';
 import {
-  HARD, blend, blur, decide, dirSlot, newMap, slotDir, write, writeSlot, type Map16,
+  HARD, blend, blur, decide, newMap, slotDir, write, writeSlot, type Map16,
 } from './combat-context.ts';
 import { HOSTILE, bestWeapon, dropOwnedGoal, meleeCooldownMs, releaseBody, setOwnedGoal } from './executor.ts';
-import { walkOnlyPath } from './travel.ts';
 import type { FightMode } from './policy.ts';
 import { zhEntity, zhName } from './names.ts';
 import { zhErrorText } from './receipt.ts';
-import { BURNING_BLOCKS, SCORCHING_FLOOR, bodyInWater, canSeeEntity, findBankCell, headInWater } from './terrain.ts';
+import { BURNING_BLOCKS, SCORCHING_FLOOR, bodyInWater, findBankCell, headInWater } from './terrain.ts';
 import { piglinIsHostile } from './piglin.ts';
-import { corridorSafe } from './idle-actions.ts';
-import { consumeHeldFood } from './skills-craft.ts';
-import { itemsInReach } from './inventory.ts';
-import { RISKY_FOODS } from './nutrition.ts';
 import {
   RANGED_EXIT_RANGE,
   chooseHybridWeapon,
@@ -73,9 +66,6 @@ const SOLO_SPACE = 6;
 const SPACE_PREDICT_S = 0.25;
 /** 接近毫无进展这么久就交给寻路器 */
 const STUCK_PATH_MS = 1_500;
-/** 战斗诊断只落运行日志，不送进人格上下文。 */
-const TRAJECTORY_SAMPLE_MS = 250;
-const MOVEMENT_STALL_MS = 1_000;
 /** E1:场上没怪之后再等这么久才收工(防"炸完→退出→新怪→再进入"抖动) */
 const CLEAR_HOLD_MS = 3_000;
 /** E5:连续这么久打不着又靠不近就收工 */
@@ -112,9 +102,6 @@ const RETREAT_SAFE_HOLD_MS = 1_500;
 const RETREAT_STALL_MS = 1_500;
 /** 到时只升级策略,不能在威胁仍近时把撤退记成成功 */
 const RETREAT_MAX_MS = 8_000;
-/** 会话级总上限:连续战斗(含 fight/retreat 振荡)超此时长强制释放,
- * 防"够不着的怪"无限锁执行器(09-29 水面战斗锁事故补闸)。 */
-const COMBAT_TOTAL_CAP_MS = 240_000;
 /**
  * 撤退中连续未受击的时限；到期且撤退已超时、无进展时交还身体。
  * 再次受击仍由 onHurtBy 重新处理。
@@ -125,8 +112,6 @@ const STUCK_COOLDOWN_MS = 10_000;
 
 /** 远程怪:该举盾、该贴脸 */
 const RANGED = new Set(['skeleton', 'stray', 'bogged', 'pillager', 'witch', 'blaze', 'ghast', 'illusioner', 'breeze']);
-const FOOD_RETRY_MS = 5_000;
-const OFFHAND_RETRY_MS = 5_000;
 
 /** E7:反射不主动交战;挨打时除 REPORT_ONLY 外一律撤 */
 const NO_FIGHT = new Set(['warden', 'wither', 'ender_dragon']);
@@ -172,8 +157,6 @@ export function footingAhead(bot: Bot, dx: number, dz: number): boolean {
 
 export interface CombatTuning {
   enabled: boolean;
-  /** 服务端明确确认在试炼层内；需要主动清怪才能推进。 */
-  arena?: boolean;
   /** 触发半径:这么近才算"找上门",不主动招惹(档 1 没有先手) */
   engageRadius: number;
   /** 追击上限(格) */
@@ -190,7 +173,7 @@ export interface CombatTuning {
   fleeHealth: number;
   /**
    * 主动进场的条件(mc_policy 的 `fight`)。只接在 `watchTick` 那一条上:
-   * 受击处理与 E1–E9 退出闸独立于此模式。
+   * 不接 `onHurtBy`(挨打一律还手)、不接 E1–E9 任何一道退出闸。
    */
   fight: FightMode;
 }
@@ -201,11 +184,10 @@ interface CombatSessionOptions {
   /** 环境自保(岩浆/溺水反射/主动传送)正在进行:比战斗优先,期间不进场、进了也让位 */
   envBusy: () => boolean;
   /**
-   * 逃生任务持有身体期间，巡检与受击均不另起战斗。
+   * flee/surface/eat 任务正在逃生时，阻止近处敌对触发主动进场；
+   * 受击仍交给 onHurtBy 判定，战斗结束后从断点恢复任务。
    */
   taskEscaping?: () => boolean;
-  /** 已开始的进食占用主手；受击不另起战斗打断消费。 */
-  taskEating?: () => boolean;
   /** 主动 attack 已持有身体；被动三格巡检不得把同一场再接管一遍。 */
   taskFighting?: () => boolean;
   /**
@@ -220,10 +202,6 @@ interface CombatSessionOptions {
    * hurt=true 表示这句已讲明掉血来由,World 据此不再复述掉血播报。
    */
   emit: (text: string, urgent: boolean, hurt?: boolean) => void;
-  /** 进入低血撤退前可尝试不占用身体的服务端防护技能。 */
-  onLowHealth?: (bot: Bot) => void;
-  /** Observed encounter terminal state, including interruptions; no causal conclusion. */
-  report?: (result: CombatResult) => void;
   ranged?: CombatRangedActions;
   diag?: MinecraftLog;
   log: Logger;
@@ -245,7 +223,6 @@ interface Foe {
   reach: number;
   /** 水平距离,给站位用 */
   flat: number;
-  visible: boolean;
 }
 
 type EndReason = 'clear' | 'flee' | 'timeout' | 'stuck' | 'mc_stop' | 'env' | 'death' | 'gone' | 'busy' | 'preempt';
@@ -286,14 +263,7 @@ export class CombatSession {
   private watch: ReturnType<typeof setInterval> | null = null;
   private state: 'idle' | 'fighting' | 'retreating' = 'idle';
   private bot: Bot | null = null;
-  private releaseWalkOnly: (() => void) | null = null;
   private startedAt = 0;
-  private healthBefore: number | null = null;
-  private sceneBefore: CombatScene | undefined;
-  /** 会话级总_cap 起点:仅 idle→engage 时重置,内部 fight/retreat 振荡不重置 */
-  private sessionStartedAt = 0;
-  /** 总_cap 触发后的被动再进场冷却;受击自卫(hurt=true)不受此限 */
-  private capCooldownUntil = 0;
   private deadlineAt = 0;
   private cooldownUntil = 0;
   private cooldownNoticed = false;
@@ -342,12 +312,6 @@ export class CombatSession {
   private sprintSince = 0;
   private shieldUp = false;
   private shieldHoldUntil = 0;
-  private offhandEquipping = false;
-  private lastOffhandAttemptAt = Number.NEGATIVE_INFINITY;
-  private eating = false;
-  private supplyGeneration = 0;
-  private lastFoodAttemptAt = Number.NEGATIVE_INFINITY;
-  private lastSelfHurtAt = Number.NEGATIVE_INFINITY;
   private targetId = -1;
   private pathing = false;
   private pathUntil = 0;
@@ -366,14 +330,6 @@ export class CombatSession {
   private ctxCreeperAt = 0;
   private coverCell: { x: number; y: number; z: number } | null = null;
   private coverAt = 0;
-  private trajectoryAt = 0;
-  private trajectoryPos: { x: number; y: number; z: number } | null = null;
-  private movementIntent: { x: number; z: number } | null = null;
-  private tacticalMove: { origin: Vec3; destination: Vec3; expiresAtMs: number } | null = null;
-  private stallSince = 0;
-  private stallMode = '';
-  private pathRetryAfter = 0;
-  private readonly blockedHeadings: Array<{ x: number; z: number; until: number }> = [];
 
   /**
    * 出手记账:挥了几次、其中几次让目标掉了血。`bot.attack()` 只管发包,够不够得着
@@ -391,10 +347,7 @@ export class CombatSession {
   private lastRangedHitTargetId = -1;
   private lastRangedHitAt = 0;
 
-  private readonly onTick = (): void => {
-    this.sampleTrajectory();
-    this.tick();
-  };
+  private readonly onTick = (): void => this.tick();
   private readonly onDead = (e: { id?: number; name?: string; position?: Vec3 }): void => this.noteDead(e);
   private readonly onFoeHurt = (e: { id?: number }, source?: { id?: number }): void => this.noteFoeHurt(e, source);
   private readonly onSelfDeath = (): void => {
@@ -420,51 +373,6 @@ export class CombatSession {
   /** 正在打(或正在撤)。执行器的受理回执与 World 的播报口径都看它 */
   get active(): boolean {
     return this.state !== 'idle';
-  }
-
-  /** 只在实际交战时允许进攻法术；撤退和 mc_stop 不主动施放。 */
-  get fighting(): boolean {
-    return this.state === 'fighting';
-  }
-
-  reactionState(): { targetId: number | null; canStep: boolean; sinceHitMs: number | null; retreating: boolean } {
-    return { targetId: this.targetId >= 0 ? this.targetId : null,
-      canStep: this.fighting && !this.eating && !this.pathing && this.swingPhase === 'idle' && this.hybridWeapon === 'melee',
-      sinceHitMs: this.fighting ? Date.now() - Math.max(this.lastLandedAt, this.startedAt) : null,
-      retreating: this.state === 'retreating' };
-  }
-
-  /** Read-only target eligibility shared by candidate construction and execution. */
-  engagementTargets(): number[] {
-    const bot = this.opts.getBot(), t = this.opts.tuning();
-    if (!bot?.entity || this.active || !t.enabled || t.fight === 'off'
-      || this.opts.envBusy() || this.opts.taskEscaping?.() || this.opts.taskFighting?.()
-      || (bot.health ?? 0) < t.fleeHealth + ENGAGE_MARGIN
-      || (t.fight === 'armed' && !bestWeapon(bot) && !this.rangedReady(bot))
-      || Date.now() < this.capCooldownUntil
-      || (!t.arena && this.busyRatioNow() > t.busyRatio / 100)) return [];
-    return this.scan(bot, t, t.chaseMax).filter(f => f.visible && !NO_FIGHT.has(f.name)).map(f => f.id);
-  }
-
-  /** Reuses the combat body's existing lease, health gates and retreat controller. */
-  react(action: { kind: 'engage'; targetId: number } | { kind: 'retreat' }
-    | { kind: 'step'; destination: [number, number, number] }): boolean {
-    const bot = this.opts.getBot();
-    if (!bot?.entity || (bot.health ?? 0) <= 0 || this.opts.envBusy() || this.opts.taskEscaping?.() || this.opts.taskFighting?.()) return false;
-    if (action.kind === 'retreat') {
-      if (!this.fighting) return false;
-      this.tacticalMove = null; this.beginRetreat('flee'); return true;
-    }
-    if (action.kind === 'step') {
-      const to = new Vec3(...action.destination);
-      if (!this.reactionState().canStep || !corridorSafe(bot, bot.entity.position, to)) return false;
-      this.tacticalMove = { origin: bot.entity.position.clone(), destination: to, expiresAtMs: Date.now() + 700 };
-      return true;
-    }
-    const foe = bot.entities[action.targetId];
-    if (!foe || !this.engagementTargets().includes(action.targetId) || !this.engage(foe.name ?? '', false)) return false;
-    if (this.fighting) this.targetId = action.targetId;
-    return true;
   }
 
   /** 这只怪的死由战斗会话来说,World 的「它死了」播报让位 */
@@ -505,13 +413,12 @@ export class CombatSession {
   }
 
   /**
-   * 反射层受击时转进来。返回 true = 会话或逃生任务处理(反射不再自己抡);
+   * 反射层受击时转进来。返回 true = 会话接手(反射不再自己抡);
    * false = 会话进不了场(关着/冷却/环境自保中),退回反射的降级行为。
    */
   onHurtBy(attackerId: number, name: string): boolean {
     const t = this.opts.tuning();
     if (!t.enabled) return false;
-    this.lastSelfHurtAt = Date.now();
     if (this.state === 'retreating') {
       this.retreatHits += 1;
       this.retreatLastHurtAt = Date.now();
@@ -521,20 +428,6 @@ export class CombatSession {
     } // 已经在撤了,别叠加;伤害历史留在同一场里,逃不掉要转身
     if (this.state === 'fighting') {
       this.provoked.add(attackerId);
-      return true;
-    }
-    if (this.opts.taskEating?.()) {
-      this.provoked.add(attackerId);
-      this.opts.diag?.write({ lane: 'combat', event: 'hurt-during-eat',
-        msg: '进食仍持有主手，受击未另起战斗', data: { attackerId, name, health: this.opts.getBot()?.health } });
-      return true;
-    }
-    if (this.opts.taskEscaping?.()) {
-      this.provoked.add(attackerId);
-      const bot = this.opts.getBot();
-      if (bot && (bot.health ?? 20) < t.fleeHealth) this.opts.onLowHealth?.(bot);
-      this.opts.diag?.write({ lane: 'combat', event: 'hurt-during-escape',
-        msg: '逃生任务仍持有身体，受击未另起战斗', data: { attackerId, name, health: bot?.health } });
       return true;
     }
     if (this.opts.envBusy()) return false;
@@ -556,6 +449,7 @@ export class CombatSession {
       this.beginRetreat('no-fight');
       return true;
     }
+    if (Date.now() < this.cooldownUntil) return false;
     if (bot?.entity && !bestWeapon(bot) && !this.rangedReady(bot) && (bot.health ?? 20) < t.fleeHealth + ENGAGE_MARGIN) {
       this.bot = bot;
       this.opts.suspendTasks(`战斗:空手血 ${this.hp()},不还手,撤`);
@@ -569,19 +463,6 @@ export class CombatSession {
       this.beginRetreat('flee');
       return true;
     }
-    // A hit can arrive through a wall or after the attacker leaves the loaded
-    // entity table. Starting a fight with no visible target just holds the body
-    // for three seconds, then resumes the task into the next hit indefinitely.
-    const attacker = bot?.entities[attackerId];
-    if (bot && (!attacker?.isValid || !attacker.position || !canSeeEntity(bot, attacker))) {
-      this.bot = bot;
-      this.provoked.add(attackerId);
-      this.opts.suspendTasks(`战斗:被看不见的${zhEntity(name)}打了,撤退`);
-      this.hook(bot);
-      this.opts.emit(`被${zhEntity(name)}打到了,但隔着障碍看不见它,先撤到安全处。`, true, true);
-      this.beginRetreat('flee');
-      return true;
-    }
     this.provoked.add(attackerId);
     return this.engage(name, true);
   }
@@ -590,17 +471,17 @@ export class CombatSession {
   private watchTick(): void {
     if (this.state !== 'idle') return;
     const t = this.opts.tuning();
-    // 逃生与主动攻击各自持有身体，巡检不重复接管。
+    // 她正在跑(flee/surface):不趁逃跑抢场——挨了打另说(onHurtBy 不看这道闸)
     if (!t.enabled || this.opts.envBusy() || this.opts.taskEscaping?.() || this.opts.taskFighting?.()) return;
     if (t.fight === 'off') return;
-    if (!t.arena && Date.now() < this.cooldownUntil) return;
+    if (Date.now() < this.cooldownUntil) return;
     const bot = this.opts.getBot();
     if (!bot?.entity) return;
     // armed 模式仅在背包有可用近战武器或远程武器就绪时主动进场。
     if (t.fight === 'armed' && !bestWeapon(bot) && !this.rangedReady(bot)) return;
     this.bot = bot;
     const foes = this.scan(bot, t);
-    const near = foes.find((f) => f.visible && f.reach <= t.engageRadius && !NO_FIGHT.has(f.name));
+    const near = foes.find((f) => f.reach <= t.engageRadius && !NO_FIGHT.has(f.name));
     if (near) {
       if (near.name === 'piglin') this.provoked.add(near.id);
       this.engage(near.name, false);
@@ -632,7 +513,7 @@ export class CombatSession {
       return true;
     }
     // E4:5 分钟滑窗里战斗占比超标 → 冷却,不自动进场
-    if (!hurt && !this.opts.tuning().arena && this.busyRatioNow() > this.opts.tuning().busyRatio / 100) {
+    if (this.busyRatioNow() > this.opts.tuning().busyRatio / 100) {
       this.cooldownUntil = Date.now() + this.opts.tuning().cooldownSec * 1000;
       if (!this.cooldownNoticed) {
         this.cooldownNoticed = true;
@@ -641,14 +522,10 @@ export class CombatSession {
       return false;
     }
     this.cooldownNoticed = false;
-    if (Date.now() < this.capCooldownUntil && !hurt) return false;
     this.bot = bot;
     this.state = 'fighting';
     const now = Date.now();
     this.startedAt = now;
-    this.healthBefore = bot.health ?? null;
-    this.sceneBefore = this.observeScene(bot);
-    this.sessionStartedAt = now;
     this.deadlineAt = now + this.opts.tuning().maxSec * 1000;
     this.lastStatusAt = now;
     this.emptySince = 0;
@@ -661,13 +538,6 @@ export class CombatSession {
     this.desperate = false;
     this.retreatBank = null;
     this.pathing = false;
-    this.pathRetryAfter = 0;
-    this.blockedHeadings.length = 0;
-    this.trajectoryAt = now;
-    this.trajectoryPos = { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z };
-    this.movementIntent = null;
-    this.stallSince = 0;
-    this.stallMode = '';
     this.kills = new Map();
     this.killsPending = new Map();
     this.struck.clear();
@@ -685,26 +555,18 @@ export class CombatSession {
     this.lastRangedHitAt = 0;
     this.ctxPrevI.fill(0);
     this.ctxPrevD.fill(0);
-    this.ctxTerrainAt = 0;
-    this.ctxCreeperAt = 0;
-    this.coverAt = 0;
-    this.coverCell = null;
-    const trialClear = !hurt && this.opts.tuning().arena === true;
-    this.opts.suspendTasks(`战斗:${trialClear ? '试炼清怪' : hurt ? '被' : ''}${zhEntity(firstName)}${hurt ? '打了' : trialClear ? '' : '贴到跟前'}`);
-    this.releaseWalkOnly ??= walkOnlyPath(bot);
+    this.opts.suspendTasks(`战斗:${hurt ? '被' : ''}${zhEntity(firstName)}${hurt ? '打了' : '贴到跟前'}`);
     this.hook(bot);
     const held = this.armMelee(bot);
     this.opts.emit(
       hurt
         ? `有只${zhEntity(firstName)}打过来了,我抄家伙还手!(生命 ${this.hp()}/20${held})`
-        : trialClear
-          ? `试炼层发现${zhEntity(firstName)},我主动清怪!(生命 ${this.hp()}/20${held})`
-          : `${zhEntity(firstName)}贴到跟前了,我先动手!(生命 ${this.hp()}/20${held})`,
+        : `${zhEntity(firstName)}贴到跟前了,我先动手!(生命 ${this.hp()}/20${held})`,
       true, hurt,
     );
     this.opts.diag?.write({
       lane: 'combat', event: 'engage',
-      msg: `开打:${firstName}${hurt ? '(挨了打)' : trialClear ? '(试炼主动清怪)' : '(近身触发)'},生命 ${this.hp()}/20`,
+      msg: `开打:${firstName}${hurt ? '(挨了打)' : '(进了 3 格圈)'},生命 ${this.hp()}/20`,
       data: { first: firstName, hurt, health: this.bot.health },
     });
     return true;
@@ -758,7 +620,7 @@ export class CombatSession {
     const left = this.bot
       ? this.exitFoes(
           this.scan(this.bot, t, this.rangedReady(this.bot) ? RANGED_EXIT_RANGE : undefined), t,
-        ).filter((f) => f.visible).length
+        ).length
       : 0;
     this.opts.emit(
       `砍翻了${parts.join('、')}!${left > 0 ? `还有 ${left} 只在。` : '周围没别的了。'}`,
@@ -780,14 +642,8 @@ export class CombatSession {
       } else if (!HOSTILE.has(name) && !provoked) continue;
       if (name === 'enderman' && !provoked) continue;
       const flat = Math.hypot(e.position.x - bot.entity.position.x, e.position.z - bot.entity.position.z);
-      // A ranged attacker identified from an unattributed hit may be farther
-      // than the normal pursuit radius. Keep that specific threat in the fight
-      // instead of entering the "empty arena" hold while still taking arrows.
-      if (flat > maxFlat && !(provoked && RANGED.has(name) && flat <= 20)) continue;
-      // 试炼塔楼层上下重叠，不能把隔层怪当成本层卡关目标。
-      if (t.arena && Math.abs(e.position.y - bot.entity.position.y) > 4) continue;
-      out.push({ id: e.id, name, ent: e as never, pos: e.position, reach: aabbReach(bot, e as never), flat,
-        visible: canSeeEntity(bot, e) });
+      if (flat > maxFlat) continue;
+      out.push({ id: e.id, name, ent: e as never, pos: e.position, reach: aabbReach(bot, e as never), flat });
     }
     return out;
   }
@@ -827,68 +683,6 @@ export class CombatSession {
     return 'kb';
   }
 
-  /** 4 Hz 战斗轨迹；位移对应上一采样区间的方向键，用于识别“看似在跑、其实顶墙”。 */
-  private sampleTrajectory(): void {
-    const bot = this.bot;
-    if (this.state === 'idle' || !bot?.entity) return;
-    const now = Date.now();
-    if (now - this.trajectoryAt < TRAJECTORY_SAMPLE_MS) return;
-    const p = bot.entity.position;
-    const prev = this.trajectoryPos;
-    const intent = this.movementIntent;
-    const dx = prev ? p.x - prev.x : 0;
-    const dz = prev ? p.z - prev.z : 0;
-    const moved = Math.hypot(dx, dz);
-    const progress = intent ? dx * intent.x + dz * intent.z : 0;
-    const mode = this.state === 'retreating' ? 'retreat' : this.pathing ? 'path' : this.hybridWeapon;
-    const controls = bot.controlState;
-    const pressing = Boolean(controls.forward || controls.back || controls.left || controls.right);
-    const target = bot.entities[this.targetId];
-    const ahead = intent ? p.offset(intent.x * 0.8, 0, intent.z * 0.8) : null;
-    this.opts.diag?.write({
-      lane: 'combat', event: 'trajectory', level: 'debug', msg: '战斗轨迹采样',
-      data: {
-        state: this.state, mode, health: bot.health, food: bot.food,
-        pos: { x: +p.x.toFixed(2), y: +p.y.toFixed(2), z: +p.z.toFixed(2) },
-        yaw: +bot.entity.yaw.toFixed(2),
-        moved: +moved.toFixed(3), progress: +progress.toFixed(3),
-        intent, slot: intent ? +dirSlot(intent.x, intent.z).toFixed(1) : null,
-        controls: { forward: !!controls.forward, back: !!controls.back,
-          left: !!controls.left, right: !!controls.right, jump: !!controls.jump, sprint: !!controls.sprint },
-        target: target?.position ? { id: target.id, name: target.name,
-          x: +target.position.x.toFixed(2), y: +target.position.y.toFixed(2), z: +target.position.z.toFixed(2) } : null,
-        ahead: ahead ? { feet: bot.blockAt(ahead)?.name, head: bot.blockAt(ahead.offset(0, 1, 0))?.name } : null,
-      },
-    });
-    this.trajectoryAt = now;
-    this.trajectoryPos = { x: p.x, y: p.y, z: p.z };
-
-    // 寻路器还在算路径、尚未按方向键时不算顶墙。
-    const checking = bot.entity.onGround && !bodyInWater(bot) && pressing &&
-      (this.pathing || intent !== null);
-    if (!checking || moved >= 0.06) { this.stallSince = 0; this.stallMode = ''; return; }
-    if (this.stallMode !== mode) { this.stallMode = mode; this.stallSince = now; return; }
-    if (now - this.stallSince < MOVEMENT_STALL_MS) return;
-    this.stallSince = now;
-    if (this.pathing) {
-      this.pathing = false;
-      this.pathRetryAfter = now + 2_500;
-      dropOwnedGoal(bot, 'combat', '战斗寻路顶墙,改为局部绕行', this.opts.diag);
-    } else if (intent) {
-      this.blockedHeadings.push({ ...intent, until: now + 2_500 });
-      if (this.blockedHeadings.length > 4) this.blockedHeadings.shift();
-      this.ctxTerrainAt = 0;
-      this.coverCell = null;
-      this.stopMovement(bot);
-    }
-    this.opts.diag?.write({
-      lane: 'combat', event: 'wall-stall', incident: true,
-      msg: `战斗${mode}原地顶墙超过 ${MOVEMENT_STALL_MS}ms,换方向`,
-      data: { mode, pos: { x: p.x, y: p.y, z: p.z }, intent,
-        targetId: this.targetId, pathRetryAfter: this.pathRetryAfter },
-    });
-  }
-
   private tick(): void {
     if (this.state === 'idle') return;
     const bot = this.bot;
@@ -896,14 +690,6 @@ export class CombatSession {
     const now = Date.now();
     // E6:环境自保找上门(岩浆/溺水),战斗静默让位,由环境反射自己汇报
     if (this.opts.envBusy()) { this.end('env'); return; }
-    // 会话级总_cap:振荡(fight↔retreat)会不断重置各分支时限,这道闸只看 engage 起点
-    if (now - this.sessionStartedAt > COMBAT_TOTAL_CAP_MS) {
-      this.opts.emit(`缠太久了,我先脱战喘口气——剩下的怪交给距离和时间。(生命 ${this.hp()}/20)`, true, false);
-      this.capCooldownUntil = now + 60_000;
-      this.end('timeout');
-      return;
-    }
-    this.equipSpareTotem(bot, now);
     if (this.state === 'retreating') { this.retreatTick(bot, now); return; }
 
     const t = this.opts.tuning();
@@ -916,15 +702,13 @@ export class CombatSession {
     // E1:没怪了,滞后 3s 收工(防"炸完→退出→新怪→再进入"刷屏)。
     // 「没怪了」按退出口径算(见 exitFoes):远处那些没交过手的不算数,
     // 否则夜里 40 格内总有一只,这一局就永远收不了工。
-    const visibleFoes = foes.filter((f) => f.visible);
-    const clearPool = this.desperate ? visibleFoes : this.exitFoes(visibleFoes, t);
+    const clearPool = this.desperate ? foes : this.exitFoes(foes, t);
     if (clearPool.length === 0) {
       if (this.emptySince === 0) this.emptySince = now;
       this.opts.ranged?.abort();
       this.rangedPendingOwner = null;
       this.hybridWeapon = 'melee';
       this.release(bot);
-      if (this.tryCombatFood(bot, foes, now)) return;
       if (now - this.emptySince >= CLEAR_HOLD_MS) this.endClear();
       return;
     }
@@ -944,21 +728,20 @@ export class CombatSession {
       this.beginRetreat('flee');
       return;
     }
-    if (this.tryCombatFood(bot, foes, now)) return;
 
     // 出手相位一旦起了就必须走完:台架第一轮 crit/sweep 整场只挥得出 2–4 刀,
     // 就是因为别的分支每 tick 把起跳/站定重置掉
     if (this.swingPhase !== 'idle') {
-      const held = visibleFoes.find((f) => f.id === this.phaseTargetId);
+      const held = foes.find((f) => f.id === this.phaseTargetId);
       if (!held) { this.swingPhase = 'idle'; bot.setControlState('jump', false); }
       else {
         this.aimAt(bot, held);
-        this.tryOffense(held, this.resolveMode(visibleFoes, held), now);
+        this.tryOffense(held, this.resolveMode(foes, held), now);
         return;
       }
     }
 
-    const target = this.pick(visibleFoes);
+    const target = this.pick(foes);
     if (!target) {
       // 场上只剩打不过的(E7):撤
       this.opts.emit(`剩下的是${zhEntity(foes[0].name)},这个打不过,撤!`, true, false);
@@ -1010,16 +793,15 @@ export class CombatSession {
     const weapon = chooseHybridWeapon(this.hybridWeapon, target.reach, rangedReady);
     if (weapon !== this.hybridWeapon) this.switchWeapon(bot, weapon);
     if (this.hybridWeapon === 'ranged') {
-      this.driveRanged(bot, target, visibleFoes, now);
+      this.driveRanged(bot, target, foes, now);
       return;
     }
 
     this.aimAt(bot, target);
 
     // 接近卡住 1.5s 交给寻路器,够得着立刻收回来自己打
-    if (!this.pathing && target.reach > 3.4 && now - this.lastProgressAt > STUCK_PATH_MS && now >= this.pathRetryAfter) {
+    if (!this.pathing && target.reach > 3.4 && now - this.lastProgressAt > STUCK_PATH_MS) {
       this.pathing = true;
-      this.movementIntent = null;
       this.pathUntil = now + 4_000;
       setOwnedGoal(bot, new goals.GoalFollow(target.ent as never, 2), 'combat', '接近目标', { dynamic: true, diag: this.opts.diag });
     }
@@ -1036,18 +818,18 @@ export class CombatSession {
         // 寻路期间视线归寻路器:两边每 tick 各拧一次,镜头里就是原地疯狂旋转
         if (this.canSwing(now) && target.reach <= REACH_MAX) {
           this.aimAt(bot, target);
-          this.tryOffense(target, this.resolveMode(visibleFoes, target), now);
+          this.tryOffense(target, this.resolveMode(foes, target), now);
         }
-        this.statusTick(bot, visibleFoes, now);
+        this.statusTick(bot, foes, now);
         return;
       }
     }
 
-    const mode = this.resolveMode(visibleFoes, target);
-    this.shieldLogic(bot, visibleFoes, now);
-    this.driveContext(bot, t, target, mode, now, visibleFoes);
+    const mode = this.resolveMode(foes, target);
+    this.shieldLogic(bot, foes, now);
+    this.driveContext(bot, t, target, mode, now, foes);
     this.tryOffense(target, mode, now);
-    this.statusTick(bot, visibleFoes, now);
+    this.statusTick(bot, foes, now);
   }
 
   /**
@@ -1064,7 +846,7 @@ export class CombatSession {
 
   /** 这一刀看不看得见目标。原版服务端近战不查墙——隔墙发包真能打中,穿帮得我们自己拦 */
   private losTo(bot: Bot, f: Foe): boolean {
-    return canSeeEntity(bot, f.ent);
+    return hasLosFrom(bot, bot.entity.position.offset(0, EYE, 0), f.ent as never);
   }
 
   /** 战况:每 6s 一条,不唤醒(接敌/击杀/撤退才唤醒) */
@@ -1131,13 +913,9 @@ export class CombatSession {
     const dx = target.pos.x - bot.entity.position.x;
     const dz = target.pos.z - bot.entity.position.z;
     if (target.reach > 14) {
-      this.driveRangedDirection(bot, [
-        { x: dx, z: dz }, { x: -dz, z: dx }, { x: dz, z: -dx },
-      ], true);
+      this.driveRangedDirection(bot, [{ x: dx, z: dz }], true);
     } else if (target.reach < 8) {
-      this.driveRangedDirection(bot, [
-        { x: -dx, z: -dz }, { x: -dz, z: dx }, { x: dz, z: -dx },
-      ], true);
+      this.driveRangedDirection(bot, [{ x: -dx, z: -dz }], true);
     } else if (inKiteRange(target.reach)) {
       this.driveRangedDirection(bot, [
         { x: -dz, z: dx },
@@ -1167,7 +945,15 @@ export class CombatSession {
   }
 
   private rangedDirectionSafe(bot: Bot, dx: number, dz: number): boolean {
-    return this.movementSafe(bot, dx, dz, true);
+    const len = Math.hypot(dx, dz);
+    if (len < 1e-6) return false;
+    const me = bot.entity.position;
+    const base = me.floored();
+    const x = Math.floor(me.x + (dx / len) * 1.3);
+    const z = Math.floor(me.z + (dz / len) * 1.3);
+    return this.rangedStandable(bot, x, base.y, z) ||
+      this.rangedStandable(bot, x, base.y + 1, z) ||
+      this.rangedStandable(bot, x, base.y - 1, z);
   }
 
   private rangedStandable(bot: Bot, x: number, y: number, z: number): boolean {
@@ -1176,8 +962,7 @@ export class CombatSession {
     const head = bot.blockAt(new Vec3(x, y + 1, z));
     if (!below || !feet || !head) return false;
     const liquid = (name: string): boolean => name === 'water' || name === 'lava' || name === 'bubble_column';
-    return below.boundingBox === 'block' && !SCORCHING_FLOOR.has(below.name) &&
-      !BURNING_BLOCKS.has(below.name) && feet.boundingBox === 'empty' && head.boundingBox === 'empty' &&
+    return below.boundingBox === 'block' && feet.boundingBox === 'empty' && head.boundingBox === 'empty' &&
       !liquid(feet.name) && !liquid(head.name);
   }
 
@@ -1206,17 +991,9 @@ export class CombatSession {
   // —— v7 移动:上下文图 ————————————————————————————————————————
 
   private driveContext(bot: Bot, t: CombatTuning, target: Foe, mode: 'crit' | 'kb' | 'sweep', now: number, foes: Foe[]): void {
-    const shortMove = this.tacticalMove;
-    if (shortMove) {
-      const remaining = shortMove.destination.minus(bot.entity.position);
-      if (now >= shortMove.expiresAtMs || remaining.norm() < 0.22
-        || !corridorSafe(bot, shortMove.origin, shortMove.destination)) this.tacticalMove = null;
-      else { this.pressToward(bot, remaining.x, remaining.z, false); return; }
-    }
     // 横扫要求出手那一 tick 几乎没动:站定期间任何移动都不许写
     if (this.swingPhase === 'settle') {
       for (const k of ['forward', 'back', 'left', 'right', 'sprint'] as const) bot.setControlState(k, false);
-      this.movementIntent = null;
       return;
     }
     const I = this.ctxI;
@@ -1275,13 +1052,8 @@ export class CombatSession {
     this.ctxPrevI.set(I);
     this.ctxPrevD.set(D);
 
-    let choice = decide(I, D, 0.25);
-    // 抛物线插值和按键量化后的实际方向可能越过被屏蔽的墙角；出手前复查。
-    for (let tries = 0; choice && tries < 16 && !this.movementSafe(bot, choice.x, choice.z); tries++) {
-      writeSlot(D, choice.slot, HARD);
-      choice = decide(I, D, 0.25);
-    }
-    if (!choice || !this.movementSafe(bot, choice.x, choice.z)) { this.release(bot); return; }
+    const choice = decide(I, D, 0.25);
+    if (!choice) { this.release(bot); return; }
     this.pressToward(bot, choice.x, choice.z, choice.strength > 0.7 && mode === 'kb');
     this.autoJump(bot, choice.x, choice.z);
   }
@@ -1312,9 +1084,13 @@ export class CombatSession {
     if (now - this.ctxTerrainAt > 200) {
       this.ctxTerrainAt = now;
       this.ctxTerrain.fill(0);
+      const me = bot.entity.position;
+      const base = me.floored();
       for (let i = 0; i < 16; i++) {
         const d = slotDir(i);
-        if (this.movementSafe(bot, d.x, d.z)) continue;
+        const x = Math.floor(me.x + d.x * 1.3);
+        const z = Math.floor(me.z + d.z * 1.3);
+        if (this.standable(bot, x, base.y, z) || this.standable(bot, x, base.y + 1, z) || this.standable(bot, x, base.y - 1, z)) continue;
         writeSlot(this.ctxTerrain, i, HARD);
       }
     }
@@ -1330,44 +1106,6 @@ export class CombatSession {
     if (BURNING_BLOCKS.has(feet.name) || BURNING_BLOCKS.has(head.name)) return false;
     if (BURNING_BLOCKS.has(below.name) || SCORCHING_FLOOR.has(below.name)) return false;
     return below.boundingBox === 'block' && feet.boundingBox === 'empty' && head.boundingBox === 'empty';
-  }
-
-  /** 按方向键后真正产生的八向移动，不能用未量化的意图来检查地形。 */
-  private appliedDirection(bot: Bot, dx: number, dz: number): { x: number; z: number } | null {
-    const len = Math.hypot(dx, dz);
-    if (len < 1e-6) return null;
-    const y = bot.entity.yaw;
-    const f = (dx * -Math.sin(y) + dz * -Math.cos(y)) / len;
-    const l = (dx * -Math.cos(y) + dz * Math.sin(y)) / len;
-    const forward = f > 0.35 ? 1 : f < -0.35 ? -1 : 0;
-    const left = l > 0.35 ? 1 : l < -0.35 ? -1 : 0;
-    const ax = forward * -Math.sin(y) + left * -Math.cos(y);
-    const az = forward * -Math.cos(y) + left * Math.sin(y);
-    const actualLen = Math.hypot(ax, az);
-    return actualLen > 0 ? { x: ax / actualLen, z: az / actualLen } : null;
-  }
-
-  /** 角色宽 0.6 格；沿整段路径检查身体两侧，避开墙角、悬崖及近期实测顶墙方向。 */
-  private movementSafe(bot: Bot, dx: number, dz: number, ranged = false, far = 1.4): boolean {
-    const d = this.appliedDirection(bot, dx, dz);
-    if (!d) return false;
-    const now = Date.now();
-    if (this.blockedHeadings.some((b) => b.until > now && b.x * d.x + b.z * d.z > 0.9)) return false;
-    const p = bot.entity.position;
-    const y = Math.floor(p.y);
-    const canStand = ranged ? this.rangedStandable.bind(this) : this.standable.bind(this);
-    const nx = -d.z, nz = d.x;
-    const ranges: number[] = [];
-    for (let range = 0.55; range < far; range += 0.5) ranges.push(range);
-    ranges.push(far);
-    for (const range of ranges) {
-      for (const side of [-0.31, 0, 0.31]) {
-        const x = Math.floor(p.x + d.x * range + nx * side);
-        const z = Math.floor(p.z + d.z * range + nz * side);
-        if (![y, y + 1, y - 1].some((atY) => canStand(bot, x, atY, z))) return false;
-      }
-    }
-    return true;
   }
 
   /** 敞开度:八个水平方向里有几个是通的 */
@@ -1407,8 +1145,6 @@ export class CombatSession {
           if (!this.standable(bot, x, y, z)) continue;
           const open = this.openness(bot, x, y, z);
           const score = -open * 2 - d * 0.6;
-          // 掩体是局部直走目标，隔墙的“好格子”只会把身体引到墙上。
-          if (score > bestScore && !this.movementSafe(bot, x + 0.5 - me.x, z + 0.5 - me.z, false, d)) continue;
           if (score > bestScore) { bestScore = score; best = { x, y, z }; }
           break;
         }
@@ -1437,7 +1173,6 @@ export class CombatSession {
     const y = bot.entity.yaw;
     const f = ux * -Math.sin(y) + uz * -Math.cos(y);
     const l = ux * -Math.cos(y) + uz * Math.sin(y);
-    this.movementIntent = this.appliedDirection(bot, dx, dz);
     bot.setControlState('forward', f > 0.35);
     bot.setControlState('back', f < -0.35);
     bot.setControlState('left', l > 0.35);
@@ -1449,7 +1184,6 @@ export class CombatSession {
   }
 
   private stopMovement(bot: Bot): void {
-    this.movementIntent = null;
     for (const key of ['forward', 'back', 'left', 'right', 'sprint', 'jump'] as const) {
       bot.setControlState(key, false);
     }
@@ -1470,97 +1204,6 @@ export class CombatSession {
   }
 
   // —— v7 盾与出手 ————————————————————————————————————————————
-
-  /** 副手已有盾或其他装备时尊重现有选择；空位才补背包中的图腾。 */
-  private equipSpareTotem(bot: Bot, now: number): void {
-    if (bot.inventory.slots?.[45] || this.offhandEquipping
-      || now - this.lastOffhandAttemptAt < OFFHAND_RETRY_MS) return;
-    const totem = bot.inventory.items().find((item) => item.name === 'totem_of_undying' && item.count > 0);
-    if (!totem) return;
-    this.lastOffhandAttemptAt = now;
-    this.offhandEquipping = true;
-    void bot.equip(totem, 'off-hand').then(() => {
-      if (bot.inventory.slots?.[45]?.name !== 'totem_of_undying') return;
-      this.opts.diag?.write({ lane: 'combat', event: 'offhand-totem', msg: '副手补上不死图腾' });
-      this.opts.emit('副手补上了不死图腾。', false, false);
-    }).catch((error: unknown) => {
-      this.opts.diag?.write({ lane: 'combat', event: 'offhand-equip-failed', msg: String(error) });
-    }).finally(() => { this.offhandEquipping = false; });
-  }
-
-  private combatFood(bot: Bot): ReturnType<Bot['inventory']['items']>[number] | null {
-    const items = itemsInReach(bot);
-    if ((bot.health ?? 20) <= 10) {
-      const apple = items.find((item) => item.name === 'golden_apple' && item.count > 0);
-      if (apple) return apple;
-    }
-    if ((bot.food ?? 20) >= 18) return null;
-    const foods = (bot.registry.foodsByName ?? {}) as Record<string, { foodPoints?: number } | undefined>;
-    return items.filter((item) => item.count > 0 && foods[item.name]
-      && !RISKY_FOODS.has(item.name) && item.name !== 'golden_apple'
-      && item.name !== 'enchanted_golden_apple')
-      .sort((a, b) => (foods[b.name]?.foodPoints ?? 0) - (foods[a.name]?.foodPoints ?? 0))[0] ?? null;
-  }
-
-  private cancelCombatFood(bot: Bot): void {
-    if (!this.eating) return;
-    this.supplyGeneration += 1;
-    this.eating = false;
-    try { bot.deactivateItem(); } catch { /* consume may already have ended */ }
-  }
-
-  /** 只在无近身或远程压制的空档进食；进食期间暂停出手。 */
-  private tryCombatFood(bot: Bot, foes: Foe[], now: number): boolean {
-    if (this.eating) {
-      if (foes.some((foe) => foe.reach < 4)) {
-        this.cancelCombatFood(bot);
-        const weapon = bestWeapon(bot);
-        if (weapon) void bot.equip(weapon, 'hand').catch(() => undefined);
-        return false;
-      }
-      return true;
-    }
-    if (this.offhandEquipping || now - this.lastFoodAttemptAt < FOOD_RETRY_MS
-      || now - this.lastSelfHurtAt < 2_500
-      || foes.some((foe) => foe.reach < 8 || (RANGED.has(foe.name) && foe.flat < 18))) return false;
-    const food = this.combatFood(bot);
-    if (!food) return false;
-    this.lastFoodAttemptAt = now;
-    this.eating = true;
-    const generation = ++this.supplyGeneration;
-    this.lowerShield(bot);
-    this.opts.ranged?.abort();
-    if (this.pathing) {
-      this.pathing = false;
-      dropOwnedGoal(bot, 'combat', '进食时先停下', this.opts.diag);
-    }
-    this.stopMovement(bot);
-    void (async () => {
-      try {
-        await bot.equip(food, 'hand');
-        if (generation !== this.supplyGeneration) return;
-        const receipt = await consumeHeldFood(bot, food.name);
-        if (generation !== this.supplyGeneration) return;
-        this.opts.diag?.write({ lane: 'combat', event: 'combat-food', msg: receipt,
-          data: { item: food.name, health: bot.health, food: bot.food } });
-        this.opts.emit(receipt, false, false);
-        this.lastProgressAt = Date.now();
-      } catch (error) {
-        if (generation === this.supplyGeneration) {
-          this.opts.diag?.write({ lane: 'combat', event: 'combat-food-failed', msg: String(error) });
-        }
-      } finally {
-        if (generation === this.supplyGeneration) {
-          if (this.state !== 'idle') {
-            const weapon = bestWeapon(bot);
-            if (weapon) await bot.equip(weapon, 'hand').catch(() => undefined);
-          }
-          this.eating = false;
-        }
-      }
-    })();
-    return true;
-  }
 
   private raiseShield(bot: Bot): void {
     const off = (bot.inventory.slots[45] as { name?: string } | null)?.name;
@@ -1622,7 +1265,6 @@ export class CombatSession {
 
     if (mode === 'crit') {
       if (bot.entity.onGround) {
-        this.tacticalMove = null;
         bot.setControlState('sprint', false);
         bot.setControlState('jump', true);
         this.swingPhase = 'hop';
@@ -1632,9 +1274,6 @@ export class CombatSession {
       return;
     }
     if (mode === 'sweep') {
-      this.tacticalMove = null;
-      for (const k of ['forward', 'back', 'left', 'right', 'sprint'] as const) bot.setControlState(k, false);
-      this.movementIntent = null;
       this.swingPhase = 'settle';
       this.phaseTargetId = target.id;
       this.phaseUntil = now + 100;
@@ -1646,14 +1285,10 @@ export class CombatSession {
     // 水里疾跑攒不出来:别为它空转冷却,到点就出手
     const overdue = now - this.lastSwingAt > cd + 500 || bodyInWater(bot);
     if (!overdue && (!bot.controlState.sprint || now - this.sprintSince < 60)) {
-      const fx = -Math.sin(bot.entity.yaw), fz = -Math.cos(bot.entity.yaw);
-      if (this.movementSafe(bot, fx, fz)) {
-        bot.setControlState('forward', true);
-        bot.setControlState('sprint', true);
-        this.movementIntent = { x: fx, z: fz };
-        if (this.sprintSince === 0) this.sprintSince = now;
-        return;
-      }
+      bot.setControlState('forward', true);
+      bot.setControlState('sprint', true);
+      if (this.sprintSince === 0) this.sprintSince = now;
+      return;
     }
     this.swing(bot, target, now);
     this.wtapUntil = now + 120;
@@ -1675,20 +1310,11 @@ export class CombatSession {
     this.cancelRanged();
     const bot = this.bot;
     if (!bot?.entity) { this.end('gone'); return; }
-    this.cancelCombatFood(bot);
-    this.releaseWalkOnly ??= walkOnlyPath(bot);
-    if (why === 'flee') this.opts.onLowHealth?.(bot);
     // 没打起来就直接撤(E7 / 血线挡下):E4 滑窗记的是这一场,起点得是现在,
     // 否则 end() 会把上一场的开始时刻算成本场时长
     if (this.state === 'idle') {
       this.startedAt = Date.now();
-      this.healthBefore = bot.health ?? null;
-      this.sceneBefore = this.observeScene(bot);
-      this.sessionStartedAt = this.startedAt;
       this.deadIds.clear();
-      this.kills.clear();
-      this.killsPending.clear();
-      this.swings = this.landed = this.arrows = this.rangedLanded = 0;
     }
     this.state = 'retreating';
     this.retreatWhy = why;
@@ -1744,37 +1370,15 @@ export class CombatSession {
     // 游向岸比跑步慢:有登岸目标时放宽时限,别在半程收工又被追回水里
     const maxMs = this.retreatBank ? RETREAT_MAX_MS * 2 : RETREAT_MAX_MS;
     const timedOut = now - this.retreatStartedAt >= maxMs;
-    const bank = this.retreatBank;
-    const wantedX = bank ? bank.x + 0.5 - p.x : p.x - from.x;
-    const wantedZ = bank ? bank.z + 0.5 - p.z : p.z - from.z;
-    const heading = this.retreatHeading(bot, foes, wantedX, wantedZ);
-    if (!bank && !footingAhead(bot, wantedX, wantedZ) && !this.retreatEdgeNoted) {
-      this.retreatEdgeNoted = true;
-      this.opts.diag?.write({
-        lane: 'combat', event: 'retreat-edge',
-        msg: `撤退方向前面没有 ${RETREAT_MAX_DROP} 格内的落脚:${heading ? '改走侧面' : '两侧也没有,原地不动'}`,
-        data: { at: { x: p.x, y: p.y, z: p.z }, dx: wantedX, dz: wantedZ },
-      });
-    }
-    const trapped = stalled && heading === null;
 
     // 跑不掉时近战按贴身判据还手；远程目标须持续命中且撤退无进展。
     // RETREAT_MAX_MS 到期只升级撤退策略，不单独触发转身还手。
-    const fightable = foes.filter((f) => f.visible && !NO_FIGHT.has(f.name)).sort((a, b) => a.reach - b.reach);
-    if (this.retreatWhy !== 'no-fight' && fightable.length > 0) {
+    const fightable = foes.filter((f) => !NO_FIGHT.has(f.name)).sort((a, b) => a.reach - b.reach);
+    if (this.retreatWhy === 'flee' && fightable.length > 0) {
       const threat = fightable[0];
-      // 刚挨过打且 1.5 秒净位移仍为零，说明“看似可走”的侧路也未让身体脱险。
-      // 不再等第二、第三次命中才回身；低血时那往往已经是致命一击。
-      const retreatAge = now - this.retreatStartedAt;
-      const stuckUnderFire = stalled && retreatAge >= RETREAT_STALL_MS && retreatAge <= 2_500
-        && now - this.retreatLastHurtAt <= 2_500 && threat.reach < 10;
-      const closeCornered = (this.retreatHits >= 2 || trapped || stuckUnderFire)
-        && now - this.retreatStartedAt >= RETREAT_STALL_MS && threat.reach <= 3.2;
-      const rangedCornered = (this.retreatHits >= 2 || trapped || stuckUnderFire)
-        && (recentlyHurt || stuckUnderFire) && stalled;
-      // mc_stop 请求先脱战；贴身连续受击证明没脱开时仍需自卫。
-      // 远处火力下的 mc_stop 继续找退路，避免把“停战”变成主动追击远程怪。
-      if (closeCornered || (this.retreatWhy === 'flee' && rangedCornered)) {
+      const closeCornered = this.retreatHits >= 2 && now - this.retreatStartedAt >= 1_500 && threat.reach <= 3.2;
+      const rangedCornered = this.retreatHits >= 2 && recentlyHurt && stalled;
+      if (closeCornered || rangedCornered) {
         if (this.turnAndFight(bot, threat, now, closeCornered ? 'close' : 'stalled')) return;
       }
     }
@@ -1828,39 +1432,29 @@ export class CombatSession {
       this.end(doneWhy === 'mc_stop' ? 'mc_stop' : 'flee');
       return;
     }
-    if (!heading) {
-      this.stopMovement(bot);
-      const threat = fightable[0];
-      if (threat) void bot.lookAt(threat.pos.offset(0, EYE, 0), true).catch(() => undefined);
-      return;
+    const to = this.retreatBank;
+    let dx = to ? to.x + 0.5 - p.x : p.x - from.x;
+    let dz = to ? to.z + 0.5 - p.z : p.z - from.z;
+    // 背对怪群那个方向前面是悬崖、岩浆或虚空时,换成左右两侧里踩得住的那边;都踩不住就原地不动
+    if (!to && !footingAhead(bot, dx, dz)) {
+      const side = ([[-dz, dx], [dz, -dx]] as const).find(([sx, sz]) => footingAhead(bot, sx, sz));
+      if (!this.retreatEdgeNoted) {
+        this.retreatEdgeNoted = true;
+        this.opts.diag?.write({
+          lane: 'combat', event: 'retreat-edge',
+          msg: `撤退方向前面没有 ${RETREAT_MAX_DROP} 格内的落脚:${side ? '改走侧面' : '两侧也没有,原地不动'}`,
+          data: { at: { x: p.x, y: p.y, z: p.z }, dx, dz },
+        });
+      }
+      if (!side) {
+        for (const k of ['forward', 'back', 'left', 'right', 'sprint'] as const) bot.setControlState(k, false);
+        return;
+      }
+      [dx, dz] = side;
     }
-    void bot.lookAt(new Vec3(p.x + heading.x * 4, p.y + EYE, p.z + heading.z * 4), true).catch(() => undefined);
-    this.pressToward(bot, heading.x, heading.z, true);
-    this.autoJump(bot, heading.x, heading.z);
-  }
-
-  /** 从可站立方向中选撤退路线；直线后退被墙挡住时优先沿墙侧移。 */
-  private retreatHeading(bot: Bot, foes: Foe[], dx: number, dz: number): { x: number; z: number } | null {
-    const p = bot.entity.position;
-    const len = Math.hypot(dx, dz);
-    if (len < 1e-6) return null;
-    const ux = dx / len, uz = dz / len;
-    let best: { x: number; z: number } | null = null;
-    let bestScore = -Infinity;
-    for (let i = 0; i < 16; i++) {
-      const d = slotDir(i);
-      if (!this.movementSafe(bot, d.x, d.z, false, 2.1)) continue;
-      const alignment = d.x * ux + d.z * uz;
-      // 退路可侧移，但不能为了绕墙主动穿过贴身的怪。
-      const nearby = foes.filter((f) => f.flat < 5);
-      const foePenalty = nearby.reduce((sum, f) => {
-        const vx = f.pos.x - p.x, vz = f.pos.z - p.z;
-        return sum + Math.max(0, (d.x * vx + d.z * vz) / (Math.hypot(vx, vz) || 1)) * 0.8;
-      }, 0);
-      const score = alignment - foePenalty;
-      if (score > bestScore) { bestScore = score; best = d; }
-    }
-    return best;
+    void bot.lookAt(new Vec3(p.x + dx * 4, p.y + EYE, p.z + dz * 4), true).catch(() => undefined);
+    this.pressToward(bot, dx, dz, true);
+    this.autoJump(bot, dx, dz);
   }
 
   /**
@@ -1923,22 +1517,18 @@ export class CombatSession {
    * —— 250ms 巡检会在下一拍把刚开跑的任务重新挂起,那就等于什么都没改。挨打仍走
    * `onHurtBy`(宽限期内它退回反射的降级行为),环境反射照旧在两者之上。
    *
-   * 首步为 eat/flee/surface 时允许交还低血自保；环境危机仍由环境反射持有。
-   * 返回刚才在做什么；本来就空闲返回 null。
+   * 返回刚才在做什么(受理回执照实说一句);本来就空闲返回 null。
    */
-  standDown(firstStep?: SkillCall): string | null {
+  standDown(): string | null {
     if (this.state === 'idle') return null;
     // queue:"now" 只更新普通任务意图，不清除受击和无进展记录。
-    // 低血、绝境战斗或刚受击的撤退只向进食和撤离交还身体。
+    // 低血、绝境战斗或距上次受击不足 RETREAT_IDLE_MS 的撤退仍持有身体，急件须等待。
     const now = Date.now();
     const retreatStillSaving = this.state === 'retreating' && now - this.retreatLastHurtAt < RETREAT_IDLE_MS;
-    const survival = firstStep?.skill === 'eat' || firstStep?.skill === 'flee' || firstStep?.skill === 'surface';
-    const environment = this.opts.envBusy();
-    if (environment || (!survival
-      && (retreatStillSaving || this.desperate || (this.bot?.health ?? 0) < this.opts.tuning().fleeHealth))) {
+    if (retreatStillSaving || this.desperate || (this.bot?.health ?? 0) < this.opts.tuning().fleeHealth) {
       this.opts.diag?.write({
         lane: 'combat', event: 'stand-down-deferred',
-        msg: `queue:"now" 未夺走救命动作:${environment ? '环境自保' : retreatStillSaving ? '撤退中刚挨过打' : `生命 ${this.hp()}/20`}`,
+        msg: `queue:"now" 未夺走救命动作:${retreatStillSaving ? '撤退中刚挨过打' : `生命 ${this.hp()}/20`}`,
         data: { state: this.state, health: this.bot?.health, hits: this.retreatHits },
       });
       return null;
@@ -1948,7 +1538,7 @@ export class CombatSession {
     this.opts.diag?.write({
       lane: 'combat', event: 'stand-down',
       msg: `queue:"now" 夺手:${what},当场交还身体,${STAND_DOWN_GRACE_MS / 1000}s 内不自动进场`,
-      data: { was: this.state, graceMs: STAND_DOWN_GRACE_MS, firstStep, survival },
+      data: { was: this.state, graceMs: STAND_DOWN_GRACE_MS },
     });
     this.opts.emit('先不打了,这件事更急。', false, false);
     this.end('preempt');
@@ -1986,32 +1576,14 @@ export class CombatSession {
     return busy / BUSY_WINDOW_MS;
   }
 
-  private observeScene(bot: Bot): CombatScene {
-    const p = bot.entity.position;
-    const nearbyHostiles: Record<string, number> = {};
-    for (const e of Object.values(bot.entities ?? {})) {
-      if (!e?.position || e.isValid === false || !HOSTILE.has(e.name ?? '')
-        || Math.hypot(e.position.x - p.x, e.position.y - p.y, e.position.z - p.z) > 16) continue;
-      nearbyHostiles[e.name!] = (nearbyHostiles[e.name!] ?? 0) + 1;
-    }
-    return { dimension: bot.game?.dimension ?? null, position: { x: p.x, y: p.y, z: p.z },
-      hostileRadius: 16, nearbyHostiles, equipment: { mainHand: bot.heldItem?.name ?? null,
-        offHand: bot.inventory?.slots?.[45]?.name ?? null,
-        helmet: bot.inventory?.slots?.[5]?.name ?? null, chestplate: bot.inventory?.slots?.[6]?.name ?? null,
-        leggings: bot.inventory?.slots?.[7]?.name ?? null, boots: bot.inventory?.slots?.[8]?.name ?? null } };
-  }
-
   private end(reason: EndReason): void {
     if (this.state === 'idle') return;
     this.cancelRanged();
     const bot = this.bot;
-    if (bot) this.cancelCombatFood(bot);
     this.state = 'idle';
     this.desperate = false;
     this.retreatBank = null;
     this.unhook();
-    this.releaseWalkOnly?.();
-    this.releaseWalkOnly = null;
     if (bot?.entity) {
       this.release(bot);
       // 统一交还身体；releaseBody 保留反射登记的逃生目标。
@@ -2034,12 +1606,6 @@ export class CombatSession {
         rangedLanded: this.rangedLanded, landed: this.landed,
       },
     });
-    this.opts.report?.({ startedAt: new Date(this.startedAt).toISOString(),
-      endedAt: new Date(Date.now()).toISOString(), reason,
-      healthBefore: this.healthBefore, healthAfter: bot?.health ?? null,
-      sceneBefore: this.sceneBefore,
-      kills: Object.fromEntries(this.kills), swings: this.swings,
-      meleeLanded: this.meleeLanded(), arrows: this.arrows, rangedLanded: this.rangedLanded });
     // 只有正常战斗收尾解冻断点。断线、环境夺权、外部抢占与死亡各自由其终态边界
     // 处理冻结队列；在这里泵回会让任务进入已断线或正在交权的执行器。
     const resumable = reason === 'clear' || reason === 'flee' || reason === 'timeout' ||
@@ -2051,8 +1617,6 @@ export class CombatSession {
   }
 
   private release(bot: Bot): void {
-    this.tacticalMove = null;
-    this.movementIntent = null;
     // sneak 也在名单里:寻路器交互放置失败时是**故意**留着它的
     // (index.js:557-566 只在放成那一支才 sneak=false),战斗夺手正好夹在中间,
     // 于是"战后一直半蹲着走"的残留没人收

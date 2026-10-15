@@ -1,14 +1,10 @@
 import { EventEmitter } from 'node:events';
-import type { Bot } from 'mineflayer';
 import { Vec3 } from 'vec3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CombatSession, footingAhead, type CombatTuning } from '../../../src/worlds/minecraft/combat.ts';
 import type { CombatRangedActions } from '../../../src/worlds/minecraft/combat.ts';
 import type { RangedTarget } from '../../../src/worlds/minecraft/ranged.ts';
 import { MinecraftLog } from '../../../src/worlds/minecraft/log.ts';
-import { Executor, type TaskReport } from '../../../src/worlds/minecraft/executor.ts';
-import { skillEat } from '../../../src/worlds/minecraft/skills-craft.ts';
-import type { CombatResult } from '../../../src/worlds/minecraft/combat-tactics.ts';
 import type { Logger } from '../../../src/core/types.ts';
 
 const log = { child() { return this; }, info() {}, warn() {}, error() {}, debug() {}, trace() {}, emit() {} } as unknown as Logger;
@@ -68,7 +64,6 @@ function combatRigBot(foes: FakeFoe[] = []) {
   bot.setControlState = (k: string, v: boolean) => { controls[k] = v; };
   bot.controlState = controls;
   bot.blockAt = (p: { y: number }) => ({ name: p.y < 64 ? 'stone' : 'air', boundingBox: p.y < 64 ? 'block' : 'empty' });
-  bot.world = { raycast: () => null };
   bot.pathfinder = { setGoal: () => {} };
   return { bot: bot as never, attacks, controls };
 }
@@ -78,10 +73,8 @@ function rig(
   over: Partial<CombatTuning> = {},
   diag?: MinecraftLog,
   ranged?: CombatRangedActions,
-  onLowHealth?: (bot: Bot) => void,
 ) {
   const events: Array<{ text: string; urgent: boolean }> = [];
-  const combatReports: CombatResult[] = [];
   const calls = { suspended: 0, resumed: 0, suspendedBy: [] as string[] };
   let envBusy = false;
   let taskEscaping = false;
@@ -99,13 +92,11 @@ function rig(
     suspendTasks: (by) => { calls.suspended++; calls.suspendedBy.push(by); },
     resumeTasks: () => { calls.resumed++; return '刚才做到一半的任务#1 接着做(第 1 步:去坐标)'; },
     emit: (text, urgent) => events.push({ text, urgent }),
-    onLowHealth,
-    report: result => combatReports.push(result),
     ranged,
     log,
   });
   return {
-    session, events, calls, combatReports,
+    session, events, calls,
     setEnvBusy: (v: boolean) => { envBusy = v; },
     setTaskEscaping: (v: boolean) => { taskEscaping = v; },
     setTaskFighting: (v: boolean) => { taskFighting = v; },
@@ -140,138 +131,6 @@ async function drive(bot: EventEmitter, ms: number, stepMs = 50): Promise<void> 
     await sleep(stepMs);
   }
 }
-
-describe('战斗补给', () => {
-  it('副手空着时补备用图腾，已持盾时保留盾牌', async () => {
-    const first = combatRigBot([foe(7, 'zombie', 3)]);
-    const bag = [{ name: 'iron_sword', type: 1, count: 1 },
-      { name: 'totem_of_undying', type: 2, count: 2 }];
-    const slots = Array.from({ length: 46 }, () => null as { name: string } | null);
-    (first.bot as any).inventory = { items: () => bag, slots };
-    (first.bot as any).equip = async (item: { name: string }, dest: string) => {
-      if (dest === 'off-hand') {
-        slots[45] = { name: item.name };
-        bag[1].count -= 1;
-      }
-    };
-    const a = rig(first.bot);
-    a.session.onHurtBy(7, 'zombie');
-    await drive(first.bot, 300);
-    expect(slots[45]).toEqual({ name: 'totem_of_undying' });
-    expect(bag[1].count).toBe(1);
-    slots[45] = null; // 第一枚图腾被消耗
-    await drive(first.bot, 5_100);
-    expect(slots[45]).toEqual({ name: 'totem_of_undying' });
-    expect(bag[1].count).toBe(0);
-    a.session.stop();
-
-    const second = combatRigBot([foe(8, 'skeleton', 3)]);
-    const shieldSlots = Array.from({ length: 46 }, () => null as { name: string } | null);
-    shieldSlots[45] = { name: 'shield' };
-    const shieldBag = [{ name: 'iron_sword', type: 1, count: 1 },
-      { name: 'totem_of_undying', type: 2, count: 1 }];
-    (second.bot as any).inventory = { items: () => shieldBag, slots: shieldSlots };
-    const equip = vi.fn(async (_item: { name: string }, _dest: string) => {});
-    (second.bot as any).equip = equip;
-    const b = rig(second.bot);
-    b.session.onHurtBy(8, 'skeleton');
-    await drive(second.bot, 300);
-    expect(shieldSlots[45]?.name).toBe('shield');
-    expect(equip.mock.calls.some(([, dest]) => dest === 'off-hand')).toBe(false);
-    b.session.stop();
-  });
-
-  it('远离近身与远程压制后进食，库存减少并恢复武器', async () => {
-    const { bot, attacks } = combatRigBot([foe(7, 'zombie', 9)]);
-    const bag = [{ name: 'iron_sword', type: 1, count: 1 }, { name: 'bread', type: 2, count: 2 }];
-    (bot as any).food = 12;
-    (bot as any).health = 15;
-    (bot as any).inventory = { items: () => bag, slots: Array(46).fill(null) };
-    (bot as any).registry.foodsByName = { bread: { foodPoints: 5 } };
-    (bot as any).equip = async (item: { name: string }) => { (bot as any).heldItem = item; };
-    (bot as any).consume = async () => {
-      await sleep(1_600);
-      bag[1].count -= 1;
-      (bot as any).food = 17;
-    };
-    (bot as any).deactivateItem = () => {};
-    const { session, events } = rig(bot);
-    session.onHurtBy(7, 'zombie');
-    await drive(bot, 2_400);
-    expect(bag[1].count).toBe(2);
-    await drive(bot, 2_100);
-    expect(bag[1].count).toBe(1);
-    expect((bot as any).heldItem.name).toBe('iron_sword');
-    expect(events.some((event) => event.text.includes('吃了一个面包'))).toBe(true);
-    expect(attacks).toHaveLength(0);
-    session.stop();
-  });
-
-  it('战斗空档能吃副手口粮，满包交换后恢复武器且不丢物品', async () => {
-    const { bot, attacks } = combatRigBot([foe(7, 'zombie', 9)]);
-    const sword = { name: 'iron_sword', type: 1, count: 1 };
-    const bread = { name: 'bread', type: 2, count: 2 };
-    const bag = [sword, ...Array.from({ length: 35 }, () => ({ name: 'cobblestone', type: 3, count: 64 }))];
-    const slots = Array(46).fill(null);
-    slots[45] = bread;
-    Object.assign(bot, { food: 12, health: 15, heldItem: sword, inventory: { items: () => bag, slots } });
-    (bot as any).registry.foodsByName = { bread: { foodPoints: 5 } };
-    (bot as any).equip = async (item: typeof sword) => {
-      if (item === slots[45]) {
-        slots[45] = bag[0];
-        bag[0] = item;
-      }
-      (bot as any).heldItem = item;
-    };
-    (bot as any).consume = async () => {
-      await sleep(1_600);
-      bread.count -= 1;
-      (bot as any).food = 17;
-    };
-    (bot as any).deactivateItem = () => {};
-    const { session, events } = rig(bot);
-    session.onHurtBy(7, 'zombie');
-    await drive(bot, 4_500);
-    expect(bread.count).toBe(1);
-    expect((bot as any).heldItem.name).toBe('iron_sword');
-    expect(slots[45]).toBe(bread);
-    expect(bag).toHaveLength(36);
-    expect(bag.filter(item => item.name === 'cobblestone')).toHaveLength(35);
-    expect(events.some(event => event.text.includes('吃了一个面包'))).toBe(true);
-    expect(attacks).toHaveLength(0);
-    session.stop();
-  });
-
-  it('副手持盾时面对远程敌人会举盾', async () => {
-    const { bot } = combatRigBot([foe(7, 'skeleton', 6)]);
-    (bot as any).inventory.slots[45] = { name: 'shield' };
-    const raised: boolean[] = [];
-    (bot as any).activateItem = (offhand: boolean) => { raised.push(offhand); };
-    (bot as any).deactivateItem = () => {};
-    const { session } = rig(bot);
-    session.onHurtBy(7, 'skeleton');
-    await drive(bot, 500);
-    expect(raised).toContain(true);
-    session.stop();
-  });
-
-  it('远程敌人仍在射程内时不为吃饭放下战斗', async () => {
-    const { bot } = combatRigBot([foe(7, 'skeleton', 9)]);
-    const bag = [{ name: 'iron_sword', type: 1, count: 1 }, { name: 'bread', type: 2, count: 2 }];
-    (bot as any).food = 10;
-    (bot as any).health = 15;
-    (bot as any).inventory = { items: () => bag, slots: Array(46).fill(null) };
-    (bot as any).registry.foodsByName = { bread: { foodPoints: 5 } };
-    const consume = vi.fn(async () => {});
-    (bot as any).consume = consume;
-    const { session } = rig(bot);
-    session.onHurtBy(7, 'skeleton');
-    await drive(bot, 3_000);
-    expect(consume).not.toHaveBeenCalled();
-    expect(bag[1].count).toBe(2);
-    session.stop();
-  });
-});
 
 /**
  * 岩浆的 boundingBox 为 empty，岩浆块为 block；可站性须同时检查危险方块名称，使用共享的 BURNING_BLOCKS/SCORCHING_FLOOR。
@@ -347,67 +206,6 @@ describe('战斗会话:进入(夺手不夺嘴)', () => {
     b.session.stop();
   });
 
-  it('试炼层主动接战本层远处怪物，但忽略上下层重叠的敌人', async () => {
-    const distant = foe(7, 'zombie', 8);
-    const upper = foe(8, 'skeleton', 2);
-    upper.position.y = 76;
-    const { bot } = combatRigBot([upper, distant]);
-    const { session, events } = rig(bot, { arena: true, engageRadius: 16, chaseMax: 18 });
-    session.start();
-    await waitUntil(() => session.active, 2_000);
-    expect(events[0].text).toContain('僵尸');
-    expect(events[0].text).not.toContain('骷髅');
-    session.stop();
-
-    const onlyUpper = combatRigBot([upper]);
-    const other = rig(onlyUpper.bot, { arena: true, engageRadius: 16, chaseMax: 18 });
-    other.session.start();
-    await sleep(600);
-    expect(other.session.active).toBe(false);
-    other.session.stop();
-  });
-
-  it('试炼层的墙外敌人不触发接战，也不抢走已看见的目标', async () => {
-    const hidden = foe(7, 'creeper', 2);
-    const seen = foe(8, 'zombie', 0.5, 2.5);
-    const { bot, attacks } = combatRigBot([hidden, seen]);
-    (bot as any).world.raycast = (_eye: Vec3, dir: Vec3) =>
-      dir.x > 0.2 ? { position: new Vec3(1, 65, 0) } : null;
-    const { session, events } = rig(bot, { arena: true, engageRadius: 16, chaseMax: 18 });
-    session.start();
-    await waitUntil(() => session.active, 2_000);
-    expect(events[0].text).toContain('僵尸');
-    expect(events[0].text).not.toContain('苦力怕');
-    await drive(bot, 2_000);
-    expect(attacks).not.toContain(7);
-    session.stop();
-
-    const onlyHidden = combatRigBot([hidden]);
-    (onlyHidden.bot as any).world.raycast = () => ({ position: new Vec3(1, 65, 0) });
-    const blocked = rig(onlyHidden.bot, { arena: true, engageRadius: 16, chaseMax: 18 });
-    blocked.session.start();
-    await sleep(700);
-    expect(blocked.session.active).toBe(false);
-    blocked.session.stop();
-  });
-
-  it('连续清试炼层时不因战斗占比暂停；受击自卫也不受冷却限制', async () => {
-    const { bot } = combatRigBot([foe(7, 'zombie', 2.2)]);
-    const { session } = rig(bot, { arena: true });
-    (session as any).busyLog.push({ from: Date.now() - 250_000, to: Date.now() });
-    (session as any).cooldownUntil = Date.now() + 60_000;
-    session.start();
-    await waitUntil(() => session.active, 2_000);
-    session.stop();
-
-    const other = rig(bot);
-    (other.session as any).busyLog.push({ from: Date.now() - 250_000, to: Date.now() });
-    (other.session as any).cooldownUntil = Date.now() + 60_000;
-    expect(other.session.onHurtBy(7, 'zombie')).toBe(true);
-    expect(other.session.active).toBe(true);
-    other.session.stop();
-  });
-
   it('普通猪灵只认实际穿戴的金甲:穿在装备槽不进场,只放背包仍主动接敌', async () => {
     const worn = combatRigBot([foe(7, 'piglin', 2.5)]);
     (worn.bot as unknown as { inventory: { slots: unknown[] } }).inventory.slots[8] = { name: 'golden_boots' };
@@ -457,26 +255,17 @@ describe('战斗会话:进入(夺手不夺嘴)', () => {
     session.stop();
   });
 
-  it('死亡是终态:释放战斗并报告实际血量和时间，不恢复被冻结的旧任务', async () => {
+  it('死亡是终态:释放战斗但不恢复被冻结的旧任务', () => {
     const { bot } = combatRigBot([foe(7, 'zombie', 2.5)]);
-    const { session, calls, combatReports } = rig(bot);
-    const startedAt = new Date(Date.now()).toISOString();
+    const { session, calls } = rig(bot);
     session.onHurtBy(7, 'zombie');
     expect(session.active).toBe(true);
 
-    await sleep(2000);
-    Object.assign(bot, { health: 0 });
     (bot as unknown as EventEmitter).emit('death');
 
     expect(session.active).toBe(false);
     expect(calls.resumed).toBe(0);
-    expect(combatReports).toHaveLength(1);
-    expect(combatReports[0]).toMatchObject({ startedAt, endedAt: new Date(Date.now()).toISOString(),
-      reason: 'death', healthBefore: 20, healthAfter: 0, kills: {},
-      sceneBefore: { position: { x: 0.5, y: 64, z: 0.5 }, nearbyHostiles: { zombie: 1 },
-        equipment: { mainHand: 'iron_sword', offHand: null } } });
     session.stop();
-    expect(combatReports).toHaveLength(1);
   });
 
   /**
@@ -517,76 +306,20 @@ describe('战斗会话:进入(夺手不夺嘴)', () => {
     expect(busy.session.onHurtBy(7, 'zombie')).toBe(false);
   });
 
-  it('任务逃生期间，巡检与受击都保留正在执行的路线', async () => {
+  /**
+   * 任务正在逃跑时，3 格圈不主动夺手；受击仍可还手，结束后从断点继续逃跑。
+   */
+  it('任务在逃时:3 格圈不主动进场,但被打照样还手', async () => {
     const near = combatRigBot([foe(7, 'cave_spider', 2.2)]);
     const a = rig(near.bot);
     a.setTaskEscaping(true);
     a.session.start();
     await sleep(600);
     expect(a.session.active).toBe(false); // 不趁逃跑抢场
-    expect(a.session.onHurtBy(7, 'cave_spider')).toBe(true);
-    expect(a.session.active).toBe(false);
-    expect(a.calls.suspended).toBe(0);
+    expect(a.session.onHurtBy(7, 'cave_spider')).toBe(true); // 挨打了就还手
+    expect(a.session.active).toBe(true);
+    expect(a.calls.suspended).toBe(1); // 逃跑任务挂起,打完接着逃
     a.session.stop();
-  });
-
-  it.each([5, 20])('真实逃跑任务生命=%s：连续受击后仍到达，后续任务只执行一次', async (health) => {
-    const { bot, attacks } = combatRigBot([foe(7, 'skeleton', 2.2)]);
-    const native = bot as unknown as Bot;
-    const said: string[] = [];
-    const reports: TaskReport[] = [];
-    let arrive: (() => void) | undefined;
-    let destination: Vec3 | undefined;
-    Object.assign(bot, { health, food: 16, game: { dimension: 'overworld' },
-      chat: (text: string) => said.push(text) });
-    Object.assign(native.pathfinder, {
-      movements: { canDig: true, scafoldingBlocks: [1] },
-      goto: async (goal: { x: number; z: number }) => {
-        destination = new Vec3(goal.x, 64, goal.z);
-        await new Promise<void>((resolve) => { arrive = resolve; });
-      },
-    });
-    let id = 0;
-    let exec: Executor;
-    const session = new CombatSession({
-      getBot: () => native,
-      tuning: () => ({ enabled: true, engageRadius: 3, chaseMax: 6, maxSec: 30, space: 2.6,
-        busyRatio: 60, cooldownSec: 60, fleeHealth: 10, fight: 'auto' }),
-      envBusy: () => false,
-      taskEscaping: () => exec?.escaping ?? false,
-      suspendTasks: (reason) => exec.suspend(reason),
-      resumeTasks: () => exec.resume(), emit: () => {}, log,
-    });
-    exec = new Executor({ getBot: () => native, report: (r) => reports.push(r), log, nextId: () => ++id,
-      busyWith: () => session.active ? '正在跟怪打' : null,
-      stopCombat: (first) => session.standDown(first) });
-    try {
-      exec.submit([{ skill: 'flee', distance: 24 }, { skill: 'chat', text: '撤退后的待办' }]);
-      await waitUntil(() => exec.escaping && arrive !== undefined);
-      session.start();
-      for (let i = 0; i < 5; i++) {
-        expect(session.onHurtBy(7, 'skeleton')).toBe(true);
-        await drive(native, 200);
-        expect(session.active).toBe(false);
-        expect(exec.escaping).toBe(true);
-        expect(reports).toEqual([]);
-      }
-      expect(attacks).toEqual([]);
-      expect(said).toEqual([]);
-      native.entity.position = destination!;
-      arrive!();
-      await waitUntil(() => reports.length === 1);
-      expect(reports[0].kind).toBe('done');
-      expect(said).toEqual(['撤退后的待办']);
-      expect(exec.escaping).toBe(false);
-      expect(native.pathfinder.movements.canDig).toBe(true);
-      (native.entities[7] as { isValid: boolean }).isValid = false;
-      await drive(native, 300);
-      expect(session.active).toBe(false);
-    } finally {
-      session.stop();
-      exec.shutdown();
-    }
   });
 
   it('头在水里不接手:水下近战交回 surface/防溺水那条线', () => {
@@ -595,18 +328,6 @@ describe('战斗会话:进入(夺手不夺嘴)', () => {
     const { session } = rig(bot);
     expect(session.onHurtBy(7, 'drowned')).toBe(false);
     expect(session.active).toBe(false);
-  });
-
-  it('被隔墙目标打到时直接撤退，不反复开一场零挥刀的战斗', async () => {
-    const { bot, attacks } = combatRigBot([foe(7, 'creeper', 2.5)]);
-    (bot as unknown as { world: { raycast: () => unknown } }).world.raycast = () => ({ name: 'stone' });
-    const { session, events, calls } = rig(bot);
-    expect(session.onHurtBy(7, 'creeper')).toBe(true);
-    await drive(bot as unknown as EventEmitter, 500, 100);
-    expect(events.some((e) => e.text.includes('看不见它,先撤'))).toBe(true);
-    expect(attacks).toEqual([]);
-    expect(calls.suspended).toBe(1);
-    session.stop();
   });
 
   /**
@@ -776,68 +497,6 @@ describe('弓与近战的同一战斗会话', () => {
     controls.left = false;
     controls.right = false;
     (bot as unknown as EventEmitter).emit('physicsTick');
-    expect(controls.left || controls.right).toBe(true);
-    session.stop();
-  });
-
-  it('轨迹采样发现持续顶墙后封锁原方向并改走另一侧', async () => {
-    const skeleton = foe(7, 'skeleton', 0.5, 10);
-    const { bot, controls } = combatRigBot([skeleton]);
-    const diag = new MinecraftLog({ log });
-    const ranged = rangedRig();
-    const { session } = rig(bot, {}, diag, ranged.actions);
-    session.onHurtBy(7, 'skeleton');
-    (bot as unknown as EventEmitter).emit('physicsTick');
-    expect(controls.left).toBe(true);
-
-    // 假 bot 按键但不产生位置变化，模拟角色顶着墙持续走。
-    await drive(bot as unknown as EventEmitter, 1_600);
-    const entries = diag.after(0);
-    expect(entries.filter((entry) => entry.event === 'trajectory').length).toBeGreaterThanOrEqual(4);
-    expect(entries.find((entry) => entry.event === 'wall-stall')?.incident).toBe(true);
-    expect(controls.left).toBe(false);
-    expect(controls.right).toBe(true);
-    session.stop();
-  });
-
-  it('斜走时检查玩家身体宽度和整段路径，不把墙角当成可走', () => {
-    const { bot } = combatRigBot();
-    (bot as unknown as { blockAt: (p: Vec3) => unknown }).blockAt = (p) => {
-      const x = Math.floor(p.x), y = Math.floor(p.y), z = Math.floor(p.z);
-      const solid = y < 64 || (x === 1 && z === 0 && (y === 64 || y === 65));
-      return { name: solid ? 'stone' : 'air', boundingBox: solid ? 'block' : 'empty' };
-    };
-    const { session } = rig(bot);
-    const safe = (dx: number, dz: number) =>
-      (session as unknown as { movementSafe(bot: Bot, dx: number, dz: number): boolean })
-        .movementSafe(bot, dx, dz);
-    expect(safe(1, 1)).toBe(false);
-    expect(safe(0, 1)).toBe(true);
-  });
-
-  it('寻路器尚未按键时不把计算路径的静止误判为顶墙', async () => {
-    const { bot } = combatRigBot([foe(7, 'zombie', 5.5)]);
-    const diag = new MinecraftLog({ log });
-    const { session } = rig(bot, {}, diag);
-    session.onHurtBy(7, 'zombie');
-    (session as unknown as { pathing: boolean }).pathing = true;
-    (session as unknown as { pathUntil: number }).pathUntil = Date.now() + 4_000;
-    await drive(bot as unknown as EventEmitter, 1_500);
-    expect(diag.after(0).some((entry) => entry.event === 'wall-stall')).toBe(false);
-    session.stop();
-  });
-
-  it('弓态后退被墙挡住时沿墙横移', () => {
-    const skeleton = foe(7, 'skeleton', 0.5, 10);
-    const { bot, controls } = combatRigBot([skeleton]);
-    rangedTerrain(bot, (_x, y, z) => z < 0 && y >= 64 && y <= 65 ? 'stone' : y < 64 ? 'stone' : 'air');
-    const ranged = rangedRig();
-    const { session } = rig(bot, {}, undefined, ranged.actions);
-    session.onHurtBy(7, 'skeleton');
-    (bot as unknown as EventEmitter).emit('physicsTick');
-    skeleton.position = new Vec3(0.5, 64, 7);
-    (bot as unknown as EventEmitter).emit('physicsTick');
-    expect(controls.forward).toBe(false);
     expect(controls.left || controls.right).toBe(true);
     session.stop();
   });
@@ -1080,27 +739,6 @@ describe('战斗会话:打与收', () => {
     session.stop();
   }, 10_000);
 
-  it('mc_stop 后被近战怪贴身追打:恢复自卫，追敌寻路全程不挖墙', () => {
-    const diag = new MinecraftLog();
-    const { bot } = combatRigBot([foe(7, 'husk', 2.5)]);
-    const movements = { canDig: true };
-    ((bot as unknown as { pathfinder: { movements: typeof movements } }).pathfinder).movements = movements;
-    const { session, events } = rig(bot, {}, diag);
-    session.onHurtBy(7, 'husk');
-    expect(movements.canDig).toBe(false);
-    expect(session.requestStop()).toContain('收手');
-    Object.assign(session as unknown as Record<string, unknown>, { retreatStartedAt: Date.now() - 1_600 });
-    session.onHurtBy(7, 'husk');
-    session.onHurtBy(7, 'husk');
-    (bot as unknown as EventEmitter).emit('physicsTick');
-    expect(diag.after(0).find((e) => e.event === 'cornered')?.data)
-      .toMatchObject({ cause: 'close', foe: 'husk' });
-    expect(events.some((e) => e.text.includes('回头打'))).toBe(true);
-    expect(movements.canDig).toBe(false);
-    session.stop();
-    expect(movements.canDig).toBe(true);
-  });
-
   it('E6:环境自保夺权时静默让位,一句话都不抢', async () => {
     const { bot } = combatRigBot([foe(7, 'zombie', 2.5)]);
     const { session, events, calls } = rig(bot);
@@ -1313,20 +951,6 @@ describe('战斗:水里与逃不掉', () => {
  * 空手且低血时，受击的默认反应是脱离。
  */
 describe('空手低血:挨打的默认反应改成脱离', () => {
-  it('低血撤退前先给即时防护技能一次机会', () => {
-    const { bot } = combatRigBot([foe(7, 'zombie', 2.5)]);
-    (bot as unknown as { health: number }).health = 7;
-    (bot as unknown as { heldItem: unknown; inventory: { items(): unknown[] } }).heldItem = null;
-    (bot as unknown as { inventory: { items(): unknown[] } }).inventory.items = () => [];
-    const observed: number[] = [];
-    const { session } = rig(bot, {}, undefined, undefined, (current) => {
-      observed.push((current as { health: number }).health);
-    });
-    session.onHurtBy(7, 'zombie');
-    expect(observed).toEqual([7]);
-    expect(session.active).toBe(true);
-    session.stop();
-  });
   function bareHanded(foes: Parameters<typeof combatRigBot>[0], health: number) {
     const r = combatRigBot(foes);
     (r.bot as unknown as { inventory: { items: () => unknown[] } }).inventory.items = () => [];
@@ -1387,123 +1011,9 @@ describe('空手低血:挨打的默认反应改成脱离', () => {
 });
 
 /**
- * queue:"now" 让战斗交还身体；低血时只让位给进食和撤离首步。
+ * queue:"now" 可以夺回普通战斗的执行权；低血或尚未安全结束的撤退只更新后续任务意图。
  */
 describe('standDown:queue:"now" 夺手', () => {
-  it('容器游标无法归还时保留物品与窗口，不开始消费', async () => {
-    const { bot } = combatRigBot([]);
-    const apple = { name: 'golden_apple', type: 2, count: 2 };
-    const cursor = { name: 'diamond', type: 3, count: 1, stackSize: 64 };
-    const window = { id: 1, inventoryStart: 0, inventoryEnd: 0, slots: [], selectedItem: cursor };
-    Object.assign(bot, { currentWindow: window, inventory: { items: () => [apple], slots: [] },
-      closeWindow: () => { Object.assign(bot, { currentWindow: null }); },
-      consume: async () => { apple.count -= 1; } });
-    Object.assign((bot as unknown as Bot).registry, { foodsByName: { golden_apple: { foodPoints: 4 } } });
-    await expect(skillEat(bot, 'golden_apple')).rejects.toThrow('游标');
-    expect((bot as unknown as Bot).currentWindow).toBe(window);
-    expect(window.selectedItem).toBe(cursor);
-    expect(apple.count).toBe(2);
-    expect((bot as unknown as Bot).heldItem?.name).toBe('iron_sword');
-  });
-
-  it.each(['eat', 'flee', 'surface'] as const)('低血撤退可交还给即时 %s，不恢复旧任务抢跑', (skill) => {
-    const { bot, controls } = combatRigBot([foe(7, 'skeleton', 7)]);
-    (bot as unknown as { health: number }).health = 5;
-    const { session, calls, combatReports } = rig(bot);
-    session.onHurtBy(7, 'skeleton');
-    session.onHurtBy(7, 'skeleton');
-    expect(session.active).toBe(true);
-    const step = skill === 'eat' ? { skill, item: 'golden_apple' } as const
-      : skill === 'flee' ? { skill, distance: 8 } as const : { skill } as const;
-    expect(session.standDown(step)).toBe('正在跟怪打');
-    expect(session.active).toBe(false);
-    expect(calls.resumed).toBe(0);
-    expect(combatReports).toHaveLength(1);
-    expect(combatReports[0]).toMatchObject({ reason: 'preempt', healthBefore: 5, healthAfter: 5 });
-    expect(Object.values(controls).every((pressed) => !pressed)).toBe(true);
-    session.stop();
-  });
-
-  it('环境自保持有时即使即时进食也不夺走身体', () => {
-    const { bot } = combatRigBot([foe(7, 'skeleton', 7)]);
-    const r = rig(bot);
-    r.session.onHurtBy(7, 'skeleton');
-    r.setEnvBusy(true);
-    expect(r.session.standDown({ skill: 'eat', item: 'golden_apple' })).toBeNull();
-    expect(r.session.active).toBe(true);
-    r.session.stop();
-  });
-
-  it.each([true, false])('真实执行器急救进食确认=%s：受击不换剑，保留待办并恢复控制', async (confirmed) => {
-    const { bot, attacks } = combatRigBot([foe(7, 'zombie', 2.2)]);
-    const native = bot as unknown as Bot;
-    const bag = [{ name: 'iron_sword', type: 1, count: 1 }, { name: 'golden_apple', type: 2, count: 2 }];
-    const said: string[] = [];
-    const reports: TaskReport[] = [];
-    Object.assign(bot, {
-      food: 16, game: { dimension: 'overworld' }, effects: {},
-      currentWindow: { id: 1, inventoryStart: 54, inventoryEnd: 90, selectedItem: null },
-      closeWindow: () => { Object.assign(bot, { currentWindow: null }); },
-      inventory: { items: () => bag, slots: Array(46).fill(null) },
-      equip: async (item: unknown) => { Object.assign(bot, { heldItem: item }); },
-      chat: (text: string) => { said.push(text); },
-      deactivateItem: () => {},
-      consume: async () => {
-        if (native.currentWindow) throw new Error('容器窗口仍开着，服务端未使用食物');
-        await new Promise((resolve) => setTimeout(resolve, 1_600));
-        if (native.heldItem?.name !== 'golden_apple') throw new Error('主手被换掉');
-        if (!confirmed) throw new Error('消费被服务端拒绝');
-        bag[1].count -= 1;
-        Object.assign(bot, { food: 20, health: 13, effects: { 10: { id: 10, amplifier: 1, duration: 100 } } });
-      },
-    });
-    Object.assign(native.registry, { foodsByName: { golden_apple: { foodPoints: 4 } } });
-    let id = 0;
-    let exec: Executor;
-    const session = new CombatSession({
-      getBot: () => native,
-      tuning: () => ({ enabled: true, engageRadius: 3, chaseMax: 6, maxSec: 30, space: 2.6,
-        busyRatio: 60, cooldownSec: 60, fleeHealth: 10, fight: 'auto', arena: true }),
-      envBusy: () => false,
-      taskEscaping: () => exec?.escaping ?? false,
-      taskEating: () => exec?.eating ?? false,
-      suspendTasks: (reason) => exec.suspend(reason),
-      resumeTasks: () => exec.resume(), emit: () => {}, log,
-    });
-    exec = new Executor({ getBot: () => native, report: (r) => reports.push(r), log, nextId: () => ++id,
-      busyWith: () => session.active ? '正在跟怪打' : null,
-      stopCombat: (first) => session.standDown(first) });
-    session.onHurtBy(7, 'zombie');
-    Object.assign(bot, { health: 5 });
-    exec.submit([{ skill: 'chat', text: '救急后继续的待办' }], 'append');
-    const receipt = exec.submit([{ skill: 'eat', item: 'golden_apple' }], 'now');
-    expect(receipt).toContain('已经放开手');
-    expect(receipt).not.toContain('排上了');
-    await waitUntil(() => exec.eating && native.heldItem?.name === 'golden_apple');
-    expect(native.currentWindow).toBeNull();
-    session.start();
-    for (let i = 0; i < 5; i++) {
-      session.onHurtBy(7, 'zombie');
-      native.emit('physicsTick');
-      await sleep(200);
-      expect(session.active).toBe(false);
-      expect(native.heldItem?.name).toBe('golden_apple');
-    }
-    expect(attacks).toEqual([]);
-    expect(said).toEqual([]);
-    await waitUntil(() => reports.length === 2);
-    expect(reports[0].kind).toBe(confirmed ? 'done' : 'blocked');
-    expect(reports[0].text).toContain(confirmed ? '吃了一个金苹果' : '消费被服务端拒绝');
-    expect(bag[1].count).toBe(confirmed ? 1 : 2);
-    expect(said).toEqual(['救急后继续的待办']);
-    expect(exec.eating).toBe(false);
-    await sleep(300);
-    expect(session.active).toBe(true);
-    if (confirmed) expect(native.heldItem?.name).toBe('iron_sword');
-    session.stop();
-    exec.shutdown();
-  });
-
   it('当场交还身体但不恢复旧断点，并把刚才在做什么交回给受理回执', () => {
     const diag = new MinecraftLog();
     const { bot } = combatRigBot([foe(7, 'zombie', 2.2)]);
@@ -1614,69 +1124,30 @@ describe('standDown:queue:"now" 夺手', () => {
     await sleep(700);
     expect(session.active).toBe(false);
     expect(calls.suspended).toBe(1); // 只有最初那一次
-    expect(session.onHurtBy(7, 'zombie')).toBe(true); // 挨打自卫不受主动接战冷却限制
+    expect(session.onHurtBy(7, 'zombie')).toBe(false); // 冷却里挨打退回反射降级
     session.stop();
   });
 });
 
 describe('撤退:安全结束与失败升级', () => {
-  it('退路正后方是墙时选择可走的侧向，不持续顶墙', () => {
-    const { bot, controls } = combatRigBot([foe(7, 'zombie', 2)]);
-    (bot as unknown as { health: number }).health = 5;
-    (bot as unknown as { blockAt: (p: Vec3) => object }).blockAt = (p) => ({
-      name: p.y < 64 || (p.x < 0 && p.y <= 65) ? 'stone' : 'air',
-      boundingBox: p.y < 64 || (p.x < 0 && p.y <= 65) ? 'block' : 'empty',
-    });
-    const { session } = rig(bot);
-    session.onHurtBy(7, 'zombie');
-    (bot as unknown as EventEmitter).emit('physicsTick');
-    expect(controls.left).not.toBe(true);
-    expect(controls.forward || controls.back || controls.right).toBe(true);
-    session.stop();
-  });
-
-  it('完全无退路且刚受击，停下回身迎敌，不无限面壁', async () => {
-    const diag = new MinecraftLog();
-    const { bot, controls } = combatRigBot([foe(7, 'zombie', 2)]);
-    (bot as unknown as { health: number }).health = 5;
-    (bot as unknown as { blockAt: (p: Vec3) => object }).blockAt = (p) => {
-      const blocked = p.y < 64 || ((p.x < 0 || p.x >= 1 || p.z < 0 || p.z >= 1) && p.y <= 65);
-      return { name: blocked ? 'stone' : 'air', boundingBox: blocked ? 'block' : 'empty' };
-    };
-    const { session } = rig(bot, {}, diag);
-    session.onHurtBy(7, 'zombie');
-    await drive(bot as unknown as EventEmitter, 1_700);
-    expect(diag.after(0).some((e) => e.event === 'cornered')).toBe(true);
-    expect(controls.forward).not.toBe(true);
-    session.stop();
-  });
-
-  it('远程骷髅射中后撤退 1.5 秒无位移:及时回身处理威胁', async () => {
+  it('远程骷髅在 3.2 格外持续命中、撤退无进展:转身处理威胁而非一直背身跑', async () => {
     const diag = new MinecraftLog();
     const { bot } = combatRigBot([foe(7, 'skeleton', 7)]);
     (bot as unknown as { health: number }).health = 5;
     const { session, events, calls } = rig(bot, {}, diag);
     session.onHurtBy(7, 'skeleton');
-    await drive(bot as unknown as EventEmitter, 1_650);
+    await drive(bot as unknown as EventEmitter, 1_600);
+    session.onHurtBy(7, 'skeleton');
+    session.onHurtBy(7, 'skeleton');
     (bot as unknown as EventEmitter).emit('physicsTick');
 
     const cornered = diag.after(0).find((e) => e.event === 'cornered');
     expect(cornered?.data).toMatchObject({ cause: 'stalled', foe: 'skeleton' });
-    expect(cornered?.data).toMatchObject({ hits: 0 });
     expect(events.some((e) => e.text.includes('远处压着我') && e.text.includes('回头打'))).toBe(true);
     expect(session.active).toBe(true);
     expect(calls.resumed).toBe(0);
     session.stop();
   }, 10_000);
-
-  it('远程怪在常规追击圈外打中时，不按周围无敌人原地等待并提前收工', async () => {
-    const { bot } = combatRigBot([foe(7, 'skeleton', 13)]);
-    const { session } = rig(bot);
-    expect(session.onHurtBy(7, 'skeleton')).toBe(true);
-    await drive(bot as unknown as EventEmitter, 3_250);
-    expect(session.active).toBe(true);
-    session.stop();
-  });
 
   it('堵住直到撤退时限:时限只升级策略,威胁仍近时不报跑开、不恢复任务', () => {
     const diag = new MinecraftLog();
@@ -1729,10 +1200,10 @@ describe('撤退:安全结束与失败升级', () => {
     (bot as unknown as { health: number }).health = 5;
     const { session, events } = rig(bot, {}, diag);
     session.onHurtBy(7, 'zombie'); // 手上还有剑:血线拒战 → 撤退
-    // 撤退开始不久剑没了(掉耐久断了/被换手):空手 + 血 5 低于 fleeHealth(10)+3
+    await drive(bot as unknown as EventEmitter, 1_600);
+    // 撤退路上剑没了(掉耐久断了/被换手):空手 + 血 5 低于 fleeHealth(10)+3
     (bot as unknown as Record<string, unknown>).heldItem = null;
     (bot as unknown as { inventory: { items: () => unknown[] } }).inventory.items = () => [];
-    await drive(bot as unknown as EventEmitter, 1_600);
     session.onHurtBy(7, 'zombie');
     session.onHurtBy(7, 'zombie');
     await drive(bot as unknown as EventEmitter, 400);
@@ -1872,99 +1343,4 @@ describe('末地:龙只报不撤,撤退不朝悬崖跑', () => {
     expect(edge?.msg).toContain('改走侧面');
     session.stop();
   }, 15_000);
-});
-
-describe('异步战术动作共用战斗控制器', () => {
-  it('接敌候选沿用控制器的中立生物、危险目标和距离判据，采样不接管身体', () => {
-    const { bot } = combatRigBot([foe(7, 'enderman', 3), foe(8, 'zombie', 5.5),
-      foe(9, 'warden', 3), foe(10, 'zombie', 20)]);
-    const r = rig(bot);
-    expect(r.session.engagementTargets()).toEqual([8]);
-    expect(r.session.active).toBe(false);
-    expect(r.calls.suspended).toBe(0);
-    expect(r.session.react({ kind: 'engage', targetId: 7 })).toBe(false);
-    expect(r.session.react({ kind: 'engage', targetId: 8 })).toBe(true);
-    expect(r.session.engagementTargets()).toEqual([]);
-    r.session.stop();
-  });
-
-  it('接敌候选在身体占用、低血、未武装和策略关闭时均不提供', () => {
-    const { bot } = combatRigBot([foe(7, 'zombie', 5.5)]);
-    const r = rig(bot, { fight: 'armed' });
-    r.setTaskFighting(true); expect(r.session.engagementTargets()).toEqual([]);
-    r.setTaskFighting(false); r.setEnvBusy(true); expect(r.session.engagementTargets()).toEqual([]);
-    r.setEnvBusy(false); r.setTaskEscaping(true); expect(r.session.engagementTargets()).toEqual([]);
-    r.setTaskEscaping(false); (bot as unknown as Bot).health = 5;
-    expect(r.session.engagementTargets()).toEqual([]);
-    (bot as unknown as Bot).health = 20;
-    (bot as unknown as Bot).inventory.items = () => [];
-    expect(r.session.engagementTargets()).toEqual([]);
-    r.session.stop();
-    const off = rig(bot, { fight: 'off' });
-    expect(off.session.engagementTargets()).toEqual([]);
-    off.session.stop();
-  });
-
-  it('在近身自保圈外接敌后持续接近，环境与主动任务仍有优先权', async () => {
-    const { bot, controls } = combatRigBot([foe(7, 'zombie', 5.5)]);
-    const r = rig(bot);
-    r.setTaskFighting(true);
-    expect(r.session.react({ kind: 'engage', targetId: 7 })).toBe(false);
-    r.setTaskFighting(false); r.setEnvBusy(true);
-    expect(r.session.react({ kind: 'engage', targetId: 7 })).toBe(false);
-    r.setEnvBusy(false);
-    expect(r.session.react({ kind: 'engage', targetId: 7 })).toBe(true);
-    await drive(bot as unknown as EventEmitter, 50);
-    expect(r.session.fighting).toBe(true);
-    expect(Object.entries(controls).some(([key, pressed]) => ['forward', 'back', 'left', 'right'].includes(key) && pressed)).toBe(true);
-    expect(r.calls.suspended).toBe(1);
-    r.session.stop();
-  });
-
-  it('战术短步保持出手，危险落脚点与已释放的身体拒绝旧动作', async () => {
-    const { bot, attacks, controls } = combatRigBot([foe(7, 'zombie', 3)]);
-    const cast = bot as unknown as Bot;
-    cast.blockAt = (p => ({ name: p.y < 64 ? 'stone' : 'air', boundingBox: p.y < 64 ? 'block' : 'empty',
-      shapes: p.y < 64 ? [[0, 0, 0, 1, 1, 1]] : [], getProperties: () => ({}) })) as Bot['blockAt'];
-    const r = rig(bot);
-    expect(r.session.react({ kind: 'engage', targetId: 7 })).toBe(true);
-    expect(r.session.react({ kind: 'step', destination: [0.5, 64, 1.7] })).toBe(true);
-    await drive(bot as unknown as EventEmitter, 1000);
-    expect(attacks.length).toBeGreaterThan(0);
-    cast.blockAt = () => null;
-    expect(r.session.react({ kind: 'step', destination: [0.5, 64, 1.7] })).toBe(false);
-    r.session.stop();
-    expect(r.session.react({ kind: 'step', destination: [0.5, 64, 1.7] })).toBe(false);
-    expect(Object.values(controls).every(pressed => !pressed)).toBe(true);
-  });
-
-  it('主动接敌遵守关闭策略和血线，战术撤退交给已有撤退控制器', () => {
-    const b = combatRigBot([foe(7, 'zombie', 3)]);
-    const off = rig(b.bot, { fight: 'off' });
-    expect(off.session.react({ kind: 'engage', targetId: 7 })).toBe(false);
-    off.session.stop();
-    const r = rig(b.bot);
-    (b.bot as unknown as Bot).health = 5;
-    expect(r.session.react({ kind: 'engage', targetId: 7 })).toBe(false);
-    (b.bot as unknown as Bot).health = 20;
-    expect(r.session.react({ kind: 'engage', targetId: 7 })).toBe(true);
-    expect(r.session.react({ kind: 'retreat' })).toBe(true);
-    expect(r.session.reactionState().retreating).toBe(true);
-    r.session.stop();
-  });
-
-  it('短步让出横扫的站定窗口并继续完成攻击', async () => {
-    const { bot, attacks, controls } = combatRigBot([foe(7, 'zombie', 2.5), foe(8, 'zombie', 2.7)]);
-    const cast = bot as unknown as Bot;
-    cast.blockAt = (p => ({ name: p.y < 64 ? 'stone' : 'air', boundingBox: p.y < 64 ? 'block' : 'empty',
-      shapes: p.y < 64 ? [[0, 0, 0, 1, 1, 1]] : [], getProperties: () => ({}) })) as Bot['blockAt'];
-    const r = rig(bot);
-    expect(r.session.react({ kind: 'engage', targetId: 7 })).toBe(true);
-    expect(r.session.react({ kind: 'step', destination: [0.5, 64, 1.7] })).toBe(true);
-    await drive(bot as unknown as EventEmitter, 100);
-    expect(['forward', 'back', 'left', 'right', 'sprint'].every(k => !controls[k])).toBe(true);
-    await drive(bot as unknown as EventEmitter, 100);
-    expect(attacks.length).toBeGreaterThan(0);
-    r.session.stop();
-  });
 });

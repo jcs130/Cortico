@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   bagStamp, blockedStamp, queueStamp,
-  renderBagReadout, renderBlockedReadout, renderQueueReadout, renderStorageReadout, renderStoredItemReadout,
+  renderBagReadout, renderBlockedReadout, renderQueueReadout,
 } from '../../../src/worlds/minecraft/readouts.ts';
 import type { BlockedRecord, QueueStatus } from '../../../src/worlds/minecraft/executor.ts';
 import type { WorldSnapshot } from '../../../src/worlds/minecraft/terrain.ts';
@@ -42,7 +42,6 @@ describe('背包读数(mc_bag)', () => {
     expect(text).toContain('圆石×40');
     expect(text).toContain('手里拿着');
     expect(text).toContain('穿着:');
-    expect(text).toContain('副手空着');
   });
 
   it('物品栏还没同步到:照实说没到,不把空栏当「包是空的」报', () => {
@@ -51,140 +50,11 @@ describe('背包读数(mc_bag)', () => {
     expect(text).not.toContain('0/36');
   });
 
-  it('独立物品显示名进入清单和手持读数', () => {
-    const text = renderBagReadout(snap({
-      heldItem: 'player_head', heldItemDisplayName: '大背包',
-      inventory: [
-        { name: 'player_head', count: 1, displayName: '大背包' },
-        { name: 'player_head', count: 1 },
-      ],
-    }));
-    expect(text).toContain('大背包×1');
-    expect(text).toContain('玩家头×1');
-    expect(text).toContain('手里拿着大背包');
-  });
-
   it('指纹认物品与手上那件,不认没进读数的东西', () => {
     const a = snap();
     expect(bagStamp(a)).toBe(bagStamp(snap()));
     expect(bagStamp(snap({ heldItem: 'torch' }))).not.toBe(bagStamp(a));
     expect(bagStamp(null)).toBe('nobot');
-  });
-
-  it('cursor ownership is visible without inflating bag slots or the carried item count', () => {
-    const before = snap({ inventory: [], heldItem: null });
-    const after = snap({ inventory: [], heldItem: null, cursorItem: { name: 'wooden_hoe', count: 1 } });
-    const text = renderBagReadout(after);
-    expect(text).toContain('0/36 格占着');
-    expect(text).toContain('手里空着');
-    expect(text).toContain('鼠标光标：木锄');
-    expect(text).toContain('wooden_hoe');
-    expect(text).toContain('尚未放回背包');
-    expect(bagStamp(after)).not.toBe(bagStamp(before));
-    expect(renderStoredItemReadout(after, [], 'wooden_hoe')).toContain('鼠标光标');
-  });
-
-  it('按物品查仓储历史，不把箱内数量混入随身余额', () => {
-    const text = renderStoredItemReadout(snap({ inventory: [] }), [
-      { x: -549, y: 63, z: -380, dimension: 'overworld', usedSlots: 27, slots: 27,
-        observedAt: Date.parse('2026-10-02T05:14:22Z'), items: [{ name: 'emerald', count: 126 }] },
-      { x: -560, y: 65, z: -375, dimension: 'overworld', usedSlots: 27, slots: 27,
-        items: [{ name: 'emerald', count: 18 }] },
-    ], 'emerald');
-    expect(text).toContain('随身绿宝石×0');
-    expect(text).toContain('虚拟大背包等未开窗容器未计入');
-    expect(text).toContain('(-549,63,-380) 上次见到×126');
-    expect(text).toContain('到场开窗重查');
-    const open = renderStoredItemReadout(snap({ inventory: [] }), [], 'emerald',
-      { title: '大背包', items: [{ name: 'emerald', count: 64 }, { name: 'emerald', count: 8 }] });
-    expect(open).toContain('当前打开的「大背包」里绿宝石×72（现读）');
-    expect(renderStoredItemReadout(snap(), [], 'diamond')).toContain('不等于其他容器里没有');
-  });
-
-  it('keeps registered variants separate across carried, open-window and historical stock', () => {
-    const registry = { itemsByName: { golden_apple: {}, enchanted_golden_apple: {} } };
-    const text = renderStoredItemReadout(snap({ inventory: [
-      { name: 'golden_apple', count: 2 }, { name: 'enchanted_golden_apple', count: 5 },
-    ] }), [{ x: 1, y: 64, z: 0, dimension: 'overworld', usedSlots: 2, slots: 27,
-      items: [{ name: 'golden_apple', count: 8 }, { name: 'enchanted_golden_apple', count: 13 }] }],
-    'golden_apple', { title: '箱子', items: [{ name: 'enchanted_golden_apple', count: 5 }] }, registry);
-    expect(text).toContain('随身金苹果×2');
-    expect(text).toContain('箱子」里金苹果×0');
-    expect(text).toContain('上次见到×8');
-  });
-
-  it('finds exact custom names across carried items, cursor, open window and historical stock', () => {
-    const s = snap({ inventory: [
-      { name: 'diamond_pickaxe', displayName: '矿工镐', count: 1 },
-      { name: 'diamond_pickaxe', displayName: '备用矿工镐', count: 2 },
-      { name: 'diamond_pickaxe', count: 3 },
-    ], cursorItem: { name: 'diamond_pickaxe', displayName: '矿工镐', count: 1 } });
-    const records = [{ x: 1, y: 64, z: 0, dimension: 'overworld', usedSlots: 3, slots: 27,
-      items: [{ name: 'diamond_pickaxe', displayName: '矿工镐', count: 4 },
-        { name: 'diamond_pickaxe', displayName: '备用矿工镐', count: 8 },
-        { name: 'diamond_pickaxe', count: 16 }] }];
-    const open = { title: '箱子', items: [
-      { name: 'diamond_pickaxe', displayName: '矿工镐', count: 5 },
-      { name: 'diamond_pickaxe', displayName: '备用矿工镐', count: 10 },
-    ] };
-    const text = renderStoredItemReadout(s, records, '矿工镐', open);
-    expect(text).toContain('随身矿工镐×1');
-    expect(text).toContain('工具物品名:diamond_pickaxe');
-    expect(text).toContain('鼠标光标：矿工镐×1');
-    expect(text).toContain('箱子」里矿工镐×5（现读）');
-    expect(text).toContain('上次见到×4');
-    const byId = renderStoredItemReadout(s, records, 'minecraft:diamond_pickaxe', open);
-    expect(byId).toContain('随身钻石镐×6');
-    expect(byId).toContain('箱子」里钻石镐×15（现读）');
-    expect(byId).toContain('上次见到×28');
-  });
-
-  it('accepts printable custom-name symbols without treating a partial name as an exact match', () => {
-    const s = snap({ inventory: [{ name: 'player_head', count: 1, displayName: '✦ 旅行背包' }] });
-    expect(renderStoredItemReadout(s, [], ' ✦  旅行背包 ')).toContain('随身✦  旅行背包×1');
-    expect(renderStoredItemReadout(s, [], '旅行背包')).toContain('随身旅行背包×0');
-    expect(renderStoredItemReadout(s, [], '✦\n旅行背包')).toContain('物品名格式不对');
-    expect(renderStoredItemReadout(s, [], '✦\u200b 旅行背包')).toContain('物品名格式不对');
-  });
-
-  it('背包把同种备用装备的耐久分别报出，供点名存物', () => {
-    const text = renderBagReadout(snap({ inventory: [
-      { name: 'diamond_sword', count: 1, durability: { left: 1550, max: 1561 } },
-      { name: 'diamond_sword', count: 1, durability: { left: 661, max: 1561 } },
-    ] }));
-    expect(text).toContain('耐久1550/1561×1');
-    expect(text).toContain('耐久661/1561×1');
-  });
-
-  it('背包快满时列出已满仓库和最近有空位仓库', () => {
-    const inventory = Array.from({ length: 34 }, () => ({ name: 'bow', count: 1 }));
-    const s = snap({ inventory });
-    const records = [
-      { x: 1, y: 64, z: 0, dimension: 'overworld', items: [], usedSlots: 27, slots: 27 },
-      { x: 2, y: 64, z: 0, dimension: 'overworld', items: [], usedSlots: 27, slots: 27 },
-      { x: 20, y: 64, z: 0, dimension: 'overworld', items: [], usedSlots: 4, slots: 27 },
-    ];
-    const text = renderStorageReadout(s, records);
-    expect(text).toContain('上次占满 2 口');
-    expect(text).toContain('(20,64,0) 4/27 格');
-    expect(text).toContain('暂缓清空随身容器');
-    expect(renderStorageReadout(snap(), records)).toBeNull();
-  });
-
-  it('随身满而近处箱子满时，指出可并堆的物品而非重复塞不可堆叠装备', () => {
-    const inventory = [
-      { name: 'spruce_log', count: 3 },
-      ...Array.from({ length: 35 }, () => ({ name: 'bow', count: 1 })),
-    ];
-    const records = [{
-      x: 1, y: 64, z: 0, dimension: 'overworld', usedSlots: 27, slots: 27,
-      items: [{ name: 'spruce_log', count: 4 }, { name: 'bow', count: 1 }],
-    }];
-    const text = renderStorageReadout(snap({ inventory }), records);
-    expect(text).toContain('云杉原木×3');
-    expect(text).toContain('(1,64,0)');
-    expect(text).toContain('不要拿弓');
-    expect(text).not.toContain('试把弓');
   });
 });
 

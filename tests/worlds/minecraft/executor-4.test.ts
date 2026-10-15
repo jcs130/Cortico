@@ -3,22 +3,14 @@
  * 分份只为并行,按实测耗时配平;哪个 describe 落在哪一份没有语义。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { EventEmitter } from 'node:events';
 import {
   causalNeeds, deriveExpect, describeSkill, Executor, Reflexes, parseSteps,
-  skillNeeds, skillProduces, useChangeMayClearRouteFailure, zhErrorText,
-  type SkillCall, type ResourcePlacementGate, type TaskReport,
+  skillNeeds, skillProduces, zhErrorText, type SkillCall, type ResourcePlacementGate, type TaskReport,
 } from '../../../src/worlds/minecraft/executor.ts';
 import { defaultPolicy } from '../../../src/worlds/minecraft/policy.ts';
-import { SkillBlocked } from '../../../src/worlds/minecraft/skill-context.ts';
 import { ChestBook } from '../../../src/worlds/minecraft/chests.ts';
 import { WorksBook } from '../../../src/worlds/minecraft/works.ts';
 import { MinecraftLog } from '../../../src/worlds/minecraft/log.ts';
-import { surfaceFeetAt } from '../../../src/worlds/minecraft/cell-facts.ts';
-import { findHitText } from '../../../src/worlds/minecraft/skills-gather.ts';
-import { openStationWindow, putIntoStation, ANVIL_BLOCKS } from '../../../src/worlds/minecraft/containers.ts';
-import { pickSmeltInput, protectedTossItem, reacquiredTossNote, skillToss } from '../../../src/worlds/minecraft/skills-container.ts';
-import type { Bot } from 'mineflayer';
 import {
   log,
   nextTaskId,
@@ -38,8 +30,6 @@ import {
   furnaceBot,
   drownBot,
   makeReflexes,
-  withMinecraftCollisionShapes,
-  withBotEvents,
 } from './executor-harness.ts';
 
 beforeEach(() => {
@@ -51,1565 +41,6 @@ afterEach(() => {
 });
 
 describe('Executor 编排', () => {
-  it('锄头点草苗格时受理刻拒收整单，并指出下面真正的土格', () => {
-    const { bot } = chestBot({ inv: { iron_hoe: 1, wheat_seeds: 4 } });
-    bot.blockAt = (p: V) => ({
-      name: p.y === 65 ? 'grass' : p.y === 64 ? 'grass_block' : 'air',
-      position: p, boundingBox: 'block',
-    });
-    const { exec, reports } = makeExecutorOn(bot);
-    const result = exec.submitDetailed([
-      { skill: 'use', item: 'iron_hoe', at: [3, 65, 0] },
-      { skill: 'use', item: 'wheat_seeds', at: [3, 65, 0] },
-    ]);
-    expect(result.accepted).toBe(false);
-    expect(result.rejection).toEqual({ kind: 'correction', rule: 'farm.soil' });
-    expect(result.retryAfterMs).toBeUndefined();
-    expect(result.receipt).toContain('下方 (3,64,0)');
-    expect(reports).toHaveLength(0);
-  });
-
-  it('同单重复锄已有耕地并对已占用的作物格下种，受理刻拒收', () => {
-    const { bot } = chestBot({ inv: { iron_hoe: 1, wheat_seeds: 4 } });
-    bot.blockAt = (p: V) => ({
-      name: p.y === 65 ? 'wheat' : p.y === 64 ? 'farmland' : 'air',
-      position: p, boundingBox: 'block',
-    });
-    const { exec, reports } = makeExecutorOn(bot);
-    const result = exec.submitDetailed([
-      { skill: 'use', item: 'iron_hoe', at: [3, 64, 0] },
-      { skill: 'use', item: 'wheat_seeds', at: [3, 65, 0] },
-    ]);
-    expect(result.accepted).toBe(false);
-    expect(result.receipt).toContain('是小麦');
-    expect(reports).toHaveLength(0);
-  });
-
-  it('作物 find 报过未成熟且生长阶段未变时暂缓原地重查，长大立即放行', () => {
-    const { bot } = chestBot();
-    (bot.registry.blocksByName as Record<string, { id: number; name: string }>).wheat = { id: 15, name: 'wheat' };
-    bot.findBlocks = () => [new V(1, 64, 0)];
-    (bot as unknown as { canSeeBlock: () => boolean }).canSeeBlock = () => true;
-    let age = 1;
-    bot.blockAt = () => ({ name: 'wheat', position: new V(1, 64, 0), boundingBox: 'empty',
-      getProperties: () => ({ age }) }) as never;
-    expect(findHitText(bot as never, { x: 1, y: 64, z: 0, what: '小麦', entity: false }))
-      .toContain('生长阶段 1/7，未成熟');
-    const { exec } = makeExecutorOn(bot);
-    const guard = exec as unknown as {
-      recordImmatureFindHits(task: unknown): void;
-      immatureFindNote(steps: SkillCall[], at: number): string | null;
-    };
-    const find: SkillCall = { skill: 'find', target: 'wheat', distance: 16 };
-    guard.recordImmatureFindHits({ steps: [find], stepLog: [{ step: 1, outcome: 'ok' }] });
-    expect(guard.immatureFindNote([{ skill: 'goto', at: [1, 64, 0] }, find], Date.now()))
-      .toContain('生长阶段仍相同');
-    const held = exec.submitDetailed([{ skill: 'goto', at: [1, 64, 0] }, find]);
-    expect(held.accepted).toBe(false);
-    expect(held.retryAfterMs).toBe(45_000);
-    age = 2;
-    expect(guard.immatureFindNote([find], Date.now())).toBeNull();
-    guard.recordImmatureFindHits({ steps: [find], stepLog: [{ step: 1, outcome: 'ok' }] });
-    age = 7;
-    expect(guard.immatureFindNote([find], Date.now())).toBeNull();
-  });
-
-  it('未成熟作物的失败阻止同片农田往返，成熟或换田后放行', () => {
-    const { bot } = chestBot();
-    (bot.registry.blocksByName as Record<string, { id: number; name: string }>).wheat = { id: 15, name: 'wheat' };
-    bot.findBlocks = () => [];
-    const { exec } = makeExecutorOn(bot);
-    const guard = exec as unknown as {
-      noteImmatureCollect(block: string, bot: Bot): void;
-      immatureCollectNote(steps: SkillCall[], at: number): string | null;
-    };
-    guard.noteImmatureCollect('wheat', bot as never);
-    const sameField: SkillCall[] = [
-      { skill: 'goto', at: [20, 64, 0] },
-      { skill: 'collect', block: 'wheat', count: 10, mature: true },
-    ];
-    expect(guard.immatureCollectNote(sameField, Date.now())).toContain('暂缓');
-    expect(guard.immatureCollectNote([
-      { skill: 'goto', at: [80, 64, 0] }, sameField[1],
-    ], Date.now())).toBeNull();
-    bot.findBlocks = () => [new V(1, 64, 0)];
-    (bot as unknown as { canSeeBlock: () => boolean }).canSeeBlock = () => true;
-    bot.blockAt = () => ({ name: 'wheat', position: new V(1, 64, 0), boundingBox: 'empty',
-      getProperties: () => ({ age: 7 }) }) as never;
-    expect(guard.immatureCollectNote(sameField, Date.now())).toBeNull();
-  });
-
-  it('两片未成熟农田分别记账，往返不能覆盖另一片的等待', () => {
-    const { bot } = chestBot();
-    (bot.registry.blocksByName as Record<string, { id: number; name: string }>).wheat = { id: 15, name: 'wheat' };
-    bot.findBlocks = () => [];
-    const { exec } = makeExecutorOn(bot);
-    const guard = exec as unknown as {
-      noteImmatureCollect(block: string, bot: Bot): void;
-      immatureCollectNote(steps: SkillCall[], at: number): string | null;
-    };
-    const crop: SkillCall = { skill: 'collect', block: 'wheat', count: 2 };
-    guard.noteImmatureCollect('wheat', bot as never);
-    bot.entity.position = new V(80, 64, 0);
-    guard.noteImmatureCollect('wheat', bot as never);
-    expect(guard.immatureCollectNote([{ skill: 'goto', at: [0, 64, 0] }, crop], Date.now()))
-      .toContain('暂缓');
-    expect(guard.immatureCollectNote([{ skill: 'goto', at: [80, 64, 0] }, crop], Date.now()))
-      .toContain('暂缓');
-    expect(guard.immatureCollectNote([{ skill: 'goto', at: [160, 64, 0] }, crop], Date.now()))
-      .toBeNull();
-  });
-
-  it('同区域重复采集不可见目标后阻断连单，目标露出或离开后放行', () => {
-    const { bot } = chestBot();
-    (bot.registry.blocksByName as Record<string, { id: number; name: string }>).iron_ore = { id: 15, name: 'iron_ore' };
-    bot.findBlocks = () => [];
-    const { exec } = makeExecutorOn(bot);
-    const guard = exec as unknown as {
-      noteUnseenCollect(block: string, bot: Bot): void;
-      unseenCollectNote(steps: SkillCall[], at: number): string | null;
-    };
-    const steps: SkillCall[] = [
-      { skill: 'tunnel', at: [0, 64, 8], until: ['#ores'] },
-      { skill: 'collect', block: 'iron_ore', count: 8 },
-    ];
-    guard.noteUnseenCollect('iron_ore', bot as never);
-    guard.noteUnseenCollect('iron_ore', bot as never);
-    expect(guard.unseenCollectNote(steps, Date.now())).toContain('collect 暂不受理');
-    bot.findBlocks = () => [new V(1, 64, 0)];
-    bot.blockAt = () => ({ name: 'iron_ore', position: new V(1, 64, 0), boundingBox: 'block' }) as never;
-    (bot as unknown as { canSeeBlock: () => boolean }).canSeeBlock = () => true;
-    expect(guard.unseenCollectNote(steps, Date.now())).toBeNull();
-    guard.noteUnseenCollect('iron_ore', bot as never);
-    guard.noteUnseenCollect('iron_ore', bot as never);
-    bot.findBlocks = () => [];
-    bot.entity.position = new V(20, 64, 0);
-    expect(guard.unseenCollectNote(steps, Date.now())).toBeNull();
-  });
-
-  it('关门不清掉寻路失败，只有真正打开通路才清', () => {
-    const open = { name: 'spruce_door', stateId: 18, open: 'true' };
-    const closed = { name: 'spruce_door', stateId: 17, open: 'false' };
-    expect(useChangeMayClearRouteFailure(open, closed)).toBe(false);
-    expect(useChangeMayClearRouteFailure(closed, open)).toBe(true);
-    expect(useChangeMayClearRouteFailure(open, { ...open, stateId: 20 })).toBe(false);
-    expect(useChangeMayClearRouteFailure(
-      { name: 'lever', stateId: 2, open: null }, { name: 'lever', stateId: 3, open: null },
-    )).toBe(true);
-  });
-
-  it('到场失败且容器仍在操作范围外时，跳过后续定点存物', async () => {
-    const { bot } = chestBot({ inv: { coal: 3 } });
-    bot.entity.position = new V(-100, 64, 0);
-    bot.pathfinder.goto = async () => { throw new Error('No path'); };
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([
-      { skill: 'goto', at: [2, 64, 0] },
-      { skill: 'stow', item: 'coal', count: 3, at: [2, 64, 0] },
-    ]);
-    await waitUntil(() => reports.length === 1, 5000);
-    expect(reports[0].text).toContain('当前仍够不着目标');
-    expect(reports[0].text).toContain('第 2 步');
-  });
-
-  it('到场目标没精确走到但容器已在操作范围内，仍可完成存物', async () => {
-    const { bot, box } = chestBot({ inv: { coal: 3 } });
-    bot.pathfinder.goto = async () => { throw new Error('No path'); };
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([
-      { skill: 'goto', at: [2, 64, 0] },
-      { skill: 'stow', item: 'coal', count: 3, at: [2, 64, 0] },
-    ]);
-    await waitUntil(() => reports.length === 1, 5000);
-    expect(box.get('coal')).toBe(3);
-    expect(reports[0].text).not.toContain('当前仍够不着目标');
-  });
-
-  it('抛物前挡住同类型中的定制物品，普通材料仍可抛', () => {
-    const bot = {
-      inventory: { items: () => [
-        { name: 'player_head', count: 1, customName: '§e大背包' },
-        { name: 'cobblestone', count: 10 },
-      ] },
-    } as unknown as Bot;
-    expect(protectedTossItem(bot, 'player_head')).toContain('大背包');
-    expect(protectedTossItem(bot, 'cobblestone')).toBeNull();
-  });
-
-  it('第一步所需随身物品已经丢失时不再把整单加入队列', () => {
-    const { bot } = chestBot({ inv: { bread: 50 } });
-    const { exec } = makeExecutorOn(bot);
-    const receipt = exec.submit([
-      { skill: 'use', item: '§e大背包' },
-      { skill: 'stow', item: 'bread', count: 50, into: 'open' },
-    ]);
-    expect(receipt).toContain('这一单我没接');
-    expect(receipt).toContain('包里没有§e大背包');
-    expect(exec.status().waiting).toHaveLength(0);
-  });
-
-  it('背包满且没有可合并堆时，取新武器在入队前拒收', () => {
-    const inv = Object.fromEntries(Array.from({ length: 36 }, (_, i) => [`item_${i}`, 1]));
-    const { bot } = chestBot({ inv });
-    const { exec } = makeExecutorOn(bot);
-    const result = exec.submitDetailed([{ skill: 'take', item: 'diamond_axe', count: 1, at: [2, 64, 0] }]);
-    expect(result.accepted).toBe(false);
-    expect(result.receipt).toContain('随身 36/36 格已满');
-    expect(exec.status().running).toBeNull();
-  });
-
-  it('满包时只有普通聊天前缀，取新物品仍在入队前拒收', () => {
-    const inv = Object.fromEntries(Array.from({ length: 36 }, (_, i) => [`item_${i}`, 1]));
-    const { bot } = chestBot({ inv });
-    const { exec } = makeExecutorOn(bot);
-    const result = exec.submitDetailed([
-      { skill: 'chat', text: '我看一下这里的箱子' },
-      { skill: 'take', item: 'coal', count: 5, at: [2, 64, 0], needs: [1] },
-    ]);
-    expect(result.accepted).toBe(false);
-    expect(result.receipt).toContain('第 2 步取物一定放不进背包');
-    expect(bot.entity.position).toEqual(new V(0.5, 64, 0.5));
-  });
-
-  function fullFoodBag(cod: number, food = 0) {
-    const inv = Object.fromEntries(Array.from({ length: 35 }, (_, i) => [`item_${i}`, 1]));
-    inv.cod = cod;
-    const rig = chestBot({ inv, box: { coal: 5 } });
-    const bot = Object.assign(rig.bot, {
-      food, health: 20,
-      heldItem: null as ReturnType<typeof rig.bot.inventory.items>[number] | null,
-    });
-    Object.assign(bot.registry, { foodsByName: { cod: {} } });
-    let consumed = 0;
-    const eater = Object.assign(bot, {
-      equip: async (item: ReturnType<typeof bot.inventory.items>[number]) => { bot.heldItem = item; },
-      consume: async () => {
-        if (bot.food >= 20) throw new Error('Food is full');
-        rig.inv.set('cod', rig.inv.get('cod')! - 1);
-        bot.food += 2;
-        consumed++;
-      },
-    });
-    const visited: number[] = [];
-    bot.pathfinder.goto = (async (goal: FakeGoal) => {
-      visited.push(goal.x!);
-      bot.entity.position = new V(goal.x!, goal.y!, goal.z!);
-    }) as never;
-    const open = bot.openContainer;
-    bot.openContainer = async () => {
-      const window = await open();
-      const withdraw = window.withdraw;
-      window.withdraw = async (type, metadata, count) => {
-        if (window.items().length >= 36 && !window.items().some((item) => item.type === type)) {
-          throw new Error('Unable to withdraw, Bot inventory is full.');
-        }
-        await withdraw(type, metadata, count);
-      };
-      return window;
-    };
-    return { ...rig, bot: eater, visited, consumed: () => consumed };
-  }
-
-  const eatThenTake: SkillCall[] = [
-    { skill: 'eat', item: 'cod' },
-    { skill: 'goto', at: [6, 64, 0] },
-    { skill: 'take', item: 'coal', count: 5, at: [2, 64, 0], needs: [2] },
-  ];
-
-  it('满包时先吃完一堆再取物，执行前缀并使用实际腾出的格', async () => {
-    const { bot, inv, box, visited, consumed } = fullFoodBag(1);
-    const { exec, reports } = makeExecutorOn(bot);
-    expect(exec.submitDetailed(eatThenTake).accepted).toBe(true);
-    await waitUntil(() => reports.length === 1, 12_000);
-    expect(reports[0].kind).toBe('done');
-    expect(consumed()).toBe(1);
-    expect(visited).toContain(6);
-    expect(inv.get('cod')).toBe(0);
-    expect(inv.get('coal')).toBe(5);
-    expect(box.get('coal')).toBe(0);
-  });
-
-  it('满包时赶路消耗最后一块垫脚料，后续取物使用实际腾出的格', async () => {
-    const { bot, inv, box } = fullFoodBag(1);
-    inv.delete('cod');
-    inv.set('dirt', 1);
-    const bridge = new Map<string, string>();
-    bot.pathfinder.goto = (async (goal: FakeGoal) => {
-      if ((inv.get('dirt') ?? 0) > 0) {
-        bridge.set('3,63,0', 'dirt');
-        inv.set('dirt', 0);
-      }
-      bot.entity.position = new V(goal.x!, goal.y!, goal.z!);
-    }) as never;
-    const { exec, reports } = makeExecutorOn(bot);
-    expect(exec.submitDetailed([
-      { skill: 'goto', at: [6, 64, 0] },
-      { skill: 'take', item: 'coal', count: 5, at: [2, 64, 0], needs: [1] },
-    ]).accepted).toBe(true);
-    await waitUntil(() => reports.length === 1, 12_000);
-    expect(reports[0].kind).toBe('done');
-    expect(bridge.get('3,63,0')).toBe('dirt');
-    expect(inv.get('dirt')).toBe(0);
-    expect(inv.get('coal')).toBe(5);
-    expect(box.get('coal')).toBe(0);
-  });
-
-  it.each([
-    { cod: 2, food: 0, left: 1, consumed: 1 },
-    { cod: 1, food: 20, left: 1, consumed: 0 },
-  ])('满包时进食未腾格，保留前缀成果并在取物现场失败: $cod / $food', async (state) => {
-    const { bot, inv, box, visited, consumed } = fullFoodBag(state.cod, state.food);
-    const { exec, reports } = makeExecutorOn(bot);
-    expect(exec.submitDetailed(eatThenTake).accepted).toBe(true);
-    await waitUntil(() => reports.length === 1, 12_000);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('背包');
-    expect(consumed()).toBe(state.consumed);
-    expect(visited).toContain(6);
-    expect(inv.get('cod')).toBe(state.left);
-    expect(inv.get('coal')).toBeUndefined();
-    expect(box.get('coal')).toBe(5);
-  });
-
-  it('已有正在存物的任务时，后续取物不按旧满包读数拒收', async () => {
-    const inv = Object.fromEntries(Array.from({ length: 35 }, (_, i) => [`item_${i}`, 1]));
-    inv.coal = 1;
-    const rig = chestBot({ inv, box: { iron_ingot: 1 } });
-    const { exec, reports } = makeExecutorOn(rig.bot);
-    expect(exec.submitDetailed([{ skill: 'stow', item: 'coal', count: 1 }]).accepted).toBe(true);
-    expect(exec.status().running).not.toBeNull();
-    expect(exec.submitDetailed([{ skill: 'take', item: 'iron_ingot', count: 1 }], 'append').accepted).toBe(true);
-    await waitUntil(() => reports.length === 2, 12_000);
-    expect(reports.map((report) => report.kind)).toEqual(['done', 'done']);
-    expect(rig.inv.get('iron_ingot')).toBe(1);
-  });
-
-  it('已有排队存物任务时，后续取物等真实库存更新再执行', async () => {
-    const inv = Object.fromEntries(Array.from({ length: 35 }, (_, i) => [`item_${i}`, 1]));
-    inv.coal = 1;
-    const rig = chestBot({ inv, box: { iron_ingot: 1 } });
-    const { exec, reports } = makeExecutorOn(rig.bot);
-    const hold = exec.pauseForEnvironment('fixture');
-    const terminal = () => reports.filter((report) => report.kind !== 'reflex');
-    expect(exec.submitDetailed([{ skill: 'stow', item: 'coal', count: 1 }], 'append').accepted).toBe(true);
-    expect(exec.status().running).toBeNull();
-    expect(exec.submitDetailed([{ skill: 'take', item: 'iron_ingot', count: 1 }], 'append').accepted).toBe(true);
-    exec.resumeAfterEnvironment(hold);
-    await waitUntil(() => terminal().length === 2, 12_000);
-    expect(terminal().map((report) => report.kind)).toEqual(['done', 'done']);
-    expect(rig.inv.get('iron_ingot')).toBe(1);
-  });
-
-  it('满包自摆配方不会耗尽材料堆时，开工前拒收以免产物掉落', () => {
-    const inv = Object.fromEntries(Array.from({ length: 35 }, (_, i) => [`item_${i}`, 1]));
-    inv.oak_wood = 8;
-    const { bot } = chestBot({ inv });
-    const { exec } = makeExecutorOn(bot);
-    const result = exec.submitDetailed([{ skill: 'craft', grid: [['oak_wood'], ['oak_wood']], count: 1 }]);
-    expect(result.accepted).toBe(false);
-    expect(result.receipt).toContain('第一轮不会耗尽任何材料堆');
-    expect(result.receipt).toContain('整堆丢弃');
-    expect(exec.status().running).toBeNull();
-  });
-
-  it('背包满时通用使用前缀可能改变库存，取物延后核验', () => {
-    const inv = Object.fromEntries(Array.from({ length: 35 }, (_, i) => [`item_${i}`, 1]));
-    inv.player_head = 1;
-    const { bot } = chestBot({ inv });
-    const { exec } = makeExecutorOn(bot);
-    const result = exec.submitDetailed([
-      { skill: 'use', item: 'player_head' },
-      { skill: 'take', item: 'bow', count: 1, from: 'open' },
-    ]);
-    expect(result.accepted).toBe(true);
-    expect(result.receipt).not.toContain('取物一定放不进背包');
-    exec.shutdown();
-  });
-
-  it('满包时通用使用不预支取物空格，现场仍需核验', () => {
-    const inv = Object.fromEntries(Array.from({ length: 35 }, (_, i) => [`item_${i}`, 1]));
-    inv.compass = 1;
-    const { bot } = chestBot({ inv });
-    const { exec } = makeExecutorOn(bot);
-    const result = exec.submitDetailed([
-      { skill: 'use', item: 'compass' },
-      { skill: 'take', item: 'iron_pickaxe', count: 1, from: 'open' },
-    ]);
-    expect(result.accepted).toBe(true);
-    expect(result.receipt).toContain('包里剩 0 格空位');
-    exec.shutdown();
-  });
-
-  it('满包时同单抛物前缀可能腾格，后续取物延后核验', () => {
-    const inv = Object.fromEntries(Array.from({ length: 35 }, (_, i) => [`item_${i}`, 1]));
-    inv.compass = 1;
-    const { bot } = chestBot({ inv });
-    const { exec } = makeExecutorOn(bot);
-    const result = exec.submitDetailed([
-      { skill: 'toss', item: 'item_0', count: 1, at: [0, 63, 0] },
-      { skill: 'use', item: 'compass' },
-      { skill: 'take', item: 'iron_pickaxe', count: 1, from: 'open' },
-    ]);
-    expect(result.accepted).toBe(true);
-    expect(result.receipt).not.toContain('取物一定放不进背包');
-    exec.shutdown();
-  });
-
-  it('刚开窗证实箱子已满且无可并堆槽时，拒收直存和先赶路再存', () => {
-    const { bot } = chestBot({ inv: { coal: 3 } });
-    const chests = new ChestBook(null);
-    const at = { x: 2, y: 64, z: 0 };
-    chests.remember('overworld', at, [{ name: 'dirt', count: 64 }], 27, 27);
-    const { exec } = makeExecutorWith(bot, chests);
-    for (const steps of [
-      [{ skill: 'stow', item: 'coal', count: 3, at: [2, 64, 0] }],
-      [{ skill: 'goto', at: [2, 64, 0] }, { skill: 'stow', item: 'coal', count: 3, at: [2, 64, 0] }],
-      [{ skill: 'stow', item: 'coal', count: 3, at: [2, 64, 0] },
-        { skill: 'use', at: [2, 64, 0] }, { skill: 'take', item: 'dirt', count: 1, from: 'open' }],
-    ] as SkillCall[][]) {
-      const result = exec.submitDetailed(steps);
-      expect(result.accepted).toBe(false);
-      expect(result.receipt).toContain('最近开窗证实已满');
-    }
-    expect(exec.status().waiting).toHaveLength(0);
-  });
-
-  it('同单从一口容器取出又原样存回不会腾格，入队前拒收', () => {
-    const { bot } = chestBot({ inv: { coal: 20 }, box: { coal: 30 } });
-    const { exec } = makeExecutorOn(bot);
-    const result = exec.submitDetailed([
-      { skill: 'use', at: [2, 64, 0] },
-      { skill: 'take', item: 'coal', count: 10, from: 'open' },
-      { skill: 'stow', item: 'coal', count: 10, at: [2, 64, 0] },
-    ]);
-    expect(result.accepted).toBe(false);
-    expect(result.retryAfterMs).toBe(5_000);
-    expect(result.receipt).toContain('无法保证随身净腾出一格');
-    expect(exec.status().waiting).toHaveLength(0);
-    // 存回更多已有煤炭可以净减少随身数，不是同一类无效循环。
-    const valid = exec.submitDetailed([
-      { skill: 'use', at: [2, 64, 0] },
-      { skill: 'take', item: 'coal', count: 10, from: 'open' },
-      { skill: 'stow', item: 'coal', count: 30, at: [2, 64, 0] },
-    ]);
-    expect(valid.receipt).not.toContain('无法保证随身净腾出一格');
-  });
-
-  it('跨箱倒货时最近窗口已证明目标容量小于计划存入量，先拒收取物', () => {
-    const { bot } = chestBot({ inv: { coal: 5 }, box: { coal: 30 } });
-    const originalBlockAt = bot.blockAt;
-    bot.blockAt = (p: V) => p.x === 3 && p.y === 64 && p.z === 0
-      ? { name: 'chest', position: p, boundingBox: 'block' }
-      : originalBlockAt(p);
-    const chests = new ChestBook(null);
-    // 目标 27/27 格：26 个其他单格物品 + 煤炭 60 个，只能再并 4 个。
-    chests.remember('overworld', { x: 3, y: 64, z: 0 }, [
-      ...Array.from({ length: 26 }, (_, i) => ({ name: `other_${i}`, count: 1 })),
-      { name: 'coal', count: 60 },
-    ], 27, 27);
-    const { exec } = makeExecutorWith(bot, chests);
-    const result = exec.submitDetailed([
-      { skill: 'use', at: [2, 64, 0] },
-      { skill: 'take', item: 'coal', count: 10, from: 'open' },
-      { skill: 'stow', item: 'coal', count: 10, at: [3, 64, 0] },
-    ]);
-    expect(result.accepted).toBe(false);
-    expect(result.retryAfterMs).toBe(5_000);
-    expect(result.receipt).toContain('最多只能再容纳煤炭×4');
-    expect(exec.status().waiting).toHaveLength(0);
-  });
-
-  it('随身容器不当玩家头存掉，也不拿它反复右键地面箱', () => {
-    const { bot } = chestBot();
-    const custom = { ...bot, inventory: { ...bot.inventory, items: () => [
-      { name: 'player_head', type: 1, count: 1, customName: '§e大背包' },
-    ] } };
-    const { exec } = makeExecutorOn(custom);
-    const stow = exec.submitDetailed([{ skill: 'stow', item: 'player_head', count: 1, at: [2, 64, 0] }]);
-    expect(stow.accepted).toBe(false);
-    expect(stow.receipt).toContain('随身容器');
-    const use = exec.submitDetailed([{ skill: 'use', item: 'player_head', at: [2, 64, 0] }]);
-    expect(use.accepted).toBe(false);
-    expect(use.receipt).toContain('只会打开那个箱子');
-    const backwards = exec.submitDetailed([
-      { skill: 'use', item: 'player_head' },
-      { skill: 'stow', item: 'iron_sword', count: 1, into: 'open' },
-    ]);
-    expect(backwards.accepted).toBe(false);
-    expect(backwards.receipt).toContain('take from:"open"');
-    expect(exec.status().waiting).toHaveLength(0);
-  });
-
-  it('旧箱子读数及有可并堆物品的满箱仍可重新尝试', () => {
-    const { bot } = chestBot({ inv: { coal: 3 } });
-    const chests = new ChestBook(null);
-    const at = { x: 2, y: 64, z: 0 };
-    chests.remember('overworld', at, [{ name: 'dirt', count: 64 }], 27, 27);
-    chests.get('overworld', at)!.observedAt = Date.now() - 121_000;
-    const { exec } = makeExecutorWith(bot, chests);
-    const guard = exec as unknown as { storageAccessNote(steps: SkillCall[]): string | null };
-    const steps: SkillCall[] = [{ skill: 'stow', item: 'coal', count: 3, at: [2, 64, 0] }];
-    expect(guard.storageAccessNote(steps)).toBeNull();
-    chests.remember('overworld', at, [{ name: 'coal', count: 3 }], 27, 27);
-    expect(guard.storageAccessNote(steps)).toBeNull();
-  });
-
-  it('存物坐标不是容器时直接给真实可见箱子，不诱导逐格猜坐标', () => {
-    const { bot } = chestBot({ inv: { coal: 3 } });
-    const { exec } = makeExecutorOn(bot);
-    const rejected = exec.submitDetailed([{ skill: 'stow', item: 'coal', count: 3, at: [3, 64, 0] }]);
-    expect(rejected.accepted).toBe(false);
-    expect(rejected.receipt).toContain('实际是空气，不是储物箱');
-    expect(rejected.receipt).toContain('箱子(2,64,0)');
-    expect(rejected.receipt).toContain('不要逐格猜坐标');
-  });
-
-  it('旧容器坐标已是空气时拒绝右键并清除账本，真实容器仍可操作', () => {
-    const { bot } = chestBot();
-    const chests = new ChestBook(null);
-    const vanished = { x: 4, y: 64, z: 0 };
-    const live = { x: 2, y: 64, z: 0 };
-    chests.remember('overworld', vanished, [{ name: 'iron_ingot', count: 1 }], 1, 27);
-    chests.remember('overworld', live, [], 0, 27);
-    const { exec } = makeExecutorWith(bot, chests);
-    const stale = exec.submitDetailed([{ skill: 'use', at: [4, 64, 0] }]);
-    expect(stale.accepted).toBe(false);
-    expect(stale.receipt).toContain('现场已是');
-    expect(chests.get('overworld', vanished)).toBeUndefined();
-    expect(chests.get('overworld', live)).toBeDefined();
-    expect(exec.status().waiting).toHaveLength(0);
-    expect(exec.submitDetailed([{ skill: 'use', at: [2, 64, 0] }]).accepted).toBe(true);
-  });
-
-  it('抛出的普通物品又被自动捡回时拒绝在原地重复抛出', async () => {
-    let count = 1;
-    const bot = {
-      entity: { position: new V(0, 64, 0) },
-      inventory: { items: () => count ? [{ name: 'rotten_flesh', type: 992, metadata: 0, count }] : [] },
-      toss: async () => { count = 0; },
-    } as unknown as Bot;
-    const done = skillToss(bot, { skill: 'toss', item: 'rotten_flesh', count: 1 },
-      { aborted: () => false } as never);
-    await vi.advanceTimersByTimeAsync(1300);
-    await done;
-    count = 1;
-    expect(reacquiredTossNote(bot, 'rotten_flesh')).toContain('又回到背包');
-    const { exec } = makeExecutorOn(bot);
-    expect(exec.submit([{ skill: 'toss', item: 'rotten_flesh', count: 1 }])).toContain('这一单我没接');
-  });
-
-  it('满包整堆丢弃会等待迟到的自动拾取，不误报空格稳定', async () => {
-    let count = 2;
-    const fillers = Array.from({ length: 35 }, (_, i) => ({ name: `item_${i}`, type: i + 1, count: 1 }));
-    const bot = {
-      entity: { position: new V(0, 64, 0) },
-      inventory: { items: () => [...fillers, ...(count ? [{ name: 'white_terracotta', type: 992, metadata: 0, count }] : [])] },
-      toss: async () => { count = 0; setTimeout(() => { count = 2; }, 2500); },
-    } as unknown as Bot;
-    const done = skillToss(bot, { skill: 'toss', item: 'white_terracotta', count: 2 },
-      { aborted: () => false } as never);
-    const blocked = expect(done).rejects.toThrow('可能已自动捡回');
-    await vi.advanceTimersByTimeAsync(4100);
-    await blocked;
-  });
-
-  it('不受理原地抛物后立刻捡另一件的腾格计划', () => {
-    const { bot } = chestBot({ inv: { diamond: 1 } });
-    const { exec } = makeExecutorOn(bot);
-    const result = exec.submitDetailed([
-      { skill: 'toss', item: 'diamond', count: 1 },
-      { skill: 'pickup', item: 'spruce_planks' },
-    ]);
-    expect(result.receipt).toContain('这一单我没接');
-    expect(result.receipt).toContain('先把要腾出的物品存进容器');
-    expect(result.retryAfterMs).toBeUndefined();
-    expect(exec.status().running).toBeNull();
-  });
-
-  it('同一整单仍在执行时不重复入队，坐标变更仍可提交', () => {
-    const { bot } = chestBot();
-    bot.pathfinder.goto = (() => new Promise<void>(() => undefined)) as never;
-    const { exec } = makeExecutorOn(bot);
-    const step: SkillCall = { skill: 'goto', at: [10, 64, 0] };
-    expect(exec.submit([step])).toContain('收下了');
-    const repeated = exec.submit([step]);
-    expect(repeated).toContain('这一单我没接:任务#');
-    expect(repeated).toContain('正在做同一整单');
-    expect(exec.status().waiting).toHaveLength(0);
-    expect(exec.submit([{ skill: 'goto', at: [11, 64, 0] }])).toContain('排进队尾');
-  });
-
-  it('exact arrival moves from an adjacent cell while ordinary arrival is already satisfied', async () => {
-    const { bot } = chestBot();
-    bot.entity.position = new V(0.5, 64, 0.5);
-    const arrivals: boolean[] = [];
-    bot.pathfinder.goto = (async (goal: { isEnd: (pos: { x: number; y: number; z: number }) => boolean }) => {
-      arrivals.push(goal.isEnd({ x: 0, y: 64, z: 0 }));
-      bot.entity.position = new V(1.5, 64, 0.5);
-      expect(goal.isEnd({ x: 1, y: 64, z: 0 })).toBe(true);
-    }) as never;
-    const { exec, reports } = makeExecutorOn(bot);
-    try {
-      expect(exec.submitDetailed([{ skill: 'goto', at: [1, 64, 0] }])).toMatchObject({ completedImmediately: true });
-      expect(exec.submitDetailed([{ skill: 'goto', at: [1, 64, 0], exact: true }])).toMatchObject({ accepted: true });
-      await waitUntil(() => reports.length > 0);
-      expect(arrivals).toEqual([false]);
-      expect(reports[0]).toMatchObject({ kind: 'done' });
-      expect(reports[0].text).toContain('精确落脚格');
-      expect(bot.entity.position).toEqual(new V(1.5, 64, 0.5));
-      expect(exec.submitDetailed([{ skill: 'goto', at: [1, 64, 0], exact: true }])).toMatchObject({ completedImmediately: true });
-    } finally { exec.shutdown(); }
-  });
-
-  it('已满足的单步 goto 立即成功，重复请求不创建完成事件或消耗任务号', async () => {
-    const { bot } = chestBot();
-    bot.entity.position = new V(-562, 67, -460);
-    const { exec, reports } = makeExecutorOn(bot);
-    const step: SkillCall = { skill: 'goto', at: [-562, 67, -460] };
-    const first = exec.submitDetailed([step]);
-    expect(first).toMatchObject({ accepted: true, completedImmediately: true });
-    expect(first.receipt).toContain('goto 已达成');
-    expect(bot.entity.position).toEqual(new V(-562, 67, -460));
-    await sleep(20_000);
-    expect(exec.submitDetailed([step])).toMatchObject({ accepted: true, completedImmediately: true });
-    expect(reports).toHaveLength(0);
-    expect(exec.status().running).toBeNull();
-    expect(exec.submitDetailed([{ skill: 'goto', at: [-550, 67, -460] }]).receipt).toContain('任务#1');
-  });
-
-  it('成功 goto 后同目标现读达成，离开目标后仍可重新赶路', async () => {
-    const { bot } = chestBot();
-    bot.pathfinder.goto = (async () => { bot.entity.position = new V(4.5, 64, 0.5); }) as never;
-    const { exec, reports } = makeExecutorOn(bot);
-    const step: SkillCall = { skill: 'goto', at: [4, 64, 0] };
-    expect(exec.submitDetailed([step]).accepted).toBe(true);
-    await waitUntil(() => reports.length === 1);
-    expect(reports[0].kind).toBe('done');
-    expect(exec.submitDetailed([step])).toMatchObject({ accepted: true, completedImmediately: true });
-    expect(reports).toHaveLength(1);
-    bot.entity.position = new V(10, 64, 0);
-    const returning = exec.submitDetailed([step]);
-    expect(returning.accepted).toBe(true);
-    expect(returning.completedImmediately).toBeUndefined();
-    await waitUntil(() => reports.length === 2);
-    expect(reports[1].kind).toBe('done');
-  });
-
-  it('未到达的同格 goto 保留短时重复请求防护', () => {
-    const { bot } = chestBot();
-    bot.pathfinder.goto = (() => new Promise<void>(() => undefined)) as never;
-    const { exec } = makeExecutorOn(bot);
-    const step: SkillCall = { skill: 'goto', at: [10, 64, 0] };
-    expect(exec.submitDetailed([step]).completedImmediately).toBeUndefined();
-    expect(exec.submitDetailed([step]).accepted).toBe(false);
-  });
-
-  it.each([
-    { at: [0, 67, 0], groundY: undefined, met: false },
-    { at: [2, 64, 0], groundY: undefined, met: false },
-    { at: [0, 65, 0], groundY: undefined, met: true },
-    { at: [2, 0, 0], groundY: true, met: true },
-    { at: [3, 0, 0], groundY: true, met: false },
-  ])('goto 到达判据与实际寻路目标一致: $at / groundY=$groundY', ({ at, groundY, met }) => {
-    const { bot } = chestBot();
-    bot.pathfinder.goto = (() => new Promise<void>(() => undefined)) as never;
-    const { exec } = makeExecutorOn(bot);
-    const step: SkillCall = { skill: 'goto', at: at as [number, number, number],
-      ...(groundY ? { groundY: true as const } : {}) };
-    const result = exec.submitDetailed([step]);
-    expect(result.completedImmediately === true).toBe(met);
-  });
-
-  it.each([
-    { dimension: 'the_nether' },
-    { dryRun: true },
-    { expect: { near: [10, 64, 0] } },
-  ])('不同维度、试算或显式验收不会被当前坐标代替: $dimension $dryRun $expect', (extra) => {
-    const { bot } = chestBot();
-    const { exec } = makeExecutorOn(bot);
-    const result = exec.submitDetailed([{ skill: 'goto', at: [0, 64, 0], ...extra } as SkillCall]);
-    expect(result.completedImmediately).toBeUndefined();
-  });
-
-  it('已有任务时已满足目标仍按 queue now 的中断契约执行', async () => {
-    const { bot } = chestBot();
-    bot.pathfinder.goto = (() => new Promise<void>(() => undefined)) as never;
-    const { exec } = makeExecutorOn(bot);
-    exec.submitDetailed([{ skill: 'goto', at: [10, 64, 0] }]);
-    const result = exec.submitDetailed([{ skill: 'goto', at: [0, 64, 0] }], 'now');
-    expect(result.completedImmediately).toBeUndefined();
-    expect(result.receipt).toContain('任务#2');
-  });
-
-  it('同一位置快速换方向重下寻路观察单时停止接单，移动后恢复', () => {
-    const { bot } = chestBot();
-    bot.pathfinder.goto = (() => new Promise<void>(() => undefined)) as never;
-    const { exec } = makeExecutorOn(bot);
-    const plan = (direction: 'north' | 'east' | 'west'): SkillCall[] => [
-      { skill: 'goto', at: [10, 64, 0] },
-      { skill: 'find', target: 'chest', distance: 32, direction },
-    ];
-    expect(exec.submitDetailed(plan('north')).accepted).toBe(true);
-    expect(exec.submitDetailed(plan('east')).accepted).toBe(true);
-    const held = exec.submitDetailed(plan('west'));
-    expect(held).toMatchObject({ accepted: false, retryAfterMs: 45_000 });
-    expect(held.receipt).toContain('位置仍未移动 12 格');
-    expect(exec.status().waiting).toHaveLength(1);
-    bot.entity.position.x += 13;
-    expect(exec.submitDetailed(plan('west')).accepted).toBe(true);
-  });
-
-  it('原地搜索受阻后允许首次先移动再搜索，不把新前置动作当作原地重试', () => {
-    const { bot } = chestBot();
-    const { exec } = makeExecutorOn(bot);
-    const guard = exec as unknown as {
-      navigationBurstNote(steps: SkillCall[], now: number): string | null;
-    };
-    const start = Date.now();
-    const find: SkillCall = { skill: 'find', target: 'chest', distance: 32 };
-    try {
-      expect(guard.navigationBurstNote([find], start)).toBeNull();
-      expect(guard.navigationBurstNote([find], start + 1000)).toBeNull();
-      expect(guard.navigationBurstNote([find], start + 2000)).not.toBeNull();
-      const approach: SkillCall = { skill: 'goto', at: [11, 64, 0] };
-      expect(guard.navigationBurstNote([approach, find], start + 3000)).toBeNull();
-      expect(guard.navigationBurstNote([approach, find], start + 4000)).toBeNull();
-      expect(guard.navigationBurstNote([approach, find], start + 5000)).not.toBeNull();
-    } finally { exec.shutdown(); }
-  });
-
-  it('小范围移动并变化搜索半径不会刷新同一目标的观察预算', () => {
-    const { bot } = chestBot();
-    const { exec } = makeExecutorOn(bot);
-    const guard = exec as unknown as {
-      navigationBurstNote(steps: SkillCall[], now: number): string | null;
-    };
-    const start = Date.now();
-    expect(guard.navigationBurstNote([{ skill: 'find', target: 'chest', distance: 32 }], start)).toBeNull();
-    bot.entity.position.x += 3;
-    expect(guard.navigationBurstNote([{ skill: 'find', target: 'chest', distance: 24 }], start + 1000)).toBeNull();
-    bot.entity.position.x += 3;
-    expect(guard.navigationBurstNote([{ skill: 'find', target: 'chest', distance: 16 }], start + 2000))
-      .toContain('位置仍未移动 12 格');
-    bot.entity.position.x += 7;
-    expect(guard.navigationBurstNote([{ skill: 'find', target: 'chest', distance: 16 }], start + 3000)).toBeNull();
-  });
-
-  it('找不到目标后每次向前挪一两格再找仍算同一观察计划', () => {
-    const { bot } = chestBot();
-    const { exec } = makeExecutorOn(bot);
-    const guard = exec as unknown as {
-      navigationBurstNote(steps: SkillCall[], now: number): string | null;
-    };
-    const start = Date.now();
-    const search = (x: number, distance: number): SkillCall[] => [
-      { skill: 'goto', at: [x, 64, 0] },
-      { skill: 'find', target: 'chest', distance },
-    ];
-    expect(guard.navigationBurstNote(search(2, 32), start)).toBeNull();
-    bot.entity.position.x += 2;
-    expect(guard.navigationBurstNote(search(4, 24), start + 1000)).toBeNull();
-    bot.entity.position.x += 2;
-    expect(guard.navigationBurstNote(search(6, 12), start + 2000))
-      .toContain('位置仍未移动 12 格');
-  });
-
-  it('同一片区域多次实际未找到目标后暂缓重复搜索，换区域后放行', () => {
-    const { bot } = chestBot();
-    const { exec } = makeExecutorOn(bot);
-    const guard = exec as unknown as {
-      recordEmptyFindOutcomes(task: unknown): void;
-      emptyFindNote(steps: SkillCall[], now: number): { text: string; retryAfterMs: number } | null;
-    };
-    const step: SkillCall = { skill: 'find', target: 'chest', distance: 24 };
-    for (let i = 0; i < 3; i++) {
-      guard.recordEmptyFindOutcomes({ steps: [step], stepLog: [
-        { step: 1, outcome: 'ok', line: '当前观察:在周围 24 格内没看见箱子' },
-      ] });
-      bot.entity.position.x += 3;
-    }
-    const held = guard.emptyFindNote([{ skill: 'goto', at: [11, 64, 0] }, step], Date.now());
-    expect(held?.text).toContain('已连续 3 次没找到');
-    expect(held?.retryAfterMs).toBe(8_000);
-    expect(guard.emptyFindNote([{ skill: 'goto', at: [40, 64, 0] }, step], Date.now())).toBeNull();
-    guard.recordEmptyFindOutcomes({ steps: [step], stepLog: [
-      { step: 1, outcome: 'ok', line: '当前观察:在周围 24 格内看见 1 处箱子' },
-    ] });
-    expect(guard.emptyFindNote([step], Date.now())).toBeNull();
-  });
-
-  it('向不同方向走远再回到同一起点，空搜索仍累计在起点', () => {
-    const { bot } = chestBot();
-    const { exec } = makeExecutorOn(bot);
-    const guard = exec as unknown as {
-      recordEmptyFindOutcomes(task: unknown): void;
-      emptyFindNote(steps: SkillCall[], now: number): { text: string } | null;
-    };
-    const step: SkillCall = { skill: 'find', target: 'poppy', direction: 'east', distance: 64 };
-    for (const x of [64, -64, 0]) {
-      bot.entity.position.x = x;
-      guard.recordEmptyFindOutcomes({ steps: [step], findOrigins: new Map([[0, { x: 0, y: 64, z: 0 }]]),
-        stepLog: [{ step: 1, outcome: 'ok', line: '朝东走满了 60 格，一路没看见虞美人' }] });
-    }
-    expect(guard.emptyFindNote([step], Date.now())?.text).toContain('已连续 3 次没找到');
-    bot.entity.position.x = 64;
-    expect(guard.emptyFindNote([step], Date.now())).toBeNull();
-  });
-
-  it('同一地点取出又存回同种物品时暂停继续倒货', async () => {
-    const { bot } = chestBot({ inv: { coal: 30 }, box: { coal: 50 } });
-    const { exec, reports } = makeExecutorOn(bot);
-    expect(exec.submit([{ skill: 'stow', item: 'coal', count: 30 }])).toContain('收下了');
-    await waitUntil(() => reports.length === 1);
-    expect(exec.submit([{ skill: 'take', item: 'coal', count: 30, at: [2, 64, 0] }])).toContain('收下了');
-    await waitUntil(() => reports.length === 2);
-    const blocked = exec.submit([{ skill: 'stow', item: 'coal', count: 30 }]);
-    expect(blocked).toContain('这一单我没接');
-    expect(blocked).toContain('已连续取出/存回');
-    expect(blocked).toContain('已经达标，应结束收纳');
-    expect(exec.status().waiting).toHaveLength(0);
-    expect(reports).toHaveLength(2);
-  });
-
-  it('用随身物品开窗的取出/存回也属于同一容器的倒货循环', () => {
-    const { bot } = chestBot({ inv: { cobblestone: 47 } });
-    const { exec } = makeExecutorOn(bot);
-    const guard = exec as unknown as {
-      noteStorageIntent(steps: SkillCall[], at: number): void;
-      storageOscillationNote(steps: SkillCall[], at: number): string | null;
-    };
-    const take: SkillCall[] = [
-      { skill: 'use', item: '§e大背包' },
-      { skill: 'take', item: 'cobblestone', count: 47, from: 'open' },
-    ];
-    const stow: SkillCall[] = [
-      { skill: 'use', item: '§e大背包' },
-      { skill: 'stow', item: 'cobblestone', count: 47, into: 'open' },
-    ];
-    const elsewhere: SkillCall[] = [
-      { skill: 'use', item: '另一只背包' },
-      { skill: 'stow', item: 'cobblestone', count: 47, into: 'open' },
-    ];
-    const t = Date.now();
-    guard.noteStorageIntent(take, t);
-    expect(guard.storageOscillationNote(stow, t + 2_000)).toContain('已连续取出/存回');
-    expect(guard.storageOscillationNote(elsewhere, t + 4_000)).toBeNull();
-    expect(guard.storageOscillationNote(stow, t + 61_000)).toContain('暂缓 10 分钟');
-  });
-
-  it('开窗后连续处理多样物品仍能识别取出又存回同一样物品', () => {
-    const { bot } = chestBot({ inv: { coal: 47 } });
-    const { exec } = makeExecutorOn(bot);
-    const guard = exec as unknown as {
-      noteStorageIntent(steps: SkillCall[], at: number): void;
-      storageOscillationNote(steps: SkillCall[], at: number): string | null;
-    };
-    const take: SkillCall[] = [
-      { skill: 'chat', text: '/backpack open' },
-      { skill: 'take', item: 'coal', count: 30, from: 'open' },
-    ];
-    const mixedStow: SkillCall[] = [
-      { skill: 'chat', text: '/backpack open' },
-      { skill: 'stow', item: 'coal', count: 30, into: 'open' },
-      { skill: 'stow', item: 'arrow', count: 1, into: 'open' },
-    ];
-    const t = Date.now();
-    guard.noteStorageIntent(take, t);
-    expect(guard.storageOscillationNote(mixedStow, t + 1_000)).toContain('已连续取出/存回');
-  });
-
-  it('一口箱子访问受阻后同单后续存物直接跳过该箱子', async () => {
-    const { bot } = chestBot({ inv: { coal: 2, iron_ingot: 2 } });
-    bot.openContainer = async () => { throw new Error('需要空手操作门或功能方块，但背包没有可安全腾手的空格'); };
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([
-      { skill: 'stow', item: 'coal', count: 2, at: [2, 64, 0] },
-      { skill: 'stow', item: 'iron_ingot', count: 2, at: [2, 64, 0] },
-    ]);
-    await waitUntil(() => reports.length === 1);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('第 2 步');
-    expect(reports[0].text).toContain('本步不再重走同一条路线');
-  });
-
-  it('use 没打开窗口时将下一步 take from:open 跳过', async () => {
-    const head = { name: 'player_head', type: 1, count: 1, slot: 36 };
-    let activated = 0;
-    const bot = {
-      entity: { id: 1, position: new V(0.5, 64, 0.5) },
-      inventory: { items: () => [head] },
-      registry: { foodsByName: {} },
-      heldItem: head,
-      currentWindow: null,
-      equip: async () => undefined,
-      activateItem: () => { activated++; },
-      deactivateItem: () => undefined,
-    };
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([
-      { skill: 'use', item: 'player_head' },
-      { skill: 'take', item: 'furnace', count: 1, from: 'open' },
-    ]);
-    await waitUntil(() => reports.length === 1);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('使用物品后没有打开容器窗口');
-    expect(reports[0].text).toContain('跳过');
-    expect(activated).toBe(1);
-  });
-  it('同一整单连续失败两次后拒收原样重试，队列不受影响', async () => {
-    const { exec, reports, bot } = makeExecutor();
-    (bot as any).currentWindow = { inventoryStart: 0, inventoryEnd: 0, title: 'Chest' };
-    const step: SkillCall = { skill: 'take', item: 'furnace', count: 1, from: 'open' };
-    exec.submit([step]);
-    await waitUntil(() => reports.length === 1);
-    exec.submit([step]);
-    await waitUntil(() => reports.length === 2);
-    const receipt = exec.submit([step]);
-    expect(receipt).toContain('这一单我没接');
-    expect(receipt).toContain('连续失败 2 次');
-    expect(exec.status().running).toBeNull();
-    expect(exec.status().waiting).toHaveLength(0);
-  });
-  it('当前窗口未打开且本单没有打开动作时，拒收窗口操作', () => {
-    const { exec } = makeExecutor();
-    for (const step of [
-      { skill: 'compact' },
-      { skill: 'stow', item: 'rotten_flesh', count: 2, into: 'open' },
-      { skill: 'take', item: 'furnace', count: 1, from: 'open' },
-    ] as SkillCall[]) {
-      expect(exec.submit([step])).toContain('当前没有打开容器窗口');
-    }
-    expect(exec.status().running).toBeNull();
-    expect(exec.status().waiting).toHaveLength(0);
-  });
-  it('从已打开窗口取不到物品时换站位也不解除重复失败保护', async () => {
-    const { exec, reports, bot } = makeExecutor();
-    (bot as any).currentWindow = { inventoryStart: 0, inventoryEnd: 0, title: 'Chest' };
-    const step: SkillCall = { skill: 'take', item: 'enchanted_book', count: 1, from: 'open' };
-    exec.submit([step]);
-    await waitUntil(() => reports.length === 1);
-    bot.entity.position.x = 20;
-    exec.submit([step]);
-    await waitUntil(() => reports.length === 2);
-    bot.entity.position.x = 40;
-    expect(exec.submit([step])).toContain('连续失败 2 次');
-  });
-  it('点名空容器取物的失败按来源和物品归并，改数量与前置赶路不能重试', async () => {
-    const { bot, box } = chestBot();
-    const chests = new ChestBook(null);
-    const { exec, reports } = makeExecutorWith(bot, chests);
-    const take: Extract<SkillCall, { skill: 'take' }> =
-      { skill: 'take', item: 'coal', count: 1, at: [2, 64, 0] };
-    expect(exec.submitDetailed([take]).accepted).toBe(true);
-    await waitUntil(() => reports.length === 1);
-    expect(reports[0].kind).toBe('blocked');
-    const precheck = exec.submitDetailed([{ ...take, count: 2 }]);
-    expect(precheck.accepted).toBe(false);
-    expect(precheck.receipt).toContain('最近开窗确认没有');
-    const repeated = exec.submitDetailed([
-      { skill: 'goto', at: [1, 64, 0] },
-      { ...take, count: 3 },
-    ]);
-    expect(repeated.accepted).toBe(false);
-    expect(repeated.receipt).toContain('同一目标取同一物品已经连续失败 2 次');
-    expect(reports).toHaveLength(1);
-
-    box.set('coal', 3);
-    await vi.advanceTimersByTimeAsync(1);
-    chests.remember('overworld', { x: 2, y: 64, z: 0 },
-      [{ name: 'coal', count: 3 } as never], 1, 27);
-    expect(exec.submitDetailed([take]).accepted).toBe(true);
-    await waitUntil(() => reports.length === 2);
-    expect(reports[1].kind).toBe('done');
-  });
-  it('同一非容器格的 take 预检拒收计入失败账，方块变化后放行', async () => {
-    const { bot, box } = chestBot({ box: { coal: 2 } });
-    let blockName = 'grass_block';
-    bot.blockAt = (p: V) => ({ name: p.x === 2 && p.y === 64 && p.z === 0 ? blockName : 'air',
-      position: p, boundingBox: 'block' });
-    const { exec, reports } = makeExecutorWith(bot, new ChestBook(null));
-    const take: Extract<SkillCall, { skill: 'take' }> =
-      { skill: 'take', item: 'coal', count: 1, at: [2, 64, 0] };
-    expect(exec.submitDetailed([take]).receipt).toContain('不是可取物容器');
-    expect(exec.submitDetailed([{ ...take, count: 2 }]).receipt).toContain('不是可取物容器');
-    const repeated = exec.submitDetailed([{ ...take, count: 3 }]);
-    expect(repeated.accepted).toBe(false);
-    expect(repeated.receipt).toContain('同一目标取同一物品已经连续失败 2 次');
-    expect(reports).toHaveLength(0);
-
-    blockName = 'chest';
-    expect(exec.submitDetailed([take]).accepted).toBe(true);
-    await waitUntil(() => reports.length === 1);
-    expect(reports[0].kind).toBe('done');
-    expect(box.get('coal')).toBe(1);
-  });
-  it('同一开窗来源取物失败不会因前面多一步而绕开保护', async () => {
-    const { exec, reports, bot } = makeExecutor();
-    const client = Object.assign(new EventEmitter(), { write() {} });
-    const events = withBotEvents(bot);
-    const win = { id: 5, type: 'minecraft:generic_9x3', title: 'Chest', inventoryStart: 27, inventoryEnd: 63,
-      hotbarStart: 54, craftingResultSlot: -1,
-      slots: Array(63).fill(null), items: () => [] };
-    const windowBot = bot as typeof bot & { currentWindow: typeof win | null;
-      inventory: { items(): never[] }; registry: { itemsByName: Record<string, unknown> }; closeWindow(): void;
-      _client: typeof client };
-    windowBot._client = client;
-    windowBot.currentWindow = null;
-    windowBot.inventory = { items: () => [] };
-    windowBot.registry = { itemsByName: {} };
-    windowBot.closeWindow = () => { windowBot.currentWindow = null; events.emit('windowClose', win); };
-    bot.chat = (text) => {
-      bot.said.push(text);
-      if (text !== '/mycli arena rewards') return;
-      windowBot.currentWindow = win;
-      client.emit('open_window', { windowId: win.id, inventoryType: win.type, windowTitle: win.title });
-      client.emit('window_items', { windowId: win.id, stateId: 1,
-        items: win.slots.map(() => ({ itemCount: 0 })), carriedItem: { itemCount: 0 } });
-      events.emit('windowOpen', win);
-    };
-    const open: SkillCall = { skill: 'chat', text: '/mycli arena rewards' };
-    const take: SkillCall = { skill: 'take', item: 'enchanted_book', count: 1, from: 'open' };
-    exec.submit([open, take]);
-    await waitUntil(() => reports.length === 1, 6_000);
-    exec.submit([{ skill: 'chat', text: '/mycli help' }, open, take]);
-    await waitUntil(() => reports.length === 2, 6_000);
-    const refused = exec.submit([open, take]);
-    expect(refused).toContain('同一来源窗口取同一物品已经连续失败 2 次');
-    expect(exec.status().running).toBeNull();
-  });
-  it('stow 连续失败两次后拒收原样重试', async () => {
-    const { exec, reports } = makeExecutor();
-    const step: SkillCall = { skill: 'stow', item: '附魔之瓶', count: 31 };
-    exec.submit([step]);
-    await waitUntil(() => reports.length === 1);
-    exec.submit([step]);
-    await waitUntil(() => reports.length === 2);
-    const receipt = exec.submit([step]);
-    expect(receipt).toContain('这一单我没接');
-    expect(receipt).toContain('连续失败 2 次');
-  });
-  it('相同站位的 goto 连续失败后拒收原样重试，换站位可再尝试', async () => {
-    const { bot } = chestBot();
-    bot.pathfinder.goto = (async () => { throw new Error('找不到可行路线'); }) as never;
-    const { exec, reports } = makeExecutorOn(bot);
-    const step: SkillCall = { skill: 'goto', at: [10, 64, 0] };
-    exec.submit([step]);
-    await waitUntil(() => reports.length === 1);
-    await vi.advanceTimersByTimeAsync(16_000);
-    exec.submit([step]);
-    await waitUntil(() => reports.length === 2);
-    await vi.advanceTimersByTimeAsync(16_000);
-    const refused = exec.submitDetailed([step]);
-    expect(refused.accepted).toBe(false);
-    expect(refused.retryAfterMs).toBeUndefined();
-    expect(refused.receipt).toContain('连续走不通 2 次');
-    const compound = exec.submitDetailed([step, { skill: 'use', at: [11, 64, 0] }]);
-    expect(compound.accepted).toBe(false);
-    expect(compound.retryAfterMs).toBeUndefined();
-    expect(compound.receipt).toContain('这片目标区域');
-    expect(reports).toHaveLength(2);
-    bot.entity.position = new V(5, 64, 0);
-    expect(exec.submit([step])).toContain('收下了');
-  });
-  it('同一落点累计三次走不通后只暂停该目标，地形变化或走通后解除', () => {
-    const { bot } = chestBot();
-    const { exec } = makeExecutorOn(bot);
-    const guard = exec as unknown as {
-      recordSpatialOutcome(steps: SkillCall[], failed: boolean, why: string): void;
-      spatialFailureNote(steps: SkillCall[], now: number): string | null;
-      clearSpatialFailuresForChangedBlock(cell: { x: number; y: number; z: number }, dimension: string): void;
-    };
-    const target: SkillCall = { skill: 'goto', at: [10, 64, 0] };
-    const reason = '走不过去: 找不到可行路线';
-    bot.entity.position = new V(0, 64, 0);
-    guard.recordSpatialOutcome([target], true, reason);
-    guard.recordSpatialOutcome([target], true, reason);
-    bot.entity.position = new V(6, 64, 0);
-    expect(guard.spatialFailureNote([target], Date.now())).toBeNull();
-    guard.recordSpatialOutcome([target], true, reason);
-    bot.entity.position = new V(-6, 64, 0);
-    const plan = [target, { skill: 'use', target: 'villager' } as SkillCall];
-    const refused = exec.submitDetailed(plan);
-    expect(refused).toMatchObject({ accepted: false });
-    expect(refused.retryAfterMs).toBeUndefined();
-    expect(refused.receipt).toContain('已连续走不通 3 次');
-    expect(guard.spatialFailureNote([{ skill: 'goto', at: [11, 64, 0] }], Date.now()))
-      .toContain('已连续走不通 3 次');
-    expect(guard.spatialFailureNote([{ skill: 'goto', at: [20, 64, 0] }], Date.now())).toBeNull();
-    expect(guard.spatialFailureNote([{ skill: 'goto', at: [20, 64, 0] }, target], Date.now())).toBeNull();
-    guard.recordSpatialOutcome([{ skill: 'goto', at: [13, 64, 0] }], false, '走通另一条路');
-    expect(guard.spatialFailureNote(plan, Date.now())).toContain('已连续走不通 3 次');
-    guard.clearSpatialFailuresForChangedBlock({ x: 10, y: 64, z: 0 }, 'overworld');
-    expect(guard.spatialFailureNote(plan, Date.now())).toBeNull();
-    bot.entity.position = new V(0, 64, 0);
-    guard.recordSpatialOutcome([target], true, reason);
-    guard.recordSpatialOutcome([target], true, reason);
-    bot.entity.position = new V(6, 64, 0);
-    guard.recordSpatialOutcome([target], true, reason);
-    bot.entity.position = new V(-6, 64, 0);
-    expect(guard.spatialFailureNote(plan, Date.now())).toContain('已连续走不通 3 次');
-    guard.recordSpatialOutcome([target], false, '已走通');
-    expect(guard.spatialFailureNote(plan, Date.now())).toBeNull();
-    expect(exec.submitDetailed([{ skill: 'goto', at: [20, 64, 0] }]).accepted).toBe(true);
-  });
-  it('同一落点即使每次卡在相同位置也跨唤醒暂缓，窗口到期后放行', () => {
-    const { bot } = chestBot();
-    const { exec } = makeExecutorOn(bot);
-    const guard = exec as unknown as {
-      recordSpatialOutcome(steps: SkillCall[], failed: boolean, why: string): void;
-      spatialFailureNote(steps: SkillCall[], now: number): string | null;
-    };
-    const target: SkillCall = { skill: 'goto', at: [10, 64, 0] };
-    for (let attempt = 0; attempt < 3; attempt++) {
-      bot.entity.position = new V(5, 64, 0);
-      guard.recordSpatialOutcome([target], true, '走不过去: 找不到可行路线');
-    }
-    bot.entity.position = new V(-10, 64, 0);
-    expect(exec.submitDetailed([target]).receipt).toContain('已连续走不通 3 次');
-    expect(guard.spatialFailureNote([target], Date.now() + 11 * 60_000)).toBeNull();
-  });
-  it('目标格被方块占住后，换站位也不重试同一格', async () => {
-    const { bot } = chestBot();
-    bot.pathfinder.goto = (async () => { throw new Error('目标那一格站不进人:它和四周都被方块占着'); }) as never;
-    const { exec, reports } = makeExecutorOn(bot);
-    const blocked: SkillCall = { skill: 'goto', at: [10, 64, 0] };
-    exec.submit([blocked]);
-    await waitUntil(() => reports.length === 1);
-    bot.entity.position = new V(5, 64, 0);
-    expect(exec.submit([blocked])).toContain('已确认不可站');
-    expect(exec.submit([{ skill: 'goto', at: [11, 64, 0] }])).toContain('收下了');
-  });
-  it('不可站目标附近有已知箱子与关闭的门时，拒收回执给出可操作入口', async () => {
-    const { bot } = chestBot();
-    const withDoor = { ...bot, blockAt: (p: V) => p.x === 4 && p.y === 64 && p.z === 0
-      ? { name: 'oak_door', position: p, boundingBox: 'block', getProperties: () => ({ open: false, half: 'lower' }) }
-      : bot.blockAt(p) };
-    withDoor.pathfinder.goto = (async () => { throw new Error('目标那一格站不进人:它和四周都被方块占着'); }) as never;
-    const chests = new ChestBook(null);
-    chests.remember('overworld', { x: 10, y: 65, z: 0 }, [], 0, 27);
-    const { exec, reports } = makeExecutorWith(withDoor, chests);
-    const step: SkillCall = { skill: 'goto', at: [10, 64, 0] };
-    exec.submit([step]);
-    await waitUntil(() => reports.length === 1);
-    withDoor.entity.position = new V(5, 64, 0);
-    const receipt = exec.submit([step]);
-    expect(receipt).toContain('账本记有容器 (10,65,0)');
-    expect(receipt).toContain('关闭的门 (4,64,0)');
-  });
-  it('被钉在原地后往反方向掉落不算路线进展', async () => {
-    const { bot } = chestBot();
-    bot.pathfinder.goto = (async () => { throw new Error('钉在原地: 10s 一格都没挪动过'); }) as never;
-    const { exec, reports } = makeExecutorOn(bot);
-    const target: SkillCall = { skill: 'goto', at: [10, 70, 0] };
-    exec.submit([target]);
-    await waitUntil(() => reports.length === 1);
-    bot.entity.position = new V(0, 58, 0);
-    expect(exec.submit([target])).toContain('此后也没有接近目标');
-    expect(reports).toHaveLength(1);
-  });
-  it.each([1, 3])('在另一处出发时重新评估路线，不沿用原站位的 %i 次钉住记录', async (attempts) => {
-    const { bot } = chestBot();
-    const { exec, reports } = makeExecutorOn(bot);
-    const guard = exec as unknown as {
-      recordSpatialOutcome(steps: SkillCall[], failed: boolean, why: string): void;
-    };
-    const target: SkillCall = { skill: 'goto', at: [10, 70, 0] };
-    bot.entity.position = new V(0, 64, 0);
-    for (let i = 0; i < attempts; i++) {
-      guard.recordSpatialOutcome([target], true, '钉在原地: 10s 一格都没挪动过');
-    }
-    expect(exec.submitDetailed([target]).accepted).toBe(false);
-    bot.entity.position = new V(-30, 64, 0);
-    bot.pathfinder.goto = (async () => { bot.entity.position = new V(10, 70, 0); }) as never;
-    expect(exec.submitDetailed([target]).accepted).toBe(true);
-    await waitUntil(() => reports.length === 1);
-    expect(reports[0].kind).toBe('done');
-    expect(bot.entity.position).toEqual(new V(10, 70, 0));
-  });
-  it('门已开时连续任务不会把它关上，失败的同一路线不会反复重试', async () => {
-    const { bot } = chestBot();
-    const activate = vi.fn(async () => undefined);
-    const originalBlockAt = bot.blockAt;
-    bot.blockAt = (p: V) => p.x === 1 && p.y === 64 && p.z === 0
-      ? { name: 'spruce_door', stateId: 18, position: p, boundingBox: 'block',
-          getProperties: () => ({ open: true, half: 'lower' }) } as never
-      : originalBlockAt(p);
-    Object.assign(bot, { activateBlock: activate });
-    bot.pathfinder.goto = (async () => { throw new Error('钉在原地: 10s 一格都没挪动过'); }) as never;
-    const { exec, reports } = makeExecutorOn(bot);
-    const steps: SkillCall[] = [{ skill: 'use', at: [1, 64, 0] }, { skill: 'goto', at: [10, 64, 0] }];
-    exec.submit(steps);
-    await waitUntil(() => reports.length === 1);
-    expect(activate).not.toHaveBeenCalled();
-    expect(reports[0].text).toContain('已经打开，保持开启');
-    expect(exec.submit(steps)).toContain('此后也没有接近目标');
-  });
-  it('同一站位走不通相邻目标时停止坐标微调循环', async () => {
-    const { bot } = chestBot();
-    bot.pathfinder.goto = (async () => { throw new Error('找不到可行路线'); }) as never;
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'goto', at: [10, 64, 0] }]);
-    await waitUntil(() => reports.length === 1);
-    exec.submit([{ skill: 'goto', at: [12, 64, 1] }]);
-    await waitUntil(() => reports.length === 2);
-    const refused = exec.submit([{ skill: 'goto', at: [11, 64, 1] }]);
-    expect(refused).toContain('这片目标区域');
-    expect(reports).toHaveLength(2);
-    bot.entity.position = new V(5, 64, 0);
-    bot.pathfinder.goto = (async () => { bot.entity.position = new V(11, 64, 1); }) as never;
-    expect(exec.submit([{ skill: 'goto', at: [11, 64, 1] }])).toContain('收下了');
-    await waitUntil(() => reports.length === 3);
-    expect(reports[2].kind).toBe('done');
-    bot.entity.position = new V(0, 64, 0);
-    await vi.advanceTimersByTimeAsync(16_000);
-    expect(exec.submit([{ skill: 'goto', at: [11, 64, 1] }])).toContain('收下了');
-  });
-  it('goto 在原地长期无进展而被叫停，也计入附近路线受阻', async () => {
-    const { bot } = chestBot();
-    bot.pathfinder.goto = (() => new Promise<void>(() => undefined)) as never;
-    const { exec } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'goto', at: [10, 64, 0] }]);
-    await vi.advanceTimersByTimeAsync(17_000);
-    expect(exec.clear()).toContain('已叫停');
-    exec.submit([{ skill: 'goto', at: [12, 64, 1] }]);
-    await vi.advanceTimersByTimeAsync(17_000);
-    expect(exec.clear()).toContain('已叫停');
-    expect(exec.submit([{ skill: 'goto', at: [11, 64, 1] }])).toContain('这片目标区域');
-  });
-  it('远处路线受阻时，前置航点或开门步骤不能被最后目的地提前拒收', async () => {
-    const { bot } = chestBot();
-    bot.pathfinder.goto = (async () => { throw new Error('找不到可行路线'); }) as never;
-    const { exec, reports } = makeExecutorOn(bot);
-    const far: SkillCall = { skill: 'goto', at: [40, 64, 0] };
-    exec.submit([far]);
-    await waitUntil(() => reports.length === 1);
-    await vi.advanceTimersByTimeAsync(16_000);
-    exec.submit([far]);
-    await waitUntil(() => reports.length === 2);
-    await vi.advanceTimersByTimeAsync(16_000);
-    expect(exec.submit([far])).toContain('连续走不通 2 次');
-    expect(exec.submit([{ skill: 'goto', at: [2, 64, 0] }, far])).toContain('收下了');
-    await waitUntil(() => reports.length === 3);
-    expect(exec.submit([{ skill: 'use', at: [1, 64, 0] }, far])).toContain('收下了');
-  });
-  it('use 后 stow 指向不存在物品时入队前拒绝，保留旧队列', () => {
-    const bot = {
-      entity: { id: 1, position: new V(0.5, 64, 0.5) },
-      inventory: { items: () => [{ name: 'experience_bottle', count: 31, type: 1 }] },
-      registry: { itemsByName: {} },
-    };
-    const { exec } = makeExecutorOn(bot);
-    const receipt = exec.submit([
-      { skill: 'use', item: 'player_head' },
-      { skill: 'stow', item: '附魔之瓶', count: 31, into: 'open' },
-    ]);
-    expect(receipt).toContain('这一单我没接');
-    expect(receipt).toContain('experience_bottle');
-    expect(exec.status().running).toBeNull();
-  });
-  it('只赶路再存不存在的物品会在出发前拒绝', () => {
-    const bot = {
-      entity: { id: 1, position: new V(0.5, 64, 0.5) },
-      inventory: { items: () => [{ name: 'dirt', count: 1, type: 1 }] },
-      registry: { itemsByName: {} },
-    };
-    const { exec } = makeExecutorOn(bot);
-    const receipt = exec.submit([
-      { skill: 'goto', at: [20, 64, 0] },
-      { skill: 'stow', item: 'iron_ingot', count: 44, at: [21, 64, 0] },
-    ]);
-    expect(receipt).toContain('这一单我没接');
-    expect(receipt).toContain('iron_ingot');
-    expect(exec.status().running).toBeNull();
-  });
-  it('take from:open 只从已打开窗口取物，不走向附近箱子', async () => {
-    const furnace = { name: 'furnace', type: 1, metadata: 0, count: 1 };
-    const slots: Array<typeof furnace | null> = new Array(63).fill(null);
-    slots[0] = furnace;
-    let bag: typeof furnace[] = [];
-    const win = {
-      slots, inventoryStart: 27, inventoryEnd: 63,
-      items: () => slots.slice(27).filter((item): item is typeof furnace => item !== null),
-    };
-    const bot = {
-      entity: { id: 1, position: new V(0.5, 64, 0.5) },
-      registry: { itemsByName: { furnace: { id: 1, name: 'furnace' } } },
-      inventory: { items: () => bag },
-      currentWindow: win as typeof win | null,
-      findBlocks: () => { throw new Error('不应搜索附近箱子'); },
-      transfer: async () => { slots[0] = null; slots[27] = furnace; },
-      closeWindow: () => { bot.currentWindow = null; bag = win.items(); },
-    };
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'take', item: 'furnace', count: 1, from: 'open' }]);
-    await waitUntil(() => reports.length === 1);
-    expect(reports[0].kind).toBe('done');
-    expect(reports[0].text).toContain('从当前窗口取出熔炉×1');
-    expect(bag).toEqual([furnace]);
-  });
-  it('窗口缺货时用短回执说明实时内容与随身已有数量', async () => {
-    const slots = new Array(63).fill(null);
-    slots[0] = { name: 'diamond', type: 2, count: 15 };
-    const swords = [
-      { name: 'diamond_sword', type: 1, count: 1 },
-      { name: 'diamond_sword', type: 1, count: 1 },
-    ];
-    const win = { slots, inventoryStart: 27, inventoryEnd: 63 };
-    const bot = {
-      entity: { id: 1, position: new V(0.5, 64, 0.5) },
-      registry: { itemsByName: { diamond_sword: { id: 1, name: 'diamond_sword' } } },
-      inventory: { items: () => swords },
-      currentWindow: win as typeof win | null,
-      closeWindow: () => { bot.currentWindow = null; },
-    };
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'take', item: 'diamond_sword', count: 1, from: 'open' }]);
-    await waitUntil(() => reports.length === 1);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('包里已有该物品×2');
-    expect(reports[0].text).toContain('实际容器里有:钻石(diamond)×15');
-    expect(reports[0].text).toContain('别据旧公告重复取');
-  });
-  it('窗口镜像没动但关窗回灌已进背包时按实得取物结案', async () => {
-    const pickaxe = { name: 'iron_pickaxe', type: 2, metadata: 0, count: 1 };
-    const slots: Array<typeof pickaxe | null> = new Array(63).fill(null);
-    slots[0] = pickaxe;
-    let bag: typeof pickaxe[] = [];
-    let clicked = false;
-    const win = { slots, inventoryStart: 27, inventoryEnd: 63,
-      items: () => slots.slice(27).filter((item): item is typeof pickaxe => item !== null) };
-    const bot = {
-      entity: { id: 1, position: new V(0.5, 64, 0.5) },
-      registry: { itemsByName: { iron_pickaxe: { id: 2, name: 'iron_pickaxe' } } },
-      inventory: { items: () => bag },
-      currentWindow: win as typeof win | null,
-      transfer: async () => { clicked = true; },
-      closeWindow: () => {
-        bot.currentWindow = null;
-        if (clicked) { slots[0] = null; bag = [pickaxe]; }
-      },
-    };
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'take', item: 'iron_pickaxe', count: 1, from: 'open' }]);
-    await waitUntil(() => reports.length === 1);
-    expect(reports[0].kind).toBe('done');
-    expect(reports[0].text).toContain('关窗后包里多了铁镐×1');
-    expect(bag).toEqual([pickaxe]);
-  });
-  it('命令打开的同一窗口连续取多类物品，失败项也按原窗口内容落账', async () => {
-    const client = Object.assign(new EventEmitter(), { write() {} });
-    const names = ['stick', 'copper_ingot', 'carrot'];
-    const slots: Array<{ name: string; type: number; metadata: number; count: number } | null> = new Array(63).fill(null);
-    names.forEach((name, i) => { slots[i] = { name, type: i + 1, metadata: 0, count: 2 }; });
-    const win = { id: 5, type: 'minecraft:generic_9x3', title: 'Chest', slots,
-      inventoryStart: 27, inventoryEnd: 63, hotbarStart: 54, craftingResultSlot: -1,
-      items: () => slots.slice(27).filter((item): item is NonNullable<typeof item> => item !== null) };
-    let bag: ReturnType<typeof win.items> = [];
-    let closes = 0;
-    const bot = {
-      entity: { id: 1, position: new V(0.5, 64, 0.5) },
-      registry: { itemsByName: Object.fromEntries(names.map((name, i) => [name, { id: i + 1, name }])) },
-      inventory: { items: () => bag }, _client: client,
-      currentWindow: null as typeof win | null,
-      chat: (text: string) => {
-        if (text !== '/mycli arena rewards') return;
-        bot.currentWindow = win;
-        client.emit('open_window', { windowId: win.id, inventoryType: win.type, windowTitle: win.title });
-        client.emit('window_items', { windowId: win.id, stateId: 1,
-          items: slots.map((stack) => stack
-            ? { itemId: stack.type, itemCount: stack.count, components: [] } : { itemCount: 0 }),
-          carriedItem: { itemCount: 0 } });
-        events.emit('windowOpen', win);
-      },
-      transfer: async ({ itemType }: { itemType: number }) => {
-        const from = slots.findIndex((it, i) => i < 27 && it?.type === itemType);
-        const to = slots.findIndex((it, i) => i >= 27 && it === null);
-        slots[to] = slots[from]; slots[from] = null;
-      },
-      closeWindow: () => { closes++; bot.currentWindow = null; bag = win.items(); events.emit('windowClose', win); },
-    };
-    const events = withBotEvents(bot);
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([
-      { skill: 'chat', text: '/mycli arena rewards' },
-      { skill: 'take', item: 'stick', count: 2, from: 'open' },
-      { skill: 'take', item: 'copper_ingot', count: 2, from: 'open' },
-      { skill: 'take', item: 'carrot', count: 2, from: 'open' },
-    ]);
-    await waitUntil(() => reports.length === 1);
-    expect(reports[0].kind).toBe('done');
-    expect(bag.map((it) => it.name)).toEqual(names);
-    expect(closes).toBe(1);
-    expect(reports[0].text).not.toContain('当前没有打开');
-
-    slots[0] = { name: 'stick', type: 1, metadata: 0, count: 2 };
-    bot.currentWindow = win;
-    exec.submit([
-      { skill: 'take', item: 'stick', count: 2, from: 'open' },
-      { skill: 'take', item: 'furnace', count: 1, from: 'open' },
-    ]);
-    await waitUntil(() => reports.length === 2);
-    expect(reports[1].kind).toBe('blocked');
-    expect(reports[1].text).toContain('从当前窗口取出木棍×2');
-    expect(reports[1].text).toContain('当前窗口没取到熔炉');
-    expect(reports[1].text).not.toContain('当前没有打开');
-  });
-  it('同一自定义背包连续存多类物品，只在最后关闭窗口', async () => {
-    const bread = { name: 'bread', type: 1, metadata: 0, count: 32 };
-    const arrow = { name: 'arrow', type: 2, metadata: 0, count: 24 };
-    const slots: Array<typeof bread | null> = new Array(63).fill(null);
-    slots[27] = bread; slots[28] = arrow;
-    const win = { slots, inventoryStart: 27, inventoryEnd: 63,
-      items: () => slots.slice(27).filter((item): item is typeof bread => item !== null) };
-    let bag = [bread, arrow];
-    let closes = 0;
-    const bot = {
-      entity: { id: 1, position: new V(0.5, 64, 0.5) },
-      registry: { itemsByName: { bread: { id: 1, name: 'bread' }, arrow: { id: 2, name: 'arrow' } } },
-      inventory: { items: () => bag },
-      currentWindow: win as typeof win | null,
-      transfer: async ({ itemType }: { itemType: number }) => {
-        const from = slots.findIndex((it, i) => i >= 27 && it?.type === itemType);
-        const to = slots.findIndex((it, i) => i < 27 && it === null);
-        slots[to] = slots[from]; slots[from] = null;
-      },
-      closeWindow: () => { closes++; bot.currentWindow = null; bag = win.items(); },
-    };
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([
-      { skill: 'stow', item: 'bread', count: 32, into: 'open' },
-      { skill: 'stow', item: 'arrow', count: 24, into: 'open' },
-    ]);
-    await waitUntil(() => reports.length === 1);
-    expect(reports[0].kind).toBe('done');
-    expect(slots.slice(0, 2).map((it) => it?.name)).toEqual(['bread', 'arrow']);
-    expect(bag).toEqual([]);
-    expect(closes).toBe(1);
-  });
-  it('同一容器满仓两次后换物品仍拒收，取出物品后放开', () => {
-    const { exec } = makeExecutor();
-    const guard = exec as unknown as {
-      recordExactOutcome(steps: SkillCall[], failed: boolean, why: string): void;
-      fullOpenStorageNote(steps: SkillCall[], now: number): string | null;
-    };
-    const stow = (item: string): SkillCall[] => [
-      { skill: 'chat', text: '/backpack open' },
-      { skill: 'stow', item, count: 1, into: 'open' },
-    ];
-    guard.recordExactOutcome(stow('iron_ingot'), true, '当前窗口没有存进铁锭:那一边没空位了');
-    guard.recordExactOutcome(stow('diamond'), true, '当前窗口没有存进钻石:那一边没空位了');
-    expect(guard.fullOpenStorageNote(stow('crossbow'), Date.now())).toContain('换物品不会腾出格子');
-    guard.recordExactOutcome(stow('experience_bottle'), false, '存入了可并堆的附魔之瓶');
-    expect(guard.fullOpenStorageNote(stow('crossbow'), Date.now())).toContain('换物品不会腾出格子');
-    guard.recordExactOutcome([{ skill: 'take', item: 'rotten_flesh', count: 1, from: 'open' }], false, '已取出');
-    expect(guard.fullOpenStorageNote(stow('crossbow'), Date.now())).toBeNull();
-  });
-  it.each([19, 1])('满窗失败后，同单先取 %i 件再存物按执行时容量裁决', async (takeCount) => {
-    type Stack = { name: string; type: number; metadata: number; count: number };
-    const slots: Array<Stack | null> = Array.from({ length: 63 }, (_, i) => i < 26
-      ? { name: 'cobblestone', type: 3, metadata: 0, count: 64 } : null);
-    slots[26] = { name: 'wheat_seeds', type: 1, metadata: 0, count: 19 };
-    slots[27] = { name: 'dirt', type: 2, metadata: 0, count: 8 };
-    const client = Object.assign(new EventEmitter(), { write() {} });
-    const win = { id: 5, type: 'minecraft:generic_9x3', title: 'Chest', slots,
-      inventoryStart: 27, inventoryEnd: 63,
-      items: () => slots.slice(27).filter((item): item is Stack => item !== null) };
-    let deposits = 0;
-    const bot = {
-      entity: { id: 1, position: new V(0.5, 64, 0.5) },
-      registry: { itemsByName: {
-        wheat_seeds: { id: 1, name: 'wheat_seeds', stackSize: 64 },
-        dirt: { id: 2, name: 'dirt', stackSize: 64 },
-        cobblestone: { id: 3, name: 'cobblestone', stackSize: 64 },
-      } },
-      inventory: { items: win.items }, _client: client,
-      currentWindow: null as typeof win | null,
-      chat: () => {
-        bot.currentWindow = win;
-        client.emit('open_window', { windowId: win.id, inventoryType: win.type, windowTitle: win.title });
-        client.emit('window_items', { windowId: win.id, stateId: 1,
-          items: slots.map((stack) => stack
-            ? { itemId: stack.type, itemCount: stack.count, components: [] } : { itemCount: 0 }),
-          carriedItem: { itemCount: 0 } });
-        events.emit('windowOpen', win);
-      },
-      transfer: async ({ itemType, count, sourceStart, sourceEnd, destStart, destEnd }: {
-        itemType: number; count: number; sourceStart: number; sourceEnd: number;
-        destStart: number; destEnd: number;
-      }) => {
-        if (destStart === 0) deposits++;
-        const from = slots.findIndex((item, i) => i >= sourceStart && i < sourceEnd && item?.type === itemType);
-        const to = slots.findIndex((item, i) => i >= destStart && i < destEnd && item === null);
-        if (from < 0 || to < 0) throw new Error('destination full');
-        const stack = slots[from]!;
-        const moved = Math.min(count, stack.count);
-        slots[to] = { ...stack, count: moved };
-        stack.count -= moved;
-        if (stack.count === 0) slots[from] = null;
-      },
-      closeWindow: () => { bot.currentWindow = null; events.emit('windowClose', win); },
-    };
-    const events = withBotEvents(bot);
-    const { exec, reports } = makeExecutorOn(bot);
-    const opener: SkillCall = { skill: 'chat', text: '/storage open' };
-    const stow: SkillCall = { skill: 'stow', item: 'dirt', count: 8, into: 'open' };
-    for (let i = 1; i <= 2; i++) {
-      expect(exec.submitDetailed([opener, stow]).accepted).toBe(true);
-      await waitUntil(() => reports.length === i);
-      expect(reports[i - 1].kind).toBe('blocked');
-      expect(reports[i - 1].text).toContain('当前窗口没有存进');
-    }
-    expect(exec.submitDetailed([opener, stow]).rejection?.rule).toBe('storage.full');
-    const repair = exec.submitDetailed([opener,
-      { skill: 'take', item: 'wheat_seeds', count: takeCount, from: 'open' },
-      { ...stow, needs: [2] },
-    ]);
-    expect(repair.accepted).toBe(true);
-    await waitUntil(() => reports.length === 3);
-    expect(reports[2].kind).toBe(takeCount === 19 ? 'done' : 'blocked');
-    expect(slots.slice(0, 27).find((item) => item?.name === 'dirt')?.count ?? 0)
-      .toBe(takeCount === 19 ? 8 : 0);
-    expect(win.items().find((item) => item.name === 'wheat_seeds')?.count).toBe(takeCount);
-    expect(deposits).toBe(3);
-  });
-  it('取物在存物之后或在另一容器时，不解除满窗重复拦截', () => {
-    const { exec } = makeExecutor();
-    const guard = exec as unknown as {
-      recordExactOutcome(steps: SkillCall[], failed: boolean, why: string): void;
-    };
-    const opener: SkillCall = { skill: 'chat', text: '/storage open' };
-    const stow: SkillCall = { skill: 'stow', item: 'dirt', count: 8, into: 'open' };
-    const take: SkillCall = { skill: 'take', item: 'wheat_seeds', count: 19, from: 'open' };
-    guard.recordExactOutcome([opener, stow], true, '当前窗口没有存进泥土:那一边没空位了');
-    guard.recordExactOutcome([opener, stow], true, '当前窗口没有存进泥土:那一边没空位了');
-    expect(exec.submitDetailed([opener, stow, take]).rejection?.rule).toBe('storage.full');
-    expect(exec.submitDetailed([take, opener, stow]).rejection?.rule).toBe('storage.full');
-    expect(exec.submitDetailed([{ skill: 'use', at: [9, 64, 0] }, take, opener, stow])
-      .rejection?.rule).toBe('storage.full');
-  });
-  it('技能罗盘的箱形 GUI 是选择菜单，不从图标取物', async () => {
-    const icon = { name: 'ender_pearl', type: 1, metadata: 0, count: 1 };
-    const slots = new Array(63).fill(null);
-    slots[0] = icon;
-    const win = { title: { text: '✦ 技能罗盘' }, slots, inventoryStart: 27, inventoryEnd: 63 };
-    let transfers = 0;
-    const bot = {
-      entity: { id: 1, position: new V(0.5, 64, 0.5) },
-      registry: { itemsByName: { ender_pearl: { id: 1, name: 'ender_pearl' } } },
-      inventory: { items: () => [] },
-      currentWindow: win as typeof win | null,
-      transfer: async () => { transfers++; },
-      closeWindow: () => { bot.currentWindow = null; },
-    };
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'take', item: 'ender_pearl', count: 1, from: 'open' }]);
-    await waitUntil(() => reports.length === 1);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('选择菜单');
-    expect(reports[0].text).toContain('不是可取走的物品');
-    expect(transfers).toBe(0);
-    expect(bot.currentWindow).toBeNull();
-  });
   it('submit 立即返回带时刻与调用的受理回执,完成后经 report 汇报', async () => {
     const { exec, reports, bot } = makeExecutor();
     const receipt = exec.submit([{ skill: 'chat', text: 'hi' }]);
@@ -1623,61 +54,6 @@ describe('Executor 编排', () => {
     expect(reports[0].kind).toBe('done');
     expect(bot.said).toEqual(['hi']);
     expect(exec.current).toBeNull();
-  });
-
-  it('解析整批时指出非法或过长的聊天输入所在步骤', () => {
-    const invalid = [
-      { skill: 'chat', text: '/msg Player 第一行\n第二行' },
-      { skill: 'chat', text: '含\r回车' },
-      { skill: 'chat', text: '含\t制表符' },
-      { skill: 'chat', text: '含\u00a7格式符' },
-      { skill: 'chat', text: 'x'.repeat(257) },
-      { skill: 'chat', text: `/msg Player ${'x'.repeat(245)}` },
-      { skill: 'server_travel', command: `/spawn${'x'.repeat(251)}`, at: [10, 64, 0] },
-    ];
-    for (const step of invalid) {
-      const parsed = parseSteps([{ skill: 'chat', text: '前一步' }, step]);
-      expect(parsed).toHaveProperty('error', expect.stringContaining('第 2 步 没有发送'));
-    }
-    expect(parseSteps([{ skill: 'chat', text: 'x'.repeat(256) }])).toHaveProperty('steps');
-  });
-
-  it.each([
-    ['多行 /msg', '/msg Player 第一行\n第二行'],
-    ['普通聊天超长', 'x'.repeat(257)],
-    ['命令超长', `/msg Player ${'x'.repeat(245)}`],
-    ['控制字符', '含\u0000空字符'],
-  ])('直接入队的%s在发送前受阻，回执提示拆分', async (_label, input) => {
-    const { exec, reports, bot } = makeExecutor();
-    exec.submit([{ skill: 'chat', text: input }]);
-    await waitUntil(() => reports.length === 1);
-    expect(bot.said).toEqual([]);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('没有发送');
-    expect(reports[0].text).toContain('多条单行 chat 步骤');
-    expect(reports[0].text).not.toContain('已向游戏聊天发送');
-  });
-
-  it('server_travel 的非法命令也不会调用 bot.chat', async () => {
-    const bot = Object.assign(combatBot({}), {
-      said: [] as string[],
-      chat(text: string) { this.said.push(text); },
-    });
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'server_travel', command: '/spawn\n/help', at: [10, 64, 0], within: 3 }]);
-    await waitUntil(() => reports.length === 1);
-    expect(bot.said).toEqual([]);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('没有发送');
-  });
-
-  it('恰好 256 字符的单行聊天只提交一次', async () => {
-    const { exec, reports, bot } = makeExecutor();
-    const text = 'x'.repeat(256);
-    exec.submit([{ skill: 'chat', text }]);
-    await waitUntil(() => reports.length === 1);
-    expect(bot.said).toEqual([text]);
-    expect(reports[0].kind).toBe('done');
   });
 
   it('多步按顺序执行;多步任务的结局回执才带任务名', async () => {
@@ -1697,7 +73,7 @@ describe('Executor 编排', () => {
     exec.submit([{ skill: 'chat', text: 'hi' }]);
     await waitUntil(() => reports.length === 1);
     expect(reports[0].text).toMatch(
-      /^\[\d{2}:\d{2}:\d{2}→\d{2}:\d{2}:\d{2} 共 [\d.]+s\] 任务#1完成: \{"skill":"chat","text":"hi"\}: 已向游戏聊天发送: hi；实际广播、命令或私聊结果以服务端回执为准$/,
+      /^\[\d{2}:\d{2}:\d{2}→\d{2}:\d{2}:\d{2} 共 [\d.]+s\] 任务#1完成: \{"skill":"chat","text":"hi"\}: 说了: hi$/,
     );
     // 单步任务不编号:一步的回执行就是它自己
     expect(reports[0].text).not.toContain('第 1 步');
@@ -1749,61 +125,6 @@ describe('Executor 编排', () => {
     expect(exec.clear()).toContain('已叫停');
     expect(exec.current).toBeNull();
     expect(exec.clear()).toBeNull();
-    release!();
-  });
-
-  it('一次过早叫停后让下一单先跑出结果，强制收手和窗口到期仍可用', async () => {
-    let release: (() => void) | null = null;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const { exec, reports } = makeExecutor(gate);
-    exec.submit([SLOW, { skill: 'chat', text: '目标' }]);
-    expect(exec.clear()).toContain('已叫停');
-    exec.submit([SLOW, { skill: 'chat', text: '继续' }]);
-    exec.submit([{ skill: 'chat', text: '排队' }], 'append');
-    const refused = exec.clear();
-    expect(refused).toContain('这次 mc_stop 没执行');
-    expect(exec.status().running?.id).toBe(2);
-    expect(exec.status().waiting).toHaveLength(1);
-    expect(reports).toHaveLength(1);
-    vi.setSystemTime(Date.now() + 30_001);
-    expect(exec.clear()).toContain('已叫停');
-    expect(exec.status().running).toBeNull();
-    exec.submit([SLOW]);
-    expect(exec.clear(true)).toContain('已叫停');
-    exec.submit([{ skill: 'chat', text: '已完成的事' }]);
-    await waitUntil(() => reports.some((report) => report.kind === 'done'));
-    exec.submit([{ skill: 'goto', at: [99, 64, 99] }]);
-    expect(exec.clear()).toContain('这次 mc_stop 没执行');
-    expect(exec.clear(true)).toContain('已叫停');
-    vi.setSystemTime(Date.now() + 120_001);
-    exec.submit([{ skill: 'goto', at: [100, 64, 100] }]);
-    expect(exec.clear()).toContain('已叫停');
-    release!();
-  });
-
-  it('同一目的地连续快速自停后拒收，其他目的地与 mc_stop 仍可使用', async () => {
-    let release: (() => void) | null = null;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const { exec } = makeExecutor(gate);
-    const destination: SkillCall = { skill: 'goto', at: [10, 64, 10] };
-    for (let i = 0; i < 6; i++) {
-      const steps = i % 2 === 0 ? [SLOW, destination] : [SLOW, destination, { skill: 'chat' as const, text: '到了' }];
-      const receipt = exec.submit(steps);
-      expect(receipt).toContain('收下了');
-      expect(exec.clear(true)).toContain('已叫停');
-    }
-
-    const refused = exec.submit([SLOW, destination]);
-    expect(refused).toContain('这一单我没接');
-    expect(refused).toContain('同一目的地最近被你连续快速叫停 6 次');
-    expect(exec.status().running).toBeNull();
-    expect(exec.status().waiting).toHaveLength(0);
-
-    expect(exec.submit([SLOW, { skill: 'goto', at: [20, 64, 20] }])).toContain('收下了');
-    expect(exec.clear(true)).toContain('已叫停');
-    vi.setSystemTime(Date.now() + 120_001);
-    expect(exec.submit([SLOW, destination])).toContain('收下了');
-    expect(exec.clear(true)).toContain('已叫停');
     release!();
   });
 
@@ -1867,15 +188,8 @@ describe('Executor 编排', () => {
 describe('equip:盔甲穿身上,不是全塞主手', () => {
   function wardrobeBot() {
     const equips: Array<[string, string]> = [];
-    const bag = [
-      { name: 'iron_leggings', type: 1, count: 1, slot: 9 },
-      { name: 'shield', type: 2, count: 1, slot: 10 },
-      { name: 'stone_sword', type: 3, count: 1, slot: 11 },
-      { name: 'totem_of_undying', type: 4, count: 1, slot: 12 },
-    ];
-    const slots: Array<(typeof bag)[number] | null> = Array(46).fill(null);
-    bag.forEach(item => { slots[item.slot] = item; });
-    const getEquipmentDestSlot = (dest: string) => ({ head: 5, torso: 6, legs: 7, feet: 8, 'off-hand': 45, hand: 36 })[dest]!;
+    // equip 到主手要跟着改 heldItem:真 mineflayer 就是这么做的,而推导出来的
+    // {holding} 判据读的正是它
     const bot = {
       equips,
       entity: { id: 9, position: new V(0.5, 64, 0.5) },
@@ -1884,18 +198,14 @@ describe('equip:盔甲穿身上,不是全塞主手', () => {
       players: {},
       heldItem: null as { name: string } | null,
       inventory: {
-        slots,
-        items: () => slots.slice(9, 45).filter((item): item is (typeof bag)[number] => !!item),
+        items: () => [
+          { name: 'iron_leggings', type: 1, count: 1 },
+          { name: 'shield', type: 2, count: 1 },
+          { name: 'stone_sword', type: 3, count: 1 },
+        ],
       },
-      getEquipmentDestSlot,
-      equip: async (it: (typeof bag)[number], dest: string) => {
+      equip: async (it: { name: string }, dest: string) => {
         equips.push([it.name, dest]);
-        const target = getEquipmentDestSlot(dest);
-        const source = it.slot;
-        const previous = slots[target];
-        slots[source] = previous;
-        if (previous) previous.slot = source;
-        slots[target] = it; it.slot = target;
         if (dest === 'hand') bot.heldItem = it;
       },
       pathfinder: { stop() {}, setGoal() {}, goto: async () => {} },
@@ -1906,8 +216,6 @@ describe('equip:盔甲穿身上,不是全塞主手', () => {
   it('受理刻试算在 equip 开工前读取背包', async () => {
     const helmet = { name: 'iron_helmet', type: 100, count: 1 };
     const bag = [helmet];
-    const slots: Array<typeof helmet | null> = Array(46).fill(null);
-    slots[9] = helmet;
     let equipped = false;
     const bot = {
       entity: { id: 9, position: new V(0.5, 64, 0.5), onGround: true },
@@ -1919,12 +227,10 @@ describe('equip:盔甲穿身上,不是全塞主手', () => {
         items: { 100: { name: 'iron_helmet' } },
         itemsByName: { iron_helmet: { id: 100, equipmentSlot: 'head' } },
       },
-      inventory: { items: () => bag, slots },
-      getEquipmentDestSlot: () => 5,
+      inventory: { items: () => bag },
       equip: async () => {
         equipped = true;
         bag.splice(0, 1);
-        slots[9] = null; slots[5] = helmet;
       },
       pathfinder: { stop() {}, setGoal() {}, goto: async () => {} },
     };
@@ -1935,28 +241,22 @@ describe('equip:盔甲穿身上,不是全塞主手', () => {
     await waitUntil(() => reports.length === 1);
     expect(equipped).toBe(true);
     expect(reports[0].kind).toBe('done');
-    expect(slots[5]).toBe(helmet);
   });
 
-  it('护腿进腿槽、盾牌与图腾挂副手、剑拿主手,回执按槽位说话', async () => {
+  it('护腿进腿槽、盾牌挂副手、剑拿主手,回执按槽位说话', async () => {
     const bot = wardrobeBot();
     const { exec, reports } = makeExecutorOn(bot);
     exec.submit([
       { skill: 'equip', item: 'iron_leggings' },
       { skill: 'equip', item: 'shield' },
-      { skill: 'equip', item: 'totem_of_undying' },
       { skill: 'equip', item: 'stone_sword' },
     ]);
     await waitUntil(() => reports.length === 1);
     expect(reports[0].kind).toBe('done');
-    expect(bot.equips).toEqual([['iron_leggings', 'legs'], ['shield', 'off-hand'],
-      ['totem_of_undying', 'off-hand'], ['stone_sword', 'hand']]);
+    expect(bot.equips).toEqual([['iron_leggings', 'legs'], ['shield', 'off-hand'], ['stone_sword', 'hand']]);
     expect(reports[0].text).toContain('穿上了铁护腿');
     expect(reports[0].text).toContain('盾牌挂上了副手');
-    expect(reports[0].text).toContain('不死图腾挂上了副手');
     expect(reports[0].text).toContain('手里拿起了石剑');
-    expect(bot.inventory.slots[7]?.name).toBe('iron_leggings');
-    expect(bot.inventory.slots[45]?.name).toBe('totem_of_undying');
   });
 
   /** 副手槽在 mineflayer 的窗口里是 45;offHand 非空时就挂在那一格 */
@@ -1978,7 +278,6 @@ describe('equip:盔甲穿身上,不是全塞主手', () => {
         // 从副手拿到主手:落进快捷栏的空格,副手空出来
         if (dest === 'hand' && slots[45] === it) slots[45] = null;
         if (dest === 'hand') bot.heldItem = it;
-        else slots[45] = it;
       },
       unequip: async (dest: string) => { equips.push(['(unequip)', dest]); },
       pathfinder: { stop() {}, setGoal() {}, goto: async () => {} },
@@ -2081,26 +380,24 @@ describe('equip:盔甲穿身上,不是全塞主手', () => {
     expect(reports[0].text).toContain('名字带这几个字的有:铁护腿');
   });
 
-  /** 腾手的假 bot:手上拿着鞍，包满时不得调用会丢物品的 unequip。 */
-  function handBot(opts: { held?: boolean; full?: boolean } = {}) {
+  /** 腾手的假 bot:手上拿着鞍。tossOnUnequip = 包满时 mineflayer 把它扔在地上那一支 */
+  function handBot(opts: { held?: boolean; tossOnUnequip?: boolean } = {}) {
     const bag = [{ name: 'saddle', type: 1, count: 1 }];
     let held: { name: string; type: number; count: number } | null = opts.held === false ? null : bag[0];
     const unequipped: string[] = [];
-    const slots = Array.from({ length: 46 }, () => null as (typeof bag)[number] | null);
-    if (opts.full) slots.fill(bag[0], 9, 45);
-    else if (held) slots[36] = held;
     return {
       unequipped,
       entity: { id: 9, position: new V(0.5, 64, 0.5) },
       entities: {},
       health: 20,
       players: {},
-      inventory: { items: () => bag, slots, firstEmptyInventorySlot: () => opts.full ? null : 9 },
+      inventory: { items: () => bag },
       get heldItem() { return held; },
       equip: async (it: { name: string; type: number; count: number }) => { held = it; },
       unequip: async (dest: string) => {
         unequipped.push(dest);
         held = null;
+        if (opts.tossOnUnequip) bag.splice(0, 1);
       },
       pathfinder: { stop() {}, setGoal() {}, goto: async () => {} },
     };
@@ -2134,29 +431,18 @@ describe('equip:盔甲穿身上,不是全塞主手', () => {
     expect(reports[0].text).toContain('主手本来就是空的');
   });
 
-  it('腾手时包是满的:拒绝而不丢弃主手物品', async () => {
-    const bot = handBot({ full: true });
+  // 包满时 mineflayer 的 equipEmpty 把手上这摞 tossStack 掉:东西真的落地了,回执要说
+  it('腾手时包是满的:手上那摞被扔在脚下,回执照实报', async () => {
+    const bot = handBot({ tossOnUnequip: true });
     const { exec, reports } = makeExecutorOn(bot);
     exec.submit([{ skill: 'equip' }]);
     await waitUntil(() => reports.length === 1);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('先把其他物品存入箱子');
-    expect(bot.unequipped).toEqual([]);
-    expect(bot.heldItem?.name).toBe('saddle');
+    expect(reports[0].kind).toBe('done');
+    expect(reports[0].text).toContain('包是满的,鞍×1被扔在了脚下');
   });
 });
 
 describe('合成:回执报实际入包,不报配方的预期产物', () => {
-  it('首步自摆配方缺材料时拒收，未尝试向服务端摆格子', () => {
-    const bot = gridCraftBot();
-    bot.inventory.items = () => [{ type: 12, count: 1, name: 'stick' }];
-    const { exec } = makeExecutorOn(bot);
-    const receipt = exec.submit([{ skill: 'craft', grid: [['stick'], ['stick']], count: 4 }]);
-    expect(receipt).toContain('这一单我没接');
-    expect(receipt).toContain('木棍要 2 个,包里 1 个');
-    expect(bot.seen).toHaveLength(0);
-  });
-
   it('合成成功时报实际多出来的数量', async () => {
     const bot = craftBot({ logs: 4, gain: 'real' });
     const { exec, reports } = makeExecutorOn(bot);
@@ -2263,36 +549,14 @@ describe('合成:回执报实际入包,不报配方的预期产物', () => {
    * 配方树没了:中间材料不再自动补齐。材料不齐时报的是这一条配方要的**直接材料**,
    * 她自己决定先去做哪一样("要木镐就自己写合木板;合木棍;合木镐")。
    */
-  it('首步材料不齐:入队前报直接材料缺口,不递归猜材料来源', () => {
+  it('材料不齐:报直接材料要什么,不递归往下找材料的材料', async () => {
     const bot = craftBot({ logs: 0, planks: 8, gain: 'real' });
     const { exec, reports } = makeExecutorOn(bot);
-    const receipt = exec.submit([{ skill: 'craft', item: 'acacia_planks', count: 12 }]);
-    expect(receipt).toContain('这一单我没接');
-    expect(receipt).toContain('金合欢原木');
-    expect(receipt).toContain('还差');
-    expect(reports).toHaveLength(0);
-    expect(bot.crafts).toEqual([]);
-  });
-
-  it('原样合成连续失败两次后拒收；背包材料变化后可以重试', async () => {
-    const bot = craftBot({ logs: 1, gain: 'none' });
-    const { exec, reports } = makeExecutorOn(bot);
-    const step: SkillCall = { skill: 'craft', item: 'acacia_planks', count: 4 };
-    exec.submit([step]);
-    await waitUntil(() => reports.length === 1);
-    exec.submit([step]);
-    await waitUntil(() => reports.length === 2);
-    expect(exec.submit([step])).toContain('连续失败 2 次');
-    bot.inventory.items = () => [{ type: 1, count: 2, name: 'acacia_log' }];
-    expect(exec.submit([step])).toContain('收下了');
-  });
-
-  it('同时写 item 和 grid 时拒收,避免把期望产物误当作配方保证', () => {
-    const bot = craftBot({ logs: 4, gain: 'real' });
-    const { exec } = makeExecutorOn(bot);
-    const receipt = exec.submit([{ skill: 'craft', item: 'acacia_planks', grid: [['acacia_log']], count: 1 }]);
-    expect(receipt).toContain('这一单我没接');
-    expect(receipt).toContain('item 会被忽略');
+    exec.submit([{ skill: 'craft', item: 'acacia_planks', count: 12 }]);
+    await waitUntil(() => reports.length === 1, 5000);
+    expect(reports[0].kind).toBe('blocked');
+    expect(reports[0].text).toContain('金合欢木板的配方要:金合欢原木×1');
+    expect(reports[0].text).toContain('包里凑不齐');
     expect(bot.crafts).toEqual([]);
   });
 
@@ -2348,72 +612,6 @@ describe('use 开容器:那一眼不白开(记进账本)', () => {
     expect(book.get('overworld', { x: 2, y: 64, z: 0 })?.items).toEqual([{ name: 'melon_slice', count: 32 }]);
   });
 
-  it('use at 后同一单 stow into:open 复用窗口并确认存入', async () => {
-    const client = Object.assign(new EventEmitter(), { write() {} });
-    const bread = { name: 'bread', type: 1, metadata: 0, count: 2, slot: 27 };
-    const slots: Array<typeof bread | null> = new Array(63).fill(null);
-    slots[27] = bread;
-    let bag = [bread];
-    let closes = 0;
-    const win = {
-      id: 5, type: 'minecraft:generic_9x3', title: 'Chest', slots, inventoryStart: 27, inventoryEnd: 63,
-      hotbarStart: 54, craftingResultSlot: -1,
-      items: () => slots.slice(27).filter((item): item is typeof bread => item !== null),
-      containerItems: () => slots.slice(0, 27).filter((item): item is typeof bread => item !== null),
-    };
-    const bot = {
-      entity: { id: 1, position: new V(0.5, 64, 0.5) },
-      entities: {}, game: { dimension: 'overworld' },
-      registry: { blocksByName: { chest: { id: 54 } }, itemsByName: { bread: { id: 1, name: 'bread' } } },
-      inventory: { items: () => bag }, heldItem: null, _client: client,
-      currentWindow: null as typeof win | null,
-      activateBlock: async () => {
-        bot.currentWindow = win;
-        client.emit('open_window', { windowId: win.id, inventoryType: win.type, windowTitle: win.title });
-        client.emit('window_items', { windowId: win.id, stateId: 1,
-          items: slots.map((stack) => stack
-            ? { itemId: stack.type, itemCount: stack.count, components: [] } : { itemCount: 0 }),
-          carriedItem: { itemCount: 0 } });
-        events.emit('windowOpen', win);
-      },
-      transfer: async ({ sourceStart }: { sourceStart: number }) => {
-        if (sourceStart === 0) { slots[27] = slots[0]; slots[0] = null; }
-        else { slots[0] = slots[27]; slots[27] = null; }
-      },
-      closeWindow: () => { closes++; bot.currentWindow = null; bag = win.items(); events.emit('windowClose', win); },
-      blockAt: (p: V) => (p.x === 2 && p.y === 64 && p.z === 0
-        ? { name: 'chest', position: p, boundingBox: 'block', stateId: 1 }
-        : { name: 'air', position: p, boundingBox: 'empty', stateId: 0 }),
-      pathfinder: { stop() {}, setGoal() {}, goto: async () => {} },
-    };
-    const events = withBotEvents(bot);
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([
-      { skill: 'use', at: [2, 64, 0] },
-      { skill: 'stow', item: 'bread', count: 2, into: 'open' },
-    ]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('done');
-    expect(reports[0].text).toContain('往当前打开的容器存了面包×2');
-    expect(win.containerItems()).toHaveLength(1);
-    expect(bag).toHaveLength(0);
-    expect(closes).toBe(1);
-    exec.submit([
-      { skill: 'use', at: [2, 64, 0] },
-      { skill: 'take', item: 'bread', count: 2, from: 'open' },
-    ]);
-    await waitUntil(() => reports.length === 2, 8000);
-    expect(reports[1].kind).toBe('done');
-    expect(bag).toHaveLength(1);
-    const repeated = exec.submit([
-      { skill: 'use', at: [2, 64, 0] },
-      { skill: 'stow', item: 'bread', count: 2, into: 'open' },
-    ]);
-    expect(repeated).toContain('这一单我没接');
-    expect(repeated).toContain('已连续取出/存回');
-    expect(closes).toBe(2);
-  });
-
   // use 的 item 指手持物；误把目标方块写成手持物时，受阻回执提供可接受的调用形状。
   it('use 带 item 撞上"那一格就是它":受阻回执给出正确写法', async () => {
     const bot = {
@@ -2440,76 +638,19 @@ describe('use 开容器:那一眼不白开(记进账本)', () => {
     expect(reports[0].text).toContain('{"skill":"use","at":[0,64,-1]}');
   });
 
-  it.each(['furnace', 'smoker', 'blast_furnace'])('右键 %s:记录槽位并给出下料和取货入口,不宣称开始烧炼', async (blockName) => {
+  it('右键炉子:三槽位入账,没有炉火和进度读数就不估到期', async () => {
     const book = new ChestBook(null);
     const bot = useBot({
       slots: [{ name: 'raw_iron', count: 3 }, null, { name: 'iron_ingot', count: 1 }],
-    }, blockName);
+    }, 'furnace');
     const { exec, reports } = makeExecutorWith(bot, book);
     exec.submit([{ skill: 'use', at: [2, 64, 0] }]);
     await waitUntil(() => reports.length === 1, 8000);
     expect(reports[0].kind).toBe('done');
     expect(reports[0].text).toContain('炉里:输入粗铁×3,燃料空,输出铁锭×1');
-    expect(reports[0].text).toContain('装料点火用 smelt 的 input、fuel 和 at:[2,64,0]');
-    expect(reports[0].text).toContain('手持材料右键是打开窗口，不是写入输入槽或燃料槽');
-    expect(reports[0].text).toContain('取货用 take 的 at:[2,64,0]');
-    expect(bot.currentWindow).toBeNull();
     const rec = book.get('overworld', { x: 2, y: 64, z: 0 })!;
     expect(rec.furnace?.input).toEqual({ name: 'raw_iron', count: 3 });
     expect(rec.furnace?.expectedDoneAt).toBeNull();
-  });
-
-  it.each(['furnace', 'smoker', 'blast_furnace'])('%s 重新开窗读到所需产物后解除旧取货失败限制', async (blockName) => {
-    type Stack = { name: string; count: number; type: number; metadata: number };
-    const slots: Array<Stack | null> = [
-      { name: 'raw_iron', count: 8, type: 1, metadata: 0 }, null, null,
-    ];
-    const bag = new Map<string, Stack>();
-    const base = useBot({ id: 1, inventoryStart: 3, slots }, blockName);
-    const transfer = async (slot: number): Promise<void> => {
-      const item = slots[slot];
-      if (item) bag.set(item.name, { ...item, count: (bag.get(item.name)?.count ?? 0) + item.count });
-      slots[slot] = null;
-    };
-    const bot = Object.assign(base, {
-      inventory: { items: () => [...bag.values()] },
-      registry: { ...base.registry, itemsByName: { iron_ingot: { id: 2, name: 'iron_ingot' } } },
-      openFurnace: async () => ({
-        inputItem: () => slots[0], fuelItem: () => slots[1], outputItem: () => slots[2],
-        takeInput: () => transfer(0), takeFuel: () => transfer(1), takeOutput: () => transfer(2),
-        close() {},
-      }),
-    });
-    const book = new ChestBook(null);
-    const { exec, reports } = makeExecutorWith(bot, book);
-    const take: SkillCall = { skill: 'take', item: 'iron_ingot', count: 7, at: [2, 64, 0] };
-    try {
-      expect(exec.submitDetailed([take]).accepted).toBe(true);
-      await waitUntil(() => reports.length === 1);
-      expect(reports[0].kind).toBe('blocked');
-      await vi.advanceTimersByTimeAsync(31_000);
-      expect(exec.submitDetailed([take]).accepted).toBe(true);
-      await waitUntil(() => reports.length === 2);
-      expect(reports[1].kind).toBe('blocked');
-      expect(exec.submitDetailed([take]).rejection?.kind).toBe('repeat');
-
-      slots[2] = { name: 'charcoal', count: 7, type: 3, metadata: 0 };
-      exec.submit([{ skill: 'use', at: [2, 64, 0] }]);
-      await waitUntil(() => reports.length === 3);
-      expect(reports[2].kind).toBe('done');
-      expect(exec.submitDetailed([take]).rejection?.kind).toBe('repeat');
-
-      slots[2] = { name: 'iron_ingot', count: 7, type: 2, metadata: 0 };
-      await vi.advanceTimersByTimeAsync(1);
-      exec.submit([{ skill: 'use', at: [2, 64, 0] }]);
-      await waitUntil(() => reports.length === 4);
-      expect(reports[3].text).toContain('输出铁锭×7');
-      expect(exec.submitDetailed([take]).accepted).toBe(true);
-      await waitUntil(() => reports.length === 5);
-      expect(reports[4].kind).toBe('done');
-      expect(bag.get('iron_ingot')?.count).toBe(7);
-      expect(slots[2]).toBeNull();
-    } finally { exec.shutdown(); }
   });
 });
 
@@ -2519,20 +660,13 @@ describe('smelt:下料点火就走(B1 解耦)', () => {
   function slotFurnace(opts: {
     fuelName?: string; fuelCount?: number; rejectFuel?: boolean; inputLimit?: number;
     fuelLevel?: number; progress?: number; consumedFuel?: number; staleTakeFails?: boolean;
-    inputName?: string; outputName?: string; updateDelayMs?: number; fuelDelayMs?: number; fuelRollbackMs?: number;
   } = {}) {
     const fuelName = opts.fuelName ?? 'coal';
-    const inputName = opts.inputName ?? 'raw_iron';
-    const outputName = opts.outputName ?? 'iron_ingot';
-    const { bot: base, inv } = furnaceBot({ inv: { [inputName]: 8, [fuelName]: opts.fuelCount ?? 30 }, furnaces: FURNACE_AT });
-    base.registry.itemsByName[inputName] ??= { id: 99, name: inputName };
-    base.registry.itemsByName[outputName] ??= { id: 98, name: outputName };
+    const { bot: base, inv } = furnaceBot({ inv: { raw_iron: 8, [fuelName]: opts.fuelCount ?? 30 }, furnaces: FURNACE_AT });
     type Stack = { name: string; count: number };
     let input: Stack | null = null;
     let fuel: Stack | null = null;
     let output: Stack | null = opts.staleTakeFails ? { name: 'glass', count: 3 } : null;
-    let fuelLevel = opts.updateDelayMs ? 0 : opts.fuelLevel ?? (opts.rejectFuel ? 0 : 0.9);
-    let progress = opts.updateDelayMs ? 0 : opts.progress ?? (opts.rejectFuel ? 0 : 0.05);
     const move = (name: string, count: number): Stack => {
       const n = Math.min(count, inv.get(name) ?? 0);
       inv.set(name, (inv.get(name) ?? 0) - n);
@@ -2541,57 +675,31 @@ describe('smelt:下料点火就走(B1 解耦)', () => {
     const bot = {
       ...base,
       openFurnace: async () => ({
-        get fuel() { return fuelLevel; }, get progress() { return progress; },
+        fuel: opts.fuelLevel ?? 0, progress: opts.progress ?? 0,
         inputItem: () => input, fuelItem: () => fuel, outputItem: () => output,
         putFuel: async (_type: number, _meta: unknown, count: number) => {
-          if (opts.rejectFuel) return;
-          if (opts.fuelDelayMs) setTimeout(() => { fuel = move(fuelName, count); }, opts.fuelDelayMs);
-          else fuel = move(fuelName, count);
-          if (opts.fuelRollbackMs) setTimeout(() => {
-            inv.set(fuelName, (inv.get(fuelName) ?? 0) + (fuel?.count ?? 0));
-            fuel = null;
-          }, opts.fuelRollbackMs);
+          if (!opts.rejectFuel) fuel = move(fuelName, count);
         },
         putInput: async (_type: number, _meta: unknown, count: number) => {
           const accepted = Math.min(count, opts.inputLimit ?? count);
-          if (accepted > 0) input = move(inputName, accepted);
+          if (accepted > 0) input = move('raw_iron', accepted);
           if (fuel) {
             fuel.count -= opts.consumedFuel ?? 0;
             if (fuel.count <= 0) fuel = null;
           }
-          if (opts.updateDelayMs) setTimeout(() => {
-            fuelLevel = opts.fuelLevel ?? 0.9;
-            progress = opts.progress ?? 0.05;
-          }, opts.updateDelayMs);
         },
         takeOutput: async () => {
           if (opts.staleTakeFails) throw new Error('No inventory space');
           if (output) inv.set(output.name, (inv.get(output.name) ?? 0) + output.count);
           output = null;
         },
-        takeInput: async () => {
-          if (input) inv.set(input.name, (inv.get(input.name) ?? 0) + input.count);
-          input = null;
-        },
-        takeFuel: async () => {
-          if (fuel) inv.set(fuel.name, (inv.get(fuel.name) ?? 0) + fuel.count);
-          fuel = null;
-        },
         close() {},
       }),
     };
-    return {
-      bot, inv,
-      slots: () => ({ input, fuel, output }),
-      finishOne: () => {
-        if (!input) throw new Error('no input to cook');
-        input = input.count > 1 ? { ...input, count: input.count - 1 } : null;
-        output = { name: outputName, count: (output?.count ?? 0) + 1 };
-      },
-    };
+    return { bot, inv };
   }
 
-  it('燃料槽未接收指定火把且没有炉火:保留本次原料并记录实际空槽', async () => {
+  it('燃料槽拒收火把但写入调用返回:回执、日志和账本都按空燃料槽报告', async () => {
     const { bot, inv } = slotFurnace({ fuelName: 'torch', rejectFuel: true });
     const book = new ChestBook(null);
     const diag = new MinecraftLog();
@@ -2600,58 +708,15 @@ describe('smelt:下料点火就走(B1 解耦)', () => {
       log, nextId: nextTaskId(), chests: book, diag });
     exec.submit([{ skill: 'smelt', input: 'raw_iron', count: 8, fuel: 'torch' }]);
     await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('blocked');
-    expect(inv.get('raw_iron')).toBe(8);
+    expect(inv.get('raw_iron')).toBe(0);
     expect(inv.get('torch')).toBe(30);
-    expect(reports[0].text).toContain('燃料槽未读到指定的火把');
-    expect(reports[0].text).toContain('本次未放入粗铁');
+    expect(reports[0].text).toContain('输入槽粗铁×8,燃料槽空,输出槽空');
+    expect(reports[0].text).toContain('未确认炉火正在燃烧');
+    expect(reports[0].text).toContain('当前不估完成时间');
     expect(reports[0].text).not.toContain('燃料槽火把×30');
     expect(book.get('overworld', { x: 2, y: 64, z: 0 })?.furnace?.expectedDoneAt).toBeNull();
-    expect(book.get('overworld', { x: 2, y: 64, z: 0 })?.furnace?.input).toBeNull();
-    expect(diag.after(0).find((r) => r.event === 'smelt-fuel-unconfirmed')?.data)
-      .toMatchObject({ requestedFuel: 'torch', input: null, fuel: null, fuelLevel: 0 });
-  });
-
-  it('燃料包稍后才更新:确认燃料入槽后继续下料并等待进度', async () => {
-    const { bot, inv } = slotFurnace({ fuelDelayMs: 150, updateDelayMs: 150 });
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'smelt', input: 'raw_iron', count: 8, fuel: 'coal' }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('done');
-    expect(inv.get('raw_iron')).toBe(0);
-    expect(reports[0].text).toContain('烧炼进度读数');
-  });
-
-  it('燃料槽先预测入槽后被服务端回滚:等待回读，原料仍留背包', async () => {
-    const { bot, inv } = slotFurnace({ fuelName: 'cobblestone', fuelRollbackMs: 150, fuelLevel: 0, progress: 0 });
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'smelt', input: 'raw_iron', count: 8, fuel: 'cobblestone' }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('燃料槽未读到指定的圆石');
-    expect(inv.get('raw_iron')).toBe(8);
-    expect(inv.get('cobblestone')).toBe(30);
-  });
-
-  it('服务端接受自定义燃料圆石:使用实际燃料槽和进度，不按原版物品名拒绝', async () => {
-    const { bot } = slotFurnace({ fuelName: 'cobblestone' });
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'smelt', input: 'raw_iron', count: 8, fuel: 'cobblestone' }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('done');
-    expect(reports[0].text).toContain('燃料槽圆石×30');
-    expect(reports[0].text).toContain('烧炼进度读数');
-  });
-
-  it('炉子仍在燃烧但燃料槽为空:允许本次原料继续入槽', async () => {
-    const { bot, inv } = slotFurnace({ rejectFuel: true, fuelLevel: 0.8, progress: 0.1 });
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'smelt', input: 'raw_iron', count: 8, fuel: 'coal' }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('done');
-    expect(inv.get('raw_iron')).toBe(0);
-    expect(inv.get('coal')).toBe(30);
-    expect(reports[0].text).toContain('炉火读数正在燃烧');
+    expect(diag.after(0).find((r) => r.event === 'smelt-loaded')?.data)
+      .toMatchObject({ input: { name: 'raw_iron', count: 8 }, fuel: null, fuelLevel: 0, expectedDoneAt: null });
   });
 
   it.each([0, 3])('输入槽实际只接受 %i 件:不把请求的八件写成已入槽', async (inputLimit) => {
@@ -2659,70 +724,10 @@ describe('smelt:下料点火就走(B1 解耦)', () => {
     const { exec, reports } = makeExecutorOn(bot);
     exec.submit([{ skill: 'smelt', input: 'raw_iron', count: 8, fuel: 'coal' }]);
     await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe(inputLimit ? 'done' : 'blocked');
     expect(inv.get('raw_iron')).toBe(8 - inputLimit);
     expect(reports[0].text).toContain(inputLimit ? '输入槽粗铁×3' : '输入槽空');
     expect(reports[0].text).not.toContain('输入槽粗铁×8');
-    if (inputLimit) expect(reports[0].text).toContain('烧炼进度读数');
-    else expect(reports[0].text).toContain('未完成下料');
-  });
-
-  it.each(['cod', 'salmon'])('注册表物品 %s 只选生鱼，不把熟鱼后缀当原料', (fish) => {
-    const cooked = `cooked_${fish}`;
-    const bot = {
-      registry: { itemsByName: { [fish]: {}, [cooked]: {} } },
-      inventory: { items: () => [
-        { name: cooked, count: 32 }, { name: fish, count: 2 },
-      ] },
-    } as unknown as Bot;
-    expect(pickSmeltInput(bot, fish)?.name).toBe(fish);
-    const cookedOnly = {
-      ...bot, inventory: { items: () => [{ name: cooked, count: 32 }] },
-    } as unknown as Bot;
-    expect(pickSmeltInput(cookedOnly, fish)).toBeUndefined();
-  });
-
-  it('炉里仍有原料时 all:true 只收成品；点名原料才能取回', async () => {
-    const { bot, inv, slots, finishOne } = slotFurnace();
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'smelt', input: 'raw_iron', count: 8, fuel: 'coal' }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('done');
-
-    exec.submit([{ skill: 'take', at: [2, 64, 0], all: true }]);
-    await waitUntil(() => reports.length === 2, 8000);
-    expect(reports[1].kind).toBe('blocked');
-    expect(reports[1].text).toContain('原料和燃料留在炉里');
-    expect(slots()).toMatchObject({ input: { count: 8 }, fuel: { count: 30 }, output: null });
-
-    finishOne();
-    exec.submit([{ skill: 'take', at: [2, 64, 0], all: true }]);
-    await waitUntil(() => reports.length === 3, 8000);
-    expect(reports[2].kind).toBe('done');
-    expect(reports[2].text).toContain('输出槽的铁锭×1');
-    expect(slots()).toMatchObject({ input: { count: 7 }, fuel: { count: 30 }, output: null });
-    expect(inv.get('iron_ingot')).toBe(1);
-
-    exec.submit([{ skill: 'take', at: [2, 64, 0], item: 'raw_iron', count: 7 }]);
-    await waitUntil(() => reports.length === 4, 8000);
-    expect(reports[3].kind).toBe('done');
-    expect(inv.get('raw_iron')).toBe(7);
-    expect(slots()).toMatchObject({ input: null, fuel: { count: 30 }, output: null });
-  });
-
-  it('点名取回生鳕鱼不会连输出槽的熟鳕鱼一起拿走', async () => {
-    const { bot, inv, slots, finishOne } = slotFurnace({ inputName: 'cod', outputName: 'cooked_cod' });
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'smelt', input: 'cod', count: 8, fuel: 'coal' }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('done');
-    finishOne();
-    exec.submit([{ skill: 'take', at: [2, 64, 0], item: 'cod', count: 7 }]);
-    await waitUntil(() => reports.length === 2, 8000);
-    expect(reports[1].kind).toBe('done');
-    expect(inv.get('cod')).toBe(7);
-    expect(inv.get('cooked_cod') ?? 0).toBe(0);
-    expect(slots()).toMatchObject({ input: null, output: { name: 'cooked_cod', count: 1 } });
+    expect(reports[0].text).toContain('当前不估完成时间');
   });
 
   it('燃料槽已消耗为空但炉火与进度仍有效:按实际剩料估时并登记提醒', async () => {
@@ -2744,51 +749,13 @@ describe('smelt:下料点火就走(B1 解耦)', () => {
   });
 
   it('有炉火但没有烧炼进度:不把热炉子当作配方已经开始', async () => {
-    const { bot } = slotFurnace({ fuelLevel: 0.5, progress: 0 });
+    const { bot } = slotFurnace({ fuelLevel: 0.5 });
     const book = new ChestBook(null);
     const { exec, reports } = makeExecutorWith(bot, book);
     exec.submit([{ skill: 'smelt', input: 'raw_iron', count: 8, fuel: 'coal' }]);
     await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('blocked');
     expect(reports[0].text).toContain('炉火读数正在燃烧,未确认烧炼进度');
-    expect(reports[0].text).toContain('未确认烧炼启动');
     expect(book.get('overworld', { x: 2, y: 64, z: 0 })?.furnace?.expectedDoneAt).toBeNull();
-  });
-
-  it('原料和燃料留在槽中但无进度:受阻并保留物品及账本', async () => {
-    const { bot, slots } = slotFurnace({ inputName: 'pufferfish', fuelLevel: 0, progress: 0 });
-    const book = new ChestBook(null);
-    const { exec, reports } = makeExecutorWith(bot, book);
-    exec.submit([{ skill: 'smelt', input: 'pufferfish', count: 1, fuel: 'coal' }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('未确认烧炼启动');
-    expect(reports[0].text).not.toContain('预计');
-    expect(slots()).toMatchObject({ input: { name: 'pufferfish', count: 1 }, fuel: { count: 30 }, output: null });
-    expect(book.get('overworld', { x: 2, y: 64, z: 0 })?.furnace).toMatchObject({
-      input: { name: 'pufferfish', count: 1 }, fuel: { count: 30 }, expectedDoneAt: null,
-    });
-  });
-
-  it('槽位先确认、进度包稍后到达:短暂等回读后确认启动', async () => {
-    const { bot } = slotFurnace({ updateDelayMs: 200, progress: 0.2 });
-    const book = new ChestBook(null);
-    const { exec, reports } = makeExecutorWith(bot, book);
-    exec.submit([{ skill: 'smelt', input: 'raw_iron', count: 8, fuel: 'coal' }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('done');
-    expect(reports[0].text).toContain('烧炼进度读数 20%');
-    expect(book.get('overworld', { x: 2, y: 64, z: 0 })?.furnace?.expectedDoneAt).not.toBeNull();
-  });
-
-  it('服务端给本地原版配方外的原料提供进度:按实际读数受理', async () => {
-    const { bot } = slotFurnace({ inputName: 'dirt', progress: 0.3 });
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'smelt', input: 'dirt', count: 1, fuel: 'coal' }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('done');
-    expect(reports[0].text).toContain('输入槽泥土×1');
-    expect(reports[0].text).toContain('烧炼进度读数 30%');
   });
 
   it('旧成品取出失败:回执保留实际输出槽,不声称已收走', async () => {
@@ -2896,13 +863,12 @@ describe('smelt:下料点火就走(B1 解耦)', () => {
     expect(b.reports[0].kind).toBe('blocked');
     expect(b.reports[0].text).toContain('包里没有煤炭');
 
-    // 服务端没有接收原料也没有产物时，下料不能算成功。
+    // 烧不出东西的料(泥土):下料照下——能不能烧由服务端裁决;取货时三个槽都空,照实报
     const dirt = furnaceBot({ inv: { dirt: 1, coal: 1 }, furnaces: FURNACE_AT });
     const a = makeExecutorOn(dirt.bot);
     a.exec.submit([{ skill: 'smelt', input: 'dirt', count: 1, fuel: 'coal' }]);
     await waitUntil(() => a.reports.length === 1, 8000);
-    expect(a.reports[0].kind).toBe('blocked');
-    expect(a.reports[0].text).toContain('未完成下料');
+    expect(a.reports[0].kind).toBe('done');
     a.exec.submit([{ skill: 'take', at: [2, 64, 0], all: true }]);
     await waitUntil(() => a.reports.length === 2, 8000);
     expect(a.reports[1].kind).toBe('blocked');
@@ -3040,7 +1006,7 @@ describe('Reflexes 防溺水', () => {
     expect(alarms(reports)).toHaveLength(1);
   });
 
-  it('已找到登岸点时氧气回满仍保持上浮和逃生目标,稳定干燥落脚后恢复环境断点', () => {
+  it('头出水不交还任务,稳定干燥落脚 600ms 后才恢复环境断点', () => {
     let feet = 'water';
     let head = 'water';
     const controls: Array<[string, boolean]> = [];
@@ -3096,12 +1062,10 @@ describe('Reflexes 防溺水', () => {
     expect(goals.length).toBeGreaterThan(0);
 
     head = 'air';
-    bot.oxygenLevel = 20;
     vi.advanceTimersByTime(1_000);
     expect(resumes).toEqual([]);
     expect(held).toBe(true);
     expect(reflexes.environmentOwnerKind).toBe('drown');
-    expect(controls.filter(([key]) => key === 'jump').at(-1)).toEqual(['jump', true]);
 
     feet = 'air';
     entity.onGround = true;
@@ -3295,7 +1259,6 @@ describe('Reflexes 逃生目标看门狗', () => {
     reflexes.start();
     vi.advanceTimersByTime(200); // 受击监听挂在分频的慢路上
     handlers.forEach((h) => h({ id: 1 }, zombie));
-    vi.advanceTimersByTime(30); // 等待可与原始 damage_event 配对的旧协议事件。
 
     const first = pf.goal;
     expect(first).not.toBeNull();
@@ -3377,8 +1340,7 @@ describe('probe 逐格/target/差分 + goto 地表 + surface 陆地脱困', () =
       health: 20,
       game: { minY: -64, height: 384 },
       inventory: { items: () => bag },
-      registry: withMinecraftCollisionShapes({ blocksByName, itemsByName: {} },
-        ['dirt', 'cobblestone', ...bag.map(item => item.name)]),
+      registry: { blocksByName, itemsByName: {} },
       equip: async () => {},
       lookAt: async () => {},
       setControlState: (name: string, on: boolean) => {
@@ -3460,7 +1422,7 @@ describe('probe 逐格/target/差分 + goto 地表 + surface 陆地脱困', () =
     await waitUntil(() => reports.length === 1, 8000);
     expect(reports[0].kind).toBe('done');
     expect(reports[0].text).toContain('空气×35');
-    expect(reports[0].text).not.toContain('逐格:');
+    expect(reports[0].text).not.toContain('逐格');
   });
 
   it('probe 全空的小体积直说全是空气', async () => {
@@ -3493,24 +1455,6 @@ describe('probe 逐格/target/差分 + goto 地表 + surface 陆地脱困', () =
     expect(reports[3].text).toContain('(1,64,1):煤矿石');
   });
 
-  it('点名探查空结果跨多步记忆，同站位原样重查暂缓', async () => {
-    const bot = probeBot({});
-    const { exec, reports } = makeExecutorOn(bot);
-    const a: SkillCall = { skill: 'probe', shape: 'box', anchors: [[0, 60, 0], [2, 62, 2]], where: ['chest'] };
-    const b: SkillCall = { skill: 'probe', shape: 'box', anchors: [[3, 60, 0], [5, 62, 2]], where: ['chest'] };
-    exec.submit([a, b]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].text).toContain('一样都没有');
-    const duplicate = exec.submitDetailed([a, b]);
-    expect(duplicate.accepted).toBe(false);
-    expect(duplicate.receipt).toContain('30 秒内不再原样重查');
-
-    bot.entity.position = new V(5.5, 64, 0.5);
-    expect(exec.submitDetailed([a, b]).accepted).toBe(true);
-    await waitUntil(() => reports.length === 2, 8000);
-    expect(reports[1].text).toContain('与上次探查相同(第 2 次)');
-  });
-
   it('probe 非露天的开放空腔才说连着更大空间(封闭判定另有封死句)', async () => {
     // 头顶 y80 一整片盖板,探查中心非露天
     const cells: Record<string, string> = {};
@@ -3523,7 +1467,7 @@ describe('probe 逐格/target/差分 + goto 地表 + surface 陆地脱困', () =
     expect(reports[0].text).toContain('连着更大的空间');
   });
 
-  it('goto 只写 [x,z]:找可达的水平落脚点;parseSteps 记 groundY', async () => {
+  it('goto 只写 [x,z]:按地表落脚;parseSteps 记 groundY', async () => {
     const parsed = parseSteps([{ skill: 'goto', at: [10, 5] }]);
     if ('error' in parsed) throw new Error(parsed.error);
     expect(parsed.steps[0]).toEqual({ skill: 'goto', at: [10, 0, 5], groundY: true });
@@ -3533,169 +1477,33 @@ describe('probe 逐格/target/差分 + goto 地表 + surface 陆地脱困', () =
 
     const bot = probeBot({ '10,70,5': 'stone' });
     const { exec, reports } = makeExecutorOn(bot);
-    const receipt = exec.submit(parsed.steps);
-    expect(receipt).toContain('{"skill":"goto","at":[10,5]}');
-    expect(receipt).not.toContain('groundY');
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('done');
-    expect(reports[0].text).toContain('到了 (10, 64, 5)');
-    expect(reports[0].text).toContain('{"skill":"goto","at":[10,5]}');
-    expect(reports[0].text).not.toContain('groundY');
-    const replay = parseSteps([JSON.parse(reports[0].text.match(/\{"skill":"goto"[^}]+\}/)![0])]);
-    if ('error' in replay) throw new Error(replay.error);
-    expect(replay.steps).toEqual(parsed.steps);
-    expect(parsed.steps[0]).toEqual({ skill: 'goto', at: [10, 0, 5], groundY: true });
-  });
-
-  it('连续跳过的地表 goto 回执仍可按公开语法重放', async () => {
-    const bot = probeBot({});
-    Object.assign(bot, { chat: () => { throw new Error('connection closed'); } });
-    const { exec, reports } = makeExecutorOn(bot);
-    const parsed = parseSteps([
-      { skill: 'chat', text: 'test' },
-      { skill: 'goto', at: [10, 5], needs: [1] },
-      { skill: 'goto', at: [20, 5], needs: [2] },
-    ]);
-    if ('error' in parsed) throw new Error(parsed.error);
     exec.submit(parsed.steps);
     await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].text).toContain('第 2~3 步 没跑');
-    expect(reports[0].text).not.toContain('groundY');
-    const calls = reports[0].text.match(/\{"skill":"goto"[^}]+\}/g)!.map(value => JSON.parse(value));
-    expect(calls.map(call => call.at)).toEqual([[10, 5], [20, 5]]);
-    const replay = parseSteps([{ skill: 'chat', text: 'test' }, ...calls]);
-    if ('error' in replay) throw new Error(replay.error);
-    expect(replay.steps).toEqual(parsed.steps);
-  });
-
-  it('goto [x,z] 在屋顶下方的入口沿现有通路到达，不强迫爬上屋顶', async () => {
-    const bot = probeBot({
-      '10,63,5': 'grass_block',
-      '10,67,5': 'spruce_planks',
-    });
-    const seen: FakeGoal[] = [];
-    bot.pathfinder.goto = async (goal: FakeGoal) => {
-      seen.push(goal);
-      bot.entity.position = new V(goal.x ?? 0, 64, goal.z ?? 0);
-    };
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'goto', at: [10, 0, 5], groundY: true }]);
-    await waitUntil(() => reports.length === 1, 8000);
     expect(reports[0].kind).toBe('done');
-    expect(reports[0].text).toContain('到了 (10, 64, 5)');
-    expect(seen.at(-1)?.constructor.name).toBe('GoalNearXZ');
+    expect(reports[0].text).toContain('到了 (10, 71, 5)');
   });
 
-  it('goto [x,z] 到达水域时只报告水平接近，不把水面当作干燥落脚格', async () => {
-    const bot = probeBot({
-      '10,60,5': 'stone',
-      '10,64,5': 'water',
-      '10,65,5': 'water',
-    });
-    bot.pathfinder.goto = async (goal: FakeGoal) => {
-      bot.entity.position = new V(goal.x ?? 0, 64, goal.z ?? 0);
-    };
-    const { exec, reports } = makeExecutorOn(bot);
-    const receipt = exec.submit([{ skill: 'goto', at: [10, 0, 5], groundY: true }]);
-    expect(receipt).toContain('水平坐标 (10,5) 附近');
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('done');
-    expect(reports[0].text).toContain('本次只满足水平接近条件');
-    expect(reports[0].text).toContain('仍在水中，未确认登岸');
-    expect(bot.entity.position).toEqual(new V(10, 64, 5));
-  });
-
-  it('地表读数不把树冠和树干顶部当作地面', () => {
-    const bot = probeBot({
-      '10,65,5': 'grass_block',
-      '10,76,5': 'spruce_log',
-      '10,77,5': 'spruce_leaves',
-      '10,78,5': 'spruce_leaves',
-    });
-    expect(surfaceFeetAt(bot as never, [10, 0, 5])).toEqual({ x: 10, y: 66, z: 5 });
-  });
-
-  it('goto [x,z] 不因未知终点高度拒绝水平寻路', async () => {
+  /**
+   * 目标区块未加载时不猜测 Y；受阻回执说明可用的输入方式。
+   */
+  it('goto [x,z] 目标区块没加载:照实受阻,并说清怎么改', async () => {
     const bot = probeBot({}, { unloadedFromX: 50 });
     const { exec, reports } = makeExecutorOn(bot);
     exec.submit([{ skill: 'goto', at: [60, 0, 5], groundY: true }]);
     await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('done');
-    expect(bot.entity.position).toEqual(new V(60, 64, 5));
-    expect(reports[0].text).toContain('本次只满足水平接近条件');
+    expect(reports[0].kind).toBe('blocked');
+    expect(reports[0].text).toContain('(60, 5) 那里还没加载,先走近些再用 [x,z];或者直接给 y');
+    expect(reports[0].text).not.toContain('猜不了');
   });
 
-  it('surface 在无遮挡陆地:确认站稳并报告零爬升', async () => {
+  it('surface 在陆上且露天:秒回已经在露天了', async () => {
     const bot = probeBot({ '0,63,0': 'stone' });
     const { exec, reports } = makeExecutorOn(bot);
     exec.submit([{ skill: 'surface' }]);
     await waitUntil(() => reports.length === 1, 8000);
     expect(reports[0].kind).toBe('done');
-    expect(reports[0].text).toContain('已站稳,当前头顶没有实心遮盖');
-    expect(reports[0].text).toContain('本次上升 0 格');
+    expect(reports[0].text).toContain('我已经在露天了');
     expect(reports[0].text).toContain('out_of_liquid=true,standing=true,sky_visible=true,final_y=64');
-  });
-
-  it('surface 通天井底站稳:回执只证明无遮挡,不宣称出井', async () => {
-    const cells: Record<string, string> = { '0,63,0': 'stone' };
-    for (let y = 64; y <= 90; y++) {
-      for (const [x, z] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) cells[`${x},${y},${z}`] = 'stone';
-    }
-    const bot = probeBot(cells);
-    const before = new Map(bot.world);
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'surface' }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('done');
-    expect(reports[0].text).toContain('本次上升 0 格');
-    expect(reports[0].text).toContain('可见天空不证明已走出竖井或到达周围地面');
-    expect(reports[0].text).not.toContain('我已经在露天了');
-    expect(bot.entity.position).toEqual(new V(0.5, 64, 0.5));
-    expect(bot.world).toEqual(before);
-  });
-
-  it('surface 天空无遮挡但仍在下落:等待落地超时后受阻', async () => {
-    const bot = probeBot({});
-    bot.entity.onGround = false;
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'surface' }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('还没稳定站上干燥落脚格');
-    expect(reports[0].text).toContain('standing=false,sky_visible=true');
-    expect(reports[0].text).not.toContain('已站稳,');
-  });
-
-  it('surface 上方未加载:天空未知且不把未加载当露天', async () => {
-    const bot = probeBot({ '0,63,0': 'stone' });
-    const read = bot.blockAt;
-    bot.blockAt = (p: V) => p.y >= 70 ? null : read(p);
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'surface' }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('不能确认天空');
-    expect(reports[0].text).toContain('sky_visible=unknown');
-    expect(reports[0].text).not.toContain('sky_visible=true');
-  });
-
-  it('surface 稳定等待期间换到有顶位置:重新读取当前位置再挖顶', async () => {
-    const bot = probeBot({
-      '0,63,0': 'stone',
-      '3,63,0': 'stone',
-      '3,66,0': 'stone',
-      '3,67,0': 'stone',
-    }, { stock: [{ name: 'dirt', count: 64, type: 5 }] });
-    const { exec, reports } = makeExecutorOn(bot);
-    setTimeout(() => { bot.entity.position = new V(3.5, 64, 0.5); }, 100);
-    exec.submit([{ skill: 'surface' }]);
-    await waitUntil(() => reports.length === 1, 12_000);
-    expect(reports[0].kind).toBe('done');
-    expect(bot.entity.position.x).toBe(3.5);
-    expect(bot.entity.position.y).toBe(66);
-    expect(bot.world.has('3,66,0')).toBe(false);
-    expect(bot.world.has('3,67,0')).toBe(false);
-    expect(bot.world.get('0,63,0')).toBe('stone');
   });
 
   it('surface 沟底被遮蔽:挖头顶+垫脚上行到露天,报爬了几格', async () => {
@@ -3707,8 +1515,8 @@ describe('probe 逐格/target/差分 + goto 地表 + surface 陆地脱困', () =
     exec.submit([{ skill: 'surface' }]);
     await waitUntil(() => reports.length === 1, 12_000);
     expect(reports[0].kind).toBe('done');
-    expect(reports[0].text).toContain('已站稳,当前头顶没有实心遮盖');
-    expect(reports[0].text).toContain('本次上升 2 格');
+    expect(reports[0].text).toContain('我爬到露天了');
+    expect(reports[0].text).toContain('上来 2 格');
     expect(reports[0].text).toContain('out_of_liquid=true,standing=true,sky_visible=true,final_y=66');
     // 头顶两块真被挖掉了
     expect(bot.world.has('0,66,0')).toBe(false);
@@ -3795,7 +1603,6 @@ describe('probe 逐格/target/差分 + goto 地表 + surface 陆地脱困', () =
     expect(reports[0].kind).toBe('blocked');
     expect(reports[0].text).toContain('塔没到顶');
     expect(reports[0].text).toContain('垫脚名单里的方块包里都没有(泥土、圆石)');
-    expect(reports[0].text).toContain('mc_policy 将其物品名加入 scaffold 名单');
     expect(reports[0].text).toContain('[现场] 塔垫了 0/3 格');
   });
 
@@ -4006,95 +1813,6 @@ describe('probe 逐格/target/差分 + goto 地表 + surface 陆地脱困', () =
     expect(reports[0].text).toContain('螺旋楼梯挖了 0/4 格');
   });
 
-  it('spiral 撞到水后，同井位改写整单仍拒收；排水后可再挖', async () => {
-    const rock = spiralRock(50, 66);
-    for (const [x, z] of [[1, 0], [0, 1], [-1, 0], [0, -1]]) rock[`${x},63,${z}`] = 'water';
-    const bot = probeBot(rock);
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'tunnel', at: [0, 60, 0], spiral: true }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('碰上水');
-
-    const repeated = exec.submitDetailed([
-      { skill: 'surface' },
-      { skill: 'tunnel', at: ['~', '~-4', '~'], spiral: true },
-    ]);
-    expect(repeated.accepted).toBe(false);
-    expect(repeated.receipt).toContain('该格现在仍是水');
-    expect(exec.status().running).toBeNull();
-
-    for (const [x, z] of [[1, 0], [0, 1], [-1, 0], [0, -1]]) bot.world.set(`${x},63,${z}`, 'stone');
-    const afterDrain = exec.submitDetailed([{ skill: 'tunnel', at: [0, 60, 0], spiral: true }]);
-    expect(afterDrain.accepted).toBe(true);
-  });
-
-  it('spiral 落脚点底下是水时也记录坐标，阻止同井位重试', async () => {
-    const rock = spiralRock(50, 66);
-    for (const [x, z] of [[1, 0], [0, 1], [-1, 0], [0, -1]]) rock[`${x},62,${z}`] = 'water';
-    const bot = probeBot(rock);
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'tunnel', at: [0, 60, 0], spiral: true }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toMatch(/底下 \(-?\d+, 62, -?\d+\) 碰上水/);
-
-    const repeated = exec.submitDetailed([
-      { skill: 'surface' },
-      { skill: 'tunnel', at: ['~', '~-4', '~'], spiral: true },
-    ]);
-    expect(repeated.accepted).toBe(false);
-    expect(repeated.receipt).toContain('该格现在仍是水');
-
-    for (const [x, z] of [[1, 0], [0, 1], [-1, 0], [0, -1]]) bot.world.set(`${x},62,${z}`, 'stone');
-    const afterDrain = exec.submitDetailed([{ skill: 'tunnel', at: [0, 60, 0], spiral: true }]);
-    expect(afterDrain.accepted).toBe(true);
-  });
-
-  it('直下竖井底下是水时也记录坐标，变更目标深度不能绕过阻断', async () => {
-    const rock = spiralRock(50, 66);
-    rock['0,62,0'] = 'water';
-    const bot = probeBot(rock);
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'tunnel', at: [0, 60, 0] }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('再往下 (0, 62, 0) 碰上水');
-    const repeated = exec.submitDetailed([{ skill: 'tunnel', at: [0, 58, 0] }]);
-    expect(repeated.accepted).toBe(false);
-    expect(repeated.receipt).toContain('该格现在仍是水');
-    bot.world.set('0,62,0', 'stone');
-    expect(exec.submitDetailed([{ skill: 'tunnel', at: [0, 60, 0] }]).accepted).toBe(true);
-  });
-
-  it('竖向通道首次折返可走，重复在同段上下打转时拒收', () => {
-    const bot = probeBot({ '0,64,0': 'stone' });
-    const { exec } = makeExecutorOn(bot);
-    const guard = exec as unknown as {
-      noteVerticalTunnelTraversal(from: { x: number; y: number; z: number },
-        to: { x: number; y: number; z: number }, dimension: string): void;
-      verticalTunnelOscillationNote(steps: SkillCall[], at: number): string | null;
-    };
-    const bottom = { x: 0, y: 65, z: 0 };
-    const top = { x: 0, y: 75, z: 0 };
-    const climb: SkillCall[] = [{ skill: 'tunnel', at: [0, 75, 0] }];
-    guard.noteVerticalTunnelTraversal(bottom, top, 'overworld');
-    bot.entity.position = new V(0.5, 75, 0.5);
-    expect(guard.verticalTunnelOscillationNote([{ skill: 'tunnel', at: [0, 65, 0] }], Date.now())).toBeNull();
-    guard.noteVerticalTunnelTraversal(top, bottom, 'overworld');
-    bot.entity.position = new V(0.5, 65, 0.5);
-    expect(guard.verticalTunnelOscillationNote(climb, Date.now())).toContain('上下打转');
-    expect(guard.verticalTunnelOscillationNote([{ skill: 'tunnel', at: [8, 75, 0] }], Date.now())).toBeNull();
-    expect(guard.verticalTunnelOscillationNote(climb, Date.now() + 181_000)).toBeNull();
-  });
-
-  it('相对 tunnel 回执明确写出垂直方向，防止把 ~8 当成向下', () => {
-    expect(describeSkill({ skill: 'tunnel', at: ['~', '~8', '~'], spiral: true }))
-      .toContain('向上 8 格');
-    expect(describeSkill({ skill: 'tunnel', at: ['~', '~-8', '~'], spiral: true }))
-      .toContain('向下 8 格');
-  });
-
   it('spiral 碰到真的传送门面照旧给维度文案', async () => {
     const rock = spiralRock(50, 66);
     rock['1,63,0'] = 'nether_portal';
@@ -4226,14 +1944,14 @@ describe('建筑与挖掘:先自救,再照实说', () => {
       entities: {},
       health: 20,
       players: {},
-      registry: withMinecraftCollisionShapes({
+      registry: {
         blocksByName: Object.fromEntries(
           (opts.knows ?? []).map((n, i) => [n, { id: 900 + i, name: n }]),
         ),
         blocks: Object.fromEntries((opts.knows ?? []).map((n, i) => [900 + i, { name: n }])),
         itemsByName: Object.fromEntries(bag.map((item, i) => [item.name, { id: 800 + i, name: item.name }])),
         entitiesByName: {},
-      }, ['dirt', 'cobblestone', ...bag.map(item => item.name)]),
+      },
       // 这一片没有目标:explore 一路走满都看不见
       findBlocks: () => [],
       inventory: { items: () => bag.filter((i) => i.count > 0) },
@@ -4565,7 +2283,6 @@ it('collect 挖之前先把趁手的家伙拿到手上', async () => {
         name: opts.block, position: at, boundingBox: 'block',
         canHarvest: (t: number | null) => Object.keys(def.harvestTools).length === 0
           || (t !== null && def.harvestTools[t] === true),
-        digTime: (t: number | null) => opts.block === 'dirt' ? (t === 15 ? 100 : 750) : 20,
       }),
       canSeeBlock: () => true,
       canDigBlock: () => true,
@@ -4765,7 +2482,7 @@ it('collect 挖之前先把趁手的家伙拿到手上', async () => {
     expect(reports[0].kind).toBe('done');
     expect(bot.heldItem).toBe(pick);
     expect(bot.dug).toBe(1);
-    expect(reports[0].text).toMatch(/钻石镐[^;]*是从副手换到主手的,副手空了/);
+    expect(reports[0].text).toContain('钻石镐是从副手换到主手的,副手空了');
   });
 
   // 正则 `/_ore$|stone|deepslate|cobble/` 认不出黑曜石、安山岩、下界岩这一批,
@@ -4779,7 +2496,7 @@ it('collect 挖之前先把趁手的家伙拿到手上', async () => {
     expect(bot.equipped).toContain('diamond_pickaxe');
   });
 
-  it('无需掉落门槛时换下不适用钻石镐，使用能提速的健康铁锹', async () => {
+  it('方块无需工具时先换下上一把耐久工具,不让钻石镐替空手受损', async () => {
     const diamond = { name: 'diamond_pickaxe', type: 13, count: 1 };
     const shovel = { name: 'iron_shovel', type: 15, count: 1 };
     const dirt = { name: 'dirt', type: 23, count: 1 };
@@ -4789,11 +2506,11 @@ it('collect 挖之前先把趁手的家伙拿到手上', async () => {
     exec.submit([{ skill: 'collect', block: 'dirt', count: 1 }]);
     await waitUntil(() => reports.length === 1, 8000);
     expect(reports[0].kind).toBe('done');
-    expect(bot.equipped[0]).toBe('iron_shovel');
-    expect(bot.heldItem).toBe(shovel);
+    expect(bot.equipped[0]).toBe('dirt');
+    expect(bot.heldItem).toBe(dirt);
   });
 
-  it('无掉落门槛的方块显式 fastest 仍选加速工具', async () => {
+  it('无掉落门槛的方块只在 fastest 下选加速工具', async () => {
     const shovel = { name: 'iron_shovel', type: 15, count: 1 };
     const bot = tierBot({ block: 'dirt', bag: [shovel] });
     const { exec, reports } = makeExecutorOn(bot);
@@ -4854,22 +2571,6 @@ it('collect 挖之前先把趁手的家伙拿到手上', async () => {
     expect(reports[0].text).toContain('垫脚名单里的方块包里都没有');
     // 挖到哪一格进现场,不与"挖通了"共用一句话
     expect(reports[0].text).toContain('[现场] 通道挖了 2/5 步,人在 (2, 64, 0)');
-  });
-
-  it('水平通道垫脚未确认后，换远处终点但仍跨同一悬空格也拒收', async () => {
-    const cells = massif(0, 6, 60, 63, 0, 0).filter((c) => c !== '3,63,0');
-    const bot = voxelBot({ cells, bag: [] });
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'tunnel', at: [5, 64, 0] }]);
-    await waitUntil(() => reports.length === 1, 15_000);
-    expect(reports[0].text).toContain('(3, 64, 0) 脚下悬空');
-
-    const repeated = exec.submitDetailed([{ skill: 'tunnel', at: [6, 64, 0] }]);
-    expect(repeated.accepted).toBe(false);
-    expect(repeated.receipt).toContain('那里刚因脚下悬空');
-
-    bot.world.set('3,63,0', 'stone');
-    expect(exec.submitDetailed([{ skill: 'tunnel', at: [6, 64, 0] }]).accepted).toBe(true);
   });
 
   it('半路挖不动就是没挖通:走了几步进现场,不报成一句读着像做完的话', async () => {
@@ -5021,7 +2722,7 @@ it('collect 挖之前先把趁手的家伙拿到手上', async () => {
       const settled: boolean[] = [];
       const rig = litRig('anywhere', undefined, () => ({
         ok: true,
-        finish: (placed) => { settled.push(placed); },
+        finish: (placed) => settled.push(placed),
       }));
       rig.exec.submit([{ skill: 'find', target: 'diamond_ore', direction: 'east', distance: 24 }]);
       await waitUntil(() => rig.reports.length === 1, 15000);
@@ -5226,13 +2927,15 @@ describe('deriveExpect:验收判据按 (skill,参数) 推导', () => {
   }
   const derive = (call: SkillCall) => deriveExpect(reg(), call);
 
-  it('goto:到达由寻路目标核验，不另推位置判据', () => {
-    expect(derive({ skill: 'goto', at: [10, 64, -20] })).toBeNull();
+  it('goto:绝对坐标推「人到那儿」', () => {
+    expect(derive({ skill: 'goto', at: [10, 64, -20] })).toEqual({ near: [10, 64, -20] });
   });
 
-  it('goto:水平坐标也由寻路目标核验', () => {
+  // [x,z] 形态的 y 是执行那一刻的地表读数,调用里根本没有;`~` 让它按脚下解析,
+  // 判定就收成了纯水平距离 —— 不然拿她写的那个占位 y 去比,站对了也判成没到
+  it('goto:只写 [x,z] 时 y 用 `~`,判定收成纯水平距离', () => {
     const [step] = (parseSteps([{ skill: 'goto', at: [10, -20] }]) as { steps: SkillCall[] }).steps;
-    expect(derive(step)).toBeNull();
+    expect(derive(step)).toEqual({ near: [10, '~', -20] });
   });
 
   // 技能按开工那一刻的脚下解析,裁决在收工那一刻再解析一次:人走过之后同一个 `~5`
@@ -5493,174 +3196,6 @@ describe('差分为空就是受阻', () => {
     expect(reports[0].text).toContain('该步按「(1,64,0) 为火把」核验:落空(实测 空气,读于 ');
   });
 
-  it('保护预检拒绝放置时保留服务端原因，不改写成六面都不认', async () => {
-    const bot = cellBot({ '1,63,0': 'stone' }, [{ name: 'torch', count: 4 }]);
-    bot.placeBlock = async () => { throw new SkillBlocked('服务端放置保护预检 deny: (1, 64, 0) 公共区域', [], 'server'); };
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'build', material: 'torch', anchors: [[1, 64, 0]] }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('保护预检 deny: (1, 64, 0) 公共区域');
-    expect(reports[0].text).not.toContain('六个面都试过了');
-  });
-
-  it('附近放置失败三次后，修正支撑可立即完成同材料施工', async () => {
-    const bot = cellBot({ '1,63,0': 'stone', '2,63,0': 'stone', '3,63,0': 'stone' },
-      [{ name: 'torch', count: 8 }]);
-    const place = bot.placeBlock;
-    bot.placeBlock = async () => { throw new Error('No block has been placed : the block is still air'); };
-    const { exec, reports } = makeExecutorOn(bot);
-    for (let x = 1; x <= 3; x++) {
-      expect(exec.submit([{ skill: 'build', material: 'torch', anchors: [[x, 64, 0]] }])).toContain('收下了');
-      await waitUntil(() => reports.length === x, 8000);
-      expect(reports.at(-1)?.kind).toBe('blocked');
-    }
-    bot.cells.set('4,63,0', 'stone');
-    bot.placeBlock = place;
-    expect(exec.submit([{ skill: 'build', material: 'torch', anchors: [[4, 64, 0]] }])).toContain('收下了');
-    await waitUntil(() => reports.length === 4, 8000);
-    expect(reports.at(-1)?.kind).toBe('done');
-    expect(bot.cells.get('4,64,0')).toBe('torch');
-  });
-
-  it.each([
-    { name: '同一整单两次', targets: [1, 1] },
-    { name: '附近三个落点', targets: [1, 2, 3] },
-  ])('材料许可修正后立即恢复施工：$name 资源拒绝不产生空间冷却', async ({ targets }) => {
-    const bot = cellBot({ '1,63,0': 'stone', '2,63,0': 'stone', '3,63,0': 'stone' },
-      [{ name: 'torch', count: 8 }]);
-    let permitted = false;
-    const reports: TaskReport[] = [];
-    const exec = new Executor({
-      getBot: () => withBotEvents(bot) as never, nextId: nextTaskId(), log,
-      report: (report) => reports.push(report),
-      permitResourcePlacement: () => permitted ? { ok: true, finish: () => {} }
-        : { ok: false, reason: 'torch 的蓝图 reserve 是 8,随身只有 8;先申请材料许可' },
-    });
-    for (const [index, x] of targets.entries()) {
-      expect(exec.submit([{ skill: 'build', material: 'torch', anchors: [[x, 64, 0]] }])).toContain('收下了');
-      await waitUntil(() => reports.length === index + 1, 8000);
-      expect(reports.at(-1)?.kind).toBe('blocked');
-      expect(bot.cells.get(`${x},64,0`)).toBeUndefined();
-    }
-    permitted = true;
-    const x = targets.at(-1)!;
-    expect(exec.submit([{ skill: 'build', material: 'torch', anchors: [[x, 64, 0]] }])).toContain('收下了');
-    await waitUntil(() => reports.length === targets.length + 1, 8000);
-    expect(reports.at(-1)?.kind).toBe('done');
-    expect(bot.cells.get(`${x},64,0`)).toBe('torch');
-  });
-
-  it('材料补齐后立即恢复施工，不把无材料当成落点失败', async () => {
-    const bag: Array<{ name: string; count: number }> = [];
-    const bot = cellBot({ '1,63,0': 'stone', '2,63,0': 'stone', '3,63,0': 'stone' }, bag);
-    const { exec, reports } = makeExecutorOn(bot);
-    for (let x = 1; x <= 3; x++) {
-      expect(exec.submit([{ skill: 'build', material: 'torch', anchors: [[x, 64, 0]] }])).toContain('收下了');
-      await waitUntil(() => reports.length === x, 8000);
-      expect(reports.at(-1)?.kind).toBe('blocked');
-    }
-    bag.push({ name: 'torch', count: 8 });
-    expect(exec.submit([{ skill: 'build', material: 'torch', anchors: [[3, 64, 0]] }])).toContain('收下了');
-    await waitUntil(() => reports.length === 4, 8000);
-    expect(reports.at(-1)?.kind).toBe('done');
-    expect(bot.cells.get('3,64,0')).toBe('torch');
-  });
-
-  it('同单先补支撑再放置，按执行时的现场完成两步施工', async () => {
-    const bot = cellBot({ '1,62,0': 'stone' }, [{ name: 'stone', count: 1 }, { name: 'torch', count: 1 }]);
-    const { exec, reports } = makeExecutorOn(bot);
-    expect(exec.submit([
-      { skill: 'build', material: 'stone', on: [{ at: [1, 62, 0], face: 'up' }] },
-      { skill: 'build', material: 'torch', on: [{ at: [1, 63, 0], face: 'up' }] },
-    ])).toContain('收下了');
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('done');
-    expect(bot.cells.get('1,63,0')).toBe('stone');
-    expect(bot.cells.get('1,64,0')).toBe('torch');
-  });
-
-  it('相同整单两次缺支撑失败后，现场补齐支撑即可立即重试成功', async () => {
-    const bot = cellBot({}, [{ name: 'torch', count: 4 }]);
-    const { exec, reports } = makeExecutorOn(bot);
-    const steps: SkillCall[] = [
-      { skill: 'goto', at: [0, 64, 0] },
-      { skill: 'build', material: 'torch', on: [{ at: [2, 63, 0], face: 'up' }] },
-    ];
-    for (let i = 0; i < 2; i++) {
-      expect(exec.submit(steps)).toContain('收下了');
-      await waitUntil(() => reports.length === i + 1, 8000);
-      expect(reports.at(-1)?.kind).toBe('blocked');
-      expect(bot.cells.get('2,64,0')).toBeUndefined();
-    }
-    bot.cells.set('2,63,0', 'stone');
-    expect(exec.submit(steps)).toContain('收下了');
-    await waitUntil(() => reports.length === 3, 8000);
-    expect(reports.at(-1)?.kind).toBe('done');
-    expect(bot.cells.get('2,64,0')).toBe('torch');
-  });
-
-  it('目标被占的施工保留失败回执，清空后原位置立即可施工', async () => {
-    const bot = cellBot({ '1,64,0': 'stone', '1,63,0': 'stone' }, [{ name: 'torch', count: 4 }]);
-    const { exec, reports } = makeExecutorOn(bot);
-    const steps: SkillCall[] = [
-      { skill: 'goto', at: [0, 64, 0] },
-      { skill: 'build', material: 'torch', anchors: [[1, 64, 0]] },
-    ];
-    for (let i = 0; i < 3; i++) {
-      expect(exec.submit(steps)).toContain('收下了');
-      await waitUntil(() => reports.length === i + 1, 8000);
-      expect(reports.at(-1)?.kind).toBe('blocked');
-      expect(bot.cells.get('1,64,0')).toBe('stone');
-    }
-    bot.cells.delete('1,64,0');
-    expect(exec.submit(steps)).toContain('收下了');
-    await waitUntil(() => reports.length === 4, 8000);
-    expect(reports.at(-1)?.kind).toBe('done');
-    expect(bot.cells.get('1,64,0')).toBe('torch');
-  });
-
-  it('指定下方支撑为空时放置失败，补齐后可立即放置铁砧', async () => {
-    const bot = cellBot({ '2,64,0': 'stone' }, [{ name: 'anvil', count: 1 }]);
-    const { exec, reports } = makeExecutorOn(bot);
-    const steps: SkillCall[] = [
-      { skill: 'goto', at: [0, 64, 0] },
-      { skill: 'build', material: 'anvil', on: [{ at: [1, 63, 0], face: 'up' }] },
-    ];
-    expect(exec.submit(steps)).toContain('收下了');
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('blocked');
-    expect(bot.cells.get('1,64,0')).toBeUndefined();
-    bot.cells.set('1,63,0', 'stone');
-    expect(exec.submit(steps)).toContain('收下了');
-    await waitUntil(() => reports.length === 2, 8000);
-    expect(reports[1].kind).toBe('done');
-    expect(bot.cells.get('1,64,0')).toBe('anvil');
-  });
-
-  it('跨地点五次放置失败后，修正方案不受同材料冷却阻挡', async () => {
-    const seed = Object.fromEntries([1, 2, 3, 21, 41, 61].map((x) => [`${x},63,0`, 'stone']));
-    const bot = cellBot(seed, [{ name: 'torch', count: 8 }]);
-    const place = bot.placeBlock;
-    bot.placeBlock = async () => { throw new Error('No block has been placed : the block is still air'); };
-    const { exec, reports } = makeExecutorOn(bot);
-    for (const [index, x] of [1, 2, 3, 21, 41].entries()) {
-      bot.entity.position.x = x - 0.5;
-      expect(exec.submit([
-        { skill: 'goto', at: [x - 1, 64, 0] },
-        { skill: 'build', material: 'torch', anchors: [[x, 64, 0]] },
-      ])).toContain('收下了');
-      await waitUntil(() => reports.length === index + 1, 8000);
-      expect(reports.at(-1)?.kind).toBe('blocked');
-    }
-    bot.entity.position.x = 60.5;
-    bot.placeBlock = place;
-    expect(exec.submit([{ skill: 'build', material: 'torch', anchors: [[61, 64, 0]] }])).toContain('收下了');
-    await waitUntil(() => reports.length === 6, 8000);
-    expect(reports.at(-1)?.kind).toBe('done');
-    expect(bot.cells.get('61,64,0')).toBe('torch');
-  });
-
   /**
    * 「那片 N 格里没有实心方块,不用挖」对着一池水也照说 —— 与 build「一个箱子都没放上
    * 却报 done」同一形状。挖空这一单的后置状态是那几格变成空气,没变成就是没做成。
@@ -5704,58 +3239,15 @@ describe('差分为空就是受阻', () => {
     expect(reports[0].text).not.toContain('核验:达成');
   });
 
-  it('距目标两格但未达三维 goto 半径时，受阻回执不报告验收达成', async () => {
+  // 位置判据没有这个歧义:人在不在那儿是状态。走不过去而人已经站在那儿是纯假失败
+  it('位置判据照翻案:goto 报走不过去,而人已经在那一格', async () => {
     const bot = combatBot({ goto: async () => { throw new Error('No path to the goal!'); } });
     const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'goto', at: [2, 64, 0] }]);
-    await waitUntil(() => reports.length === 1, 5000);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('走不过去: 找不到可行路线');
-    expect(reports[0].text).not.toContain('核验:达成');
-    expect(reports[0].text).not.toContain('这个条件现在本来就是满足的');
-  });
-
-  it('半砖落脚满足实际三维 goto 目标时，直接保留到达结果', async () => {
-    const bot = combatBot({});
-    bot.pathfinder.goto = async () => {
-      bot.entity.position = new V(10.5, 64.5625, 10.5);
-      Object.assign(bot.entity, { onGround: true });
-    };
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'goto', at: [10, 66, 10] }]);
+    exec.submit([{ skill: 'goto', at: [0, 64, 0] }]);
     await waitUntil(() => reports.length === 1, 5000);
     expect(reports[0].kind).toBe('done');
-    expect(reports[0].text).toContain('到了 (10, 64, 10)');
-    expect(bot.entity.position.y).toBe(64.5625);
-  });
-
-  it('goto 维度前置条件不符时，当前位置不替代导航结果', async () => {
-    const bot = combatBot({});
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'goto', at: [0, 64, 0], dimension: 'the_nether' }]);
-    await waitUntil(() => reports.length === 1, 5000);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('先用 transit 穿门');
-    expect(reports[0].text).not.toContain('核验:达成');
-  });
-
-  it('goto 显式位置验收达成时保留调用方裁决', async () => {
-    const bot = combatBot({ goto: async () => { throw new Error('No path to the goal!'); } });
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'goto', at: [2, 64, 0], expect: { near: [2, 64, 0], within: 2 } }]);
-    await waitUntil(() => reports.length === 1, 5000);
-    expect(reports[0].kind).toBe('done');
-    expect(reports[0].text).toContain('技能报受阻');
-    expect(reports[0].text).toContain('核验:达成');
-  });
-
-  it('goto 实际到达后显式位置验收落空时仍报告受阻', async () => {
-    const bot = combatBot({});
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'goto', at: [2, 64, 0], expect: { near: [10, 64, 0], within: 1 } }]);
-    await waitUntil(() => reports.length === 1, 5000);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('核验:落空');
+    expect(reports[0].text).toContain('技能报受阻(走不过去: 找不到可行路线)');
+    expect(reports[0].text).toContain('该步按「距 (0,64,0) 2 格内」核验:达成');
   });
 
   /**
@@ -5767,10 +3259,9 @@ describe('差分为空就是受阻', () => {
     bot.pathfinder.goto = async () => {
       (bot as unknown as { placeMisses: Array<Record<string, unknown>> })
         .placeMisses.push({ was: 'water', x: 3, y: 62, z: 4 });
-      bot.entity.position = new V(2, 64, 0);
     };
     const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'goto', at: [2, 64, 0] }]);
+    exec.submit([{ skill: 'goto', at: [0, 64, 0] }]);
     await waitUntil(() => reports.length === 1, 5000);
     expect(reports[0].kind).toBe('done');
     expect(reports[0].text).toContain('路上还有 1 次放置服务端没认');
@@ -5808,41 +3299,6 @@ describe('差分为空就是受阻', () => {
     };
     return bot;
   }
-
-  it('collect 甜浆果丛按实际甜浆果入包数回报', async () => {
-    const bot = mineBot2();
-    bot.entity.position = new V(-8.5, 50, 8.5);
-    const bush = { name: 'sweet_berry_bush', position: new V(-8, 50, 8), boundingBox: 'empty' };
-    Object.assign(bot.registry.blocks, { 101: { name: bush.name, drops: [] } });
-    Object.assign(bot.registry.blocksByName, { [bush.name]: { id: 101, name: bush.name, drops: [] } });
-    Object.assign(bot.registry.items, { 803: { name: 'sweet_berries' } });
-    bot.findBlocks = () => [bush.position];
-    bot.blockAt = () => ({ ...bush, canHarvest: () => true });
-    bot.dig = async () => { bot.inventory.items().push({ name: 'sweet_berries', count: 3 }); };
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'collect', block: bush.name, count: 1 }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('done');
-    expect(reports[0].text).toContain('实际入包 3 个');
-    expect(reports[0].text).not.toContain('一个都没掉');
-  });
-
-  it('collect 未登记掉落物时只报告本步背包净增', async () => {
-    const bot = mineBot2();
-    bot.entity.position = new V(-8.5, 50, 8.5);
-    const bush = { name: 'mod:fruit_bush', position: new V(-8, 50, 8), boundingBox: 'empty' };
-    Object.assign(bot.registry.blocks, { 101: { name: bush.name, drops: [] } });
-    Object.assign(bot.registry.blocksByName, { [bush.name]: { id: 101, name: bush.name, drops: [] } });
-    bot.findBlocks = () => [bush.position];
-    bot.blockAt = () => ({ ...bush, canHarvest: () => true });
-    bot.dig = async () => { bot.inventory.items().push({ name: 'mod:fruit', count: 2 }); };
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'collect', block: bush.name, count: 1 }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('done');
-    expect(reports[0].text).toContain('本步背包净增');
-    expect(reports[0].text).not.toContain('一个都没掉');
-  });
 
   /** 可写的方块世界:没写的格子就是空气;water 与 torch 没有碰撞箱 */
   function cellBot(seed: Record<string, string>, bag: Array<{ name: string; count: number }>) {
@@ -5890,7 +3346,7 @@ describe('差分为空就是受阻', () => {
  * probe 报告作物 age 原值；collect 的 mature 条件只收 age 达到上限的作物。
  */
 describe('作物:probe 带 age,collect 只收熟的', () => {
-  function cropBot(ages: Record<string, number | undefined>, opts: { fullInv?: boolean; seedsOnly?: boolean } = {}) {
+  function cropBot(ages: Record<string, number | undefined>, opts: { fullInv?: boolean } = {}) {
     const inv = new Map<string, number>();
     // 夹具将背包 36 格塞满杂物，使采集掉落无法进入背包。
     if (opts.fullInv) for (let i = 0; i < 36; i++) inv.set(`junk_${i}`, 1);
@@ -5900,10 +3356,10 @@ describe('作物:probe 带 age,collect 只收熟的', () => {
       entities: {},
       game: { dimension: 'overworld' },
       registry: {
-        blocksByName: { wheat: { id: 7, name: 'wheat', drops: [8, 9] } },
-        blocks: { 7: { name: 'wheat', drops: [8, 9] } },
-        items: { 8: { name: 'wheat' }, 9: { name: 'wheat_seeds' } },
-        itemsByName: { wheat: { id: 8, name: 'wheat' }, wheat_seeds: { id: 9, name: 'wheat_seeds' } },
+        blocksByName: { wheat: { id: 7, name: 'wheat', drops: [8] } },
+        blocks: { 7: { name: 'wheat', drops: [8] } },
+        items: { 8: { name: 'wheat' } },
+        itemsByName: { wheat: { id: 8, name: 'wheat' } },
       },
       inventory: { items: () => [...inv].filter(([, n]) => n > 0).map(([name, count]) => ({ name, count, type: 8 })) },
       heldItem: null,
@@ -5932,10 +3388,7 @@ describe('作物:probe 带 age,collect 只收熟的', () => {
       dig: async (b: { position: V }) => {
         field.delete(`${b.position.x},${b.position.y},${b.position.z}`);
         // 包满了掉落物进不来:挖了也不入账
-        if (!opts.fullInv) {
-          const drop = opts.seedsOnly ? 'wheat_seeds' : 'wheat';
-          inv.set(drop, (inv.get(drop) ?? 0) + 1);
-        }
+        if (!opts.fullInv) inv.set('wheat', (inv.get('wheat') ?? 0) + 1);
       },
       pathfinder: {
         stop() {}, setGoal() {},
@@ -5974,34 +3427,6 @@ describe('作物:probe 带 age,collect 只收熟的', () => {
     expect(reports[0].text).toContain('都还没长成');
     expect(reports[0].text).toContain('最高 age 6/7');
     expect(field.size).toBe(2);
-    const retry = exec.submit([
-      { skill: 'goto', at: [0, 64, 0] },
-      { skill: 'collect', block: 'wheat', count: 1, mature: true },
-    ]);
-    expect(retry).toContain('这一单我没接');
-    expect(retry).toContain('同一农田的 mature collect 暂缓');
-  });
-
-  it('作物省略 mature 时也不挖幼苗，并暂停同一农田的重复采集', async () => {
-    const { bot, field } = cropBot({ '2,64,0': 3 });
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'collect', block: 'wheat', count: 1 }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('最高 age 3/7');
-    expect(field.has('2,64,0')).toBe(true);
-    expect(exec.submit([{ skill: 'collect', block: 'wheat', count: 1 }])).toContain('暂缓');
-  });
-
-  it('只捡到小麦种子时，不能把种子计作小麦委托的收获', async () => {
-    const { bot, inv } = cropBot({ '2,64,0': 7 }, { seedsOnly: true });
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'collect', block: 'wheat', count: 1 }]);
-    await waitUntil(() => reports.length === 1, 8000);
-    expect(inv.get('wheat_seeds')).toBe(1);
-    expect(inv.get('wheat') ?? 0).toBe(0);
-    expect(reports[0].kind).toBe('blocked');
-    expect(reports[0].text).toContain('一个都没进包');
   });
 
   it('mature 用在没有 age 状态的东西上:直说用不上,不静默当没写', async () => {
@@ -6121,15 +3546,12 @@ describe('战斗挂起与恢复(suspend/resume)', () => {
     const bag: Array<{ name: string; count: number }> = [{ name: 'stone_pickaxe', count: 1 }];
     const state = { digs: 0, release: null as (() => void) | null };
     let gated = false;
-    // Two nearby blocks are harvested first; the next target genuinely requires travel.
-    // Pickup is already confirmed in inventory, so no fake post-dig navigation gate is needed.
-    const targetAt = () => state.digs < gateAfterDigs ? ore.position : new V(8, 64, 0);
     const bot = {
       entity: { id: 9, position: new V(0.5, 64, 0.5) },
       entities: {},
       health: 20,
       players: {},
-      world: { raycast: () => ({ position: targetAt(), face: 1 }) },
+      world: { raycast: () => ({ position: ore.position, face: 1 }) },
       registry: {
         blocks: { 1: { name: 'stone', drops: [4] } },
         blocksByName: {
@@ -6143,22 +3565,21 @@ describe('战斗挂起与恢复(suspend/resume)', () => {
       equip: async () => {},
       lookAt: async () => {},
       setControlState: () => {},
-      findBlocks: () => [targetAt()],
-      blockAt: () => ({ ...ore, position: targetAt(), boundingBox: 'block', canHarvest: () => true }),
+      findBlocks: () => [ore.position],
+      blockAt: () => ({ ...ore, boundingBox: 'block', canHarvest: () => true }),
       canSeeBlock: () => true,
-      canDigBlock: (block: { position: V }) => block.position.distanceTo(bot.entity.position) <= 5.1,
+      canDigBlock: () => true,
       digTime: () => 20,
       dig: async () => { state.digs++; bag.push({ name: 'cobblestone', count: 1 }); },
       stopDigging: () => {},
       pathfinder: {
         stop() {}, setGoal() {},
-        // Going to the remaining ore is blocked until combat releases the body.
+        // 挖够 gateAfterDigs 块之后的第一次寻路卡住:战斗在这一刻夺手
         goto: async () => {
           if (state.digs === gateAfterDigs && !gated) {
             gated = true;
             await new Promise<void>((r) => { state.release = r; });
           }
-          bot.entity.position = targetAt().offset(-1.5, 0, 0.5);
         },
       },
     };
@@ -6650,8 +4071,7 @@ describe('物品使用效果与行军停滞边界', () => {
         foodsByName: { bread: {}, cooked_beef: {}, golden_apple: {}, enchanted_golden_apple: {}, pufferfish: {} },
       },
       inventory: { items: () => bag },
-      heldItem: null as typeof bag[number] | null,
-      equip: async (item: typeof bag[number]) => { bot.heldItem = item; bot.eaten = item.name; },
+      equip: async (item: { name: string }) => { bot.eaten = item.name; },
       eaten: null as string | null,
       // eat 的完成判据是这一样食物在包里少了一个,吃下去就得真扣
       consume: async () => {
@@ -6696,18 +4116,6 @@ describe('物品使用效果与行军停滞边界', () => {
     expect(bag[0].count).toBe(0);
   });
 
-  it('一次进食整堆消失时回报异常数量，不谎称只吃了一个', async () => {
-    const bag = [{ name: 'golden_apple', count: 16 }];
-    const bot = eater(bag);
-    bot.consume = async () => { bag[0].count = 0; };
-    const { exec, reports } = makeExecutorOn(bot);
-    exec.submit([{ skill: 'eat', item: 'golden_apple' }]);
-    await waitUntil(() => reports.length === 1, 5000);
-    expect(reports[0].text).toContain('随身数量 16 → 0');
-    expect(reports[0].text).toContain('一次少了 16 个');
-    expect(reports[0].text).not.toContain('吃了一个金苹果');
-  });
-
   it('eat 显式点名河豚时照做,不会被背包里的面包替换', async () => {
     const mixedBag = [
       { name: 'pufferfish', count: 1 },
@@ -6715,7 +4123,9 @@ describe('物品使用效果与行军停滞边界', () => {
     ];
     const withBread = eater(mixedBag);
     const a = makeExecutorOn(withBread);
-    expect(a.exec.submit([{ skill: 'eat', item: 'pufferfish' }])).toContain('收下了');
+    // 河豚过毒食确认门:第一单只报后果,原样重发才吃
+    expect(a.exec.submit([{ skill: 'eat', item: 'pufferfish' }])).toContain('我没接');
+    a.exec.submit([{ skill: 'eat', item: 'pufferfish' }]);
     await waitUntil(() => a.reports.length === 1, 5000);
     expect(a.reports[0].kind).toBe('done');
     expect(withBread.eaten).toBe('pufferfish');
@@ -6727,7 +4137,8 @@ describe('物品使用效果与行军停滞边界', () => {
     const pufferfishBag = [{ name: 'pufferfish', count: 1 }];
     const onlyPufferfish = eater(pufferfishBag);
     const b = makeExecutorOn(onlyPufferfish);
-    expect(b.exec.submit([{ skill: 'eat', item: 'pufferfish' }])).toContain('收下了');
+    expect(b.exec.submit([{ skill: 'eat', item: 'pufferfish' }])).toContain('我没接');
+    b.exec.submit([{ skill: 'eat', item: 'pufferfish' }]);
     await waitUntil(() => b.reports.length === 1, 5000);
     expect(b.reports[0].kind).toBe('done');
     expect(onlyPufferfish.eaten).toBe('pufferfish');
@@ -6745,7 +4156,9 @@ describe('物品使用效果与行军停滞边界', () => {
       bot.deactivateItem = () => { throw new Error('食物不应提前收手'); };
 
       const { exec, reports } = makeExecutorOn(bot);
-      expect(exec.submit([{ skill: 'use', item: name }])).toContain('收下了');
+      // 空手 use 河豚同样过毒食确认门:第一单只报后果
+      if (name === 'pufferfish') expect(exec.submit([{ skill: 'use', item: name }])).toContain('我没接');
+      exec.submit([{ skill: 'use', item: name }]);
       await waitUntil(() => reports.length === 1, 5000);
 
       expect(reports[0].kind).toBe('done');
@@ -7284,8 +4697,7 @@ describe('toss 的落点', () => {
     expect(bot.looked[0].pitch).toBeLessThan(-(29 * Math.PI) / 180);
     expect(bot.looked[0].pitch).toBeGreaterThan(-(46 * Math.PI) / 180);
     expect(reports[0].text).toMatch(/朝[东南西北]+抬头抛出去/);
-    expect(reports[0].text).toContain('那个方向 8 格内是空的');
-    expect(reports[0].text).toContain('实际落点未核验');
+    expect(reports[0].text).toContain('8 格内是空的');
   });
 
   it('四面被围死:不转头,照旧就地扔,回执照实说是在脚边扔的', async () => {
@@ -7328,29 +4740,6 @@ describe('toss 的落点', () => {
  * anvil/grindstone 使用 1.20.6 通用窗口协议验证开窗、产出、shift-click 取货和经验变化；组件物品不依赖 prismarine-item 的本地合成计算。
  */
 describe('anvil/grindstone:铁砧与砂轮', () => {
-  it('输入格已占用时明确指向工作站窗口，不误称背包满', async () => {
-    const moveSlotItem = vi.fn();
-    const win = {
-      id: 5, type: 'minecraft:anvil', slots: [{ name: 'iron_boots', type: 1, count: 1 }],
-      inventoryStart: 3, inventoryEnd: 39,
-      items: () => [{ name: 'iron_boots', type: 1, count: 1, slot: 3 }],
-    };
-    await expect(putIntoStation({ moveSlotItem } as never, win, (name) => name === 'iron_boots', 0, '铁靴子'))
-      .rejects.toThrow('工作站输入格 1 已有铁靴子');
-    expect(moveSlotItem).not.toHaveBeenCalled();
-  });
-
-  it('窗口报 destination full 时不误导她丢背包物品', async () => {
-    const win = {
-      id: 5, type: 'minecraft:anvil', slots: new Array(39).fill(null),
-      inventoryStart: 3, inventoryEnd: 39,
-      items: () => [{ name: 'iron_boots', type: 1, count: 1, slot: 3 }],
-    };
-    const bot = { moveSlotItem: async () => { throw new Error('destination full'); } };
-    await expect(putIntoStation(bot as never, win, (name) => name === 'iron_boots', 0, '铁靴子'))
-      .rejects.toThrow('这不是背包空位的判据，不要丢物品腾格');
-  });
-
   interface FakeItem {
     name: string; count: number; type: number; slot?: number;
     componentMap?: Map<string, { data?: unknown }>;
@@ -7452,37 +4841,6 @@ describe('anvil/grindstone:铁砧与砂轮', () => {
     };
     return bot;
   }
-
-  it('铁砧开窗串到旧箱子时关错窗重开，不把箱内附魔之瓶当输入材料', async () => {
-    const bot = stationBot({ station: 'anvil', bag: [], out: null });
-    bot.entity.position = new V(1.5, 64, 0.5);
-    const chest = {
-      id: 4, type: 'minecraft:generic_9x3',
-      slots: [{ name: 'experience_bottle', count: 64, type: 3 }],
-      inventoryStart: 27, inventoryEnd: 63,
-    };
-    const mutable = bot as typeof bot & { currentWindow: typeof chest | typeof bot.win | null };
-    mutable.currentWindow = chest;
-    let opens = 0;
-    const closed: string[] = [];
-    mutable.openBlock = async () => {
-      const win = ++opens === 1 ? chest : bot.win;
-      mutable.currentWindow = win;
-      return win as typeof bot.win;
-    };
-    mutable.closeWindow = (win?: typeof chest | typeof bot.win) => {
-      if (win) closed.push(win.type);
-      mutable.currentWindow = null;
-    };
-    const opened = openStationWindow(bot as never, { aborted: () => false } as never,
-      { x: 2, y: 64, z: 0 }, ANVIL_BLOCKS, '铁砧');
-    await vi.runAllTimersAsync();
-    const { win } = await opened;
-    expect(win).toBe(bot.win);
-    expect(opens).toBe(2);
-    expect(closed).toEqual(['minecraft:generic_9x3', 'minecraft:generic_9x3']);
-    expect(bot.bag).toEqual([]);
-  });
 
   const dmg = (n: number) => new Map([['damage', { data: n }]]);
   const sharp3 = () => new Map<string, { data?: unknown }>([

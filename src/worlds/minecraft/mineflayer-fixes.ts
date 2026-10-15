@@ -2,7 +2,7 @@
  * 合成、放置与挖掘以服务端确认为准。
  * 合成产物仅采用服务端槽位更新；放置仅在目标格回读成功后完成；
  * 挖掘只认服务端把那一格改掉,mineflayer 到点自己写空气的那一笔按下不发。
- * 全局 stateId 只认当前打开窗口的包;windowId=-2/254 的 `set_slot` 按玩家库存索引更新,不改变容器 revision。
+ * 全局 stateId 只认当前打开窗口的包;windowId=-2 的 `set_slot` 没有对应容器,整包拦截。
  *
  * 合成期间光标必须随时可以清空:prismarine-windows 对"手上拿着 A 去点装着 B 的格子"
  * 一律本地换位，原版服务端不换。一次换位两边状态就此分家，之后所有合成都在错的格子上做。
@@ -21,16 +21,10 @@ import { setNameRegistry, zhName } from './names.ts';
 import { PLACE_MISS_TTL_MS } from './pathfinder-perf.ts';
 import { ShowPacer, type ShowTempo } from './show.ts';
 import { dropOwnedGoal } from './executor.ts';
-import { SkillBlocked } from './skill-context.ts';
-import { installInventoryWindowSyncGuard } from './inventory-window-sync.ts';
-import { installDamageEvidence } from './damage-evidence.ts';
-import { installOwnedFishing } from './fishing.ts';
-import { armTemporaryScaffoldPlacement, assertTemporaryScaffoldDigSafe, closeTemporaryScaffoldPlacement,
-  hasPreparedTemporaryScaffoldPlacement, prepareTemporaryScaffoldPlacement, recordTemporaryScaffold } from './temporary-scaffold.ts';
-import { assertInventoryClicksReady, clickInventoryConfirmed, installInventoryClickSync,
-  inventoryClickState, isInventoryClickError, isInventoryCursorPacket, sameInventoryStack } from './inventory-click-sync.ts';
 import { PLACE_REACH } from './cell-facts.ts';
 
+/** 单次点击等待服务端确认的上限。 */
+const CLICK_ACK_MS = 400;
 /** 摆好材料之后等产出槽被服务端填上的上限 */
 const RESULT_WAIT_MS = 1_500;
 /** 右键工作台到窗口开出来的上限 */
@@ -42,8 +36,6 @@ const PLACE_TRIES = 3;
 /** 挖掘等服务端把那一格改掉的上限:按 digTime 放大,给服务端的补挖留出余量 */
 const DIG_CONFIRM_MIN_MS = 8_000;
 const DIG_CONFIRM_FACTOR = 3;
-/** 本地挖完、服务端迟迟不认时通知寻路退避该坐标。 */
-export const DIG_UNCONFIRMED_EVENT = 'cortiDigUnconfirmed';
 /** 悬空起挖等落地的上限:一格下落 ~250ms 足够;水里 onGround 恒假,不等 */
 const DIG_GROUND_WAIT_MS = 600;
 /** 服务端认账比本地定时器晚这么多就记一条:整片挖掘不刷屏,慢的那些留痕 */
@@ -73,22 +65,20 @@ type DigBlock = Bot['targetDigBlock'];
 interface WindowLike {
   id: number;
   type: string;
-  slots: Array<{ type: number; count: number; stackSize?: number; metadata?: number | null; nbt?: unknown;
-    components?: unknown[]; removedComponents?: unknown[] } | null>;
-  selectedItem: WindowLike['slots'][number];
+  slots: Array<{ type: number; count: number; metadata?: number | null; nbt?: unknown } | null>;
+  selectedItem: { type: number; count: number; metadata?: number | null; nbt?: unknown } | null;
   inventoryStart: number;
   inventoryEnd: number;
   findInventoryItem(item: number, metadata: number | null, notFull?: boolean): { slot: number } | null;
+  findItemRange(
+    start: number, end: number, itemType: number, metadata?: number | null,
+    notFull?: boolean, nbt?: unknown,
+  ): { slot: number } | null;
   firstEmptySlotRange(start: number, end: number): number | null;
 }
 
 /** 装了修补的 bot 才有的内部面 */
 interface PatchedBot extends Bot {
-  /** Bridge 的服务端挖掘权限缓存；覆盖路径挖掘和显式 dig/tunnel。 */
-  cortiBreakVerdict?: (block: NonNullable<DigBlock>) => 'allowed' | 'protected' | 'unknown';
-  cortiProtectCheck?: (action: 'break' | 'place', cell: { x: number; y: number; z: number }) => Promise<{
-    status: 'deny' | 'unknown' | 'allow_likely'; reason: string;
-  }>;
   _genericPlace(
     referenceBlock: unknown, faceVector: unknown, options: Record<string, unknown>,
   ): Promise<unknown>;
@@ -128,8 +118,6 @@ export function installMineflayerFixes(
   diag?: MinecraftLog,
   showTempo?: () => ShowTempo | null,
 ): void {
-  installDamageEvidence(bot);
-  if (typeof bot.fish === 'function') installOwnedFishing(bot);
   if (typeof bot.craft !== 'function' || typeof bot.placeBlock !== 'function') {
     log.error(
       'mineflayer 修补装得太早:bot.craft/placeBlock 还不存在,说明内建插件尚未注入,' +
@@ -150,7 +138,6 @@ export function installMineflayerFixes(
   // 中文名拼名器在这里才第一次拿得到 registry:拼得出中文名 ≠ 这个 id 存在,
   // 装上之后 `deepslate_cobblestone` 那类假 id 会在回执里带出原始 id(names.ts 模块头)
   setNameRegistry(bot.registry as unknown as Parameters<typeof setNameRegistry>[0] | undefined);
-  installInventoryWindowSyncGuard(bot, diag);
   fixFoodComponentSchema(bot, log);
   fixPotionContentsSchema(bot, log);
   fixToolTierMaterials(bot, log);
@@ -158,7 +145,6 @@ export function installMineflayerFixes(
   installStateIdGuard(bot, diag, () => tracing > 0);
   installClosedWindowItemsDrop(bot, diag);
   installPacketTrace(bot, trace);
-  installInventoryClickSync(bot, diag);
   installConfirmedPlace(bot as PatchedBot, diag, (n) => { tracing += n; });
   installConfirmedDig(bot as PatchedBot, log, diag);
   installDiggingLatchRelease(bot, diag);
@@ -489,8 +475,8 @@ function installClosedWindowItemsDrop(bot: Bot, diag: MinecraftLog | undefined):
  * mineflayer 用任意 set_slot/window_items 的 stateId 顶掉全局值,而点击一律带
  * 全局值发出;开着工作台时窗口 0 的更新(副手槽 45 是常客)会让每次点击都带上
  * 错的 stateId,服务端按失步整窗回灌。windowId 与当前窗口对不上的包内容照常
- * 透传,stateId 改写成当前窗口最近一次的值。windowId=-2/254 直接更新玩家库存,
- * 槽号采用 PlayerInventory 索引;开窗时同步主栏与热栏的对应玩家槽,防止关闭窗口回写旧物品。
+ * 透传(关掉的容器窗口的 window_items 除外,见 installClosedWindowItemsDrop),
+ * stateId 改写成当前窗口最近一次的值;windowId=-2 没有对应容器,整包拦下。
  */
 function installStateIdGuard(bot: Bot, diag: MinecraftLog | undefined, tracing: () => boolean): void {
   const client = bot._client as unknown as {
@@ -500,42 +486,23 @@ function installStateIdGuard(bot: Bot, diag: MinecraftLog | undefined, tracing: 
   let dropped = 0;
   let rewritten = 0;
   let goodStateId: number | null = null;
-  let forwardedStateId = -1;
   client.emit = (name: string, ...args: unknown[]): boolean => {
     if (name === 'set_slot' || name === 'window_items') {
-      const pkt = args[0] as { windowId?: number; stateId?: number; slot?: number; item?: unknown } | undefined;
-      if (pkt && name === 'set_slot' && (pkt.windowId === -2 || pkt.windowId === 254)) {
-        const rawSlot = pkt.slot;
-        // 1.20.6 ClientPacketListener writes these indices to PlayerInventory.setItem.
-        // ContainerID is u8 in minecraft-protocol, so the wire value -2 arrives as 254.
-        const slot = typeof rawSlot === 'number' && Number.isInteger(rawSlot) && rawSlot >= 0 && rawSlot <= 40
-          ? rawSlot < 9 ? bot.inventory.hotbarStart + rawSlot
-            : rawSlot < 36 ? rawSlot : rawSlot < 40 ? 44 - rawSlot : 45
-          : null;
-        if (slot === null || !Number.isInteger(slot) || slot < 0 || slot >= bot.inventory.slots.length || pkt.item === undefined) {
-          dropped++;
-          if (tracing()) diag?.write({ lane: 'craft', event: 'stateid-guard',
-            msg: '忽略无效的玩家库存直接更新',
-            data: { stateId: pkt.stateId, slot: rawSlot, droppedSoFar: dropped } });
-          return true;
+      const pkt = args[0] as { windowId?: number; stateId?: number; slot?: number } | undefined;
+      if (pkt && name === 'set_slot' && pkt.windowId === -2) {
+        dropped++;
+        if (tracing()) {
+          diag?.write({
+            lane: 'craft', event: 'stateid-guard',
+            msg: `拦下一个 windowId=-2 的 set_slot(它带的 stateId=${pkt.stateId})`,
+            data: { stateId: pkt.stateId, slot: pkt.slot, droppedSoFar: dropped },
+          });
         }
-        const stateId = goodStateId ?? forwardedStateId;
-        const window = bot.currentWindow;
-        if (window && window !== bot.inventory && slot >= bot.inventory.inventoryStart && slot < bot.inventory.inventoryEnd) {
-          const playerSlot = window.inventoryStart + slot - bot.inventory.inventoryStart;
-          if (Number.isInteger(playerSlot) && playerSlot >= window.inventoryStart
-            && playerSlot < window.inventoryEnd && playerSlot < window.slots.length) {
-            // Native set_slot creates a separate Item for each window and records authority.
-            // Mirror first: heldItemChanged listeners may close the window synchronously.
-            origEmit(name, { ...pkt, windowId: window.id, slot: playerSlot, stateId }, ...args.slice(1));
-          }
-        }
-        origEmit(name, { ...pkt, windowId: 0, slot, stateId }, ...args.slice(1));
         return true;
       }
       if (pkt && typeof pkt.stateId === 'number') {
         const curId = (bot.currentWindow as { id?: number } | null)?.id ?? 0;
-        if (pkt.windowId === curId || (name === 'set_slot' && isInventoryCursorPacket(pkt))) {
+        if (pkt.windowId === curId) {
           goodStateId = pkt.stateId;
         } else if (goodStateId !== null && pkt.stateId !== goodStateId) {
           rewritten++;
@@ -548,7 +515,6 @@ function installStateIdGuard(bot: Bot, diag: MinecraftLog | undefined, tracing: 
           }
           pkt.stateId = goodStateId;
         }
-        forwardedStateId = pkt.stateId;
       }
     }
     return origEmit(name, ...args);
@@ -771,145 +737,131 @@ function installConfirmedPlace(
     pathPlacement: { key: string; flight: PathPlacementFlight } | null,
   ): Promise<void> {
     const before = bot.blockAt(dest);
-    const supportProof = pathPlacement === null ? null : prepareTemporaryScaffoldPlacement(bot, before);
-    try {
-      const protection = await bot.cortiProtectCheck?.('place', dest);
-      if (protection && protection.status !== 'allow_likely') {
-        throw new SkillBlocked(
-          `服务端放置保护预检 ${protection.status}: (${dest.x}, ${dest.y}, ${dest.z}) ${protection.reason}`,
-          [], 'server',
-        );
-      }
-      if (pathPlacement && pathGeneration !== pathPlacement.flight.generation) {
-        throw new Error(`寻路已重算，取消旧路线在 (${dest.x}, ${dest.y}, ${dest.z}) 的放置`);
-      }
-      const startedAt = Date.now();
-      // 直接技能复用放置负缓存：同格、方块名未变且在 TTL 内则拒绝重试。
-      // 寻路放置已在搜索层排除，仍通过 flight 记录确认与所有权。
-      if (pathPlacement === null) {
-        const stale = recentPlaceMiss(bot, dest);
-        if (stale !== null) {
-          diag?.write({
-            lane: 'skill', event: 'place-miss-cached',
-            msg: `(${dest.x}, ${dest.y}, ${dest.z}) ${Math.round(stale.agoMs / 1000)} 秒前放过三次都没确认,`
-              + `那一格现在还是${zhName(stale.was)}:这次不发包`,
-            data: { at: { x: dest.x, y: dest.y, z: dest.z }, was: stale.was, agoMs: stale.agoMs },
-          });
-          throw new Error(`No block has been placed : the block is still ${stale.was}`);
-        }
-      }
-      // 期望落地的是哪一样:`_genericPlace` 放的就是手上这件。取得到方块名才校验身份,
-      // 取不到(水桶、红石粉、种子这类"物品名 ≠ 方块名"的)一律降级为旧口径并在 diag 标注
-      const want = placedBlockExpectation(bot);
-      const eyeDist = (): number | null => {
-        const feet = bot.entity?.position;
-        return feet
-          ? Math.hypot(feet.x - (dest.x + 0.5), feet.y + 1.62 - (dest.y + 0.5), feet.z - (dest.z + 0.5))
-          : null;
-      };
-      let tries = 0;
-      /** 重试前人已经离开手长(多半是脚下支撑没放上、人掉下去了):再发包服务端也只会拒 */
-      let leftReach: number | null = null;
-      setTracing(1);
-      try {
-        for (let attempt = 1; attempt <= PLACE_TRIES; attempt++) {
-          const d = attempt > 1 ? eyeDist() : null;
-          if (d !== null && d > PLACE_REACH && !changedAt(bot, dest, before, want)) {
-            leftReach = d;
-            break;
-          }
-          tries = attempt;
-          // 重试前回读目标位置;前次放置的迟到回包不得触发重复放置。
-          const ok = attempt > 1 && changedAt(bot, dest, before, want)
-            ? true
-            : await placeOnce(bot, referenceBlock, faceVector, dest, before, want);
-          if (ok) {
-            diag?.write({
-              lane: 'skill', event: 'place-confirmed', durMs: Date.now() - startedAt,
-              msg: `放置在第 ${attempt} 次回读到了 (${dest.x}, ${dest.y}, ${dest.z})`
-                + (want === null ? '(没校验落地的是不是要放的那样)' : ''),
-              data: {
-                attempt, at: { x: dest.x, y: dest.y, z: dest.z },
-                want, identityChecked: want !== null, placed: bot.blockAt(dest)?.name ?? null,
-              },
-            });
-            const placed = bot.blockAt(dest);
-            if (placed) {
-              recordTemporaryScaffold(bot, supportProof, placed);
-              const ledger = (bot.placedLedger ??= []);
-              ledger.push({ name: placed.name, x: dest.x, y: dest.y, z: dest.z });
-              if (ledger.length > 256) ledger.splice(0, ledger.length - 256);
-            }
-            // 保持 placeBlock 的 blockPlaced 事件契约;mineflayer 类型表未声明该事件。
-            (bot as unknown as { emit(n: string, ...a: unknown[]): void })
-              .emit('blockPlaced', before, bot.blockAt(dest));
-            return;
-          }
-        }
-      } finally {
-        setTracing(-1);
-      }
-      const was = before?.name ?? 'air';
-      // 人走出手长而没发满的那一格不算服务端拒放,不进拒放黑名单
-      if (leftReach === null) {
-        const misses = (bot.placeMisses ??= []);
-        // at 供寻路器的被拒格黑名单判时效(pathfinder-perf 模块头第 8 条)
-        misses.push({ was, x: dest.x, y: dest.y, z: dest.z, at: Date.now() });
-        if (misses.length > 256) misses.splice(0, misses.length - 256);
-      }
-      // 寻路支撑未获服务端确认时撤销目标，避免再次使用未成立的承重条件。
-      // 每次放置由自己的 flight 持有所有权；代次校验用于排除迟到结果。
-      const owns = pathPlacement !== null
-        && pathPlacementFlights.get(pathPlacement.key) === pathPlacement.flight
-        && pathGeneration === pathPlacement.flight.generation;
-      if (owns) {
-        const seq = (bot.pathSupportFailure?.seq ?? 0) + 1;
-        bot.pathSupportFailure = {
-          seq, generation: pathPlacement.flight.generation, was,
-          x: dest.x, y: dest.y, z: dest.z,
-          ...(leftReach !== null ? { leftReach: Number(leftReach.toFixed(1)) } : {}),
-        };
-        const why = leftReach !== null
-          ? `搭路支撑 (${dest.x}, ${dest.y}, ${dest.z}) 没放上,人已离开它 ${leftReach.toFixed(1)} 格`
-          : `搭路支撑 (${dest.x}, ${dest.y}, ${dest.z}) 三次未确认`;
-        // 撤的是谁的目标要说得出来:这一路与 executor/combat/反射共用同一本所有权账
-        dropOwnedGoal(bot, 'path-support', why, diag);
+    const startedAt = Date.now();
+    // 直接技能复用放置负缓存：同格、方块名未变且在 TTL 内则拒绝重试。
+    // 寻路放置已在搜索层排除，仍通过 flight 记录确认与所有权。
+    if (pathPlacement === null) {
+      const stale = recentPlaceMiss(bot, dest);
+      if (stale !== null) {
         diag?.write({
-          lane: 'skill', event: 'path-support-unconfirmed',
-          msg: `${why},已取消当前移动段`,
-          data: {
-            seq, generation: pathPlacement.flight.generation, was,
-            at: { x: dest.x, y: dest.y, z: dest.z }, leftReach,
-          },
+          lane: 'skill', event: 'place-miss-cached',
+          msg: `(${dest.x}, ${dest.y}, ${dest.z}) ${Math.round(stale.agoMs / 1000)} 秒前放过三次都没确认,`
+            + `那一格现在还是${zhName(stale.was)}:这次不发包`,
+          data: { at: { x: dest.x, y: dest.y, z: dest.z }, was: stale.was, agoMs: stale.agoMs },
         });
+        throw new Error(`No block has been placed : the block is still ${stale.was}`);
       }
-      // 现场几何随案卷:拒放的规律(台架实测"越贴身越拒",脚下低一格 0%)要靠
-      // 人在哪、离目标多远、有没有潜行这几个数才能对上号,只有坐标断不了案
+    }
+    // 期望落地的是哪一样:`_genericPlace` 放的就是手上这件。取得到方块名才校验身份,
+    // 取不到(水桶、红石粉、种子这类"物品名 ≠ 方块名"的)一律降级为旧口径并在 diag 标注
+    const want = placedBlockExpectation(bot);
+    const eyeDist = (): number | null => {
       const feet = bot.entity?.position;
-      const dist = eyeDist();
+      return feet
+        ? Math.hypot(feet.x - (dest.x + 0.5), feet.y + 1.62 - (dest.y + 0.5), feet.z - (dest.z + 0.5))
+        : null;
+    };
+    let tries = 0;
+    /** 重试前人已经离开手长(多半是脚下支撑没放上、人掉下去了):再发包服务端也只会拒 */
+    let leftReach: number | null = null;
+    setTracing(1);
+    try {
+      for (let attempt = 1; attempt <= PLACE_TRIES; attempt++) {
+        const d = attempt > 1 ? eyeDist() : null;
+        if (d !== null && d > PLACE_REACH && !changedAt(bot, dest, before, want)) {
+          leftReach = d;
+          break;
+        }
+        tries = attempt;
+        // 重试前回读目标位置;前次放置的迟到回包不得触发重复放置。
+        const ok = attempt > 1 && changedAt(bot, dest, before, want)
+          ? true
+          : await placeOnce(bot, referenceBlock, faceVector, dest, before, want);
+        if (ok) {
+          diag?.write({
+            lane: 'skill', event: 'place-confirmed', durMs: Date.now() - startedAt,
+            msg: `放置在第 ${attempt} 次回读到了 (${dest.x}, ${dest.y}, ${dest.z})`
+              + (want === null ? '(没校验落地的是不是要放的那样)' : ''),
+            data: {
+              attempt, at: { x: dest.x, y: dest.y, z: dest.z },
+              want, identityChecked: want !== null, placed: bot.blockAt(dest)?.name ?? null,
+            },
+          });
+          const placed = bot.blockAt(dest);
+          if (placed) {
+            const ledger = (bot.placedLedger ??= []);
+            ledger.push({ name: placed.name, x: dest.x, y: dest.y, z: dest.z });
+            if (ledger.length > 256) ledger.splice(0, ledger.length - 256);
+          }
+          // 保持 placeBlock 的 blockPlaced 事件契约;mineflayer 类型表未声明该事件。
+          (bot as unknown as { emit(n: string, ...a: unknown[]): void })
+            .emit('blockPlaced', before, bot.blockAt(dest));
+          return;
+        }
+      }
+    } finally {
+      setTracing(-1);
+    }
+    const was = before?.name ?? 'air';
+    // 人走出手长而没发满的那一格不算服务端拒放,不进拒放黑名单
+    if (leftReach === null) {
+      const misses = (bot.placeMisses ??= []);
+      // at 供寻路器的被拒格黑名单判时效(pathfinder-perf 模块头第 8 条)
+      misses.push({ was, x: dest.x, y: dest.y, z: dest.z, at: Date.now() });
+      if (misses.length > 256) misses.splice(0, misses.length - 256);
+    }
+    // 寻路支撑未获服务端确认时撤销目标，避免再次使用未成立的承重条件。
+    // 每次放置由自己的 flight 持有所有权；代次校验用于排除迟到结果。
+    const owns = pathPlacement !== null
+      && pathPlacementFlights.get(pathPlacement.key) === pathPlacement.flight
+      && pathGeneration === pathPlacement.flight.generation;
+    if (owns) {
+      const seq = (bot.pathSupportFailure?.seq ?? 0) + 1;
+      bot.pathSupportFailure = {
+        seq, generation: pathPlacement.flight.generation, was,
+        x: dest.x, y: dest.y, z: dest.z,
+        ...(leftReach !== null ? { leftReach: Number(leftReach.toFixed(1)) } : {}),
+      };
+      const why = leftReach !== null
+        ? `搭路支撑 (${dest.x}, ${dest.y}, ${dest.z}) 没放上,人已离开它 ${leftReach.toFixed(1)} 格`
+        : `搭路支撑 (${dest.x}, ${dest.y}, ${dest.z}) 三次未确认`;
+      // 撤的是谁的目标要说得出来:这一路与 executor/combat/反射共用同一本所有权账
+      dropOwnedGoal(bot, 'path-support', why, diag);
       diag?.write({
-        lane: 'skill', event: 'place-unconfirmed', durMs: Date.now() - startedAt,
-        msg: `放了 ${tries} 次,(${dest.x}, ${dest.y}, ${dest.z}) 回读`
-          + (want !== null && bot.blockAt(dest)?.name !== (before?.name ?? null)
-            ? `变成了${bot.blockAt(dest)?.name ?? '空气'},不是要放的 ${want}`
-            : `还是${before?.name ?? '空气'}`)
-          + (leftReach !== null ? `;人离开那一格 ${leftReach.toFixed(1)} 格,超出手长 ${PLACE_REACH},不再重发` : ''),
+        lane: 'skill', event: 'path-support-unconfirmed',
+        msg: `${why},已取消当前移动段`,
         data: {
-          at: { x: dest.x, y: dest.y, z: dest.z },
-          was: before?.name ?? null,
-          want, identityChecked: want !== null, now: bot.blockAt(dest)?.name ?? null,
-          feet: feet ? { x: Number(feet.x.toFixed(2)), y: Number(feet.y.toFixed(2)), z: Number(feet.z.toFixed(2)) } : null,
-          eyeDist: dist !== null ? Number(dist.toFixed(2)) : null,
-          sneak: (bot as unknown as { controlState?: Record<string, boolean> }).controlState?.sneak ?? null,
-          face: faceVector && typeof faceVector === 'object'
-            ? { x: (faceVector as { x: number }).x, y: (faceVector as { y: number }).y, z: (faceVector as { z: number }).z }
-            : null,
-          held: bot.heldItem?.name ?? null,
+          seq, generation: pathPlacement.flight.generation, was,
+          at: { x: dest.x, y: dest.y, z: dest.z }, leftReach,
         },
       });
-      // 保持 mineflayer 错误文本,供寻路器沿兼容的 catch 分支处理。
-      throw new Error(`No block has been placed : the block is still ${before?.name}`);
-    } finally { closeTemporaryScaffoldPlacement(supportProof); }
+    }
+    // 现场几何随案卷:拒放的规律(台架实测"越贴身越拒",脚下低一格 0%)要靠
+    // 人在哪、离目标多远、有没有潜行这几个数才能对上号,只有坐标断不了案
+    const feet = bot.entity?.position;
+    const dist = eyeDist();
+    diag?.write({
+      lane: 'skill', event: 'place-unconfirmed', durMs: Date.now() - startedAt,
+      msg: `放了 ${tries} 次,(${dest.x}, ${dest.y}, ${dest.z}) 回读`
+        + (want !== null && bot.blockAt(dest)?.name !== (before?.name ?? null)
+          ? `变成了${bot.blockAt(dest)?.name ?? '空气'},不是要放的 ${want}`
+          : `还是${before?.name ?? '空气'}`)
+        + (leftReach !== null ? `;人离开那一格 ${leftReach.toFixed(1)} 格,超出手长 ${PLACE_REACH},不再重发` : ''),
+      data: {
+        at: { x: dest.x, y: dest.y, z: dest.z },
+        was: before?.name ?? null,
+        want, identityChecked: want !== null, now: bot.blockAt(dest)?.name ?? null,
+        feet: feet ? { x: Number(feet.x.toFixed(2)), y: Number(feet.y.toFixed(2)), z: Number(feet.z.toFixed(2)) } : null,
+        eyeDist: dist !== null ? Number(dist.toFixed(2)) : null,
+        sneak: (bot as unknown as { controlState?: Record<string, boolean> }).controlState?.sneak ?? null,
+        face: faceVector && typeof faceVector === 'object'
+          ? { x: (faceVector as { x: number }).x, y: (faceVector as { y: number }).y, z: (faceVector as { z: number }).z }
+          : null,
+        held: bot.heldItem?.name ?? null,
+      },
+    });
+    // 保持 mineflayer 错误文本,供寻路器沿兼容的 catch 分支处理。
+    throw new Error(`No block has been placed : the block is still ${before?.name}`);
   }
 }
 
@@ -921,17 +873,7 @@ async function placeOnce(
   before: { type: number } | null,
   want: string | null,
 ): Promise<boolean> {
-  let looked = false;
-  if (hasPreparedTemporaryScaffoldPlacement(bot, dest)) {
-    // _genericPlace normally awaits lookAt internally. Move that same look before
-    // arming the proof, then skip it there: no awaited work remains before write.
-    const reference = referenceBlock as { position: DigBlock['position'] };
-    const face = faceVector as { x: number; y: number; z: number };
-    await bot.lookAt(reference.position.offset(.5 + face.x * .5, .5 + face.y * .5, .5 + face.z * .5));
-    armTemporaryScaffoldPlacement(bot, dest, want);
-    looked = true;
-  }
-  await bot._genericPlace(referenceBlock, faceVector, { swingArm: 'right', ...(looked ? { forceLook: 'ignore' } : {}) });
+  await bot._genericPlace(referenceBlock, faceVector, { swingArm: 'right' });
   return waitBlockChanged(bot, dest, before, PLACE_CONFIRM_MS, want);
 }
 
@@ -1031,9 +973,6 @@ function installConfirmedDig(bot: PatchedBot, log: Logger, diag?: MinecraftLog):
   }
   const origDig = bot.dig.bind(bot) as (b: DigBlock, f?: boolean | 'ignore', d?: unknown) => Promise<void>;
   const origUpdate = bot._updateBlockState.bind(bot);
-  let pathGeneration = 0;
-  bot.on('goal_updated', () => { pathGeneration += 1; });
-  bot.on('path_reset', () => { pathGeneration += 1; });
 
   /** 手上这一次挖掘;不在挖时为 null。mineflayer 本身也只允许同时挖一格。 */
   let digging: { key: string; before: { type: number; name: string } | null; confirmed: boolean } | null = null;
@@ -1055,30 +994,8 @@ function installConfirmedDig(bot: PatchedBot, log: Logger, diag?: MinecraftLog):
     digging.confirmed = true;
   });
 
-  const checkBreakPermission = (block: NonNullable<DigBlock>): void => {
-    const permission = bot.cortiBreakVerdict?.(block);
-    if (permission !== 'protected' && permission !== 'unknown') return;
-    const pos = block.position;
-    diag?.write({ lane: 'skill', event: 'dig-permission-blocked', incident: true,
-      msg: permission === 'protected' ? '服务端标记目标方块受保护，停止挖掘' : '目标区块的保护清单尚未同步，停止挖掘',
-      data: { at: { x: pos.x, y: pos.y, z: pos.z }, block: block.name, permission } });
-    throw new Error(permission === 'protected'
-      ? `服务端标记 (${pos.x}, ${pos.y}, ${pos.z}) 的${zhName(block.name)}受保护，未挖`
-      : `(${pos.x}, ${pos.y}, ${pos.z}) 的保护权限尚未同步，未挖`);
-  };
-
   bot.dig = (async (block: DigBlock, forceLook?: boolean | 'ignore', digFace?: unknown): Promise<void> => {
     const pos = block.position;
-    const pathAttempt = bot.pathfinder?.isMining?.() === true ? pathGeneration : null;
-    checkBreakPermission(block);
-    const protection = await bot.cortiProtectCheck?.('break', pos);
-    if (protection && protection.status !== 'allow_likely') {
-      throw new Error(`服务端挖掘保护预检 ${protection.status}: (${pos.x}, ${pos.y}, ${pos.z}) ${protection.reason}`);
-    }
-    if (pathAttempt !== null && pathAttempt !== pathGeneration) {
-      throw new Error(`寻路已重算，取消旧路线在 (${pos.x}, ${pos.y}, ${pos.z}) 的挖掘`);
-    }
-    checkBreakPermission(block);
     // 非水中悬空时，开挖前最多等 DIG_GROUND_WAIT_MS 毫秒落地，再按当刻姿态计算挖掘时长。
     // 超时仍照常开挖；水下不等待落地，保留水下速度惩罚。
     const airborne = (): boolean => {
@@ -1097,7 +1014,6 @@ function installConfirmedDig(bot: PatchedBot, log: Logger, diag?: MinecraftLog):
         });
       }
     }
-    assertTemporaryScaffoldDigSafe(bot, block);
     const before = bot.blockAt(pos);
     const digMs = bot.digTime(block);
     const budget = Number.isFinite(digMs)
@@ -1107,8 +1023,6 @@ function installConfirmedDig(bot: PatchedBot, log: Logger, diag?: MinecraftLog):
     const at = `(${pos.x}, ${pos.y}, ${pos.z})`;
     const was = before ? zhName(before.name) : '那一格';
     const startedAt = Date.now();
-    (bot as unknown as { cortiLastDigAttempt?: { at: number; x: number; y: number; z: number; type: number } })
-      .cortiLastDigAttempt = { at: startedAt, x: pos.x, y: pos.y, z: pos.z, type: block.type };
     digging = mine;
     try {
       await origDig(block, forceLook, digFace);
@@ -1116,14 +1030,12 @@ function installConfirmedDig(bot: PatchedBot, log: Logger, diag?: MinecraftLog):
       const localDone = Date.now();
       const deadline = localDone + budget;
       while (!mine.confirmed && !(before && changedAt(bot, pos, before))) {
-        checkBreakPermission(block);
         if (Date.now() >= deadline) {
           diag?.write({
-            lane: 'skill', event: 'dig-unconfirmed', durMs: Date.now() - startedAt, incident: true,
+            lane: 'skill', event: 'dig-unconfirmed', durMs: Date.now() - startedAt,
             msg: `等了 ${(budget / 1000).toFixed(1)} 秒,服务端没把 ${at} 的${was}挖掉`,
             data: { at: { x: pos.x, y: pos.y, z: pos.z }, was: before?.name ?? null, digMs, budgetMs: budget },
           });
-          (bot as unknown as { emit(event: string, block: DigBlock): void }).emit(DIG_UNCONFIRMED_EVENT, block);
           throw new Error(
             `服务端没认这一下:等了 ${(budget / 1000).toFixed(1)} 秒,${at} 还是${was}` +
             '(可能够不着、被保护,或者服务端那头还在自己补挖)',
@@ -1199,7 +1111,6 @@ function installConfirmedCraft(
   showTempo?: () => ShowTempo | null,
 ): void {
   bot.craft = async (recipe, count, craftingTable): Promise<void> => {
-    assertInventoryClicksReady(bot);
     const r = recipe as unknown as CraftRecipe;
     const times = Math.max(1, Number(count ?? 1));
     if (r.requiresTable && !craftingTable) {
@@ -1213,7 +1124,6 @@ function installConfirmedCraft(
     // 白等没人看);预算由这一整次 bot.craft 共享,times 大时后面的轮次自动恢复瞬时
     const show = new ShowPacer(r.requiresTable ? showTempo?.() ?? null : null);
     const startedAt = Date.now();
-    let failure: unknown;
     try {
       for (let i = 0; i < times; i++) {
         let window: WindowLike;
@@ -1235,36 +1145,16 @@ function installConfirmedCraft(
           (r.result.id === null ? '(她自己摆的格子)' : `(物品 #${r.result.id})`),
         data: { item: r.result.id, times, table: r.requiresTable },
       });
-    } catch (error) {
-      failure = error;
-      throw error;
     } finally {
       // 工作台窗口一关,格子里的材料由服务端退回背包;窗口 0 关不掉,只能自己拿回来,
       // 否则失败时摆进去的材料会一直不在背包清单里。腾空失败不能盖掉合成本身的错。
-      try {
-        if (inventoryClickState(bot).phase !== 'ready') {
-          const suffix = '材料和游标保留在当前窗口，等待服务端完整同步后再整理';
-          if (failure instanceof Error) failure.message += `；${suffix}`;
-          else assertInventoryClicksReady(bot);
-        } else if (opened) {
-          if (bot.currentWindow !== opened as unknown) throw new Error('合成窗口已被替换，原窗口材料未整理');
-          await stashCursor(bot, opened, null);
-          await show.beat('close');
-          bot.closeWindow(opened as never);
-        } else {
-          await clearGrid(bot, bot.inventory as unknown as WindowLike, trace);
-        }
-      } catch (cleanupError) {
-        if (failure instanceof Error && cleanupError instanceof Error) {
-          if (isInventoryClickError(cleanupError)) {
-            cleanupError.message = `${failure.message}；归还材料未完成：${cleanupError.message}`;
-            throw cleanupError;
-          }
-          failure.message += `；归还材料未完成：${cleanupError.message}`;
-        } else throw cleanupError;
-      } finally {
-        setTracing(-1);
+      if (opened) {
+        await show.beat('close');
+        bot.closeWindow(opened as never);
+      } else {
+        await clearGrid(bot, bot.inventory as unknown as WindowLike, trace).catch(() => undefined);
       }
+      setTracing(-1);
     }
   };
 }
@@ -1345,9 +1235,9 @@ async function craftOnce(
         const src = window.findInventoryItem(id, null, false);
         if (!src) throw new Error(`包里没有可用的${itemLabel(bot, id)}`);
         from = src.slot;
-        await click(bot, src.slot, 0, 0, window); // 左键拿起整摞
+        await click(bot, src.slot, 0, 0); // 左键拿起整摞
       }
-      await click(bot, dest, 1, 0, window); // 右键放一个进格子
+      await click(bot, dest, 1, 0); // 右键放一个进格子
       await show?.beat('click');
     }
     await stashCursor(bot, window, from, id); // 余下的放回原处,进下一种材料时光标是空的
@@ -1366,41 +1256,33 @@ async function craftOnce(
   }
 
   await show?.beat('result'); // 产出槽在摄像机画面上亮一拍再收
-  // Count capacity after placing ingredients: consuming the last ingredient can free a slot.
-  // The server's actual result also covers explicit grids and component-bearing products.
-  let room = 0;
-  const max = result.stackSize ?? bot.registry.items[result.type]?.stackSize ?? 64;
-  for (let slot = window.inventoryStart; slot < window.inventoryEnd; slot++) {
-    const item = window.slots[slot];
-    if (!item) room += max;
-    else if (sameInventoryStack(item, result)) room += Math.max(0, (item.stackSize ?? max) - item.count);
-  }
-  if (room < result.count) {
-    trace('output-no-room', '背包容量不足，未取出合成产物', { item: result.type, count: result.count, room });
-    throw new Error(`背包容量不足：${itemLabel(bot, result.type)}×${result.count} 只有 ${room} 个存放余量；产物尚未取出，先腾出空间`);
-  }
-  await click(bot, 0, 0, 0, window); // 拿起真产物;不伪造,changedSlots 才和服务端对得上
+  await click(bot, 0, 0, 0); // 拿起真产物;不伪造,changedSlots 才和服务端对得上
   if (!window.selectedItem) throw new Error('产物槽点了,产物没到手上');
-  await stashCursor(bot, window, null);
+
+  const merge = window.findItemRange(
+    window.inventoryStart, window.inventoryEnd, result.type, result.metadata, true, result.nbt,
+  );
+  const dest = merge ? merge.slot : window.firstEmptySlotRange(window.inventoryStart, window.inventoryEnd);
+  if (dest === null || dest === undefined) throw new Error('包满了,产物没地方放');
+  await click(bot, dest, 0, 0);
 }
 
 /**
- * 点击必须按服务端 stateId 顺序串行。Mineflayer 的 clickWindow 有时在本地槽位
- * 乐观更新后便 resolve；紧接着的第二包会带同一个旧 stateId，被服务端回滚整窗。
- * 合成格的 updateSlot:0 也可能永远不来，所以两种等待都必须有上限。
+ * 点一下就往下走。
+ *
+ * `bot.clickWindow` 对合成格的点击会去等 `updateSlot:0`,**那个等待没有超时**——
+ * 配方在服务端没配上时它就永远挂着。原版客户端发点击本来也不等回话,这里发出去
+ * 之后最多等 CLICK_ACK_MS 就继续。
  */
-export async function clickCraftWindow(bot: Bot, slot: number, mouseButton: number, mode: number): Promise<void> {
-  await clickInventoryConfirmed(bot, slot, mouseButton, mode);
+async function click(bot: Bot, slot: number, mouseButton: number, mode: number): Promise<void> {
+  const pending = bot.clickWindow(slot, mouseButton, mode);
+  pending.catch(() => undefined); // 被放弃的那次不能变成未处理拒绝
+  await Promise.race([pending, sleep(CLICK_ACK_MS)]);
 }
 
-const click = async (bot: Bot, slot: number, button: number, mode: number, window: WindowLike): Promise<void> => {
-  await clickInventoryConfirmed(bot, slot, button, mode, window as unknown as NonNullable<Bot['currentWindow']>);
-};
-
 /**
- * 将光标物品放回来源格、同类未满堆叠或背包空格，防止后续点击按交换物品处理。
- * 满包不等于没地方放：服务器回灌把来源格占上时，同类堆叠仍可接住余料。
- * 仅当光标材质符合 expectedType 时可回空的来源格，避免回灌换位后混入其他材料。
+ * 将光标物品放回来源格或背包空格，防止后续点击按交换物品处理；无处可放时报错。
+ * 仅当光标材质符合 expectedType 时可回来源格，避免回灌换位后混入其他材料。
  */
 async function stashCursor(
   bot: Bot, window: WindowLike, preferred: number | null, expectedType?: number,
@@ -1408,27 +1290,16 @@ async function stashCursor(
   if (!window.selectedItem) return;
   const backOk = expectedType === undefined || window.selectedItem.type === expectedType;
   if (preferred !== null && backOk && !window.slots[preferred]) {
-    await click(bot, preferred, 0, 0, window);
+    await click(bot, preferred, 0, 0);
     if (!window.selectedItem) return;
   }
-  // One result can span several partial stacks; each click is server-confirmed.
-  for (let slot = window.inventoryStart; slot < window.inventoryEnd; slot++) {
-    const held = window.selectedItem;
-    const item = window.slots[slot];
-    if (!held) return;
-    const max = item?.stackSize ?? (item ? bot.registry.items[item.type]?.stackSize : undefined) ?? 64;
-    if (item && item.count < max && sameInventoryStack(item, held)) {
-      await click(bot, slot, 0, 0, window);
-    }
-  }
-  if (!window.selectedItem) return;
   const empty = window.firstEmptySlotRange(window.inventoryStart, window.inventoryEnd);
   if (empty !== null && empty !== undefined) {
-    await click(bot, empty, 0, 0, window);
+    await click(bot, empty, 0, 0);
     if (!window.selectedItem) return;
   }
-  const stillHeld = window.selectedItem;
-  throw new Error(`包满了,鼠标光标还持有${itemLabel(bot, stillHeld.type)}×${stillHeld.count},放不回背包`);
+  const held = window.selectedItem;
+  throw new Error(`包满了,手上还攥着${itemLabel(bot, held.type)}×${held.count},放不回背包`);
 }
 
 /**
@@ -1443,13 +1314,11 @@ async function clearGrid(
   trace: (event: string, msg: string, data?: Record<string, unknown>) => void,
 ): Promise<void> {
   const width = gridWidth(window);
-  // A failed pickup can leave the cursor occupied while every crafting cell is empty.
-  await stashCursor(bot, window, null);
   for (let slot = 1; slot <= width * width; slot++) {
     const left = window.slots[slot];
     if (!left) continue;
     await stashCursor(bot, window, null);
-    await click(bot, slot, 0, 0, window);
+    await click(bot, slot, 0, 0);
     await stashCursor(bot, window, null);
     trace('grid-clear', `合成格 ${slot} 里还剩着上次的物品 #${left.type}×${left.count},先拿出来`, {
       slot, item: left.type, count: left.count,

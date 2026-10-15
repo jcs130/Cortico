@@ -1,7 +1,6 @@
 # 找一个进程名下的主窗口:有没有出来,以及改标题。
 #
-# 认哪扇窗只认 OwnerPid 或它的子进程:Windows 的 java 启动器可能再拉一个
-# java.exe,游戏窗口归子进程。进程树归属仍是唯一无歧义的凭据。
+# 认哪扇窗只认 OwnerPid:调用方托管着那个进程,窗口归属是唯一无歧义的凭据。
 # 没有按标题找的路——同一台机器上常有第二份同名同标题的客户端(人自己玩的那份)。
 #
 # 用法:
@@ -40,31 +39,11 @@ function Write-Result($obj) {
 # 一个进程可能有多扇窗(闪屏、对话框),取面积最大的那扇。
 # 一扇都没有 = 这个客户端还没就绪,由调用方接着等,不去别处找。
 # 参数不能叫 $pid:$PID 是 PowerShell 当前进程号,只读。
-function Owner-ProcessIds([int]$targetPid) {
-  $owners = [System.Collections.Generic.HashSet[int]]::new()
-  [void]$owners.Add($targetPid)
-  try {
-    $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
-    do {
-      $added = $false
-      foreach ($process in $processes) {
-        if ($owners.Contains([int]$process.ParentProcessId) -and $owners.Add([int]$process.ProcessId)) {
-          $added = $true
-        }
-      }
-    } while ($added)
-  } catch {
-    # 进程树暂时读不到时仍可按启动进程本身找窗口。
-  }
-  return ,$owners
-}
-
 function Find-OwnerWindow([int]$targetPid) {
-  $script:OwnerPids = Owner-ProcessIds $targetPid
+  $script:OwnerPid = $targetPid
   $script:best = [IntPtr]::Zero
   $script:bestArea = 0
   $script:bestTitle = ''
-  $script:bestPid = 0
   $cb = [MinecraftWin+EnumProc] {
     param($hWnd, $lParam)
     if (-not [MinecraftWin]::IsWindowVisible($hWnd)) { return $true }
@@ -76,7 +55,7 @@ function Find-OwnerWindow([int]$targetPid) {
     $title = $sb.ToString()
     $wpid = 0
     [void][MinecraftWin]::GetWindowThreadProcessId($hWnd, [ref]$wpid)
-    if (-not $script:OwnerPids.Contains([int]$wpid)) { return $true }
+    if ($wpid -ne $script:OwnerPid) { return $true }
     $r = New-Object MinecraftWin+RECT
     [void][MinecraftWin]::GetWindowRect($hWnd, [ref]$r)
     $area = ($r.Right - $r.Left) * ($r.Bottom - $r.Top)
@@ -84,12 +63,11 @@ function Find-OwnerWindow([int]$targetPid) {
       $script:bestArea = $area
       $script:best = $hWnd
       $script:bestTitle = $title
-      $script:bestPid = $wpid
     }
     return $true
   }
   [void][MinecraftWin]::EnumWindows($cb, [IntPtr]::Zero)
-  return @{ hwnd = $script:best; title = $script:bestTitle; pid = $script:bestPid }
+  return @{ hwnd = $script:best; title = $script:bestTitle }
 }
 
 try {
@@ -103,11 +81,11 @@ try {
 
   if ($SetTitle) {
     [void][MinecraftWin]::SetWindowText($best, $SetTitle)
-    Write-Result @{ ok = $true; hwnd = [int64]$best; pid = $found.pid; title = $SetTitle }
+    Write-Result @{ ok = $true; hwnd = [int64]$best; title = $SetTitle }
     exit 0
   }
 
-  Write-Result @{ ok = $true; hwnd = [int64]$best; pid = $found.pid; title = $found.title }
+  Write-Result @{ ok = $true; hwnd = [int64]$best; title = $found.title }
 } catch {
   Write-Result @{ ok = $false; error = $_.Exception.Message }
 }

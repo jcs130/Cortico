@@ -1,5 +1,4 @@
 import type { ConfigGroup } from '../../core/types.ts';
-import type { CombatDecisionConfig } from './combat-decision.ts';
 import type { Language } from '../../core/language.ts';
 import { text } from './strings.ts';
 
@@ -13,24 +12,14 @@ export const MINECRAFT_DEFAULTS = {
   port: 25565,
   /** 游戏内用户名(offline 模式直接生效) */
   username: 'corti',
-  /** Private scoped account file; only encrypted credential references are read by the client. */
-  loginConfigFile: '',
   /**
    * 全链路的版本约定:服务器(Paper)、观察者客户端(Fabric+SpectatorPlus)、
    * mineflayer 协议必须使用同一版本。1.20.6 是 SpectatorPlus(观察者附身时补渲
    * HUD/手臂/手持)客户端模组支持的 1.20.x 最高版;1.20.5+ 需要 Java 21。
    */
   version: '1.20.6',
-  /** 网页画面端口(OBS 浏览器源 + 画面源之一);0=不开 */
+  /** prismarine-viewer 网页端口(OBS 浏览器源 + 画面源之一);0=不开 */
   viewerPort: 7792,
-  /** 现代画面资源包根目录；空 = 使用自带 prismarine-viewer */
-  viewerAssetsDir: '',
-  /** 网页画面中语音气泡显示的称呼；空 = 游戏内用户名 */
-  viewerSpeakerName: '',
-  /** Omitted mc_visual.background follows this mode; explicit arguments take precedence. */
-  visual: { background: false },
-  /** 普通玩家可用的脱困传送指令；空值沿用受管服务器的控制台传送。 */
-  escapeCommand: '',
   /** 挂载面板启停的本地服务器(空 = 未配置,按钮会提示去配置) */
   local: {
     /** World 启动时拉起本地服务器并连接;运行中由挂载面板启停。 */
@@ -67,35 +56,6 @@ export const MINECRAFT_DEFAULTS = {
   precheck: true,
   /** 受理回执附上相同任务的上次终态。 */
   priorOutcome: true,
-  /** 反复成功任务的可选模型失效 fallback；只作用于列出的目标技能。 */
-  repeatSuccessFallback: { enabled: false, skillsCsv: '', maxSuccesses: 3, windowMinutes: 15 },
-  /** 任务受阻后可选的快速辅助判断；只给建议，不执行动作。 */
-  decision: {
-    enabled: false,
-    endpoint: '',
-    timeoutMs: 500,
-    minIntervalMs: 5_000,
-    minConfidence: 0.75,
-  },
-  combatDecision: {
-    enabled: false, mode: 'shadow' as const, endpoint: '', timeoutMs: 250,
-    minIntervalMs: 750, minConfidence: 0.75, maxAgeMs: 500, maxEntities: 12, maxCandidates: 2,
-    allowMovement: false, allowEngage: false, engageScope: 'party' as const,
-    movementStallMs: 1_500,
-  },
-  /** 空闲时授权的小动作；占用身体的任务与事件可随时取消。 */
-  idle: {
-    enabled: false,
-    selector: 'random' as 'random' | 'decision',
-    decisionPolicy: 'choice' as 'choice' | 'sample',
-    endpoint: '',
-    timeoutMs: 350,
-    minIdleMs: 6_000,
-    minIntervalMs: 12_000,
-    maxIntervalMs: 28_000,
-    afterArrival: false,
-    allowMovement: false,
-  },
   reflex: {
     /** 受击反击 */
     fightBack: true,
@@ -224,13 +184,8 @@ export interface MinecraftConfigSection {
   host: string;
   port: number;
   username: string;
-  loginConfigFile: string;
   version: string;
   viewerPort: number;
-  viewerAssetsDir: string;
-  viewerSpeakerName: string;
-  visual: { background: boolean };
-  escapeCommand: string;
   local: {
     startWithWorld: boolean;
     serverDir: string;
@@ -245,19 +200,6 @@ export interface MinecraftConfigSection {
   precheck: boolean;
   /** 受理回执附相同任务的上次终态；默认开启。 */
   priorOutcome: boolean;
-  /** 达到窗口内成功次数后，暂缓同目标技能的新 mc_do；默认关闭。 */
-  repeatSuccessFallback: {
-    enabled: boolean; skillsCsv: string; maxSuccesses: number; windowMinutes: number;
-  };
-  /** 受阻任务的异步辅助判断。 */
-  decision: { enabled: boolean; endpoint: string; timeoutMs: number; minIntervalMs: number; minConfidence?: number };
-  combatDecision?: CombatDecisionConfig;
-  idle: {
-    enabled: boolean; selector: 'random' | 'decision'; endpoint: string; timeoutMs: number;
-    decisionPolicy?: 'choice' | 'sample';
-    afterArrival?: boolean;
-    minIdleMs: number; minIntervalMs: number; maxIntervalMs: number; allowMovement: boolean;
-  };
   reflex: {
     fightBack: boolean; fleeHealth: number;
     reactCooldownSec: number; antiDrown: boolean; antiLava: boolean;
@@ -302,110 +244,6 @@ export function minecraftConfigGroup(language: Language): ConfigGroup {
       title: t.title,
       description: t.description,
       properties: {
-'worlds.minecraft.loginConfigFile': { type: 'string', title: text(language).compat['loginConfigFile.title'], 'x-hot': true,
-        description: text(language).compat['loginConfigFile.description'],
-        'x-path': { kind: 'file', extensions: ['.json'] } },
-'worlds.minecraft.viewerAssetsDir': {
-        type: 'string', title: text(language).compat['viewerAssetsDir.title'], 'x-hot': false,
-        description: text(language).compat['viewerAssetsDir.description'],
-        'x-path': { kind: 'directory' },
-      },
-'worlds.minecraft.viewerSpeakerName': {
-        type: 'string', title: text(language).compat['viewerSpeakerName.title'], 'x-hot': false,
-        description: text(language).compat['viewerSpeakerName.description'],
-      },
-'worlds.minecraft.visual.background': {
-        type: 'boolean', title: text(language).compat['visual.background.title'], 'x-hot': true,
-        description: text(language).compat['visual.background.description'],
-      },
-'worlds.minecraft.escapeCommand': {
-        type: 'string', title: text(language).compat['escapeCommand.title'], 'x-hot': false,
-        description: text(language).compat['escapeCommand.description'],
-      },
-'worlds.minecraft.repeatSuccessFallback.enabled': {
-        type: 'boolean', title: text(language).compat['repeatSuccessFallback.enabled.title'], 'x-hot': true,
-        description: text(language).compat['repeatSuccessFallback.enabled.description'],
-      },
-'worlds.minecraft.repeatSuccessFallback.skillsCsv': {
-        type: 'string',
-        title: text(language).compat['repeatSuccessFallback.skillsCsv.title'], 'x-hot': true,
-        description: text(language).compat['repeatSuccessFallback.skillsCsv.description'],
-      },
-'worlds.minecraft.repeatSuccessFallback.maxSuccesses': {
-        type: 'integer', title: text(language).compat['repeatSuccessFallback.maxSuccesses.title'], minimum: 2, maximum: 20, 'x-hot': true,
-        description: text(language).compat['repeatSuccessFallback.maxSuccesses.description'],
-      },
-'worlds.minecraft.repeatSuccessFallback.windowMinutes': {
-        type: 'integer', title: text(language).compat['repeatSuccessFallback.windowMinutes.title'], minimum: 1, maximum: 60,
-        'x-suffix': text(language).compat['repeatSuccessFallback.windowMinutes.x-suffix'], 'x-hot': true,
-      },
-'worlds.minecraft.decision.enabled': {
-        type: 'boolean', title: text(language).compat['decision.enabled.title'], 'x-hot': true,
-        description: text(language).compat['decision.enabled.description'],
-      },
-'worlds.minecraft.decision.endpoint': {
-        type: 'string', title: text(language).compat['decision.endpoint.title'], 'x-hot': true,
-        description: text(language).compat['decision.endpoint.description'],
-      },
-'worlds.minecraft.decision.timeoutMs': {
-        type: 'integer', title: text(language).compat['decision.timeoutMs.title'], minimum: 50, maximum: 5000, 'x-suffix': 'ms', 'x-hot': true,
-      },
-'worlds.minecraft.decision.minIntervalMs': {
-        type: 'integer', title: text(language).compat['decision.minIntervalMs.title'], minimum: 0, maximum: 60000, 'x-suffix': 'ms', 'x-hot': true,
-      },
-'worlds.minecraft.decision.minConfidence': {
-        type: 'number', title: text(language).compat['decision.minConfidence.title'], minimum: 0, maximum: 1, 'x-hot': true,
-        description: text(language).compat['decision.minConfidence.description'],
-      },
-'worlds.minecraft.combatDecision.enabled': {
-        type: 'boolean', title: text(language).compat['combatDecision.enabled.title'], 'x-hot': true,
-        description: text(language).compat['combatDecision.enabled.description'],
-      },
-'worlds.minecraft.combatDecision.mode': {
-        type: 'string', enum: ['shadow', 'act'], title: text(language).compat['combatDecision.mode.title'], 'x-hot': true,
-        description: text(language).compat['combatDecision.mode.description'],
-      },
-'worlds.minecraft.combatDecision.endpoint': {
-        type: 'string', title: text(language).compat['combatDecision.endpoint.title'], 'x-hot': true,
-        description: text(language).compat['combatDecision.endpoint.description'],
-      },
-'worlds.minecraft.combatDecision.timeoutMs': {
-        type: 'integer', title: text(language).compat['combatDecision.timeoutMs.title'], minimum: 50, maximum: 2000, 'x-suffix': 'ms', 'x-hot': true,
-      },
-'worlds.minecraft.combatDecision.minIntervalMs': {
-        type: 'integer', title: text(language).compat['combatDecision.minIntervalMs.title'], minimum: 250, maximum: 10000, 'x-suffix': 'ms', 'x-hot': true,
-      },
-'worlds.minecraft.combatDecision.minConfidence': {
-        type: 'number', title: text(language).compat['combatDecision.minConfidence.title'], minimum: 0, maximum: 1, 'x-hot': true,
-      },
-'worlds.minecraft.combatDecision.maxAgeMs': {
-        type: 'integer', title: text(language).compat['combatDecision.maxAgeMs.title'], minimum: 50, maximum: 2000, 'x-suffix': 'ms', 'x-hot': true,
-        description: text(language).compat['combatDecision.maxAgeMs.description'],
-      },
-'worlds.minecraft.combatDecision.maxEntities': {
-        type: 'integer', title: text(language).compat['combatDecision.maxEntities.title'], minimum: 4, maximum: 64, 'x-hot': true,
-        description: text(language).compat['combatDecision.maxEntities.description'],
-      },
-'worlds.minecraft.combatDecision.maxCandidates': {
-        type: 'integer', title: text(language).compat['combatDecision.maxCandidates.title'], minimum: 1, maximum: 8, 'x-hot': true,
-        description: text(language).compat['combatDecision.maxCandidates.description'],
-      },
-'worlds.minecraft.combatDecision.allowMovement': {
-        type: 'boolean', title: text(language).compat['combatDecision.allowMovement.title'], 'x-hot': true,
-        description: text(language).compat['combatDecision.allowMovement.description'],
-      },
-'worlds.minecraft.combatDecision.allowEngage': {
-        type: 'boolean', title: text(language).compat['combatDecision.allowEngage.title'], 'x-hot': true,
-        description: text(language).compat['combatDecision.allowEngage.description'],
-      },
-'worlds.minecraft.combatDecision.engageScope': {
-        type: 'string', enum: ['party', 'hostile'], title: text(language).compat['combatDecision.engageScope.title'], 'x-hot': true,
-        description: text(language).compat['combatDecision.engageScope.description'],
-      },
-'worlds.minecraft.combatDecision.movementStallMs': {
-        type: 'integer', title: text(language).compat['combatDecision.movementStallMs.title'], minimum: 500, maximum: 10000, 'x-suffix': 'ms', 'x-hot': true,
-        description: text(language).compat['combatDecision.movementStallMs.description'],
-      },
         'worlds.minecraft.serverMode': {
           type: 'string', title: t.serverModeTitle, enum: [...MINECRAFT_SERVER_MODES], 'x-hot': true,
           description: t.serverModeDescription,
@@ -461,42 +299,6 @@ export function minecraftRhythmConfigGroup(language: Language): ConfigGroup {
       title: t.title,
       description: t.description,
       properties: {
-'worlds.minecraft.idle.enabled': {
-        type: 'boolean', title: text(language).compat['idle.enabled.title'], 'x-hot': true,
-        description: text(language).compat['idle.enabled.description'],
-      },
-'worlds.minecraft.idle.selector': {
-        type: 'string', enum: ['random', 'decision'], title: text(language).compat['idle.selector.title'], 'x-hot': true,
-        description: text(language).compat['idle.selector.description'],
-      },
-'worlds.minecraft.idle.afterArrival': {
-        type: 'boolean', title: text(language).compat['idle.afterArrival.title'], 'x-hot': true,
-        description: text(language).compat['idle.afterArrival.description'],
-      },
-'worlds.minecraft.idle.endpoint': {
-        type: 'string', title: text(language).compat['idle.endpoint.title'], 'x-hot': true,
-        description: text(language).compat['idle.endpoint.description'],
-      },
-'worlds.minecraft.idle.decisionPolicy': {
-        type: 'string', enum: ['choice', 'sample'], title: text(language).compat['idle.decisionPolicy.title'], 'x-hot': true,
-        description: text(language).compat['idle.decisionPolicy.description'],
-      },
-'worlds.minecraft.idle.timeoutMs': {
-        type: 'integer', title: text(language).compat['idle.timeoutMs.title'], minimum: 50, maximum: 2000, 'x-suffix': 'ms', 'x-hot': true,
-      },
-'worlds.minecraft.idle.minIdleMs': {
-        type: 'integer', title: text(language).compat['idle.minIdleMs.title'], minimum: 1000, maximum: 60000, 'x-suffix': 'ms', 'x-hot': true,
-      },
-'worlds.minecraft.idle.minIntervalMs': {
-        type: 'integer', title: text(language).compat['idle.minIntervalMs.title'], minimum: 5000, maximum: 120000, 'x-suffix': 'ms', 'x-hot': true,
-      },
-'worlds.minecraft.idle.maxIntervalMs': {
-        type: 'integer', title: text(language).compat['idle.maxIntervalMs.title'], minimum: 5000, maximum: 300000, 'x-suffix': 'ms', 'x-hot': true,
-      },
-'worlds.minecraft.idle.allowMovement': {
-        type: 'boolean', title: text(language).compat['idle.allowMovement.title'], 'x-hot': true,
-        description: text(language).compat['idle.allowMovement.description'],
-      },
         'worlds.minecraft.world.tickSec': {
           type: 'integer', title: t.tickSecTitle, minimum: 5, maximum: 300, 'x-suffix': 's', 'x-hot': true,
         },
