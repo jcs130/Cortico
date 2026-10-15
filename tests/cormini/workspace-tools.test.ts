@@ -236,6 +236,14 @@ describe('glob_files:按名找,最近改过的在前', () => {
 });
 
 describe('grep_files:按内容搜', () => {
+  it('遵从调用方取消信号，不把中止的检索报告成无匹配', async () => {
+    put('notes/a.md', '目标');
+    const controller = new AbortController();
+    controller.abort(new Error('caller stopped search'));
+    const tool = p.declareSessions()[0].tools().find(t => t.name === 'grep_files')!;
+    await expect(tool.handler({ pattern: '目标' }, { role: 'main', log: nullLogger(), signal: controller.signal }))
+      .rejects.toThrow('caller stopped search');
+  });
   beforeEach(() => {
     put('notes/a.md', '第一行 铃兰\n第二行\n第三行 铃兰花\n');
     put('notes/b.md', '没有\n');

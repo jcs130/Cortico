@@ -1,4 +1,4 @@
-<!-- Owner: bots/cormini/index.ts -->
+<!-- Owner: bots/cormini/index.ts, bots/cormini/persona/memory.ts, bots/cormini/persona/workspaceTools.ts -->
 
 # bots/cormini
 
@@ -32,6 +32,8 @@ expire with their session and are excluded from the next note.
   listing), `glob_files` (by name pattern) and `grep_files` (by content); nothing else
   survives a context handoff. The file listing is part of the system prefix, so the bot
   always knows what it has.
+  Content searches read files asynchronously and yield during line scanning so other events
+  can be processed. Cancellation aborts the search without reporting a complete match count.
 - **The constitution is the prefix.** `persona/CONSTITUTION.seed.md` initializes
   `workspace/CONSTITUTION.md` on first run; the workspace copy is loaded verbatim on every
   session. Edits by hand or by the bot take effect at the next session start.

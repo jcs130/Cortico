@@ -6,6 +6,8 @@ import {
   appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync,
   renameSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs';
+import { readFile, readdir, stat } from 'node:fs/promises';
+import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import { dirname, isAbsolute, join, normalize as pathNormalize, relative, resolve, sep } from 'node:path';
 import { MEM_SCHEME, mimeOfHandle } from 'cortico/core/blobs.ts';
 import type { BlobStore } from 'cortico/core/types.ts';
@@ -105,6 +107,18 @@ function walkFilesAbs(dir: string, prefix: string): string[] {
     else out.push(rel);
   }
   return out;
+}
+
+async function* walkFilesAsync(dir: string, prefix: string, signal?: AbortSignal): AsyncGenerator<string> {
+  signal?.throwIfAborted();
+  for (const name of (await readdir(dir)).sort()) {
+    signal?.throwIfAborted();
+    if (name.startsWith('.')) continue;
+    const abs = join(dir, name);
+    const rel = prefix ? `${prefix}/${name}` : name;
+    if ((await stat(abs)).isDirectory()) yield* walkFilesAsync(abs, rel, signal);
+    else yield rel;
+  }
 }
 
 /** 目录项排序:目录在前,同类按名。树与 listDir 共用这一条。 */
@@ -459,5 +473,39 @@ export class GitWorkspaceMemory {
       out.push({ path: f, lines, hits });
     }
     return out;
+  }
+
+  /** 异步遍历和读取，逐文件交回相同的检索结果；行扫描定期让出事件循环，取消时不返回完整计数。 */
+  async *grepAsync(opts: { match: (line: string) => boolean; path?: string; filter?: RegExp | null;
+    read?: (path: string) => string | null; signal?: AbortSignal }): AsyncGenerator<GrepFileHit> {
+    const { signal } = opts;
+    signal?.throwIfAborted();
+    const abs = this.insideWorkspace(opts.path || '.');
+    const rel = relative(this.memoryDir, abs).split(sep).join('/');
+    const files = (await stat(abs)).isDirectory() ? walkFilesAsync(abs, rel, signal) : [rel];
+    for await (const f of files) {
+      signal?.throwIfAborted();
+      if (opts.filter && !opts.filter.test(f)) continue;
+      if (f.split('/').some((seg) => seg.includes('.tmp-'))) continue;
+      await yieldToEventLoop(undefined, { signal });
+      const virtual = opts.read?.(f);
+      let buf: Buffer;
+      try {
+        buf = virtual == null ? await readFile(join(this.memoryDir, f), { signal }) : Buffer.from(virtual);
+      } catch {
+        signal?.throwIfAborted();
+        continue;
+      }
+      signal?.throwIfAborted();
+      if (buf.includes(0)) continue;
+      const lines = buf.toString('utf8').split(/\r?\n/);
+      const hits: number[] = [];
+      for (let i = 0; i < lines.length; i++) {
+        if (i > 0 && i % 2048 === 0) await yieldToEventLoop(undefined, { signal });
+        if (opts.match(lines[i]!)) hits.push(i);
+      }
+      signal?.throwIfAborted();
+      if (hits.length) yield { path: f, lines, hits };
+    }
   }
 }

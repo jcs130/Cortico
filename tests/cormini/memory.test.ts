@@ -3,7 +3,13 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { GitWorkspaceMemory, WorkspaceError } from '../../bots/cormini/persona/memory.ts';
+import { GitWorkspaceMemory, WorkspaceError, type GrepFileHit } from '../../bots/cormini/persona/memory.ts';
+
+async function collect(hits: AsyncIterable<GrepFileHit>): Promise<GrepFileHit[]> {
+  const out: GrepFileHit[] = [];
+  for await (const hit of hits) out.push(hit);
+  return out;
+}
 
 describe('工作区记忆的磁盘底层', () => {
   let dir: string;
@@ -164,6 +170,49 @@ describe('工作区记忆的磁盘底层', () => {
     expect(m.globFiles('*.md').sort()).toEqual(['note/a.md', 'note/deep/c.md']);
     expect(m.globFiles('*.md', 'note/deep')).toEqual(['note/deep/c.md']);
     expect(m.globFiles('*.json')).toEqual([]);
+  });
+
+  it('异步检索保留顺序、虚拟文件、过滤、行号和二进制排除', async () => {
+    m.writeFileAtomic('note/a.md', '原文\r\n目标\r\n');
+    m.writeFileAtomic('note/playbook/b.md', '目标\n第二行\n目标');
+    m.writeFileAtomic('people/c.md', '目标');
+    writeFileSync(join(dir, 'note', 'binary.md'), Buffer.from('目标\0目标'));
+    writeFileSync(join(dir, 'note', '.hidden.md'), '目标');
+    writeFileSync(join(dir, 'note', 'a.md.tmp-write'), '目标');
+    const opts = { match: (line: string) => line.includes('目标'), filter: /^note\//,
+      read: (path: string) => path === 'note/a.md' ? '虚拟\n目标一\n目标二' : null };
+    expect(await collect(m.grepAsync(opts))).toEqual(m.grep(opts));
+    expect(await collect(m.grepAsync({ ...opts, path: 'note/playbook' })))
+      .toEqual(m.grep({ ...opts, path: 'note/playbook' }));
+    expect(await collect(m.grepAsync({ ...opts, path: 'note/a.md' })))
+      .toEqual(m.grep({ ...opts, path: 'note/a.md' }));
+    await expect(collect(m.grepAsync({ ...opts, path: '../escape' }))).rejects.toThrow(/escapes workspace/);
+  });
+
+  it('扫描单个长文件期间仍处理事件循环回调', async () => {
+    const count = 20_000;
+    m.writeFileAtomic('note/long.md', '目标\n'.repeat(count));
+    let scanned = 0;
+    let servicedAt = -1;
+    const hits = await collect(m.grepAsync({ path: 'note/long.md', match: line => {
+      if (++scanned === 1) setImmediate(() => { servicedAt = scanned; });
+      return line === '目标';
+    } }));
+    expect(servicedAt).toBeGreaterThan(0);
+    expect(servicedAt).toBeLessThan(count);
+    expect(hits[0].hits).toHaveLength(count);
+  });
+
+  it('取消中断行扫描且不交回看似完整的结果', async () => {
+    m.writeFileAtomic('note/long.md', '目标\n'.repeat(20_000));
+    const controller = new AbortController();
+    let scanned = 0;
+    await expect(collect(m.grepAsync({ path: 'note/long.md', signal: controller.signal, match: () => {
+      if (++scanned === 1) setImmediate(() => controller.abort(new Error('search cancelled')));
+      return true;
+    } }))).rejects.toThrow();
+    expect(scanned).toBeLessThan(20_000);
+    await expect(collect(m.grepAsync({ match: () => true, signal: controller.signal }))).rejects.toThrow('search cancelled');
   });
 
   it('grep 逐行判定,交回整份行表与命中行号;可只搜某个文件', () => {

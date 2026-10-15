@@ -377,7 +377,8 @@ function grepTool(host: WorkspaceHost): ToolDef {
       },
       required: ['pattern'],
     },
-    handler: async (args) => {
+    handler: async (args, ctx) => {
+      ctx.signal?.throwIfAborted();
       const pattern = String(args.pattern ?? '');
       if (!pattern) return '[grep failed] pattern 不能为空';
       let re: RegExp;
@@ -405,8 +406,8 @@ function grepTool(host: WorkspaceHost): ToolDef {
       let matchedFiles = 0;
       const out: string[] = [];
       let shown = 0;
-      for (const hit of host.memory.grep({ match: (l) => re.test(l), path: where, filter: globFilter,
-        read: path => host.readOverride(path) })) {
+      for await (const hit of host.memory.grepAsync({ match: (l) => re.test(l), path: where, filter: globFilter,
+        read: path => host.readOverride(path), signal: ctx.signal })) {
         const { path: f, lines, hits } = hit;
         matchedFiles++;
         total += hits.length;
