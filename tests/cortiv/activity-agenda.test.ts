@@ -187,6 +187,74 @@ describe('persistent Persona activity agenda', () => {
       doneWhen: plan().items[1].doneWhen, sourceCapturedAt: stamp });
     expect(restored.planningReadout()).not.toContain(plan().items[1].why);
   });
+  it('corrects completion criteria with dated history while preserving the objective and progress', () => {
+    const { dir } = rig(); let at = now();
+    const agenda = new ActivityAgenda(dir, () => at); adopt(agenda);
+    agenda.operate({ operation: 'focus', id: 'river' });
+    const original = agenda.state().items.find(item => item.id === 'river')!;
+    const revision = agenda.revision();
+    agenda.propose(JSON.stringify(plan()), revision, stamp);
+    at += 60_000;
+    const doneWhen = '按已核验的区域记录地点与路线，现场确认后再结案';
+    agenda.operate({ operation: 'update', id: 'river', expected_revision: revision, doneWhen,
+      note: '最新地点回执订正原先混用区域的验收条件' });
+    const restored = new ActivityAgenda(dir, () => at);
+    const corrected = JSON.parse(restored.operate({ operation: 'read', id: 'river' })).items[0];
+    expect(corrected).toMatchObject({ ...original, doneWhen, status: 'active',
+      doneWhenUpdatedAt: new Date(at).toISOString(),
+      updatedAt: new Date(at).toISOString(), note: '最新地点回执订正原先混用区域的验收条件',
+      doneWhenHistory: [{ doneWhen: original.doneWhen, sourceAt: stamp, correctedAt: new Date(at).toISOString(),
+        correctionNote: '最新地点回执订正原先混用区域的验收条件' }] });
+    expect(restored.state().proposal).toBeNull();
+    const compact = JSON.parse(restored.planningReadout()).items.find((item: { id: string }) => item.id === 'river');
+    expect(compact).toMatchObject({ doneWhen, doneWhenUpdatedAt: corrected.doneWhenUpdatedAt, status: original.status });
+    expect(compact).not.toHaveProperty('doneWhenHistory');
+    expect(restored.planningReadout()).not.toContain(original.doneWhen);
+    expect(JSON.parse(restored.operate({ operation: 'read' })).items.find((item: { id: string }) => item.id === 'river'))
+      .not.toHaveProperty('doneWhenHistory');
+    expect(restored.summary()).toContain(doneWhen);
+    expect(restored.summary()).not.toContain(original.doneWhen);
+    restored.propose(JSON.stringify(plan()), revision, stamp);
+    expect(restored.state().proposal).toBeNull();
+    at += 60_000;
+    restored.operate({ operation: 'update', id: 'river', expected_revision: restored.revision(),
+      doneWhen: '地点与路线记录完成并经现场复核', note: '新增路线证据订正验收范围' });
+    const twice = JSON.parse(restored.operate({ operation: 'read', id: 'river' })).items[0];
+    expect(twice.doneWhenHistory[1]).toMatchObject({ doneWhen, sourceAt: corrected.doneWhenUpdatedAt });
+    expect(twice.sourceCapturedAt).toBe(stamp);
+  });
+  it('rejects stale, mixed, closed and malformed criterion corrections without writing progress', () => {
+    const { agenda, dir } = rig(); adopt(agenda);
+    const input = { operation: 'update', id: 'river', expected_revision: agenda.revision(),
+      doneWhen: '订正后的验收条件', note: '新的现场回执说明原条件不适用' };
+    const before = readFileSync(join(dir, AGENDA_FILE), 'utf8');
+    for (const change of [{ expected_revision: undefined }, { expected_revision: agenda.revision() - 1 },
+      { expected_revision: 1.5 }, { doneWhen: '' }, { doneWhen: ' ' }, { doneWhen: null },
+      { doneWhen: '字'.repeat(241) }, { note: undefined }, { note: '' }, { note: ' ' },
+      { status: 'done' }, { when: '新的条件' }, { why: '新的前提' }, { worlds: ['arena'] },
+      { operation: 'focus' }, { operation: 'amend' }]) {
+      expect(agenda.operate({ ...input, ...change })).toContain('错误');
+      expect(readFileSync(join(dir, AGENDA_FILE), 'utf8')).toBe(before);
+    }
+    agenda.operate({ operation: 'update', id: 'river', status: 'done', note: '原判据已验收' });
+    const closed = readFileSync(join(dir, AGENDA_FILE), 'utf8');
+    expect(agenda.operate({ ...input, expected_revision: agenda.revision() })).toContain('记录保留');
+    expect(readFileSync(join(dir, AGENDA_FILE), 'utf8')).toBe(closed);
+  });
+  it('exposes a versioned criterion correction through the real Persona tool', async () => {
+    const { dir, agenda } = rig(); adopt(agenda);
+    const persona = new CortiV({ memoryDir: dir, tickDelayMs: () => null });
+    persona.attach(makeFakeHarnessApi());
+    const tool = persona.declareSessions().find(session => session.id === 'main')!.tools().find(tool => tool.name === 'activity_plan')!;
+    const read = JSON.parse(String(await tool.handler({ operation: 'read', id: 'river' }, { role: 'main', log: nullLogger() })));
+    await tool.handler({ operation: 'update', id: 'river', doneWhen: '按最新地点回执验收路线',
+      expected_revision: read.revision, note: '来源 region/state 已确认原条件跨区域混用' }, { role: 'main', log: nullLogger() });
+    const restored = new ActivityAgenda(dir, now);
+    expect(restored.state().items.find(item => item.id === 'river')).toMatchObject({ doneWhen: '按最新地点回执验收路线',
+      status: 'queued', sourceCapturedAt: stamp, doneWhenHistory: [{ doneWhen: plan().items[1].doneWhen }] });
+    expect(restored.planningReadout()).not.toContain(plan().items[1].doneWhen);
+    expect((tool.parameters as any).properties.doneWhen).toMatchObject({ type: 'string', maxLength: 240 });
+  });
   it('retains the sampled source time through delayed adoption, progress and restart', () => {
     const { dir } = rig(); let at = now();
     const agenda = new ActivityAgenda(dir, () => at);

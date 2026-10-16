@@ -25,6 +25,8 @@ interface AcceptedItem extends AgendaItem { status: AgendaStatus; note: string; 
   worldHistory?: Array<{ worlds?: string[]; correctedAt: string; correctionNote: string }>;
   whyUpdatedAt?: string;
   whyHistory?: Array<{ why: string; sourceAt?: string; correctedAt: string; correctionNote: string }>;
+  doneWhenUpdatedAt?: string;
+  doneWhenHistory?: Array<{ doneWhen: string; sourceAt?: string; correctedAt: string; correctionNote: string }>;
   corrections?: Array<{ note: string; updatedAt: string; status?: AgendaStatus }>; }
 interface Proposal extends AgendaPlan { baseRevision: number; capturedAt: string; }
 interface Ledger {
@@ -81,6 +83,10 @@ function validAccepted(value: unknown): value is AcceptedItem {
     && (value.whyHistory === undefined || (Array.isArray(value.whyHistory) && value.whyHistory.every(entry =>
       object(entry) && text(entry.why, 240) && text(entry.correctionNote, 400) && timestamp(entry.correctedAt)
       && (entry.sourceAt === undefined || timestamp(entry.sourceAt)))))
+    && (value.doneWhenUpdatedAt === undefined || timestamp(value.doneWhenUpdatedAt))
+    && (value.doneWhenHistory === undefined || (Array.isArray(value.doneWhenHistory) && value.doneWhenHistory.every(entry =>
+      object(entry) && text(entry.doneWhen, 240) && text(entry.correctionNote, 400) && timestamp(entry.correctedAt)
+      && (entry.sourceAt === undefined || timestamp(entry.sourceAt)))))
     && (value.corrections === undefined || (Array.isArray(value.corrections) && value.corrections.every(entry =>
       object(entry) && text(entry.note, 400, true) && timestamp(entry.updatedAt)
       && (entry.status === undefined || ['queued', 'active', 'deferred', 'done', 'cancelled'].includes(String(entry.status))))));
@@ -93,7 +99,8 @@ function cleanItem(item: AgendaItem): AgendaItem {
     ...(item.worlds === undefined ? {} : { worlds: [...item.worlds] }),
     when: item.when, ifBlocked: item.ifBlocked, references: [...item.references] };
 }
-function currentItem({ whyHistory: _history, worldHistory: _worldHistory, ...item }: AcceptedItem): Omit<AcceptedItem, 'whyHistory' | 'worldHistory'> { return item; }
+function currentItem({ whyHistory: _history, worldHistory: _worldHistory, doneWhenHistory: _criterionHistory,
+  ...item }: AcceptedItem): Omit<AcceptedItem, 'whyHistory' | 'worldHistory' | 'doneWhenHistory'> { return item; }
 function clip(value: string, max: number): string {
   const flat = value.replace(/\s+/g, ' ').trim();
   return flat.length <= max ? flat : flat.slice(0, max - 1) + '…';
@@ -157,11 +164,14 @@ export class ActivityAgenda {
     return this.summary();
   }
   operate(args: Record<string, unknown>): string {
-    if (Object.keys(args).some(key => !['operation', 'id', 'status', 'note', 'why', 'worlds', 'when', 'ifBlocked', 'offset', 'limit', 'includeCompleted', 'includeClosed', 'expected_revision'].includes(key))) return '[日程输入错误] 含有未知参数。';
+    if (Object.keys(args).some(key => !['operation', 'id', 'status', 'note', 'why', 'worlds', 'doneWhen', 'when', 'ifBlocked', 'offset', 'limit', 'includeCompleted', 'includeClosed', 'expected_revision'].includes(key))) return '[日程输入错误] 含有未知参数。';
     if (args.worlds !== undefined && (args.operation !== 'update' || !validWorlds(args.worlds))) return '[日程输入错误] worlds 仅用于 update，填写最多四个不同的 World id；空数组表示不属于特定世界，未知归属保持省略。';
     if (args.why !== undefined && args.operation !== 'update') return '[日程输入错误] why 只能通过 update 连同 note 和当前 expected_revision 订正。';
+    if (args.doneWhen !== undefined && (args.operation !== 'update'
+      || [args.why, args.worlds, args.status, args.when, args.ifBlocked].some(value => value !== undefined)))
+      return '[日程输入错误] doneWhen 只能通过独立 update 连同 note 和当前 expected_revision 订正；不能同时改变状态、前提、归属或等待条件。';
     if (args.expected_revision !== undefined && !['amend', 'reopen'].includes(String(args.operation))
-      && !(args.operation === 'update' && (args.why !== undefined || args.worlds !== undefined))) return '[日程输入错误] expected_revision 仅用于 amend/reopen 或 update 订正 why/worlds。';
+      && !(args.operation === 'update' && (args.why !== undefined || args.worlds !== undefined || args.doneWhen !== undefined))) return '[日程输入错误] expected_revision 仅用于 amend/reopen 或 update 订正 why/worlds/doneWhen。';
     if (args.operation !== 'update' && (args.when !== undefined || args.ifBlocked !== undefined)) {
       return '[日程输入错误] when/ifBlocked 只能通过 update 连同 note 修订。';
     }
@@ -181,7 +191,7 @@ export class ActivityAgenda {
         proposal: draft && candidate ? { baseRevision: draft.baseRevision, capturedAt: draft.capturedAt, items: [candidate] } : null };
       const end = Number(offset) + Number(limit);
       return JSON.stringify({ ...detail, items: selected.slice(Number(offset), end).map(item => args.id === undefined ? currentItem(item) : item),
-        interpretation: 'worlds 未标注表示归属未核验，[] 表示无特定世界；归属订正历史仅在定向 read 的 worldHistory 中保留。summary、doneWhen 来自 sourceCapturedAt 对应的规划采样，不是当前现场读数。why 经订正后以 whyUpdatedAt 为记录时间，旧值仅在定向 read 的 whyHistory 中保留；未订正时来源为 sourceCapturedAt。when/ifBlocked 可由 update 修订。记录时间不证明现场事实，旧记录缺少来源时不能用 updatedAt 推定。实际进展见 status、note 及其 updatedAt，并与最新观察对账。',
+        interpretation: 'worlds 未标注表示归属未核验，[] 表示无特定世界；归属订正历史仅在定向 read 的 worldHistory 中保留。summary 来源为 sourceCapturedAt 对应的规划采样，不是当前现场读数。why/doneWhen 订正后以 whyUpdatedAt/doneWhenUpdatedAt 为记录时间，旧值仅在定向 read 的 whyHistory/doneWhenHistory 中保留；未订正时来源为 sourceCapturedAt。when/ifBlocked 可由 update 修订。记录时间不证明现场事实，旧记录缺少来源时不能用 updatedAt 推定。实际进展见 status、note 及其 updatedAt，并与最新观察对账。',
         completedCount: this.ledger.items.filter(item => item.status === 'done').length,
         cancelledCount: this.ledger.items.filter(item => item.status === 'cancelled').length,
         page: { offset, limit, total: selected.length, nextOffset: end < selected.length ? end : null } });
@@ -250,9 +260,14 @@ export class ActivityAgenda {
       || args.expected_revision !== this.ledger.revision)) {
       return '[日程输入错误] 订正 why 需要 1 至 240 字符的新前提、note 中的核验证据和 read 返回的当前 expected_revision；先重新读取已变化的日程。';
     }
+    if (args.doneWhen !== undefined && (!text(args.doneWhen, 240) || !Number.isSafeInteger(args.expected_revision)
+      || args.expected_revision !== this.ledger.revision)) {
+      return '[日程输入错误] 订正 doneWhen 需要 1 至 240 字符的验收条件、note 中的核验证据和 read 返回的当前 expected_revision；订正不表示条件已满足。';
+    }
     const updatedAt = this.stamp();
     const premiseChanged = args.why !== undefined && args.why !== item.why;
     const worldsChanged = args.worlds !== undefined && !sameWorlds(args.worlds as string[], item.worlds);
+    const criterionChanged = args.doneWhen !== undefined && args.doneWhen !== item.doneWhen;
     const scope = worldsChanged ? {
       worlds: [...args.worlds as string[]], worldsUpdatedAt: updatedAt,
       worldHistory: [...item.worldHistory ?? [], { ...(item.worlds === undefined ? {} : { worlds: [...item.worlds] }),
@@ -264,12 +279,18 @@ export class ActivityAgenda {
         ...((item.whyUpdatedAt ?? item.sourceCapturedAt) ? { sourceAt: item.whyUpdatedAt ?? item.sourceCapturedAt } : {}),
         correctedAt: updatedAt, correctionNote: args.note as string }],
     } : {};
+    const criterion = criterionChanged ? {
+      doneWhen: args.doneWhen as string, doneWhenUpdatedAt: updatedAt,
+      doneWhenHistory: [...item.doneWhenHistory ?? [], { doneWhen: item.doneWhen,
+        ...((item.doneWhenUpdatedAt ?? item.sourceCapturedAt) ? { sourceAt: item.doneWhenUpdatedAt ?? item.sourceCapturedAt } : {}),
+        correctedAt: updatedAt, correctionNote: args.note as string }],
+    } : {};
     const items = this.ledger.items.map(entry => entry.id === item.id
-      ? { ...entry, ...premise, ...scope, status: (args.status ?? entry.status) as AgendaStatus, note: args.note as string,
+      ? { ...entry, ...premise, ...scope, ...criterion, status: (args.status ?? entry.status) as AgendaStatus, note: args.note as string,
         when: (args.when ?? entry.when) as string, ifBlocked: (args.ifBlocked ?? entry.ifBlocked) as string, updatedAt }
       : entry);
     this.save({ ...this.ledger, revision: this.ledger.revision + 1, items,
-      ...(premiseChanged || worldsChanged ? { premiseRevision: this.ledger.revision + 1, proposal: null } : {}) });
+      ...(premiseChanged || worldsChanged || criterionChanged ? { premiseRevision: this.ledger.revision + 1, proposal: null } : {}) });
     return this.summary();
   }
   summary(): string {
@@ -288,9 +309,10 @@ export class ActivityAgenda {
         : next.length || deferred.length ? '当前阶段尚未选择；结合现场自行选下一项。'
           : '当前没有未完成阶段；完成记录是历史。结合长期目标和现场选择新阶段，可 review 异步请求候选，期间独立行动可以继续。',
       ...(draft ? [`后台候选采样于 ${draft.capturedAt}，共 ${draft.items.length} 项，${draft.baseRevision === this.ledger.revision ? '待核验采用' : '整份已落后于当前进展'}；activity_plan read 带 id 定向核验候选与前提，adopt 指定一项不改现有进展；整份过期则 review。`] : [])];
-    const footer = '阶段变化用 activity_plan update 留证据；when/ifBlocked 可修订；why 订正需 read 的当前 expected_revision 与核验证据；误记完成先 read 后 reopen 留新证据；明确放弃用 cancelled 加原因；read 带 id 查详情；日程不阻止交流、应急和新的选择。';
+    const footer = '阶段变化用 activity_plan update 留证据；when/ifBlocked 可修订；why/doneWhen 订正需 read 的当前 expected_revision 与核验证据；doneWhen 独立订正不改变状态；误记完成先 read 后 reopen 留新证据；明确放弃用 cancelled 加原因；read 带 id 查详情；日程不阻止交流、应急和新的选择。';
     const sections = [
       ...(active ? [[`够了就收尾：${clip(active.doneWhen, 160)}`,
+        ...(active.doneWhenUpdatedAt ? [`完成条件订正于 ${active.doneWhenUpdatedAt}；不表示已完成。`] : []),
         `条件：${clip(active.when, 100)}；受阻：${clip(active.ifBlocked, 100)}`,
         ...(active.note ? ['最近证据：' + clip(active.note, 160)] : [])]] : []),
       next.map(item => `候选 id=${JSON.stringify(item.id)} ${clip(item.title, 48)} [${worldLabel(item)}]`),
@@ -314,7 +336,7 @@ export class ActivityAgenda {
     return JSON.stringify({ revision: this.ledger.revision,
       items: [...this.ledger.items.filter(item => !closed(item)), ...history.slice(-AGENDA_MAX_ITEMS)]
         .map(currentItem),
-      interpretation: 'worlds 未标注表示归属未核验，[] 表示无特定世界；各世界的资源、时钟与等待条件单独核验。whyUpdatedAt 是已订正前提的记录时间，否则 why 来源为 sourceCapturedAt；记录仍需核对最新观察。前提与归属订正历史仅通过 activity_plan read 定向查阅。',
+      interpretation: 'worlds 未标注表示归属未核验，[] 表示无特定世界；各世界的资源、时钟与等待条件单独核验。whyUpdatedAt/doneWhenUpdatedAt 是已订正前提/完成条件的记录时间，否则来源为 sourceCapturedAt；记录仍需核对最新观察。前提、完成条件与归属订正历史仅通过 activity_plan read 定向查阅。',
       completedCount: history.filter(item => item.status === 'done').length,
       cancelledCount: history.filter(item => item.status === 'cancelled').length,
       history: 'done 是完成记录，cancelled 是明确撤销，不应重放。较早关闭记录未展开；activity_plan read includeClosed:true 分页或按 id 查询。' });

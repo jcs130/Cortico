@@ -1,4 +1,4 @@
-Owner: `bots/cortiv/persona/state-memory.ts`, `bots/cortiv/persona/persona.ts`.
+Owner: `bots/cortiv/persona/state-memory.ts`, `bots/cortiv/persona/activity-agenda.ts`, `bots/cortiv/persona/persona.ts`.
 
 # Current memory and historical notes
 
@@ -17,5 +17,7 @@ Recent notes, session/handoff archives, migration backups, the raw claim ledger 
 The same view applies to planning inputs, default search, automatic recent notes and replayed Memory tool results. Handoff generation re-resolves those tool results without modifying the original event store. Background prose and final summaries are archived; their bodies are not automatically promoted into current claims. Background claim updates pass the same version and observation checks.
 
 Closed agenda notes can be corrected with `activity_plan amend` and the current agenda revision from `read`. The stage remains closed; the earlier note and its timestamp remain in `corrections`. A concurrent or older correction cannot overwrite a newer one.
+
+An open stage's completion criterion can be corrected by an independent `activity_plan update` with `doneWhen`, the current `expected_revision` from `read`, and supporting evidence in `note`. The objective and status stay intact; this call cannot also change status, premise, World attribution or waiting conditions. Prior criteria and source times remain in `doneWhenHistory`, available through a targeted read; foreground and planning readouts use the current criterion and `doneWhenUpdatedAt`. A changed criterion retires proposals captured before the correction. Correction does not establish completion.
 
 Arbitrary prose can still contain mistaken interpretations. This contract prevents the supported historical sources from becoming current state merely through rewriting or replay, and rejects stale structured updates. It does not detect all contradictions in unrestricted natural language. Vector similarity is independent of this validity contract.
