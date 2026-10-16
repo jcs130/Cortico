@@ -8,7 +8,7 @@ import { protocolConfig } from './config.ts';
 import { CHAT_PRESETS } from '../presets.ts';
 
 export type ChatCompatOptions = Pick<ChatCompatProviderOptions,
-  'endpointPath' | 'extraHeaders' | 'extraBody' | 'reasoningMode' | 'replayReasoning' | 'legacyFunctionCallExtraContent'> & { maxContextImages?: number };
+  'endpointPath' | 'extraHeaders' | 'extraBody' | 'reasoningMode' | 'replayReasoning' | 'legacyFunctionCallExtraContent' | 'tupleSchemaStyle'> & { maxContextImages?: number };
 
 export function chatCompatOptions(entry: LLMProviderEntry): ChatCompatOptions {
   return (entry.options ?? {}) as ChatCompatOptions;
@@ -16,7 +16,7 @@ export function chatCompatOptions(entry: LLMProviderEntry): ChatCompatOptions {
 
 function normalizeChatCompat(entry: LLMProviderEntry): LLMProviderEntry {
   const options: Record<string, unknown> = { ...entry.options };
-  for (const key of ['endpointPath', 'reasoningMode', 'replayReasoning', 'maxContextImages'])
+  for (const key of ['endpointPath', 'reasoningMode', 'replayReasoning', 'maxContextImages', 'tupleSchemaStyle'])
     if (options[key] === '') delete options[key];
   for (const key of ['extraHeaders', 'extraBody', 'legacyFunctionCallExtraContent']) {
     const value = options[key];
@@ -57,6 +57,8 @@ export default {
       fail('Replay reasoning must be boolean.', '回传历史推理必须为布尔值。');
     if (options.legacyFunctionCallExtraContent !== undefined && !isObject(options.legacyFunctionCallExtraContent))
       fail('Legacy function call continuation metadata must be an object.', '历史工具调用续接元数据必须为对象。');
+    if (options.tupleSchemaStyle !== undefined && !['items', 'prefixItems'].includes(options.tupleSchemaStyle))
+      fail('Tuple schema style must be items or prefixItems.', '元组 Schema 表示必须为 items 或 prefixItems。');
     if (options.maxContextImages !== undefined && (!Number.isSafeInteger(options.maxContextImages) || options.maxContextImages < 0))
       fail('Context image limit must be a non-negative safe integer.', '历史图片上限必须为非负安全整数。');
     if (options.extraHeaders !== undefined && (!isObject(options.extraHeaders) || Object.values(options.extraHeaders).some(value => typeof value !== 'string')))

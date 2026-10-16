@@ -36,6 +36,7 @@ it('discovers the module and makes its settings editable through the existing pr
     'providers.Chat.options.endpointPath', 'providers.Chat.options.reasoningMode', 'providers.Chat.options.replayReasoning',
     'providers.Chat.options.maxContextImages', 'providers.Chat.options.extraHeaders', 'providers.Chat.options.extraBody',
     'providers.Chat.options.legacyFunctionCallExtraContent',
+    'providers.Chat.options.tupleSchemaStyle',
   ]);
   expect(Object.values(protocol.schema.properties!).every(field => field['x-hot'] === true)).toBe(true);
   expect(saved.entry.options?.legacyFunctionCallExtraContent).toEqual({ fixture: { signature: 'migration' } });
@@ -55,6 +56,7 @@ it.each([
   { replayReasoning: 'true' }, { maxContextImages: -1 }, { maxContextImages: 0.5 },
   { extraHeaders: [] }, { extraHeaders: { authorization: 7 } }, { extraBody: [] }, { extraBody: null },
   { legacyFunctionCallExtraContent: [] }, { legacyFunctionCallExtraContent: null }, { legacyFunctionCallExtraContent: 'migration' },
+  { tupleSchemaStyle: 'guess' }, { tupleSchemaStyle: 1 },
 ])('rejects malformed transport options: %j', options => {
   expect(() => validateEntry(module, { ...entry, options }, 'en')).toThrow();
 });

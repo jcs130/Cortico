@@ -1,4 +1,4 @@
-Owner: `index.ts` (`ProviderModule`), `native.ts` (`ChatCompatProvider`), `config.ts` (`protocolConfig`).
+Owner: `index.ts` (`ProviderModule`), `native.ts` (`ChatCompatProvider`), `config.ts` (`protocolConfig`), `../transport/tool-schema.ts` (`prefixTupleItems`).
 
 # OpenAI Chat Completions Compatible
 
@@ -29,6 +29,12 @@ and compatibility domain; dropping past reasoning does not discard continuation 
 `options.legacyFunctionCallExtraContent` is an optional object for an endpoint's documented
 migration of synthetic or foreign-provider function calls. It defaults to absent and never
 replaces continuation data from the current provider, including unsigned parallel calls.
+
+`options.tupleSchemaStyle` defaults to `items`, preserving the tools' tuple notation. Select
+`prefixItems` for endpoints requiring newer JSON Schema tuple syntax. Conversion walks schema
+positions only, retains positional constraints and maps `additionalItems` to the trailing
+`items` schema; examples and defaults are unchanged. Stored tool definitions and validation
+of the returned arguments retain their original contracts.
 
 `options.extraHeaders` adds request headers; the configured bearer secret owns Authorization.
 `options.extraBody` overrides generated body fields. The caller's streaming choice remains

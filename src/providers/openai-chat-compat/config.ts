@@ -36,6 +36,10 @@ export function protocolConfig(name: string, entry: LLMProviderEntry, language: 
           type: 'object', title: zh ? '历史工具调用续接元数据' : 'Legacy function call continuation metadata',
           description: zh ? '仅用于本地合成或其他模型的调用历史；当前连接返回的续接数据原样保留。' : 'Only for synthetic or foreign-model call history; native continuation data stays unchanged.', 'x-hot': true,
         },
+        [`${prefix}tupleSchemaStyle`]: {
+          type: 'string', enum: ['items', 'prefixItems'], title: zh ? '工具元组 Schema 表示' : 'Tool tuple schema notation',
+          description: zh ? '默认保留 items 数组；要求新版 JSON Schema 的端点可选 prefixItems，参数约束保留。' : 'Default preserves items arrays; endpoints requiring newer JSON Schema can use prefixItems without changing argument constraints.', 'x-hot': true,
+        },
       },
     },
   }];

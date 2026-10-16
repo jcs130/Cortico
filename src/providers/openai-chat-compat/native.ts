@@ -5,6 +5,7 @@ import { nullLogger } from '../../core/util.ts';
 import { OpenAIHttpClient } from '../transport/chat.ts';
 import type { NativeChatMessage } from '../transport/native-types.ts';
 import { dropPastThinking, mapTools, renderMessagesWithMedia, type CompatMediaOptions } from '../transport/history.ts';
+import { prefixTupleItems } from '../transport/tool-schema.ts';
 
 export type ReasoningMode = 'reasoning_effort' | 'extra_body';
 
@@ -20,6 +21,8 @@ export interface ChatCompatProviderOptions {
   replayReasoning?: boolean;
   /** Explicit continuation metadata for synthetic or foreign-model function-call history. */
   legacyFunctionCallExtraContent?: Record<string, unknown>;
+  /** Select the endpoint's JSON Schema tuple notation; default preserves items arrays. */
+  tupleSchemaStyle?: 'items' | 'prefixItems';
   media?: CompatMediaOptions;
   keepThinking?: () => boolean;
   log?: Logger;
@@ -35,7 +38,7 @@ export function buildChatCompatRequestBody(
   spec: ModelSpec,
   messages: NativeChatMessage[],
   tools?: ToolSchema[],
-  options: Pick<ChatCompatProviderOptions, 'media' | 'reasoningMode' | 'replayReasoning'> & { keepThinking?: boolean } = {},
+  options: Pick<ChatCompatProviderOptions, 'media' | 'reasoningMode' | 'replayReasoning' | 'tupleSchemaStyle'> & { keepThinking?: boolean } = {},
 ): Record<string, unknown> {
   const history = options.keepThinking === false ? dropPastThinking(messages) : messages;
   const body: Record<string, unknown> = {
@@ -48,7 +51,8 @@ export function buildChatCompatRequestBody(
   }
   if (spec.temperature !== undefined) body.temperature = spec.temperature;
   if (spec.maxTokens !== undefined) body.max_tokens = spec.maxTokens;
-  const mapped = mapTools(tools);
+  const mapped = mapTools(options.tupleSchemaStyle === 'prefixItems'
+    ? tools?.map(tool => ({ ...tool, parameters: prefixTupleItems(tool.parameters) })) : tools);
   if (mapped) body.tools = mapped;
   return body;
 }
