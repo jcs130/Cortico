@@ -9,6 +9,7 @@ export interface ResponseAssembly {
   snapshot(): Response | null;
   meters(): TokenMeters;
   serviceTier(): string | null;
+  itemData?(): Record<string, Record<string, unknown>> | undefined;
 }
 
 /**
@@ -94,11 +95,12 @@ export class NativeResponseAssembly implements ResponseAssembly {
   meters(): TokenMeters { return structuredClone(this.usage); }
 }
 
+type NativeToolCall = { index?: number; id?: string; function?: { name?: string; arguments?: string }; extra_content?: Record<string, unknown> };
 type NativeChunk = {
   id?: string; model?: string; service_tier?: string;
   choices?: Array<{ index?: number; finish_reason?: string | null; delta?: {
     content?: string | null; refusal?: string | null; reasoning_content?: string | null;
-    tool_calls?: Array<{ index: number; id?: string; function?: { name?: string; arguments?: string } }>;
+    tool_calls?: NativeToolCall[];
   } }>;
   usage?: Record<string, unknown> | null;
 };
@@ -115,8 +117,10 @@ export class ChatResponseAssembly implements ResponseAssembly {
   private tier: string | null = null;
   private readonly calls = new Map<number, number>();
   private readonly textSlots = new Map<string, number>();
-  private readonly pendingCalls = new Map<number, NonNullable<NonNullable<NonNullable<NativeChunk['choices']>[number]['delta']>['tool_calls']>>();
+  private readonly pendingCalls = new Map<number, Array<NativeToolCall & { index: number }>>();
+  private readonly callIndices = new Map<string, number>();
   private readonly output: MutableOutput[] = [];
+  private readonly continuation: Record<string, Record<string, unknown>> = Object.create(null);
   /** The Item that received the last delta is the one a length or filter stop cut short. */
   private lastTouched: number | null = null;
 
@@ -160,6 +164,22 @@ export class ChatResponseAssembly implements ResponseAssembly {
     item.content![0][field] += delta;
     this.lastTouched = index;
   }
+  /** Complete calls may omit the streaming index; only an explicit call identity can supply it. */
+  private callIndex(call: NativeToolCall): number {
+    const previous = call.id ? this.callIndices.get(call.id) : undefined;
+    if (call.index !== undefined) {
+      if (!Number.isInteger(call.index) || call.index < 0) throw new ResponseProtocolError('Invalid native tool index');
+      if (previous !== undefined && previous !== call.index) throw new ResponseProtocolError('Native function identity changed');
+      if (call.id) this.callIndices.set(call.id, call.index);
+      return call.index;
+    }
+    if (previous !== undefined) return previous;
+    if (!call.id || !call.function?.name) throw new ResponseProtocolError('Native function call lacks index or complete identity');
+    let index = 0;
+    while (this.calls.has(index) || this.pendingCalls.has(index)) index++;
+    this.callIndices.set(call.id, index);
+    return index;
+  }
   feed(payload: unknown, emit: (event: StreamEvent) => void): void {
     const chunk = payload as NativeChunk;
     this.start(chunk, emit);
@@ -173,10 +193,10 @@ export class ChatResponseAssembly implements ResponseAssembly {
     if (delta?.content) this.text('content', delta.content, emit);
     if (delta?.refusal) this.text('refusal', delta.refusal, emit);
     for (const call of delta?.tool_calls ?? []) {
-      if (!Number.isInteger(call.index) || call.index < 0) throw new ResponseProtocolError('Invalid native tool index');
-      const pending = this.pendingCalls.get(call.index) ?? [];
-      pending.push(call);
-      this.pendingCalls.set(call.index, pending);
+      const index = this.callIndex(call);
+      const pending = this.pendingCalls.get(index) ?? [];
+      pending.push({ ...call, index });
+      this.pendingCalls.set(index, pending);
     }
     for (const nativeIndex of [...this.pendingCalls.keys()].sort((a, b) => a - b)) {
       if (!this.calls.has(nativeIndex) && nativeIndex !== this.calls.size) break;
@@ -191,6 +211,11 @@ export class ChatResponseAssembly implements ResponseAssembly {
         }
         const item = this.output[index];
         if ((call.id && call.id !== item.call_id) || (call.function?.name && call.function.name !== item.name)) throw new ResponseProtocolError('Native function identity changed');
+        if (call.extra_content !== undefined) {
+          if (!call.extra_content || typeof call.extra_content !== 'object' || Array.isArray(call.extra_content))
+            throw new ResponseProtocolError('Native function extra_content must be an object');
+          this.continuation[item.id] = { chatExtraContent: structuredClone(call.extra_content) };
+        }
         const fragment = call.function?.arguments;
         if (fragment) {
           this.send({ type: 'response.function_call_arguments.delta', output_index: index, item_id: item.id, delta: fragment }, emit);
@@ -230,9 +255,12 @@ export class ChatResponseAssembly implements ResponseAssembly {
   snapshot(): Response | null { return this.accumulator.snapshot(); }
   serviceTier(): string | null { return this.tier; }
   meters(): TokenMeters { return structuredClone(this.usage); }
+  itemData(): Record<string, Record<string, unknown>> | undefined {
+    return Object.keys(this.continuation).length ? structuredClone(this.continuation) : undefined;
+  }
 }
 
-export function parseChatResponse(raw: unknown, request: Request): { response: Response; meters: TokenMeters; serviceTier: string | null } {
+export function parseChatResponse(raw: unknown, request: Request): { response: Response; meters: TokenMeters; serviceTier: string | null; itemData?: Record<string, Record<string, unknown>> } {
   const data = raw as { id?: string; model?: string; usage?: Record<string, unknown>; choices?: Array<{ index?: number; finish_reason?: string | null; message?: Record<string, any> }> };
   const choice = data.choices?.[0] as { message?: Record<string, any>; finish_reason?: string | null } | undefined;
   if (!choice?.message) throw new ResponseProtocolError('Native Chat response lacks choices[0].message');
@@ -240,5 +268,6 @@ export function parseChatResponse(raw: unknown, request: Request): { response: R
   assembler.feed({ ...data, choices: [{ index: 0, delta: { ...choice.message,
     tool_calls: choice.message.tool_calls?.map((call: any, index: number) => ({ ...call, index })) }, finish_reason: choice.finish_reason }] }, () => {});
   const response = assembler.finish(() => {});
-  return { response, meters: assembler.meters(), serviceTier: assembler.serviceTier() };
+  const itemData = assembler.itemData();
+  return { response, meters: assembler.meters(), serviceTier: assembler.serviceTier(), ...(itemData ? { itemData } : {}) };
 }

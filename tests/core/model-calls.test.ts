@@ -125,11 +125,13 @@ describe('model call admission', () => {
       startedAt: new Date().toISOString(), elapsedMs: 300, requestId: null, responseId: null, outcome: 'failed', status: 503,
       serviceTier: null, meters: unknownMeters(), charges: [] };
     const gate = new ModelCallGate();
-    const client = limitModelCalls({ async respond() { throw new GenerationError('unavailable', [attempt], null, origin, 503); } },
+    const itemData = { call: { chatExtraContent: { fixture: { signature: 'opaque' } } } };
+    const client = limitModelCalls({ async respond() { throw new GenerationError('unavailable', [attempt], null, origin, 503, '', { itemData }); } },
       gate, 'agent-a', new AbortController().signal);
     const error = await client.respond({ model: origin.model, input: 'private-input' }).catch(error => error);
     expect(error).toBeInstanceOf(GenerationError);
     expect(error.attempts).toMatchObject([{ requestId: null, agentId: 'agent-a', meters: { input: null } }]);
+    expect(error.itemData).toEqual(itemData);
     expect(gate.snapshot()).toMatchObject({ active: 0, queued: 0 });
   });
 });

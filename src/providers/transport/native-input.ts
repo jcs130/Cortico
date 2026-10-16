@@ -42,8 +42,13 @@ function nativeParts(entry: ContextRecord): Array<Record<string, unknown>> | und
   });
 }
 
+export interface NativeChatInputOptions {
+  /** Explicit migration metadata for calls synthesized locally or recorded by another provider. */
+  legacyFunctionCallExtraContent?: Record<string, unknown>;
+}
+
 /** Chat Completions has one assistant envelope for adjacent reasoning, text and function calls. */
-export function nativeChatInput(request: Request, options: GenerateOptions): NativeChatMessage[] {
+export function nativeChatInput(request: Request, options: GenerateOptions, native: NativeChatInputOptions = {}): NativeChatMessage[] {
   const messages: NativeChatMessage[] = [];
   if (request.instructions) messages.push({ role: 'system', content: request.instructions });
   let assistant: NativeChatMessage | null = null;
@@ -65,7 +70,12 @@ export function nativeChatInput(request: Request, options: GenerateOptions): Nat
       target.reasoning_content = (target.reasoning_content ?? '') + itemText(item);
     } else if (item.type === 'function_call') {
       const target = ensureAssistant(entry);
-      (target.tool_calls ??= []).push({ id: item.call_id, type: 'function', function: { name: item.name, arguments: item.arguments } });
+      const owner = entry.context.origin, current = options.origin;
+      const sameProvider = owner && current && owner.instance === current.instance && owner.module === current.module
+        && owner.compatibilityDomain === current.compatibilityDomain && owner.model === current.model;
+      const extra = sameProvider ? entry.context.providerData?.chatExtraContent : native.legacyFunctionCallExtraContent;
+      (target.tool_calls ??= []).push({ id: item.call_id, type: 'function', function: { name: item.name, arguments: item.arguments },
+        ...(extra && typeof extra === 'object' && !Array.isArray(extra) ? { extra_content: structuredClone(extra as Record<string, unknown>) } : {}) });
     } else if (item.type === 'function_call_output') {
       assistant = null;
       messages.push({ role: 'tool', content: itemText(item), parts: nativeParts(entry), tool_call_id: item.call_id, blobs: entry.context.blobs });

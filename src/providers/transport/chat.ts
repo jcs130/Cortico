@@ -5,7 +5,7 @@ import type { Request } from '../../protocol/open-responses/index.ts';
 import { GenerationError, type GenerateOptions, type Generation, type ResponseClient } from '../../core/generation.ts';
 import { generate } from './response-http.ts';
 import { ChatResponseAssembly, parseChatResponse, type ResponseAssembly } from './response-assembly.ts';
-import { nativeChatInput, requestSpec, requestTools } from './native-input.ts';
+import { nativeChatInput, requestSpec, requestTools, type NativeChatInputOptions } from './native-input.ts';
 import { createConversationId } from '../../core/conversation-id.ts';
 
 const INFLIGHT_ALERT_WINDOW_MS = 60_000;
@@ -37,7 +37,7 @@ export interface StreamFailureVerdict {
 }
 export abstract class OpenAIHttpClient extends BaseProvider {
   protected buildResponseBody(request: Request, options: GenerateOptions): Record<string, unknown> {
-    const body = this.buildBody(requestSpec(request, options), nativeChatInput(request, options), requestTools(request), options.sessionId);
+    const body = this.buildBody(requestSpec(request, options), nativeChatInput(request, options, this.nativeInputOptions()), requestTools(request), options.sessionId);
     if (request.metadata) body.metadata = { ...request.metadata };
     for (const key of ['top_p', 'presence_penalty', 'frequency_penalty', 'parallel_tool_calls'] as const) if (request[key] !== undefined) body[key] = request[key];
     if (request.tool_choice != null) {
@@ -56,6 +56,8 @@ export abstract class OpenAIHttpClient extends BaseProvider {
 
   protected responseAssembly(request: Request): ResponseAssembly { return new ChatResponseAssembly(request); }
 
+  protected nativeInputOptions(): NativeChatInputOptions { return {}; }
+
   protected parseResponse(raw: unknown, request: Request): ReturnType<typeof parseChatResponse> { return parseChatResponse(raw, request); }
 
   async respond(request: Request, options: GenerateOptions = {}): Promise<Generation> {
@@ -63,7 +65,7 @@ export abstract class OpenAIHttpClient extends BaseProvider {
       model: request.model ?? '', compatibilityDomain: this.baseUrl };
     const key = OpenAIHttpClient.streakKey(request.model ?? '', options.role);
     return generate(request, options, origin, {
-      url: `${this.baseUrl}${this.chatPath}`, body: this.buildResponseBody(request, options),
+      url: `${this.baseUrl}${this.chatPath}`, body: this.buildResponseBody(request, { ...options, origin }),
       headers: () => this.headers(), refresh: () => this.onAuthError(),
       assembly: () => this.responseAssembly(request), parse: raw => this.parseResponse(raw, request), log: this.log,
       succeeded: () => { if (!options.diagnostic) this.inflightStreak.delete(key); },

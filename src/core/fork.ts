@@ -107,7 +107,7 @@ export async function runForkLoop(opts: ForkLoopOptions): Promise<string> {
       observed.splice(settledLength);
       log.info('后台模型轮让出前台，保留已完成上下文后重试', { round });
     }
-    const output = responseRecords(generated.response, generated.origin);
+    const output = responseRecords(generated.response, generated.origin, {}, generated.itemData);
     messages.push(...output);
     observed.splice(settledLength, observed.length - settledLength, ...output);
     opts.track?.recordAttempts(generated.attempts, observed);

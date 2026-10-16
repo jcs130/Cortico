@@ -15,7 +15,7 @@ export interface ResponseTransport {
   headers(): Record<string, string> | Promise<Record<string, string>>;
   refresh(): Promise<boolean>;
   assembly(): ResponseAssembly;
-  parse(raw: unknown): { response: Response; meters: TokenMeters; serviceTier: string | null };
+  parse(raw: unknown): { response: Response; meters: TokenMeters; serviceTier: string | null; itemData?: Generation['itemData'] };
   failure(info: { model: string; role?: string; elapsedMs: number; status: number; requestId: string | null; body: string; message: string }, record: (attempts: ProviderAttempt[]) => void): Promise<boolean>;
   succeeded(): void;
   log: Logger;
@@ -109,12 +109,13 @@ export async function generate(request: Request, options: GenerateOptions, origi
   const attempts: ProviderAttempt[] = [];
   let lastError: unknown;
   let partial: Response | null = null;
+  let itemData: Generation['itemData'];
   let authRetried = false;
   // 上一次尝试的 `Retry-After`;没有头或解析不成形时按固定间隔退避。
   let retryAfterMs: number | null = null;
   const delays = options.diagnostic ? [] : [1000, 4000, 10000];
   const fail = (error: unknown): GenerationError => new GenerationError(errorText(error) + reqIdSuffix(attempts.filter(attempt => attempt.purpose !== 'diagnostic').at(-1)?.requestId), attempts,
-    partial, origin, error instanceof LLMError ? error.status : 0, error instanceof LLMError ? error.body : '', { cause: error });
+    partial, origin, error instanceof LLMError ? error.status : 0, error instanceof LLMError ? error.body : '', { cause: error, itemData });
   for (let ordinal = 0; ordinal <= delays.length; ordinal++) {
     try {
       if (options.signal?.aborted) throw abortError(options.signal);
@@ -153,6 +154,7 @@ export async function generate(request: Request, options: GenerateOptions, origi
     let finishedAt: number | null = null;
     const diagnostics: ProviderAttempt[] = [];
     partial = null;
+    itemData = undefined;
     const forward = (event: StreamEvent): void => {
       if (carriesContent(event)) { observed = true; touchContent(); }
       if ('delta' in event && typeof event.delta === 'string') characters += event.delta.length;
@@ -215,6 +217,7 @@ export async function generate(request: Request, options: GenerateOptions, origi
           }
         }
         partial = assembly.finish(forward);
+        itemData = assembly.itemData?.();
         attempt.meters = assembly.meters();
         attempt.serviceTier = assembly.serviceTier();
       } else {
@@ -222,6 +225,7 @@ export async function generate(request: Request, options: GenerateOptions, origi
         noteStats(value);
         const parsed = transport.parse(value);
         partial = parsed.response;
+        itemData = parsed.itemData;
         attempt.meters = parsed.meters;
         attempt.serviceTier = parsed.serviceTier;
       }
@@ -230,12 +234,13 @@ export async function generate(request: Request, options: GenerateOptions, origi
       if (partial.status !== 'completed' && partial.status !== 'incomplete') throw new LLMError(`Response has no terminal status: ${partial.status}`, 0, '');
       attempt.outcome = options.signal?.aborted ? 'discarded' : partial.status;
       transport.succeeded();
-      return { response: partial, origin, attempts };
+      return { response: partial, origin, attempts, ...(itemData ? { itemData } : {}) };
     } catch (error) {
       finishedAt = Date.now();
       controller.abort(new Error('Provider attempt ended'));
       if (streaming) {
         partial = assembly.snapshot();
+        itemData = assembly.itemData?.();
         attempt.meters = assembly.meters();
       }
       attempt.responseId = partial?.id ?? null;

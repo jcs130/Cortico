@@ -49,6 +49,27 @@ function toolTexts(seen: ChatMessage[][]): string[] {
 }
 
 describe('runForkLoop 回合契约', () => {
+  it('retains provider continuation data in the next background tool round', async () => {
+    let rounds = 0;
+    const llm: ResponseClient = { respond: async (request, options) => {
+      const response = createResponse(`r${++rounds}`, request);
+      response.status = 'completed';
+      if (rounds === 1) {
+        response.output = [{ type: 'function_call', id: 'fc1', call_id: 'c1', name: 'touch', arguments: '{}', status: 'completed' }];
+      } else {
+        expect(options?.context?.find(entry => entry.item.type === 'function_call')?.context.providerData)
+          .toEqual({ chatExtraContent: { fixture: { signature: 'opaque' } } });
+        expect(JSON.stringify(request)).not.toContain('opaque');
+        response.output = [{ type: 'message', id: 'answer', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'ready', annotations: [] }] }];
+      }
+      return { response, origin: { instance: 'fixture', module: 'fixture', model: 'test', compatibilityDomain: 'fixture' }, attempts: [],
+        ...(rounds === 1 ? { itemData: { fc1: { chatExtraContent: { fixture: { signature: 'opaque' } } } } } : {}) };
+    } };
+    expect(await runNativeForkLoop({ id: 'review', llm, spec: SPEC, messages: [message('user', 'Inspect.')], tools: [touch], maxRounds: 3, log: nullLogger() }))
+      .toBe('ready');
+    expect(rounds).toBe(2);
+  });
+
   it('passes a returned failure to the next model request with its protocol marker', async () => {
     const llm = new ScriptedLLM(1);
     const outcome = { text: 'Target unavailable; nothing changed.', failed: true as const };

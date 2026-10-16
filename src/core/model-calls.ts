@@ -85,7 +85,7 @@ export function limitModelCalls(client: ResponseClient, gate: ModelCallGate, age
         return { ...result, attempts: result.attempts.map(tag) };
       } catch (error) {
         if (error instanceof GenerationError) throw new GenerationError(error.message, error.attempts.map(tag), error.partial,
-          error.origin, error.status, error.body, { cause: error });
+          error.origin, error.status, error.body, { cause: error, itemData: error.itemData });
         throw error;
       } finally { release(); }
     },

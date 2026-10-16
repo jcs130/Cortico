@@ -67,6 +67,17 @@ provider 模块不预设任何模型名;端点
 终端页从状态帧读取当前端点的名称、模型、模块与地址,点开就是那条端点;一条都不可用时,输入框
 的灰字写明去哪儿设置。
 
+## 内建 openai-chat-compat
+
+兼容 Chat Completions 的工具调用若返回 `extra_content`，传输层将它保存在对应项的
+上下文元数据中，标准 Item 与用量日志不增加供应商字段。前台、后台、会话落盘和保留的
+交接记录都保留这份数据；仅在来源实例、模块、模型与兼容域均相同时回传。
+`keepPastThinking` 的文字推理裁剪不删除工具续接数据。
+
+`options.legacyFunctionCallExtraContent` 可为本地合成或其他模型留下的工具调用提供对象型
+迁移字段。默认不设置，仅应按目标端点的迁移协议配置；当前端点原生调用保留原数据，
+同一端点未附数据的并行调用也不补写迁移字段。
+
 ## 内建 openai-responses-compat
 
 `options.maxContextImages` 可选地限制保存的图像附件重放；默认未设置，不限数量。

@@ -22,6 +22,14 @@ the supplied body, so the connection's body and model settings must agree.
 `reasoning_content`. The host's `keepThinking` choice still determines whether past reasoning is
 retained. Returned reasoning remains part of Cortico's response Items in either replay mode.
 
+Returned function-call `extra_content` is preserved as opaque per-Item context metadata, outside
+the standard response Items and usage logs. It survives session persistence, retained handoff
+records and background tool rounds. Replay requires the same provider instance, module, model
+and compatibility domain; dropping past reasoning does not discard continuation metadata.
+`options.legacyFunctionCallExtraContent` is an optional object for an endpoint's documented
+migration of synthetic or foreign-provider function calls. It defaults to absent and never
+replaces continuation data from the current provider, including unsigned parallel calls.
+
 `options.extraHeaders` adds request headers; the configured bearer secret owns Authorization.
 `options.extraBody` overrides generated body fields. The caller's streaming choice remains
 authoritative and every stream sets `stream_options.include_usage=true` after the merge.

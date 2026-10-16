@@ -26,7 +26,7 @@ it('discovers the module and makes its settings editable through the existing pr
   const info = hub.moduleList('en').find(item => item.id === module.id)!;
   expect(info.sections.map(section => section.id)).toEqual(['endpoint', 'model', 'pricing', 'protocol']);
   const saved = hub.save(null, { name: 'Chat', entry: { ...entry, options: { reasoningMode: 'extra_body', replayReasoning: true,
-    extraBody: { thinking_switch: true } } }, secretValue: 'fixture-secret' }, 'en');
+    extraBody: { thinking_switch: true }, legacyFunctionCallExtraContent: { fixture: { signature: 'migration' } } } }, secretValue: 'fixture-secret' }, 'en');
   expect(saved.readiness.state).toBe('ready');
   expect(JSON.stringify(saved)).not.toContain('fixture-secret');
   expect(registry.resolve('Chat').client).toBeInstanceOf(ChatCompatProvider);
@@ -35,8 +35,10 @@ it('discovers the module and makes its settings editable through the existing pr
   expect(Object.keys(protocol.schema.properties!)).toEqual([
     'providers.Chat.options.endpointPath', 'providers.Chat.options.reasoningMode', 'providers.Chat.options.replayReasoning',
     'providers.Chat.options.maxContextImages', 'providers.Chat.options.extraHeaders', 'providers.Chat.options.extraBody',
+    'providers.Chat.options.legacyFunctionCallExtraContent',
   ]);
   expect(Object.values(protocol.schema.properties!).every(field => field['x-hot'] === true)).toBe(true);
+  expect(saved.entry.options?.legacyFunctionCallExtraContent).toEqual({ fixture: { signature: 'migration' } });
 });
 
 it('normalizes editor unset values without removing false, zero or connection body settings', () => {
@@ -52,6 +54,7 @@ it.each([
   { endpointPath: 'chat/completions' }, { endpointPath: 4 }, { reasoningMode: 'template' },
   { replayReasoning: 'true' }, { maxContextImages: -1 }, { maxContextImages: 0.5 },
   { extraHeaders: [] }, { extraHeaders: { authorization: 7 } }, { extraBody: [] }, { extraBody: null },
+  { legacyFunctionCallExtraContent: [] }, { legacyFunctionCallExtraContent: null }, { legacyFunctionCallExtraContent: 'migration' },
 ])('rejects malformed transport options: %j', options => {
   expect(() => validateEntry(module, { ...entry, options }, 'en')).toThrow();
 });

@@ -234,6 +234,34 @@ describe('MainLoop standard Response execution', () => {
     meters: { ...unknownMeters(), input: 10, output: 2, total: 12 },
   });
 
+  it('keeps provider continuation data through foreground tool execution and the next request', async () => {
+    let received = false, sent = false;
+    const rig = makeRig({ silent: true });
+    const fallback = rig.llm.respond.bind(rig.llm);
+    rig.llm.respond = async (request, options) => {
+      if (sent) {
+        const call = options?.context?.find(entry => entry.item.type === 'function_call' && entry.item.call_id === 'continuation-call');
+        expect(call?.context.providerData).toEqual({ chatExtraContent: { fixture: { signature: 'opaque' } } });
+        expect(JSON.stringify(request)).not.toContain('opaque');
+        received = true;
+        return fallback(request, options);
+      }
+      sent = true;
+      const response = createResponse('continuation', request);
+      response.status = 'completed';
+      response.output = [{ type: 'function_call', id: 'continuation-item', call_id: 'continuation-call', name: 'qq_noop', arguments: '{}', status: 'completed' }];
+      return { response, origin, attempts: [attempt(response.id)], itemData: {
+        'continuation-item': { chatExtraContent: { fixture: { signature: 'opaque' } } },
+      } };
+    };
+    try {
+      rig.start(); rig.pushEvent('Inspect.');
+      await until(() => received);
+      const stored = rig.session.records.find(entry => entry.item.type === 'function_call' && entry.item.call_id === 'continuation-call');
+      expect(stored?.context.providerData).toEqual({ chatExtraContent: { fixture: { signature: 'opaque' } } });
+    } finally { await rig.cleanup(); }
+  });
+
   it('waits for preceding Items when done events arrive out of order and honors a barrier', async () => {
     const executed: string[] = [];
     const first = { ...makeTool('first', () => { executed.push('first'); return 'inspect before continuing'; }), barrierAfter: true };

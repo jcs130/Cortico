@@ -1326,7 +1326,7 @@ export class MainLoop {
         } finally {
           llmMs = Date.now() - llmStart;
         }
-        assistant = responseRecords(res.response, res.origin);
+        assistant = responseRecords(res.response, res.origin, {}, res.itemData);
         setAnchors({ resp: res.response.id });
         if (!this.active(generation) || flight.controller.signal.aborted) {
           if (this.active(generation) && flight.abortReason === 'interrupt') {
@@ -1370,7 +1370,7 @@ export class MainLoop {
           const interrupted = flight.abortReason === 'interrupt';
           if (interrupted && e instanceof GenerationError && e.partial) {
             // 已外化的部分输出保存；提前执行的调用使用真实结果，其余调用不执行。
-            await this.recordAbortedStream(responseRecords(e.partial, e.origin), eager, generation, NOT_EXECUTED_INTERRUPTED);
+            await this.recordAbortedStream(responseRecords(e.partial, e.origin, {}, e.itemData), eager, generation, NOT_EXECUTED_INTERRUPTED);
             if (!this.active(generation)) return;
           }
           this.tapAbort(tap, interrupted ? ABORT_INTERRUPTED : ABORT_PREEMPTED);
@@ -1382,7 +1382,7 @@ export class MainLoop {
         this.recordFailedUsage(e, prefixHash);
         if (tap && e instanceof GenerationError && e.partial) {
           // 已向外发送的部分输出必须保存；已执行的工具调用使用真实结果配对。
-          await this.recordAbortedStream(responseRecords(e.partial, e.origin), eager, generation);
+          await this.recordAbortedStream(responseRecords(e.partial, e.origin, {}, e.itemData), eager, generation);
           if (!this.active(generation)) {
             this.tapAbort(tap, ABORT_SHUTDOWN);
             return;

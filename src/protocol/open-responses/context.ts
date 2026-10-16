@@ -19,6 +19,8 @@ export interface ContextMeta {
   responseId?: string;
   responseStatus?: string;
   origin?: ItemOrigin;
+  /** Opaque continuation data owned by the recorded provider, separate from standard Items. */
+  providerData?: Record<string, unknown>;
 }
 export interface ContextRecord {
   version: 2;
@@ -68,9 +70,10 @@ export function withText(entry: ContextRecord, text: string): ContextRecord {
   return { ...entry, item: { ...item, content: text } as InputItem };
 }
 
-export function responseRecords(response: Response, origin: ItemOrigin, context: ContextMeta = {}): ContextRecord[] {
+export function responseRecords(response: Response, origin: ItemOrigin, context: ContextMeta = {}, itemData?: Record<string, Record<string, unknown>>): ContextRecord[] {
   return response.output.map(item => record(structuredClone(item), {
     ...context, responseId: response.id, responseStatus: response.status, origin,
+    ...(item.id && itemData?.[item.id] ? { providerData: structuredClone(itemData[item.id]) } : {}),
   }));
 }
 

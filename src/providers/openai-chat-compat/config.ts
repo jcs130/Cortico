@@ -32,6 +32,10 @@ export function protocolConfig(name: string, entry: LLMProviderEntry, language: 
         [`${prefix}extraBody`]: {
           type: 'object', title: zh ? '附加请求体（JSON object）' : 'Extra request body (JSON object)', 'x-hot': true,
         },
+        [`${prefix}legacyFunctionCallExtraContent`]: {
+          type: 'object', title: zh ? '历史工具调用续接元数据' : 'Legacy function call continuation metadata',
+          description: zh ? '仅用于本地合成或其他模型的调用历史；当前连接返回的续接数据原样保留。' : 'Only for synthetic or foreign-model call history; native continuation data stays unchanged.', 'x-hot': true,
+        },
       },
     },
   }];

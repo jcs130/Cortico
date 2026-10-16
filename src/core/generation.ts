@@ -118,6 +118,8 @@ export interface Generation {
   response: Response;
   origin: ItemOrigin;
   attempts: ProviderAttempt[];
+  /** Opaque continuation data keyed by output Item ID; persisted separately from standard Items. */
+  itemData?: Record<string, Record<string, unknown>>;
 }
 export interface ResponseClient {
   respond(request: Request, options?: GenerateOptions): Promise<Generation>;
@@ -126,10 +128,12 @@ export interface ResponseClient {
 }
 export class GenerationError extends Error {
   constructor(message: string, readonly attempts: ProviderAttempt[], readonly partial: Response | null,
-    readonly origin: ItemOrigin, readonly status = 0, readonly body = '', options?: ErrorOptions) {
+    readonly origin: ItemOrigin, readonly status = 0, readonly body = '', options?: ErrorOptions & { itemData?: Record<string, Record<string, unknown>> }) {
     super(message, options);
     this.name = 'GenerationError';
+    this.itemData = options?.itemData;
   }
+  readonly itemData?: Record<string, Record<string, unknown>>;
 }
 export function unknownMeters(): TokenMeters {
   return { input: null, output: null, total: null, cachedInput: null, uncachedInput: null, reasoning: null, native: null };

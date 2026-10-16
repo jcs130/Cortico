@@ -18,6 +18,8 @@ export interface ChatCompatProviderOptions {
   reasoningMode?: ReasoningMode;
   /** Default false; only endpoints accepting reasoning_content can replay it. */
   replayReasoning?: boolean;
+  /** Explicit continuation metadata for synthetic or foreign-model function-call history. */
+  legacyFunctionCallExtraContent?: Record<string, unknown>;
   media?: CompatMediaOptions;
   keepThinking?: () => boolean;
   log?: Logger;
@@ -61,6 +63,10 @@ export class ChatCompatProvider extends OpenAIHttpClient {
     return buildChatCompatRequestBody(spec, messages, tools, {
       ...this.options, keepThinking: this.options.keepThinking?.(),
     });
+  }
+
+  protected nativeInputOptions() {
+    return { legacyFunctionCallExtraContent: this.options.legacyFunctionCallExtraContent };
   }
 
   protected buildResponseBody(request: Request, options: GenerateOptions): Record<string, unknown> {
