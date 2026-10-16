@@ -778,6 +778,8 @@ export interface StoragePart {
   order?: number;
   /** 当前存储规模（条数或大小）的实时说明。 */
   stat(): string;
+  /** 控制台优先使用的异步统计；可供大账本在工作线程读取。 */
+  statAsync?(): Promise<string>;
   /** 返回清除结果；抛错表示失败。 */
   clear(): Promise<string> | string;
 }

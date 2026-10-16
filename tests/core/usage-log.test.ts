@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, appendFileSync, writeFileSync, readFileSync } from
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { UsageLog } from '../../src/core/usage-log.ts';
+import { aggregateUsage } from '../../src/core/cost.ts';
 import type { UsageRecord } from '../../src/core/types.ts';
 
 let dir: string;
@@ -18,6 +19,40 @@ beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'usagelog-')); file = join(d
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 describe('UsageLog', () => {
+  it('queries Unicode, damaged and duplicate rows off-thread with the same totals', async () => {
+    const records = Array.from({ length: 5000 }, (_, i) => ({ ...rec(1), model: 'model-a', version: 2, recordId: String(i), label: '观察🐾'.repeat(100) }));
+    writeFileSync(file, [...records.map(row => JSON.stringify(row)), 'damaged', JSON.stringify(records[0])].join('\n'));
+    const log = new UsageLog(file, () => {});
+    const options = { bucket: 'hour' as const, timezone: 'Asia/Shanghai', from: '2026-07-19', to: '2026-07-19' };
+    const expected = aggregateUsage(log.readAll(), options);
+    let ticks = 0;
+    const timer = setInterval(() => ticks++, 5);
+    try {
+      const [a, b, count] = await Promise.all([log.aggregateAsync(options), log.aggregateAsync(options), log.countAsync()]);
+      expect(a).toEqual(expected);
+      expect(b).toBe(a);
+      expect(count).toBe(records.length);
+      expect(ticks).toBeGreaterThan(0);
+      expect(log.status().error).toContain('1 damaged ledger lines');
+    } finally { clearInterval(timer); }
+    log.append({ ...rec(2), model: 'model-a' });
+    expect(await log.countAsync()).toBe(records.length + 1);
+  });
+
+  it('includes failed pending appends once and reads missing ledgers as empty', async () => {
+    const blocked = join(dir, 'blocked');
+    writeFileSync(blocked, 'not a directory');
+    const log = new UsageLog(join(blocked, 'usage.jsonl'), () => {});
+    log.append({ ...rec(1), model: 'model-a' });
+    const options = { bucket: 'day' as const };
+    expect(await log.aggregateAsync(options)).toEqual(aggregateUsage(log.readAll(), options));
+    expect(await log.countAsync()).toBe(1);
+    rmSync(blocked);
+    log.flush();
+    expect(await log.countAsync()).toBe(1);
+    expect(await new UsageLog(join(dir, 'missing.jsonl')).countAsync()).toBe(0);
+  });
+
   it('append 后 readAll 拿到全部,顺序保留', () => {
     const log = new UsageLog(file);
     log.append(rec(1)); log.append(rec(2)); log.append(rec(3));

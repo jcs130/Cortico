@@ -447,7 +447,7 @@ export interface WebAppCheckpointDeps {
 export interface WebAppUsageDeps {
   status?(): { pending: number; error: string | null };
   /** `days` 与补空桶的截止时刻按部署时区解释,由实现方给定时区。 */
-  aggregate(opts: { from?: string; to?: string; days?: number; bucket: UsageBucketOption; currency?: string; basis?: 'marginal' | 'equivalent' }): UsageAggregate;
+  aggregate(opts: { from?: string; to?: string; days?: number; bucket: UsageBucketOption; currency?: string; basis?: 'marginal' | 'equivalent' }): UsageAggregate | Promise<UsageAggregate>;
 }
 
 
@@ -1582,7 +1582,7 @@ export class WebApp {
         events: this.deps.store.range({ limit: DIAGNOSTICS_TAIL }),
         latestCursor: this.deps.store.latestCursor(),
         worlds: (await this.deps.worlds?.(this.languageOf(req))) ?? [],
-        usage: this.deps.usage?.aggregate({ bucket: 'day' }) ?? null,
+        usage: (await this.deps.usage?.aggregate({ bucket: 'day' })) ?? null,
         endpoint: dbg?.activeEndpoint?.() ?? null,
       }));
     }));
@@ -1608,16 +1608,16 @@ export class WebApp {
       res.json({ id, messages, estTokens: estimateMessagesTokens(messages) });
     }));
 
-    app.get('/api/storage', wrap((req, res) => {
+    app.get('/api/storage', wrap(async (req, res) => {
       const language = this.languageOf(req);
-      const parts = (this.deps.storage?.(language) ?? []).map((p) => {
+      const parts = await Promise.all((this.deps.storage?.(language) ?? []).map(async (p) => {
         let stat = '';
-        try { stat = p.stat(); } catch (err) { stat = serverText(language).statFailed(String(err)); }
+        try { stat = await (p.statAsync?.() ?? p.stat()); } catch (err) { stat = serverText(language).statFailed(String(err)); }
         return {
           key: p.key, label: p.label, kind: p.kind, owner: p.owner,
           location: p.location, danger: !!p.danger, note: p.note, stat,
         };
-      });
+      }));
       res.json({ parts });
     }));
 
@@ -2110,7 +2110,7 @@ export class WebApp {
       }),
     );
 
-    app.get('/api/usage', wrap((req, res) => {
+    app.get('/api/usage', wrap(async (req, res) => {
       const src = this.deps.usage;
       if (!src) { res.json({ currency: 'USD', bucket: 'day', from: null, to: null, series: [], totals: null, byRole: [], byModel: [] }); return; }
       const BUCKETS = ['auto', 'minute', 'hour', 'day', 'week', 'month'] as const;
@@ -2127,7 +2127,7 @@ export class WebApp {
       if (to) opts.to = to;
       const days = intParam(req.query.days);
       if (days !== undefined && days >= 1) opts.days = days;
-      res.json({ ...src.aggregate(opts), ledger: src.status?.() });
+      res.json({ ...await src.aggregate(opts), ledger: src.status?.() });
     }));
 
     app.get('/api/config', wrap((req, res) => {

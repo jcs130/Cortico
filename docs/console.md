@@ -147,6 +147,8 @@ JSON:运行指纹(`runs/index.jsonl` 的这一行与 `run.json`)、状态快照�
 上限(`DIAGNOSTICS_TAIL`),取到上限的段名列在 `truncated` 里;键名含 secret / token / key /
 password 的配置值写出前抹成 `***`;`endpoint` 段不经这一步,否则 `maxTokens` 会被抹掉。未挂载的接缝那一段为空。
 
+用量聚合与账本计数在工作线程读取；同一账本串行查询，相同的在途查询共享结果。控制台优先使用可选的 `StoragePart.statAsync`，用量数据源也可异步返回。
+
 ## 语言
 
 界面语言由浏览器选择,可选值是 `src/core/language.ts` 的 `LANGUAGES`:`zh`(简体中文)、`zh-Hant`、

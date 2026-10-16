@@ -29,7 +29,6 @@ import { RESERVED_FRAME_NAMES } from './core/loop.ts';
 import type { ResponseClient } from './core/generation.ts';
 import { acquireInstanceLock, type InstanceLock } from './core/instance-lock.ts';
 import { assembleSystemSegments, envPromptOverridePath, envPromptTemplateSource, renderWorldEnvPrompt, type EnvPromptDirs, type EnvPromptOrigin } from './core/prefix.ts';
-import { aggregateUsage } from './core/cost.ts';
 import { DeadlineError, nowIso, withDeadline } from './core/util.ts';
 import { closeRun } from './core/run.ts';
 import { ProviderHub } from './providers/console/hub.ts';
@@ -222,6 +221,7 @@ function deriveStorage<C extends CoreConfig>(core: Core<C>, dataDir: string, lan
       location: 'data/usage.jsonl',
       note: s.usage.note,
       stat: () => s.usage.stat(core.usageLog.count(), size(dataDir, 'usage.jsonl')),
+      statAsync: async () => s.usage.stat(await core.usageLog.countAsync(), size(dataDir, 'usage.jsonl')),
       clear: () => s.usage.cleared(core.usageLog.clear()),
     },
     {
@@ -967,7 +967,7 @@ export function createBot<C extends CoreConfig>(
       defaultScheme: cfg.web.theme,
       sessions: core.sessions,
       storage: consoleStorage,
-      usage: { aggregate: (opts) => aggregateUsage(core.usageLog.readAll(), { ...opts, timezone: core.config.timezone, rates: usageRates(core.config) }), status: () => core.usageLog.status() },
+      usage: { aggregate: (opts) => core.usageLog.aggregateAsync({ ...opts, timezone: core.config.timezone, rates: usageRates(core.config) }), status: () => core.usageLog.status() },
       config: {
         groups: (language) => allConfigGroups(language).map((group) => ({ group, values: group.owner.startsWith('provider:') ? providerSettings.values(group.id, language) : readGroupValues(cfg, group) })),
         set: (groupId: string, values: ConfigValues, language) => {

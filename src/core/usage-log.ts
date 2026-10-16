@@ -2,7 +2,11 @@
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
+import { Worker } from 'node:worker_threads';
+import type { UsageAggregate, UsageAggregateOptions } from './cost.ts';
 import type { UsageRecord } from './types.ts';
+
+interface UsageQueryResult { count: number; aggregate?: UsageAggregate; error: string | null }
 
 function* lines(file: string): Generator<string> {
   const fd = openSync(file, 'r');
@@ -31,6 +35,8 @@ export class UsageLog {
   private pending: UsageRecord[] = [];
   private error: string | null = null;
   private reconcile = false;
+  private queries = new Map<string, Promise<UsageQueryResult>>();
+  private queryTail: Promise<unknown> = Promise.resolve();
   constructor(private readonly file: string, private readonly report: (message: string) => void = console.error) {}
 
   append(rec: UsageRecord): void {
@@ -91,6 +97,35 @@ export class UsageLog {
   }
 
   count(): number { return this.readAll().length; }
+
+  /** Console reads run off the event loop; identical in-flight queries share one snapshot. */
+  private query(options?: UsageAggregateOptions): Promise<UsageQueryResult> {
+    const key = JSON.stringify(options ?? null);
+    const existing = this.queries.get(key);
+    if (existing) return existing;
+    const query = this.queryTail.then(() => new Promise<UsageQueryResult>((resolve, reject) => {
+      const worker = new Worker(new URL('./usage-query-worker.mjs', import.meta.url), {
+        workerData: { file: this.file, pending: this.pending, options }, execArgv: [],
+      });
+      worker.once('message', (result: UsageQueryResult) => {
+        if (result.error && result.error !== this.error) { this.error = result.error; this.report(result.error); }
+        resolve(result);
+        void worker.terminate();
+      });
+      worker.once('error', reject);
+      worker.once('exit', code => reject(new Error(`Usage query worker exited before returning a result (${code})`)));
+    }));
+    this.queries.set(key, query);
+    this.queryTail = query.catch(() => {});
+    void query.finally(() => this.queries.delete(key)).catch(() => {});
+    return query;
+  }
+
+  async countAsync(): Promise<number> { return (await this.query()).count; }
+
+  async aggregateAsync(options: UsageAggregateOptions): Promise<UsageAggregate> {
+    return (await this.query(options)).aggregate!;
+  }
 
   clear(): number {
     const count = this.count();

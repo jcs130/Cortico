@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebApp } from '../../src/web/server.ts';
 import { UsageLog } from '../../src/core/usage-log.ts';
-import { aggregateUsage } from '../../src/core/cost.ts';
 import { nullLogger } from '../../src/core/util.ts';
 import type { UsageRecord } from '../../src/core/types.ts';
 import type { BotConfig } from '../../bots/corti-soulmate/assemble.ts';
@@ -54,7 +53,9 @@ beforeAll(async () => {
     memoryDir,
     dataDir,
     getStatus: () => ({}),
-    usage: { aggregate: (opts) => aggregateUsage(usage.readAll(), opts) },
+    usage: { aggregate: (opts) => usage.aggregateAsync(opts) },
+    storage: () => [{ key: 'usage', label: 'Usage', owner: 'core', kind: 'disk',
+      stat: () => 'fallback', statAsync: async () => `${await usage.countAsync()} records`, clear: () => 'unused' }],
     config: {
       groups: () => configGroups.map((group) => ({ group, values: readGroupValues(cfg, group) })),
       set: (groupId, values) => {
@@ -76,6 +77,11 @@ afterAll(async () => {
 });
 
 describe('/api/usage', () => {
+  it('awaits usage in diagnostics and asynchronous storage statistics', async () => {
+    const [diagnostics, storage] = await Promise.all([getJ('/api/diagnostics'), getJ('/api/storage')]);
+    expect(diagnostics.usage.aggregate.totals.calls).toBe(2);
+    expect(storage.parts[0].stat).toBe('2 records');
+  });
   it('聚合 IO 自报 token，未提交报价时显示未报价', async () => {
     const d = await getJ('/api/usage?bucket=hour&from=2026-07-19&to=2026-07-19');
     expect(d.totals.calls).toBe(2);
