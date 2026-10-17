@@ -25,7 +25,10 @@ function rig(extraWorlds: World[] = []) {
     } }));
   });
   const world: World = { id: 'game', start: async () => {}, stop: async () => {}, tools: () => [], envPromptVars: () => ({}),
-    requestFacts: () => ({ text: 'Observed now: moving normally, destination not reached.', snapshotTypes: [], parts: [
+    requestFacts: () => ({ text: 'Observed now: moving normally, destination not reached.', snapshotTypes: [],
+      decision: { sampledAtMs: Date.now(), state: { health: 20, danger: null,
+        action: { taskId: 7, progress: 'distance reduced from 120 to 100 blocks; no obstruction' },
+        completed: false } }, parts: [
       { key: 'sample', text: `Observed ${new Date().toISOString()}` },
       { key: 'inventory', text: 'older inventory detail '.repeat(5000) },
       { key: 'queue', text: 'Task #7 executing, distance reduced from 120 to 100 blocks; no obstruction.' },
@@ -42,6 +45,10 @@ function rig(extraWorlds: World[] = []) {
 }
 
 describe('request-local reasoning fallback', () => {
+  const context = (request: any) => {
+    const instructions = request.questions.reasoning.instructions;
+    return JSON.parse(instructions.slice(instructions.indexOf('{')));
+  };
   it('retains actual music occupancy beyond the first two worlds and uses the configured deeper level', async () => {
     let audio = '[演出当前读数；观察 ' + new Date().toISOString() + ']\n正在播放歌曲「Example」；在播及排队约 90 秒';
     const world = (id: string, text: () => string): World => ({ id, start: async () => {}, stop: async () => {},
@@ -50,16 +57,16 @@ describe('request-local reasoning fallback', () => {
     r.cfg.minIntervalMs = 0; r.cfg.reasoningDeliberateEffort = 'xhigh';
     await r.persona.beforeDecision({ events: [r.event], messages: r.records });
     expect(await r.select()).toEqual({ thinking: true, reasoningEffort: 'xhigh' });
-    expect(r.requests[0].state.performance.text).toContain('90 秒');
-    expect(r.requests[0].state.facts.map((fact: any) => fact.source)).toEqual(['game', 'other']);
+    expect(context(r.requests[0]).performance.text).toContain('90 秒');
+    expect(context(r.requests[0]).facts.map((fact: any) => fact.source)).toEqual(['game', 'other']);
     expect(JSON.stringify(r.requests[0]).length).toBeLessThan(5000);
     audio = '[演出当前读数；观察 ' + new Date().toISOString() + ']\n安静';
     const event = { ...r.event, cursor: 43, text: 'Please respond now.' };
     r.persona.onDelivery({ events: [event] }); r.choice('immediate');
     await r.persona.beforeDecision({ events: [event], messages: r.records });
     expect(await r.select()).toEqual({ thinking: false });
-    expect(r.requests.at(-1).state.performance.text).toContain('安静');
-    expect(r.requests.at(-1).state.performance.text).not.toContain('Example');
+    expect(context(r.requests.at(-1)).performance.text).toContain('安静');
+    expect(context(r.requests.at(-1)).performance.text).not.toContain('Example');
     r.persona.stopRhythm();
   });
 
@@ -70,8 +77,9 @@ describe('request-local reasoning fallback', () => {
     expect(await r.select()).toBeNull();
     expect(r.requests).toHaveLength(1);
     expect(r.spec.thinking).toBe(false);
-    const facts = r.requests[0].state.facts[0];
-    expect(facts.parts.find((part: any) => part.key === 'queue').text).toContain('distance reduced');
+    const facts = context(r.requests[0]).facts[0];
+    expect(facts.state.action.progress).toContain('distance reduced');
+    expect(JSON.stringify(r.requests[0])).not.toContain('older inventory');
     expect(JSON.stringify(r.requests[0]).length).toBeLessThan(4000);
     r.persona.stopRhythm();
   });
@@ -92,7 +100,7 @@ describe('request-local reasoning fallback', () => {
       outcome: { failed: true, text: 'Observation unavailable; do not infer a cliff from this failure.' } });
     r.choice('routine');
     expect(await r.select()).toEqual({ thinking: true, reasoningEffort: 'low' });
-    expect(r.requests.at(-1).state.recentRequest).toMatchObject({ tool: 'inspect', receipt: expect.stringContaining('[执行失败]') });
+    expect(context(r.requests.at(-1)).latestResult).toMatchObject({ tool: 'inspect', receipt: expect.stringContaining('[执行失败]') });
     r.persona.stopRhythm();
   });
 
@@ -116,7 +124,7 @@ describe('request-local reasoning fallback', () => {
     r.persona.onDelivery({ events: [event] }); r.choice('immediate');
     await r.persona.beforeDecision({ events: [event], messages: r.records });
     expect(await r.select()).toEqual({ thinking: false });
-    expect(r.requests.at(-1).state.observations.at(-1).cursor).toBe(43);
+    expect(r.requests.at(-1).state.observations.at(-1).text).toContain('Taking damage');
     r.persona.stopRhythm();
   });
 });

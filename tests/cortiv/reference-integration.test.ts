@@ -47,6 +47,15 @@ function rig() {
 const requireRead = (root: string, path: string): string => readFileSync(join(root, path), 'utf8');
 
 describe('Persona progressive reference integration', () => {
+  it('does not classify topics while an opened activity prevents adopting that advice', async () => {
+    const r = rig(); r.library.detail(r.topics[0].key, 'shelter');
+    const selected = r.library.selected();
+    const fetchImpl = vi.fn(async () => r.answer());
+    const router = new ReferenceRouting(r.library, () => r.fast, fetchImpl, () => NOW);
+    await router.observe([event()], [], makeFakeHarnessApi());
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(r.library.selected()).toEqual(selected);
+  });
   it('keeps asynchronous result evidence when later snapshots and a long accepted plan share a batch', async () => {
     const r = rig(); const requests: RequestInit[] = [];
     const notices: string[] = [];

@@ -916,6 +916,8 @@ export interface WorldRequestFacts {
    * when sampling alone leaves the other facts unchanged. Consumers may use text instead.
    */
   parts?: readonly { key: string; text: string }[];
+  /** World-owned compact current facts for optional fast classification; full evidence stays in text/parts. */
+  decision?: { sampledAtMs: number; state: Readonly<Record<string, unknown>> };
 }
 
 /** 主 session 循环此刻在做什么;每个字段都是 Core 直接观察到的事实。 */

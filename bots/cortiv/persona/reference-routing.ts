@@ -52,6 +52,8 @@ export class ReferenceRouting {
     // All topics remain available through the library; oversized catalogs require explicit choice.
     if (!topics.length || topics.length > REFERENCE_MAX_TOPICS) return;
     const selected = this.library.selected();
+    // An opened activity cannot adopt topic advice; preserve it without an unused inference.
+    if (selected?.activityId) return;
     const observations = observed.filter(event => !event.tags?.includes('snapshot'));
     const state = {
       catalogReady: true,

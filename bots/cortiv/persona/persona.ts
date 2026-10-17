@@ -951,7 +951,7 @@ export class CortiV extends Cormini {
 
   private foregroundScene(events: readonly EventEnvelope[]): ForegroundScene {
     const facts = this.worlds.flatMap(world => {
-      try { const current = world.requestFacts?.(); return current ? [{ source: world.id, text: current.text, parts: current.parts }] : []; }
+      try { const current = world.requestFacts?.(); return current ? [{ source: world.id, text: current.text, decision: current.decision }] : []; }
       catch { return []; }
     });
     const outcome = this.foregroundOutcome;
@@ -1005,7 +1005,7 @@ export class CortiV extends Cormini {
     const revision = this.foregroundRevision;
     const config = JSON.stringify(cfg);
     const reused = pending && pending.revision === revision && pending.config === config && Date.now() - pending.at <= 1000;
-    const advice = reused ? pending.advice : await this.foregroundAdviser.advise(this.foregroundScene(this.foregroundEvents), ctx.signal);
+    const advice = reused ? pending.advice : await this.foregroundAdviser.advise(this.foregroundScene(this.foregroundEvents), ctx.signal, 'reasoning');
     const stale = ctx.signal.aborted || revision !== this.foregroundRevision || config !== JSON.stringify(this.fastForegroundConfig());
     this.brainMetrics.selector(stale ? { ...advice, kind: 'stale' } : advice);
     let choice: RequestReasoning | null = null;
@@ -1026,6 +1026,7 @@ export class CortiV extends Cormini {
       choice: choice ? advice.reasoning : 'configured', probability: advice.reasoningProbability ?? null,
       thinking: choice?.thinking ?? ctx.spec.thinking, reasoningEffort: choice ? choice.reasoningEffort ?? null : ctx.spec.reasoningEffort ?? null,
       reused: !!reused, elapsedMs: reused ? 0 : advice.elapsedMs ?? 0, inputChars: advice.inputChars ?? 0,
+      inputFormat: advice.inputFormat ?? null, questionNames: advice.questionNames ?? [],
     } });
     return choice;
   }

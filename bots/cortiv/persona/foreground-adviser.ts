@@ -27,22 +27,23 @@ export const FAST_FOREGROUND_DEFAULTS: FastForegroundConfig = {
 };
 
 const READING = {
-  focused: '当前目标、现场事实、最新完整调用与回执足以继续，只需少量最近历史',
-  connected: '需要较早的人物约定、地点、步骤或失败证据，或者当前依赖不明确；保留通常历史并按需展开原始证据',
+  focused: 'Current evidence suffices.',
+  connected: 'Need older agreements, dependencies or failure evidence.',
 };
 const TIMING = {
-  continue: '当前身体任务正常执行，没有新问题或计划变化，等执行终态或有新输入时再决策',
-  respond: '当前需要制定后续动作、核验异常、处理变化或回应新输入，主意识现在决策',
+  continue: 'Fresh normal progress; await the terminal result or new input.',
+  respond: 'Plan next action, check an anomaly or answer new input now.',
 };
 const REASONING = {
-  immediate: '急需接话、处理危险或即将结束的动作；下一步已经明确的短动作、核验和工具衔接也优先立刻回应，无需额外推理',
-  routine: '普通交流、几何解释或少量步骤衔接，需要简短核对，低思考即可；证据不足时不要假定有长时间空档',
-  deliberate: '确有复杂空间约束、自主脚本设计或多步方案比较，且没有急需回应的输入，值得较深思考。新鲜现场确认身体任务正常推进或歌曲实际在播、仍有较长剩余时间时，可利用这段时间规划；仅受理、无进展移动、单纯走路或播歌本身不足以选此项',
+  immediate: 'Danger, urgent response, or known short next step.',
+  routine: 'Brief check/conversation; safe planning time unknown.',
+  deliberate: 'Complex design/comparison, confirmed safe time, no urgency; running/accepted alone is insufficient.',
 };
 
 export interface ForegroundScene {
   events: readonly EventEnvelope[];
-  facts: readonly { source: string; text: string; parts?: readonly { key: string; text: string }[] }[];
+  facts: readonly { source: string; text: string;
+    decision?: { sampledAtMs: number; state: Readonly<Record<string, unknown>> } }[];
   agenda: string;
   performance?: { source: string; text: string };
   intent?: { tool: string; arguments: string; receipt?: string; at?: string };
@@ -59,6 +60,8 @@ export interface ForegroundAdvice {
   elapsedMs?: number;
   latencyMs?: number;
   inputChars?: number;
+  inputFormat?: 'foreground-compact-v1';
+  questionNames?: string[];
   cursors: number[];
   attemptId?: string;
   proposedReading?: keyof typeof READING;
@@ -110,38 +113,46 @@ export class ForegroundAdviser {
 
   reset(): void { this.generation++; this.controller?.abort(); this.controller = null; this.lastAttemptAt = -Infinity; }
 
-  async advise(scene: ForegroundScene, signal?: AbortSignal): Promise<ForegroundAdvice> {
+  async advise(scene: ForegroundScene, signal?: AbortSignal, purpose: 'foreground' | 'reasoning' = 'foreground'): Promise<ForegroundAdvice> {
     const cfg = this.config();
     const started = this.now();
     const base = { defer: false, cursors: scene.events.map(event => event.cursor) };
     if (signal?.aborted) return { ...base, kind: 'stale' };
     if (!cfg.enabled || !decisionAvailable(cfg, this.decisionHost())) return { ...base, kind: 'disabled' };
+    if (purpose === 'reasoning' && (!cfg.reasoningEnabled || !cfg.reasoningModel.trim())) return { ...base, kind: 'disabled' };
     if (this.controller || started - this.lastAttemptAt < cfg.minIntervalMs) return { ...base, kind: 'cooldown' };
     this.lastAttemptAt = started;
-    const opportunity = cfg.deferQueueTail ? queueTailOpportunity(scene.events, started) : null;
-    const state = {
-      sampledAt: new Date(started).toISOString(),
-      observations: scene.events.filter(event => event.contextDelivery !== 'archive-only'
-        && !(event.source === 'persona' && event.type === 'notice')).slice(-3)
-        .map(event => ({ source: event.source, type: event.type, cursor: event.cursor, at: event.ts, text: excerpt(event.text, 200) })),
-      facts: scene.facts.filter(fact => !cfg.reasoningEnabled || fact.source !== scene.performance?.source).slice(0, 2)
-        .map(fact => ({ source: fact.source, text: excerpt(fact.text, 300),
-        ...(cfg.reasoningEnabled && fact.parts?.length ? { parts: fact.parts.slice(0, 24)
-          .map(part => ({ key: part.key, text: excerpt(part.text, 80) })) } : {}) })),
-      agenda: excerpt(scene.agenda, 240),
-      ...(cfg.reasoningEnabled && scene.performance ? { performance: {
-        source: scene.performance.source, text: excerpt(scene.performance.text, 400),
-      } } : {}),
-      recentRequest: scene.intent ? { ...scene.intent, arguments: excerpt(scene.intent.arguments, 140),
-        receipt: excerpt(scene.intent.receipt ?? '', 240) } : null,
-      queueTail: opportunity?.meta?.minecraftQueueTail ?? null,
-      boundary: '状态、目标、新用户输入、完整最新调用与失败回执始终保留。只选择额外历史的阅读量；继续执行不等于完成。',
-    };
-    const body = JSON.stringify({ state, questions: {
-      reading: { type: 'choice', instructions: '按本次问题选择需要阅读的历史深度；信息依赖不明确时选 connected。无需输出解释。', criteria: READING },
-      ...(opportunity ? { timing: { type: 'choice', instructions: '现在只有仍在执行的尾步队列观察。判断是否需要提前规划；有不确定性选 respond。此选择不能停止、替换或新增身体任务。', criteria: TIMING } } : {}),
+    const opportunity = purpose === 'foreground' && cfg.deferQueueTail ? queueTailOpportunity(scene.events, started) : null;
+    const facts = scene.facts.filter(fact => !cfg.reasoningEnabled || fact.source !== scene.performance?.source)
+      .map(fact => ({ source: fact.source, ...(fact.decision ? {
+        ageMs: started - fact.decision.sampledAtMs, state: fact.decision.state,
+      } : { excerpt: excerpt(fact.text, 100), complete: fact.text.length <= 100 }) }));
+    const latest = new Map<string, EventEnvelope>();
+    for (const event of scene.events) {
+      if (event.contextDelivery === 'archive-only' || (event.source === 'persona' && event.type === 'notice')) continue;
+      // Collapse repeated snapshots only. A newer status must not displace speech or a failure result.
+      if (event.tags?.includes('snapshot')) latest.set(JSON.stringify([event.source, event.type, event.senderKey]), event);
+      else latest.set(String(event.cursor), event);
+    }
+    const observations = [...latest.values()].sort((a, b) => a.cursor - b.cursor)
+        .map(event => ({ source: event.source, type: event.type.startsWith(event.source + '.') ? event.type.slice(event.source.length + 1) : event.type,
+          ...(event.senderKey ? { sender: event.senderKey } : {}),
+          ageMs: started - Date.parse(event.ts), text: excerpt(event.text, 80) }));
+    const recentRequest = scene.intent ? { ...scene.intent, arguments: excerpt(scene.intent.arguments, 80),
+      receipt: excerpt(scene.intent.receipt ?? '', 100) } : null;
+    // The backend evaluates each question with state. Keep question-specific evidence out of that repeated state.
+    const reading = { agenda: excerpt(scene.agenda, 100), recentRequest,
+      worlds: facts.map(fact => ({ source: fact.source, ageMs: 'ageMs' in fact ? fact.ageMs : null })),
+      ...(cfg.reasoningEnabled && cfg.reasoningModel.trim() ? {} : { facts }) };
+    const reasoning = { facts, ...(scene.performance ? { performance: {
+      source: scene.performance.source, text: excerpt(scene.performance.text, 100) } } : {}),
+      latestResult: recentRequest ? { tool: recentRequest.tool, receipt: recentRequest.receipt, at: recentRequest.at } : null };
+    const body = JSON.stringify({ state: { observations }, questions: {
+      ...(purpose === 'foreground' ? { reading: { type: 'choice', instructions: 'Extra history; incomplete/unknown dependencies require connected. Context: ' + JSON.stringify(reading), criteria: READING } } : {}),
+      ...(opportunity ? { timing: { type: 'choice', instructions: 'Only a fresh queue tail is pending. Running is not completion; uncertainty requires respond. Queue: '
+        + JSON.stringify(opportunity.meta?.minecraftQueueTail), criteria: TIMING } } : {}),
       ...(cfg.reasoningEnabled && cfg.reasoningModel.trim() ? { reasoning: { type: 'choice',
-        instructions: '只选择下一次主意识请求的思考深度，依据新输入、现场采样时间、当前任务实际进度及最近失败回执。空闲不必深思，正在执行不等于安全或有时间。不能改变身体任务、发言或等待策略；不确定选 routine。', criteria: REASONING } } : {}),
+        instructions: 'Reasoning only; unknown requires routine. Now: ' + JSON.stringify(reasoning), criteria: REASONING } } : {}),
     } });
     const attemptId = randomUUID();
     const controller = new AbortController();
@@ -158,7 +169,8 @@ export class ForegroundAdviser {
       const raw = await Promise.race([request, new Promise<null>(resolve => {
         timer = setTimeout(() => { timedOut = true; controller.abort(); resolve(null); }, Math.max(1, Math.min(2000, cfg.timeoutMs)));
       }), new Promise<null>(resolve => { onAbort = () => resolve(null); controller.signal.addEventListener('abort', onAbort, { once: true }); })]) as { answers?: Record<string, unknown>; latency_ms?: number } | null;
-      const measured = { attemptId, elapsedMs: this.now() - started, inputChars: body.length,
+      const measured = { attemptId, elapsedMs: this.now() - started, inputChars: body.length, inputFormat: 'foreground-compact-v1' as const,
+        questionNames: Object.keys(JSON.parse(body).questions),
         ...(typeof raw?.latency_ms === 'number' && Number.isFinite(raw.latency_ms) ? { latencyMs: raw.latency_ms } : {}) };
       if ((controller.signal.aborted && !timedOut) || generation !== this.generation || configKey !== createHash('sha256').update(JSON.stringify(this.config())).digest('hex'))
         return { ...base, ...measured, kind: 'stale' };

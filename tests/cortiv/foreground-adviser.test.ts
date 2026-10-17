@@ -88,8 +88,8 @@ describe('foreground reading and timing fallback', () => {
     }) as typeof fetch, () => now);
     const result = await adviser.advise(scene());
     expect(result).toMatchObject({ kind: 'advice', reading: 'focused', defer: true, cursors: [42] });
-    expect(JSON.stringify(request.state)).toContain('把借来的工具还给原主人');
-    expect(JSON.stringify(request.state)).toContain('尚未完成');
+    expect(request.questions.reading.instructions).toContain('把借来的工具还给原主人');
+    expect(request.questions.reading.instructions).toContain('尚未完成');
     const withChat = await new ForegroundAdviser(config, (async () => new Response(JSON.stringify(answer()))) as typeof fetch, () => now)
       .advise(scene([tail(),tail({ type: 'game.chat', meta: undefined, text: '请马上回答' })]));
     expect(withChat.defer).toBe(false);
@@ -146,13 +146,63 @@ describe('foreground reading and timing fallback', () => {
     await adviser.advise(input);
     expect(body.length).toBeLessThan(3100);
     const request = JSON.parse(body);
-    expect(request.state.observations).toHaveLength(3);
-    expect(request.state.observations[0]).toMatchObject({ source: 'game', type: 'game.task.queue', cursor: 42,
-      at: tail().ts });
+    expect(request.state.observations).toHaveLength(1);
+    expect(request.state.observations[0]).toMatchObject({ source: 'game', type: 'task.queue',
+      ageMs: 0 });
     for (const value of ['仍在执行', '尚未抵达', '观测来源及当前位置', '生命下降', '同伴在线', '对方尚未回应',
       '目标是归还装备', '尚未完成', '目的地', '不能替换队列', '受理时间', '终态失败，装备仍在自己身上']) expect(body).toContain(value);
-    expect(request.state.queueTail).toEqual(tail().meta!.minecraftQueueTail);
+    expect(request.questions.timing.instructions).toContain(JSON.stringify(tail().meta!.minecraftQueueTail));
     expect((await adviser.advise(input)).kind).toBe('cooldown');
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses fresh World compact facts once and retains hazards, unknowns and independent world identities', async () => {
+    let body = '';
+    const adviser = new ForegroundAdviser(() => ({ ...config(), reasoningEnabled: true, reasoningModel: 'local-model' }),
+      (async (_url, init) => { body = String(init?.body); return new Response(JSON.stringify(answer())); }) as typeof fetch, () => now);
+    await adviser.advise({ ...scene([tail({ type: 'game.failed', text: 'Movement blocked, no arrival confirmed.' })]), facts: [
+      { source: 'game', text: 'OLDER_INVENTORY'.repeat(2000), decision: { sampledAtMs: now - 75,
+        state: { health: 6, danger: { water: true, air: 12, nearestHostile: 2, los: null },
+          action: { task: 7, step: 'move', result: 'blocked' }, constraints: { support: null } } } },
+      { source: 'other-game', text: 'Independent world, no verified active task.' },
+    ] });
+    const input = JSON.parse(body);
+    const instruction = input.questions.reasoning.instructions;
+    const context = JSON.parse(instruction.slice(instruction.indexOf('{')));
+    expect(context.facts[0]).toMatchObject({ source: 'game', ageMs: 75,
+      state: { health: 6, danger: { water: true, air: 12, nearestHostile: 2, los: null }, constraints: { support: null } } });
+    expect(context.facts[1]).toMatchObject({ source: 'other-game', complete: true });
+    expect(body).not.toContain('OLDER_INVENTORY');
+    expect(context.facts[0]).not.toHaveProperty('parts');
+    expect(body).toContain('Movement blocked');
+  });
+
+  it('retains new speaker input and failure evidence when several newer snapshots arrive', async () => {
+    let body = '';
+    const adviser = new ForegroundAdviser(config, (async (_url, init) => {
+      body = String(init?.body); return new Response(JSON.stringify(answer()));
+    }) as typeof fetch, () => now);
+    await adviser.advise(scene([
+      tail({ cursor: 40, type: 'game.chat', tags: undefined, senderKey: 'operator', text: 'New request: take the safe route.' }),
+      tail({ cursor: 41, type: 'game.failed', tags: undefined, text: 'Movement blocked; no arrival.' }),
+      ...[42,43,44].map(cursor => tail({ cursor, text: 'Same queue, latest snapshot ' + cursor })),
+    ]));
+    const input = JSON.parse(body);
+    expect(input.state.observations).toHaveLength(3);
+    expect(input.state.observations[0]).toMatchObject({ source: 'game', sender: 'operator', text: expect.stringContaining('New request') });
+    expect(body).toContain('Movement blocked');
+    expect(body).toContain('latest snapshot 44');
+    expect(body).not.toContain('latest snapshot 42');
+  });
+
+  it('asks only reasoning when the caller cannot consume reading or timing answers', async () => {
+    let body = '';
+    const adviser = new ForegroundAdviser(() => ({ ...config(), reasoningEnabled: true, reasoningModel: 'local-model' }),
+      (async (_url, init) => { body = String(init?.body); return new Response(JSON.stringify({ answers: {
+        reasoning: { choice: 'immediate', confidence: .98, probabilities: { immediate: .98, routine: .01, deliberate: .01 } },
+      } })); }) as typeof fetch, () => now);
+    const result = await adviser.advise(scene(), undefined, 'reasoning');
+    expect(Object.keys(JSON.parse(body).questions)).toEqual(['reasoning']);
+    expect(result).toMatchObject({ reasoning: 'immediate', defer: false, questionNames: ['reasoning'] });
   });
 });
