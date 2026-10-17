@@ -32,6 +32,7 @@ import {
   type ExtensionPackageJson,
 } from './extensions/manifest.ts';
 import { registerFrameworkResolver } from './extensions/runtime.ts';
+import { repoRoot } from './paths.ts';
 import { text } from './extensions/strings.ts';
 import { pageIdFor, type ContributingKind } from './web/shared/console-protocol.ts';
 
@@ -417,6 +418,14 @@ function fetchFailure(url: string, err: unknown): string {
 
 /** extensions/ 里的 npm 配置文件;`pnpm add` 与 `pnpm config get` 在这个目录跑,都读它。 */
 const NPMRC = '.npmrc';
+/** 独立工作区保留扩展安装时的 pnpm 配置，不继承外层仓库的工作区。 */
+const WORKSPACE_FILE = 'pnpm-workspace.yaml';
+
+/** 源码分发跟随框架固定 pnpm；npm 分发可能没有 packageManager 字段。 */
+function corticoPackageManager(): string | undefined {
+  const { packageManager } = JSON.parse(readFileSync(join(repoRoot(), 'package.json'), 'utf8')) as { packageManager?: unknown };
+  return typeof packageManager === 'string' ? packageManager : undefined;
+}
 /** .npmrc 里设默认源的那一行;`@scope:registry=` 不算。 */
 const REGISTRY_LINE = /^\s*registry\s*=(.*)$/;
 
@@ -588,14 +597,14 @@ export class ExtensionManager {
   }
 
   /**
-   * 安装走的 registry:和 `pnpm add` 同样在 extensions/ 里带 `--ignore-workspace` 跑
+   * 安装走的 registry:和 `pnpm add` 同样在 extensions/ 工作区里跑
    * `pnpm config get registry`,读的是 extensions/ 与用户的 .npmrc、`pnpm_config_registry`,没配时是 npm 官方的。
    * pnpm 失败或没给出地址时抛出它的退出码与输出,下次查询再问。解析结果缓存到 `setRegistry()` 改写
    * extensions/.npmrc 为止;在别处改了配置要重启进程。
    */
   private registry(): Promise<string> {
     if (this.registryUrl) return this.registryUrl;
-    const args = ['config', 'get', 'registry', '--ignore-workspace'];
+    const args = ['config', 'get', 'registry'];
     const pending = this.run(args, this.prepareDir()).then(({ code, output }) => {
       const url = code === 0 ? output.split(/\r?\n/).map((line) => line.trim()).reverse().find((line) => /^https?:\/\/\S+$/.test(line)) : undefined;
       if (!url) throw extensionError((t) => t.registryUnreadable(`pnpm ${args.join(' ')}`, code, output.trim().split('\n').slice(-20).join('\n')), 502);
@@ -633,13 +642,20 @@ export class ExtensionManager {
     this.registryUrl = null;
   }
 
-  /** extensions/ 和其中的 package.json,pnpm 以它为项目目录;返回目录。 */
+  /** 独立扩展工作区跟随框架的 pnpm 版本，其余包信息与已有工作区配置保留。 */
   private prepareDir(): string {
     if (!existsSync(this.dir)) mkdirSync(this.dir, { recursive: true });
     const pkgFile = join(this.dir, 'package.json');
-    if (!existsSync(pkgFile)) {
-      writeFileSync(pkgFile, JSON.stringify({ name: 'cortico-extensions', private: true, dependencies: {} }, null, 2) + '\n', 'utf8');
+    const existing = existsSync(pkgFile);
+    const pkg = existing
+      ? JSON.parse(readFileSync(pkgFile, 'utf8')) as Record<string, unknown>
+      : { name: 'cortico-extensions', private: true, dependencies: {} };
+    const packageManager = corticoPackageManager();
+    if (!existing || (packageManager && pkg.packageManager !== packageManager)) {
+      writeFileSync(pkgFile, JSON.stringify(packageManager ? { ...pkg, packageManager } : pkg, null, 2) + '\n', 'utf8');
     }
+    const workspaceFile = join(this.dir, WORKSPACE_FILE);
+    if (!existsSync(workspaceFile)) writeFileSync(workspaceFile, '', 'utf8');
     return this.dir;
   }
 
@@ -932,14 +948,15 @@ export class ExtensionManager {
   async install(target: ExtensionInstallTarget, language: Language = 'zh'): Promise<string> {
     const spec = this.installSpec(target);
     this.prepareDir();
-    const output = await this.exclusive(['add', spec, '--ignore-workspace']);
+    const output = await this.exclusive(['add', spec]);
     return `${text(language).installed(spec)}\n${output}`;
   }
 
   async uninstall(name: string, language: Language = 'zh'): Promise<string> {
     if (!PACKAGE_NAME.test(name)) throw extensionError((t) => t.badPackageName(name));
     if (!readInstalled(this.dir).some((p) => p.name === name)) throw extensionError((t) => t.notInstalled(name));
-    const output = await this.exclusive(['remove', name, '--ignore-workspace']);
+    this.prepareDir();
+    const output = await this.exclusive(['remove', name]);
     return `${text(language).uninstalled(name)}\n${output}`;
   }
 

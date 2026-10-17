@@ -303,6 +303,23 @@ describe('Provider 数据面:建、删、复制、密钥、模型列表、探测
     }
     await expect(invoke(settings, 'setSecret', { name: 'local', value: 'x' })).rejects.toThrow('变量名');
   });
+  it('空密钥占位不串读下一行，更新时保留其它变量', async () => {
+    const { cfg, settings, providersDir } = fixture();
+    cfg.providers.local.secret = 'LOCAL_TEST_KEY';
+    vi.stubEnv('LOCAL_TEST_KEY', '');
+    try {
+      mkdirSync(join(providersDir, 'local'), { recursive: true });
+      const env = join(providersDir, 'local', '.env');
+      writeFileSync(env, 'LOCAL_TEST_KEY=\r\nOTHER_KEY=sk-other\r\n', 'utf8');
+      expect(settings.secretStatus('local', cfg.providers.local)).toBe('none');
+      await invoke(settings, 'setSecret', { name: 'local', value: 'sk-local' });
+      expect(readFileSync(env, 'utf8')).toContain('OTHER_KEY=sk-other');
+      expect(settings.secretStatus('local', cfg.providers.local)).toBe('file');
+      expect(readFileSync(env, 'utf8').split(/\r?\n/).filter((line) => line.startsWith('LOCAL_TEST_KEY='))).toEqual(['LOCAL_TEST_KEY=sk-local']);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
   it('从磁盘加载的密钥变量名按字面匹配，保留其它变量', async () => {
     const { cfg, settings, providersDir } = fixture();
     mkdirSync(join(providersDir, 'cloud'), { recursive: true });
