@@ -199,9 +199,7 @@ export class PendingWork {
   }
 
   summary(): string {
-    const active = this.entries.map((item, order) => ({ item, order }))
-      .filter(({ item }) => item.status === 'ready' || item.status === 'waiting')
-      .sort((a, b) => Date.parse(b.item.registeredAt) - Date.parse(a.item.registeredAt) || b.order - a.order).map(({ item }) => item);
+    const active = this.activeEntries();
     const retired = this.entries.filter(item => item.evidence?.workState && ['resolved', 'cancelled'].includes(item.status))
       .sort((a, b) => Date.parse(b.evidence!.at) - Date.parse(a.evidence!.at)).slice(0, 3);
     if (active.length === 0 && retired.length === 0) return '';
@@ -242,13 +240,19 @@ export class PendingWork {
     }
     const offset = Number(args.offset ?? 0);
     const limit = Number(args.limit ?? 10);
-    const active = this.entries.filter((item) => item.status === 'waiting' || item.status === 'ready');
+    const active = this.activeEntries();
     const visible = args.include_closed === true ? this.entries : active;
     const page = visible.slice(offset, offset + limit);
     const next = offset + page.length < visible.length ? offset + page.length : null;
     const counts = `活跃 ${active.length} 项，已结清 ${this.entries.filter((item) => item.status === 'resolved').length} 项，已取消 ${this.entries.filter((item) => item.status === 'cancelled').length} 项`;
     return `[pending_work] ${counts}；本页 ${page.length} 项，offset=${offset}，next_offset=${next ?? '无'}。`
       + (page.length > 0 ? `\n${page.map((item) => this.line(item, true)).join('\n')}` : '\n本页没有待办。');
+  }
+
+  private activeEntries(): PendingEntry[] {
+    return this.entries.map((item, order) => ({ item, order }))
+      .filter(({ item }) => item.status === 'ready' || item.status === 'waiting')
+      .sort((a, b) => Date.parse(b.item.registeredAt) - Date.parse(a.item.registeredAt) || b.order - a.order).map(({ item }) => item);
   }
 
   private defer(args: Record<string, unknown>): string {

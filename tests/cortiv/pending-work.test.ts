@@ -111,7 +111,8 @@ describe('PendingWork', () => {
     vi.advanceTimersByTime(1100);
     r.manager.operate({ operation: 'defer', id: 'fresh', note: 'Current objective', after_seconds: 60 });
     const text = r.manager.summary(); expect(text).toContain('id="fresh"'); expect(text).not.toContain('id="old-0"');
-    expect(r.manager.operate({ operation: 'list', limit: 20 })).toContain('id="old-0"');
+    expect(r.manager.operate({ operation: 'list', include_closed: true, limit: 20 })).toContain('id="old-0"');
+    expect(r.manager.operate({ operation: 'list', limit: 20 })).toContain('id="fresh"');
     expect(text.length).toBeLessThanOrEqual(PENDING_WORK_SUMMARY_MAX_CHARS);
   });
 
@@ -460,8 +461,9 @@ describe('PendingWork', () => {
     expect(r.manager.summary()).toBe(text);
     const first = r.manager.operate({ operation: 'list' });
     expect(first).toContain('next_offset=10');
-    expect(first).not.toContain('id="work-19"');
-    expect(r.manager.operate({ operation: 'list', offset: 10 })).toContain('id="work-19"');
+    expect(first).toContain('id="work-19"');
+    expect(first).not.toContain('id="work-0"');
+    expect(r.manager.operate({ operation: 'list', offset: 10 })).toContain('id="work-0"');
   });
 
   it('list 默认只列活跃待办，已关闭归档分页读取，输出不回灌全部历史', () => {
@@ -496,7 +498,7 @@ describe('PendingWork', () => {
     r.manager.onDelivery([event()]);
     const text = r.manager.summary();
     expect(text.indexOf('id="review-now"')).toBeLessThan(text.indexOf('id="wait-19"'));
-    expect(r.manager.operate({ operation: 'list', limit: 20 })).toContain('id="wait-0"');
+    expect(r.manager.operate({ operation: 'list', include_closed: true, limit: 20 })).toContain('id="wait-0"');
     expect(text).toContain('cursor=1');
     expect(text.length).toBeLessThanOrEqual(PENDING_WORK_SUMMARY_MAX_CHARS);
   });

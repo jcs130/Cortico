@@ -17,6 +17,7 @@ archives and detaches the old binding; the fresh contrary evidence remains in it
 
 Reconciliation advances the agenda revision and invalidates dependent proposals so a late
 background result cannot restore retired work. Pending summaries prioritize newer intentions
-within their existing text budget; pagination still exposes every older entry. Closed work
+within their existing text budget; the default active list uses the same order. Historical
+pagination still exposes every older entry. Closed work
 stays searchable and carries its source evidence. This bookkeeping does not establish that
 an agent has learned a better method or completed another World objective.
