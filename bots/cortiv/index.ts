@@ -82,7 +82,7 @@ export const CORTIV_COGNITION_CONFIG_GROUP: ConfigGroup = {
 export const CORTIV_HISTORICAL_RECALL_CONFIG_GROUP: ConfigGroup = {
   id: 'cortiv-historical-recall', owner: 'persona',
   schema: { type: 'object', title: '按需历史回查',
-    description: 'memory_record recall 同时查持久工作区和明确配置的游戏记忆只读接口。保留原时间与来源，不自动写入经验或执行技能。',
+    description: 'memory_record recall 与后台复盘的 recall_history 查询持久工作区和明确配置的游戏记忆只读接口。保留原时间与来源，不自动写入经验或执行技能。',
     properties: {
       'historicalRecall.enabled': { type: 'boolean', title: '启用游戏记忆回查', 'x-hot': true },
       'historicalRecall.worldId': { type: 'string', title: '游戏 World id', 'x-hot': true },

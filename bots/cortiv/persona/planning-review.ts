@@ -1,6 +1,6 @@
 /** Persona periodic review: read activity and Memory, propose intentions without World execution. */
 import { createHash } from 'node:crypto';
-import type { CoreApi, EventEnvelope, TimerEntry } from 'cortico/core/types.ts';
+import type { CoreApi, EventEnvelope, TimerEntry, ToolDef } from 'cortico/core/types.ts';
 import { estimateTokens } from 'cortico/core/util.ts';
 import { message, itemText, type ContextRecord } from 'cortico/protocol/open-responses/context.ts';
 import type { ActivityAgenda } from './activity-agenda.ts';
@@ -44,6 +44,9 @@ const RESULT_MAX_CHARS = 2_400;
 const SEEN_RECORDS_LIMIT = 8_192;
 const ACTIVITY_MAX_TOKENS = 48_000;
 const QUESTION_MAX_CHARS = 1_200;
+const HISTORICAL_RECALL_PROMPT = '可按需用 recall_history 查询与本次问题或目标相关的持久历史与已配置游戏记忆。只查具体缺口，不全量读库。'
+  + '检索结果保留原时间、发言人、来源和版本；他人的经历不是你的亲历，未命中不证明没发生。'
+  + '历史不能证明当前库存、路线、任务完成或方法已有效；必要时建议主意识核验现场。此处不能写入、批准、执行技能或世界动作。';
 
 /** Carry bounded source excerpts across a real session replacement, without old tool pairs. */
 export function causalReviewTail(snapshot: readonly ContextRecord[], maxAgeMs: number, now = Date.now()): ContextRecord[] {
@@ -221,6 +224,8 @@ interface PlanningOptions {
   runtime?: () => string;
   now?: () => number;
   agenda?: ActivityAgenda;
+  /** Explicitly supplied historical readers; no write, execution or current-state authority. */
+  tools?: () => ToolDef[];
 }
 
 export class PeriodicPlanningReview {
@@ -391,21 +396,30 @@ export class PeriodicPlanningReview {
     const operation = (async (): Promise<void> => {
       try {
         const material = this.options.memory([...new Set(cfg.memoryFiles.split(/\r?\n/).map((file) => file.trim()).filter(Boolean))]);
+        // Bind the review deadline to active readers as well as model requests.
+        const tools = (this.options.tools?.() ?? []).map(tool => ({ ...tool,
+          handler: (args: Record<string, unknown>, ctx: Parameters<ToolDef['handler']>[1]) => tool.handler(args, { ...ctx,
+            signal: ctx.signal ? AbortSignal.any([ctx.signal, controller.signal]) : controller.signal }),
+        }));
+        const recallBudget = tools.length ? estimateTokens(HISTORICAL_RECALL_PROMPT)
+          + estimateTokens(JSON.stringify(tools.map(({ name, description, parameters }) => ({ name, description, parameters })))) : 0;
         const messages = planningMessages({ ...material,
           ...(runtime === undefined ? {} : { runtime }),
           agenda: this.options.agenda ? this.options.agenda.summary() + '\n'
             + this.options.agenda.planningReadout() : material.agenda,
           activity: this.activities.map((activity) => activity.text).join('\n\n') || '(没有近期活动记录)', capturedAt,
-        }, contextTokens, agendaReview, question, trigger);
+        }, Math.max(256, contextTokens - recallBudget), agendaReview, question, trigger);
+        if (tools.length) messages.unshift(message('system', HISTORICAL_RECALL_PROMPT));
         core.log.emit('debug', '后台复盘阅读材料', { event: 'planning-context', data: {
           profile, provider, contextTokens, outputTokens, timeoutMs, capturedAt,
           requestRecords: messages.length, estimatedInputTokens: estimateTokens(messages.map(r => itemText(r.item)).join('\n')),
+          tools: tools.map(tool => tool.name),
         } });
         const text = (await core.spawnFork({
           id: PLANNING, provider, maxOutputTokens: outputTokens,
           ...(cfg.yieldToForeground ? { generationPriority: 'background' as const,
             generationWaitTimeoutMs: cfg.generationWaitTimeoutMs } : {}),
-          signal: controller.signal, tools: [],
+          signal: controller.signal, tools,
           messages,
         })).trim();
         const current = this.options.config();

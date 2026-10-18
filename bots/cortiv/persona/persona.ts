@@ -566,6 +566,7 @@ export class CortiV extends Cormini {
     this.stateMemory.migrate(this.stateNotePaths());
     this.planningReview = new PeriodicPlanningReview({
       core, config: this.planningConfig, agenda: this.activityAgenda,
+      tools: () => this.planningRecallTools(),
       runtime: () => this.currentWorldLifecycle(),
       memory: (files) => ({
         constitution: this.memory.readFile('CONSTITUTION.md'),
@@ -1254,7 +1255,7 @@ export class CortiV extends Cormini {
       },
       {
         id: PLANNING, label: '长期复盘',
-        rounds: () => ({ soft: 1, hard: 1 }),
+        rounds: () => this.historicalRecallConfig().enabled ? { soft: 2, hard: 3 } : { soft: 1, hard: 1 },
         persistent: false, receivesEvents: false, tools: () => [],
       },
     ];
@@ -1421,6 +1422,19 @@ export class CortiV extends Cormini {
       this.recallTool(),
       ...(this.referenceConfig().enabled ? [this.referenceTool()] : []),
     ];
+  }
+
+  private planningRecallTools(): ToolDef[] {
+    if (!this.historicalRecallConfig().enabled) return [];
+    const memory = this.tools().find(tool => tool.name === 'memory_record')!;
+    return [{ name: 'recall_history', tags: ['read'], interruptible: true,
+      description: 'Read bounded persistent historical workspace excerpts and the explicitly configured game memory. Query a specific gap; preserve speaker, original time and citations. No memory mutation, skill installation or game action. A miss is not proof of noncompletion.',
+      parameters: { type: 'object', additionalProperties: false,
+        properties: { query: { type: 'string', minLength: 1, maxLength: 300 } }, required: ['query'] },
+      handler: async (args, ctx) => Object.keys(args).some(key => key !== 'query')
+        ? { failed: true, text: 'recall_history 只接受 query；没有写入或执行参数。' }
+        : memory.handler({ operation: 'recall', query: args.query }, ctx),
+    }];
   }
 
   private referenceTool(): ToolDef {

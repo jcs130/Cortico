@@ -36,6 +36,12 @@ sources retain their dates and speakers. Current completion uses the current Wor
 work identity and external receipts. A maintainer's read probe verifies transport, not the
 agent's subsequent adoption or learning.
 
+When game historical recall is enabled, planning and focused causal reviews also receive the
+read-only `recall_history(query)` tool. Up to three fork rounds allow retrieval followed by a
+complete answer. They receive no other host/World tools. The model chooses a concrete query;
+there is no automatic full-library read or forced retrieval on every review. The review's
+original deadline, runtime/revision checks and result-age limit also cover retrieval time.
+
 Tests exercise actual Persona/Core/provider request routing, valid agenda retention, empty
 output retryability, durable history retrieval, scope selection, cancellation and partial-source
 timeout behaviour. Production latency, natural recall/adoption and learning benefits require a

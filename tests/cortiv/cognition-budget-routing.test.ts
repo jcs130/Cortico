@@ -8,10 +8,56 @@ import { PeriodicPlanningReview, PLANNING_DEFAULTS } from '../../bots/cortiv/per
 import { ActivityAgenda } from '../../bots/cortiv/persona/activity-agenda.ts';
 import { message } from '../../src/protocol/open-responses/context.ts';
 import { FakeLLM, makeCfg, makeLoaded, makeTmpDir, textReply } from '../core/helpers.ts';
+import { makeFakeIO } from '../core/helpers.ts';
+import { HISTORICAL_RECALL_DEFAULTS } from '../../bots/cortiv/persona/historical-recall.ts';
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { vi.unstubAllGlobals(); for (const fn of cleanup.splice(0)) await fn(); });
 describe('separate speech, routine and deep review budgets', () => {
+  it('deep review can choose a bounded historical query and receive its dated result before completing, with only a read tool', async () => {
+    const tmp = makeTmpDir(), config = makeCfg(), current = new FakeLLM(), memoryCalls: any[] = [];
+    config.providers.reflection = { kind: 'openai-chat-compat', baseUrl: 'https://review.test',
+      spec: { model: 'review-model', thinking: true, reasoningEffort: 'high', maxTokens: 8192 } };
+    const world = makeFakeIO('game');
+    world.tools = () => [{ name: 'game_memory', tags: ['read', 'write'], description: 'Game historical memory', parameters: {},
+      handler: async (args, ctx) => { memoryCalls.push({ args, ctx }); return { text: JSON.stringify({
+        historical: true, currentWorldVerified: false,
+        source: { id: 'memory-source-7', observedAt: '2026-10-01T10:00:00Z', speaker: 'Jojo', text: 'I completed the orchard.' },
+      }) }; } }];
+    const persona = new CortiV({ memoryDir: `${tmp.dir}/memory`, worlds: [world], tickDelayMs: () => null,
+      planning: () => ({ ...PLANNING_DEFAULTS, enabled: true, provider: 'reflection', reflectionProvider: 'reflection' }),
+      historicalRecall: () => ({ ...HISTORICAL_RECALL_DEFAULTS, enabled: true, worldId: 'game', toolName: 'game_memory' }) });
+    const core = new Core(makeLoaded({ config, rootDir: tmp.dir, memoryDir: `${tmp.dir}/memory`, dataDir: `${tmp.dir}/data` }),
+      { persona, worlds: [world], llm: current });
+    cleanup.push(async () => { persona.stopRhythm(); await core.stop(); tmp.cleanup(); });
+    persona.memory.writeFileAtomic('sessions/visit.md', '[2026-10-01] Jojo: I completed the orchard.');
+    const bodies: any[] = [];
+    vi.stubGlobal('fetch', async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)); bodies.push(body);
+      const first = bodies.length === 1;
+      const chunks = [{ id: `review-${bodies.length}`, model: 'review-model', choices: [{ index: 0, finish_reason: null,
+        delta: first ? { role: 'assistant', tool_calls: [{ index: 0, id: 'recall-1', type: 'function',
+          function: { name: 'recall_history', arguments: JSON.stringify({ query: 'orchard' }) } }] }
+          : { role: 'assistant', content: 'Jojo reported completing the orchard on October 1; inspect the current state before resuming.' } }] },
+      { choices: [{ index: 0, delta: {}, finish_reason: first ? 'tool_calls' : 'stop' }] }];
+      return new Response(chunks.map(chunk => `data: ${JSON.stringify(chunk)}\n\n`).join('') + 'data: [DONE]\n\n',
+        { headers: { 'Content-Type': 'text/event-stream' } });
+    });
+    persona.startRhythm();
+    expect(await persona.console().invoke!('planning', 'review', [{ question: 'What was actually done at the orchard?' }])).toMatchObject({ accepted: true });
+    await vi.waitFor(async () => expect(await persona.console().invoke!('planning', 'state', []))
+      .toMatchObject({ running: false, lastOutcome: 'completed' }));
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0].tools.map((tool: any) => tool.function.name)).toEqual(['recall_history']);
+    const read = bodies[1].messages.find((item: any) => item.role === 'tool');
+    expect(read.content).toContain('memory-source-7'); expect(read.content).toContain('2026-10-01');
+    expect(read.content).toContain('Jojo'); expect(read.content).toContain('currentWorldVerified');
+    expect(memoryCalls).toHaveLength(1);
+    expect(memoryCalls[0].args).toEqual({ action: 'service', operation: 'prepare', input: { query: 'orchard', max_bytes: 4000 } });
+    expect(memoryCalls[0].ctx.role).toBe('planning'); expect(memoryCalls[0].ctx.signal).toBeInstanceOf(AbortSignal);
+    expect(current.calls).toEqual([]);
+    expect(config.providers.reflection.spec?.reasoningEffort).toBe('high');
+  });
   it('sends complete speech and plan outputs through their registered connections while retaining high reflection and main configuration', async () => {
     const tmp = makeTmpDir(), config = makeCfg(), current = new FakeLLM();
     for (const [name, effort] of [['draft', 'none'], ['routine', 'low'], ['reflection', 'high']]) {

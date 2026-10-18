@@ -65,6 +65,9 @@ describe('historical recall through the public game memory read contract', () =>
   });
   it('rejects write arguments and respects caller cancellation without treating it as an empty search', async () => {
     const r = rig();
+    const empty = JSON.parse(await r.invoke({ operation: 'evidence' }) as string);
+    expect(empty.recovery.nextRead).toBeNull();
+    expect(empty.recovery.required).toContain('nonblank');
     expect(await r.invoke({ operation: 'recall', query: 'orchard', requestId: 'write' })).toHaveProperty('failed');
     const controller = new AbortController(); controller.abort(new Error('caller cancelled'));
     await expect(r.invoke({ operation: 'recall', query: 'orchard' }, controller.signal)).rejects.toThrow('caller cancelled');

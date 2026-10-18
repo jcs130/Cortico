@@ -23,6 +23,8 @@ export function historicalRecallTool(base: ToolDef, options: {
     description: base.description + ' recall(query) searches persistent historical workspace excerpts and, when configured, the game memory service. Use recall when recent evidence misses or when resuming an old activity. History has original speakers and dates; it never proves current state or completion.',
     parameters: { ...base.parameters, properties: { ...properties,
       operation: { type: 'string', enum: ['read', 'history', 'evidence', 'recall', 'set', 'retire'] },
+      query: { type: 'string', maxLength: 300,
+        description: 'evidence: whitespace-separated literal terms must all occur in one of the latest 128 observations. recall: a nonblank topic/question; searches persistent workspace using any literal term and configured game memory using its scoped query. A miss never proves noncompletion.' },
     } },
     handler: async (args, ctx) => {
       if (args.operation !== 'recall') {
@@ -30,7 +32,8 @@ export function historicalRecallTool(base: ToolDef, options: {
         if (args.operation !== 'evidence' || args.evidence_id !== undefined || typeof value !== 'string') return value;
         const recent = JSON.parse(value) as { total: number; [key: string]: unknown };
         if (recent.total === 0) return JSON.stringify({ ...recent, recovery: {
-          nextRead: { operation: 'recall', query: String(args.query ?? '') },
+          nextRead: typeof args.query === 'string' && args.query.trim() ? { operation: 'recall', query: args.query.trim() } : null,
+          ...(typeof args.query === 'string' && args.query.trim() ? {} : { required: 'Choose a specific nonblank historical topic/query for memory_record recall.' }),
           reason: 'Only the bounded recent observation buffer was searched. Persistent history and the configured game memory have not been searched.',
         } });
         return value;
