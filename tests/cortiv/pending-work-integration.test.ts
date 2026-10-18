@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CortiV } from '../../bots/cortiv/persona/persona.ts';
 import { FOCUSED_COGNITION } from '../../bots/cortiv/persona/focused-cognition.ts';
+import { FOREGROUND_CONTEXT_DEFAULTS } from '../../bots/cortiv/persona/foreground-context.ts';
 import { PLANNING } from '../../bots/cortiv/persona/planning-review.ts';
 import { Core } from '../core/fixture-core.ts';
 import type { BotConfig } from '../../bots/corti-soulmate/assemble.ts';
@@ -28,7 +29,7 @@ describe('CortiV pending work with the event loop', () => {
     throw new Error('event loop did not reach the expected state');
   }
 
-  async function open(dir?: string) {
+  async function open(dir?: string, withCurrentFacts = false) {
     if (!dir) {
       dir = mkdtempSync(join(tmpdir(), 'cortiv-pending-loop-'));
       dirs.push(dir);
@@ -41,7 +42,8 @@ describe('CortiV pending work with the event loop', () => {
     ]);
     let host!: WorldHost;
     world.start = async (value) => { host = value; };
-    const persona = new CortiV({ memoryDir, worlds: [world] });
+    const persona = new CortiV({ memoryDir, worlds: [world],
+      ...(withCurrentFacts ? { foreground: () => ({ ...FOREGROUND_CONTEXT_DEFAULTS, enabled: true }) } : {}) });
     const llm = new FakeLLM();
     const opening = toolReply([{ name: 'end_turn' }]);
     llm.script(opening);
@@ -62,7 +64,7 @@ describe('CortiV pending work with the event loop', () => {
   }
 
   it('reconciles World work before presenting pending context to the next real loop request', async () => {
-    const r = await open();
+    const r = await open(undefined, true);
     const reference = { world: 'social', scope: { realm: 'test', account: 'visitor', agent: 'fixture' },
       subject: 'work', instance: 'accepted-1', revision: 1 };
     let status = 'active';
@@ -71,6 +73,12 @@ describe('CortiV pending work with the event loop', () => {
     r.llm.script(toolReply([{ name: 'pending_work', args: { operation: 'defer', id: 'bound', note: 'Exact work result', after_seconds: 60, work_ref: reference } }]), toolReply([{ name: 'end_turn' }]));
     await r.send('operator', 'Keep the unfinished work.');
     await until(() => { try { return r.ledger().entries[0]?.status === 'waiting'; } catch { return false; } });
+    const delivered = r.llm.calls.flatMap(call => call.messages).reverse()
+      .find(message => message.content?.includes('当前任务身份'));
+    const index = JSON.parse(delivered!.content!.split('\n')[1]);
+    expect(index[0].work_ref).toEqual({ ...reference, revision: 2 });
+    expect(index[0].work_ref).not.toHaveProperty('status');
+    expect(index[0].status).toBe('active');
     status = 'completed';
     r.llm.script(toolReply([{ name: 'social_work' }]), toolReply([{ name: 'end_turn' }]));
     await r.send('operator', 'Continue independent work.');

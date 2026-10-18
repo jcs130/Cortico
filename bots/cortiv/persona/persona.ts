@@ -1083,7 +1083,8 @@ export class CortiV extends Cormini {
         this.activityAgenda?.reconcileWorldWork(world.id, workStates);
         const workIndex = [...workStates.filter(state => state.status === 'active'),
           ...workStates.filter(state => state.status !== 'active').slice(-3)]
-          .map(({ evidence, ...state }) => ({ ...state, evidence: { source: evidence.source, reference: evidence.reference } }));
+          .map(({ status, observedAt, evidence, ...work_ref }) => ({ work_ref, status, observedAt,
+            evidence: { source: evidence.source, reference: evidence.reference } }));
         if (workIndex.length) pins.push(message('user', `[${world.id} 当前任务身份；绑定意图时复制 work_ref，历史完成不再是当前待办]\n${JSON.stringify(workIndex)}`));
         pins.push(...(facts.parts?.length
           ? facts.parts.map(part => message('user', `[${world.id} 当前已观察事实 · ${part.key}]\n${part.text || '本项当前无内容。'}`))

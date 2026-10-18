@@ -3,6 +3,7 @@
 An intention may bind to a World's `workStates` identity using `work_ref`:
 `world`, `scope` (realm/account/agent), `subject`, `instance`, and `revision`.
 The reference must identify an external result that fully settles the intention.
+The current task index supplies a schema-compatible `work_ref` separately from status and evidence.
 `pending_work bind` attaches an existing open intention; `defer` may supply the reference
 when creating one. `activity_plan bind` also requires the current `expected_revision`
 and a binding explanation in `note`.
