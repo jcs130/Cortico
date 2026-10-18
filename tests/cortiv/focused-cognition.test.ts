@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CortiV, COGNITION } from '../../bots/cortiv/persona/persona.ts';
 import { FOCUSED_COGNITION, FOCUSED_COGNITION_MAX_OUTPUT_TOKENS,
-  FOCUSED_COGNITION_TIMEOUT_MS, focusedCognitionMessages, FocusedCognition,
+  FOCUSED_COGNITION_TIMEOUT_MS, focusedCognitionMessages, FocusedCognition, SPEECH_IDENTITY_MAX_CHARS, SPEECH_HISTORY_MAX_CHARS,
 } from '../../bots/cortiv/persona/focused-cognition.ts';
 import type { BlobRef, CognitionContext, ForkOptions } from '../../src/core/types.ts';
 import { message, itemText } from '../../src/protocol/open-responses/context.ts';
@@ -36,11 +36,45 @@ function rig(enabled: () => boolean = () => true) {
   core.spawnFork = fork;
   persona.attach(core);
   sessionInfo.mockClear();
-  return { persona, core, fork, sessionInfo, snapshot };
+  return { dir, persona, core, fork, sessionInfo, snapshot };
 }
 const texts = (options: ForkOptions) => options.messages.map(({ item }) => itemText(item)).join('\n');
 
 describe('独立定向认知请求', () => {
+  it('drafts speech with host identity and shared accepted speech while keeping ordinary task requests isolated', async () => {
+    const r = rig();
+    writeFileSync(join(r.dir, 'CONSTITUTION.md'), '我是一个温和爱开玩笑的主播，说话简洁自然。', 'utf8');
+    await r.persona.onDelivery({ events: [{ cursor: 1, source: 'vtuber', type: 'vtuber.speech.submitted',
+      ts: new Date().toISOString(), origin: 'internal', text: '', meta: { callId: 'commentary-before', script: '已经向同伴发出邀请。', role: 'commentary' } }] });
+    await r.persona.cognition.request({ brief: '为现场拟一句口播。', hint: { context: 'task', kind: 'vtuber-commentary' } }, context());
+    expect(r.fork).toHaveBeenCalledTimes(1);
+    const first = r.fork.mock.calls[0][0];
+    expect(texts(first)).toContain('温和爱开玩笑');
+    expect(texts(first)).toContain('已经向同伴发出邀请');
+    expect(texts(first)).toContain('同义改写');
+    expect(texts(first)).not.toContain('旧玩家聊天');
+    expect(texts(first)).not.toContain('主会话长ENV');
+    expect(first.tools).toEqual([]);
+    await r.persona.cognition.request({ brief: '下一次现场。', hint: { context: 'task', kind: 'vtuber-commentary' } }, context());
+    expect(itemText(r.fork.mock.calls[1][0].messages[0].item)).toBe(itemText(first.messages[0].item));
+    await r.persona.cognition.request({ brief: '检查门口。', hint: { context: 'task' } }, context());
+    expect(texts(r.fork.mock.calls[2][0])).not.toContain('温和爱开玩笑');
+    expect(texts(r.fork.mock.calls[2][0])).not.toContain('已经向同伴发出邀请');
+  });
+
+  it('bounds speech identity and history independently and does not draft a generic replacement when identity is missing', async () => {
+    const records = focusedCognitionMessages({ brief: '本次短任务。' }, context(), {
+      identity: '人'.repeat(SPEECH_IDENTITY_MAX_CHARS + 100), recentSpeech: '话'.repeat(SPEECH_HISTORY_MAX_CHARS + 100),
+    });
+    expect(itemText(records[0].item).endsWith('人'.repeat(SPEECH_IDENTITY_MAX_CHARS))).toBe(true);
+    expect(itemText(records[0].item)).not.toContain('人'.repeat(SPEECH_IDENTITY_MAX_CHARS + 1));
+    expect(itemText(records[1].item)).toContain('话'.repeat(SPEECH_HISTORY_MAX_CHARS));
+    expect(itemText(records[1].item)).not.toContain('话'.repeat(SPEECH_HISTORY_MAX_CHARS + 1));
+    const r = rig();
+    rmSync(join(r.dir, 'CONSTITUTION.md'), { force: true });
+    expect(await r.persona.cognition.request({ brief: '拟一句口播。', hint: { context: 'task', kind: 'vtuber-commentary' } }, context())).toHaveProperty('error');
+    expect(r.fork).not.toHaveBeenCalled();
+  });
   it('声明独立一轮session，默认无工具、不接事件、不持久化，也不改变原shared声明', () => {
     const { persona } = rig();
     const decl = persona.declareSessions().find((entry) => entry.id === FOCUSED_COGNITION)!;

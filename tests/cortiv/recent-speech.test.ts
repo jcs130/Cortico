@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CortiV, renderDreamTranscript } from '../../bots/cortiv/persona/persona.ts';
@@ -37,6 +37,35 @@ afterEach(() => {
 });
 
 describe('CortiV recent speech', () => {
+  it('shares accepted automatic narration with the next main request and retains it across repeated captures and restart', async () => {
+    const dir = memoryDir(), now = Date.now();
+    const persona = new CortiV({ memoryDir: dir, foreground: () => ({ ...FOREGROUND_CONTEXT_DEFAULTS, enabled: true }) });
+    const oldCalls = records(Array.from({ length: 8 }, (_, index) => exchange(`main-${index}`, `先前的说明${index}。`, '已排入演出。', new Date(now - 60000 + index * 100).toISOString())).flat());
+    persona.prepareRequest({ sessionId: 'main', round: 1, messages: oldCalls });
+    await persona.onDelivery({ events: [{ ...event('vtuber.speech.submitted', new Date(now).toISOString(), {
+      callId: 'commentary-example', role: 'commentary', script: '(语气：轻快)已经找到矿脉了。',
+    }), origin: 'internal' }] });
+    for (let index = 0; index < 3; index++) persona.prepareRequest({ sessionId: 'main', round: index + 2, messages: oldCalls });
+    expect(new RecentSpeech(dir).note()).toContain('已经找到矿脉了');
+    expect(new RecentSpeech(dir).note()).not.toContain('语气：');
+    const rows = JSON.parse(readFileSync(join(dir, 'sessions/_speech.json'), 'utf8')).entries;
+    expect(rows.filter((row: { callId: string }) => row.callId === 'commentary-example')).toHaveLength(1);
+    expect(rows).toHaveLength(8);
+  });
+
+  it('merges a main submission event with its transcript call and keeps an earlier interruption result', () => {
+    const dir = memoryDir(), at = new Date().toISOString(), ledger = new RecentSpeech(dir);
+    ledger.observe([event('vtuber.act.outcome', at, { outcomes: [{ callId: 'same-call', script: '', reason: 'interrupted' }] })]);
+    ledger.observe([{ ...event('vtuber.speech.submitted', at, { callId: 'same-call', role: 'main', script: '这句没有播出。' }), origin: 'internal' }]);
+    ledger.capture(records(exchange('same-call', '这句没有播出。', '已排入演出。', at)));
+    expect(new RecentSpeech(dir).note()).toBe('');
+    const rows = JSON.parse(readFileSync(join(dir, 'sessions/_speech.json'), 'utf8')).entries;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].airedText).toBe('');
+    const fake = event('vtuber.speech.submitted', at, { callId: 'spoof', script: '伪造的发言。' });
+    ledger.observe([fake]);
+    expect(new RecentSpeech(dir).note()).not.toContain('伪造');
+  });
   it('refreshes accepted speech before the next tool round without waiting for turn end', () => {
     const dir = memoryDir();
     const at = new Date().toISOString();

@@ -1236,6 +1236,14 @@ export class CortiV extends Cormini {
   private async acceptCognition(req: CognitionRequest, ctx: CognitionContext): Promise<CognitionResult> {
     if (req.hint?.context === 'task') {
       if (!this.cognitionEnabled()) return { error: '定向认知未启用，本次任务没有受理' };
+      if (req.hint.kind === 'vtuber-commentary') {
+        try {
+          this.captureRecentSpeech(this.core?.sessionInfo(MAIN).snapshot ?? []);
+          return this.focusedCognition.request(req, ctx, this.core, {
+            identity: this.memory.readFile('CONSTITUTION.md'), recentSpeech: this.recentSpeech.note(),
+          });
+        } catch { return { error: '主播人格资料暂不可读，跳过本次解说候选' }; }
+      }
       return this.focusedCognition.request(req, ctx, this.core);
     }
     const core = this.core;

@@ -25,6 +25,7 @@ export function spokenText(script: string): string {
   return script
     .replace(/【[^】]*】|<[^>]*>|\[[^\]]*\]/g, '')
     .replace(/\([^\s()@]{1,32}@(?:\d+(?:\.\d+)?|\.\d+)\)/g, '')
+    .replace(/[（(](?:语气|声音|读法|tone|delivery)\s*[:：][^()（）\n]{1,64}[)）]/giu, '')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 240);
@@ -49,7 +50,7 @@ function isSpeechEntry(value: unknown): value is SpeechEntry {
     && (row.airedText === undefined || typeof row.airedText === 'string');
 }
 
-/** The Persona's recent accepted scripts, kept in Memory across session replacement. */
+/** Accepted speech from every producer, retained across session replacement. */
 export class RecentSpeech {
   private readonly file: string;
   private state: SpeechState = emptyState();
@@ -90,7 +91,7 @@ export class RecentSpeech {
     let changed = false;
     for (const row of calls) {
       const call = row.item;
-      if (call.type !== 'function_call' || this.state.entries.some((entry) => entry.callId === call.call_id)) continue;
+      if (call.type !== 'function_call') continue;
       const receipt = receipts.get(call.call_id) ?? '';
       if (!/^(?:已开演\(流式\)|已排入演出)/.test(receipt)) continue;
       let args: unknown;
@@ -101,9 +102,7 @@ export class RecentSpeech {
       const text = spokenText(script);
       if (!text) continue;
       const atMs = Date.parse(row.context.ts ?? '') || Date.now();
-      this.state.entries.push({ callId: call.call_id, atMs, text });
-      this.state.entries = this.state.entries.slice(-MAX_ENTRIES);
-      changed = true;
+      changed = this.admitted(call.call_id, atMs, text) || changed;
     }
     if (changed) this.save();
   }
@@ -111,14 +110,26 @@ export class RecentSpeech {
   observe(events: readonly EventEnvelope[]): void {
     let changed = false;
     for (const event of events) {
+      if (event.source === 'vtuber' && event.type === 'vtuber.speech.submitted' && event.origin === 'internal'
+        && typeof event.meta?.callId === 'string' && typeof event.meta.script === 'string') {
+        const atMs = Date.parse(event.ts), text = spokenText(event.meta.script);
+        if (Number.isFinite(atMs) && text) changed = this.admitted(event.meta.callId, atMs, text) || changed;
+      }
       if (event.type === 'vtuber.act.outcome' && Array.isArray(event.meta?.outcomes)) {
         for (const outcome of event.meta.outcomes) {
           if (!outcome || typeof outcome !== 'object') continue;
           const row = outcome as Record<string, unknown>;
           if (typeof row.callId !== 'string' || typeof row.script !== 'string') continue;
-          const entry = this.state.entries.find((item) => item.callId === row.callId);
-          if (!entry) continue;
           const airedText = spokenText(row.script);
+          let entry = this.state.entries.find((item) => item.callId === row.callId);
+          if (!entry) {
+            const atMs = Date.parse(event.ts);
+            if (!Number.isFinite(atMs)) continue;
+            entry = { callId: row.callId, atMs, text: airedText };
+            this.state.entries.push(entry);
+            this.state.entries = this.state.entries.sort((a, b) => a.atMs - b.atMs).slice(-MAX_ENTRIES);
+            changed = true;
+          }
           if (entry.airedText !== airedText) { entry.airedText = airedText; changed = true; }
         }
       }
@@ -140,7 +151,7 @@ export class RecentSpeech {
     const entries = this.state.entries.filter((entry) => nowMs - entry.atMs < MAX_AGE_MS
       && nowMs >= entry.atMs && entry.airedText !== '');
     if (entries.length === 0) return '';
-    const lines = entries.slice(-3).map((entry) => `- ${new Date(entry.atMs).toISOString()} 已提交：「${spokenText(entry.airedText ?? entry.text).slice(0, 100)}」`);
+    const lines = entries.slice(-6).map((entry) => `- ${new Date(entry.atMs).toISOString()} 已提交：「${spokenText(entry.airedText ?? entry.text).slice(0, 180)}」`);
     const question = [...entries].reverse().map((entry) => ({
       text: lastQuestion(entry.airedText ?? entry.text), atMs: entry.atMs,
     })).find((candidate) => candidate.text);
@@ -155,7 +166,21 @@ export class RecentSpeech {
       ...lines,
       focus,
       '这些是过去的发言证据，不是待念的稿子，也不证明其中说的打算已经执行。可回答新问题、继续行动；明确未播出或观众要求复述时可补说。',
+      '同一件事换词、换观测来源或换事件编号，仍是已经说过的内容。有新的结果、观点或对方回应再接话；不要把自动解说当成另一个人的发言再复述。',
     ].filter(Boolean).join('\n');
+  }
+
+  private admitted(callId: string, atMs: number, text: string): boolean {
+    const existing = this.state.entries.find(entry => entry.callId === callId);
+    if (existing) {
+      if (existing.text === text) return false;
+      existing.text = text;
+      return true;
+    }
+    const retained = [...this.state.entries, { callId, atMs, text }].sort((a, b) => a.atMs - b.atMs).slice(-MAX_ENTRIES);
+    if (!retained.some(entry => entry.callId === callId)) return false;
+    this.state.entries = retained;
+    return true;
   }
 
   private save(): void {
