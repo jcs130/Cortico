@@ -52,6 +52,19 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2026-01-01T10:
 afterEach(() => { for (const run of cleanup.splice(0).reverse()) run(); vi.useRealTimers(); });
 
 describe('Persona长期复盘', () => {
+  it('missing output leaves the activity version retryable; an explicit nothing is a completed no-change review', async () => {
+    const r = rig(); r.reply(async () => '');
+    expect(r.review.review().accepted).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(r.review.state()).toMatchObject({ lastOutcome: 'failed', lastCompletedAt: null,
+      lastFailure: { code: 'empty_result' } });
+    r.reply(async () => '(nothing)');
+    expect(r.review.review().accepted).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(r.review.state()).toMatchObject({ lastOutcome: 'empty', lastFailure: null });
+    expect(r.review.review()).toMatchObject({ accepted: false, reason: '没有新的活动记录' });
+    expect(r.injected).toEqual([]);
+  });
   it('mixed async outcomes reach the review before delivery with complete failure clauses and step evidence', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'task-mixed-review-'));
     cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
@@ -173,7 +186,7 @@ describe('Persona长期复盘', () => {
     expect(input).toContain('75→97→75');
     expect(input).toContain('净变化'); expect(input).toContain('自述');
     expect(input).not.toContain('只返回JSON');
-    expect(r.forks[0].maxOutputTokens).toBeLessThanOrEqual(1600);
+    expect(r.forks[0].maxOutputTokens).toBe(r.cfg.reflectionMaxOutputTokens);
     expect(estimateMessagesTokens(r.forks[0].messages)).toBeLessThanOrEqual(12_000);
     expect(r.forks[0].tools).toEqual([]); expect(r.gate).not.toHaveBeenCalled();
     expect(r.agenda.state()).toEqual(before);
@@ -295,7 +308,7 @@ describe('Persona长期复盘', () => {
     await vi.advanceTimersByTimeAsync(30 * 60_000);
     expect(r.forks).toHaveLength(1);
     expect(r.forks[0]).toMatchObject({ id: PLANNING, provider: 'configured-planner',
-      maxOutputTokens: 1600, tools: [] });
+      maxOutputTokens: r.cfg.maxOutputTokens, tools: [] });
     expect(r.forks[0].signal).toBeInstanceOf(AbortSignal);
     expect(r.memory).toHaveBeenCalledWith(['goals.md', 'missing.md']);
     expect(r.forks[0].messages.map((entry) => itemText(entry.item)).join('\n')).toContain('尚未完成');

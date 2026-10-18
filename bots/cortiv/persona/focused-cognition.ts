@@ -4,8 +4,19 @@ import { withBlobLines } from 'cortico/core/blobs.ts';
 import { message, type ContextRecord } from 'cortico/protocol/open-responses/context.ts';
 
 export const FOCUSED_COGNITION = 'focused-cognition';
-export const FOCUSED_COGNITION_MAX_OUTPUT_TOKENS = 320;
+export const FOCUSED_COGNITION_MAX_OUTPUT_TOKENS = 2_048;
 export const FOCUSED_COGNITION_TIMEOUT_MS = 45_000;
+export interface FocusedCognitionConfig {
+  provider: string;
+  maxOutputTokens: number;
+  speechProvider: string;
+  speechMaxOutputTokens: number;
+}
+/** Output limits include reasoning. Speech drafting needs a short answer, not a reasoning transcript. */
+export const FOCUSED_COGNITION_DEFAULTS: FocusedCognitionConfig = {
+  provider: '', maxOutputTokens: FOCUSED_COGNITION_MAX_OUTPUT_TOKENS,
+  speechProvider: '', speechMaxOutputTokens: 768,
+};
 const RESULT_MAX_CHARS = 1_800;
 export interface FocusedSpeechContext { identity: string; recentSpeech: string }
 export const SPEECH_IDENTITY_MAX_CHARS = 4_000;
@@ -40,6 +51,7 @@ export function focusedCognitionMessages(req: CognitionRequest, ctx: CognitionCo
 /** No queue: a timeout aborts the fork, and its slot stays occupied until cancellation really settles. */
 export class FocusedCognition {
   private inFlight: Promise<string> | null = null;
+  constructor(private readonly config: () => FocusedCognitionConfig = () => FOCUSED_COGNITION_DEFAULTS) {}
 
   async request(req: CognitionRequest, ctx: CognitionContext, core: CoreApi | null | undefined, speech?: FocusedSpeechContext): Promise<CognitionResult> {
     if (!core) return { error: '定向认知现在接不上(Persona还没挂上 core)，本次未受理' };
@@ -50,15 +62,20 @@ export class FocusedCognition {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
     try {
+      const cfg = { ...FOCUSED_COGNITION_DEFAULTS, ...this.config() };
+      const maxOutputTokens = speech ? cfg.speechMaxOutputTokens : cfg.maxOutputTokens;
+      const provider = (speech ? cfg.speechProvider : cfg.provider).trim();
       const messages = focusedCognitionMessages(req, ctx, speech);
       core.log.emit('debug', '定向认知阅读材料', { event: 'focused-cognition-context', data: {
         worldId: ctx.worldId, requestRecords: messages.length, attachments: ctx.blobs?.length ?? 0,
         taskChars: req.brief.length, tools: ctx.tools.map((tool) => tool.name),
         contextPolicy: speech ? 'speech-persona-and-recent' : 'task-only',
+        maxOutputTokens, provider: provider || 'current',
       } });
       const operation = core.spawnFork({
         id: FOCUSED_COGNITION, messages, tools: [...ctx.tools],
-        maxOutputTokens: FOCUSED_COGNITION_MAX_OUTPUT_TOKENS,
+        ...(provider ? { provider } : {}),
+        maxOutputTokens,
         signal: controller.signal, stopWhen: () => controller.signal.aborted,
       });
       this.inFlight = operation;

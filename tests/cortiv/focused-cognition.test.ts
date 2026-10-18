@@ -107,7 +107,7 @@ describe('独立定向认知请求', () => {
     expect(JSON.stringify(call.messages)).not.toContain('data:image');
     expect(call.tools).toEqual([]);
     expect(call.maxOutputTokens).toBe(FOCUSED_COGNITION_MAX_OUTPUT_TOKENS);
-    expect(FOCUSED_COGNITION_MAX_OUTPUT_TOKENS).toBe(320);
+    expect(FOCUSED_COGNITION_MAX_OUTPUT_TOKENS).toBeGreaterThan(320);
     expect(call.signal).toBeInstanceOf(AbortSignal);
     expect(call).not.toHaveProperty('provider');
     expect(call).not.toHaveProperty('model');

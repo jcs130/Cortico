@@ -14,6 +14,8 @@ import { decisionConnectionProperties } from './persona/decision-connection.ts';
 import { FAST_REFERENCE_DEFAULTS, type FastReferenceConfig } from './persona/reference-adviser.ts';
 import { REFERENCE_LIBRARY_DEFAULTS, type ReferenceLibraryConfig } from './persona/reference-library.ts';
 import { PLANNING_DEFAULTS, type PlanningConfig } from './persona/planning-review.ts';
+import { FOCUSED_COGNITION_DEFAULTS, type FocusedCognitionConfig } from './persona/focused-cognition.ts';
+import { HISTORICAL_RECALL_DEFAULTS, type HistoricalRecallConfig } from './persona/historical-recall.ts';
 import { FOREGROUND_CONTEXT_DEFAULTS, type ForegroundContextConfig } from './persona/foreground-context.ts';
 import { FAST_FOREGROUND_DEFAULTS, type FastForegroundConfig } from './persona/foreground-adviser.ts';
 import { DREAM_DEFAULTS, type DreamConfig } from './persona/dream-context.ts';
@@ -60,6 +62,13 @@ export const CORTIV_COGNITION_CONFIG_GROUP: ConfigGroup = {
       },
       'cognition.maxHistoryTokens': { type: 'integer', minimum: 1024, title: '后台构思近期历史预算(token估算)', 'x-hot': true,
         description: '完整环境契约和当前请求另外保留；旧经历通过工作区按需读取。' },
+      'cognition.focused.maxOutputTokens': { type: 'integer', minimum: 256, title: '定向观察生成上限(token)', 'x-hot': true,
+        description: '包含推理和答案；每次受理时捕获，不能把简短答案长度当成总生成预算。' },
+      'cognition.focused.provider': { type: 'string', title: '定向观察 provider', 'x-hot': true,
+        description: '留空沿用前台；模型和思考档位取这个 provider 的配置。' },
+      'cognition.focused.speechMaxOutputTokens': { type: 'integer', minimum: 256, title: '口播候选生成上限(token)', 'x-hot': true },
+      'cognition.focused.speechProvider': { type: 'string', title: '口播候选 provider', 'x-hot': true,
+        description: '留空沿用前台；建议单独配置短输出连接，避免推理占完口播预算，不改变前台或深入复盘。' },
       'cognition.blueprintProvider': { type: 'string', title: '蓝图设计 provider', 'x-hot': true,
         description: '已注册的 provider 名称；留空使用当前 provider。模型与思考强度由该 provider 配置，普通构思和定向观察保持各自通道。' },
       'cognition.blueprintMaxHistoryTokens': { type: 'integer', minimum: 1024, title: '蓝图设计近期历史预算(token估算)', 'x-hot': true,
@@ -68,6 +77,20 @@ export const CORTIV_COGNITION_CONFIG_GROUP: ConfigGroup = {
         description: '只作用于蓝图设计 fork，可按层分批交稿；provider 的上下文容量仍是物理上限。' },
     },
   },
+};
+
+export const CORTIV_HISTORICAL_RECALL_CONFIG_GROUP: ConfigGroup = {
+  id: 'cortiv-historical-recall', owner: 'persona',
+  schema: { type: 'object', title: '按需历史回查',
+    description: 'memory_record recall 同时查持久工作区和明确配置的游戏记忆只读接口。保留原时间与来源，不自动写入经验或执行技能。',
+    properties: {
+      'historicalRecall.enabled': { type: 'boolean', title: '启用游戏记忆回查', 'x-hot': true },
+      'historicalRecall.worldId': { type: 'string', title: '游戏 World id', 'x-hot': true },
+      'historicalRecall.toolName': { type: 'string', title: '游戏记忆工具名', 'x-hot': true,
+        description: '必须提供 Agent MC World 的 action:service, operation:prepare 公共契约。只查询当前挂载的明确工具，不探测或启动其他 World。' },
+      'historicalRecall.maxBytes': { type: 'integer', minimum: 512, maximum: 32768, title: '游戏历史正文预算(UTF-8字节)', 'x-hot': true },
+      'historicalRecall.timeoutMs': { type: 'integer', minimum: 1, maximum: 60000, title: '历史回查等待上限(毫秒)', 'x-hot': true },
+    } },
 };
 
 export const CORTIV_FAST_ATTENTION_CONFIG_GROUP: ConfigGroup = {
@@ -226,12 +249,14 @@ export interface CortiVConfig extends CoreConfig {
   rounds: { soft: number; hard: number };
   cognition: {
     enabled: boolean; maxHistoryTokens: number;
+    focused: FocusedCognitionConfig;
     blueprintProvider: string; blueprintMaxHistoryTokens: number; blueprintMaxOutputTokens: number;
   };
   fastAttention: typeof FAST_ATTENTION_DEFAULTS;
   references: ReferenceLibraryConfig;
   fastReference: FastReferenceConfig;
   planning: PlanningConfig;
+  historicalRecall: HistoricalRecallConfig;
   dream: DreamConfig;
   sleepReview: SleepReviewConfig;
   foreground: ForegroundContextConfig;
@@ -278,6 +303,8 @@ function build(loaded: LoadedConfig<CortiVConfig>, worlds: World[]): BotParts<Co
     // 现读:控制台上关掉,下一次 World 来请托时句柄就已经不在了(不用重启)。
     cognitionEnabled: () => cfg.cognition.enabled,
     cognitionHistoryTokens: () => cfg.cognition.maxHistoryTokens ?? 4000,
+    focusedCognition: () => ({ ...FOCUSED_COGNITION_DEFAULTS, ...cfg.cognition.focused }),
+    historicalRecall: () => ({ ...HISTORICAL_RECALL_DEFAULTS, ...cfg.historicalRecall }),
     blueprintCognition: () => ({
       provider: cfg.cognition.blueprintProvider ?? BLUEPRINT_COGNITION_DEFAULTS.provider,
       maxHistoryTokens: cfg.cognition.blueprintMaxHistoryTokens ?? BLUEPRINT_COGNITION_DEFAULTS.maxHistoryTokens,
@@ -310,7 +337,7 @@ function build(loaded: LoadedConfig<CortiVConfig>, worlds: World[]): BotParts<Co
       persona.stopRhythm();
     },
     console: {
-      configGroups: [CORTIV_CONTEXT_CONFIG_GROUP, CORTIV_COGNITION_CONFIG_GROUP,
+      configGroups: [CORTIV_CONTEXT_CONFIG_GROUP, CORTIV_COGNITION_CONFIG_GROUP, CORTIV_HISTORICAL_RECALL_CONFIG_GROUP,
         CORTIV_FAST_ATTENTION_CONFIG_GROUP, CORTIV_REFERENCE_CONFIG_GROUP, CORTIV_PLANNING_CONFIG_GROUP, CORTIV_DREAM_CONFIG_GROUP, CORTIV_SLEEP_REVIEW_CONFIG_GROUP, CORTIV_FOREGROUND_CONFIG_GROUP,
         CORTIV_TOOL_CALL_RECOVERY_CONFIG_GROUP],
       // 阶段预算与软预警线(终端页上下文圈的分母与黄线);计数与物理上限由 core 报
@@ -341,6 +368,7 @@ const definition: BotDefinition<CortiVConfig> = {
     // 默认开:蓝图设计就走这条,关掉它 Minecraft 那边的 design 只能如实拒收。
     cognition: {
       enabled: true, maxHistoryTokens: 4000,
+      focused: { ...FOCUSED_COGNITION_DEFAULTS },
       blueprintProvider: BLUEPRINT_COGNITION_DEFAULTS.provider,
       blueprintMaxHistoryTokens: BLUEPRINT_COGNITION_DEFAULTS.maxHistoryTokens,
       blueprintMaxOutputTokens: BLUEPRINT_COGNITION_DEFAULTS.maxOutputTokens,
@@ -349,6 +377,7 @@ const definition: BotDefinition<CortiVConfig> = {
     references: { ...REFERENCE_LIBRARY_DEFAULTS },
     fastReference: { ...FAST_REFERENCE_DEFAULTS },
     planning: { ...PLANNING_DEFAULTS },
+    historicalRecall: { ...HISTORICAL_RECALL_DEFAULTS },
     dream: { ...DREAM_DEFAULTS },
     sleepReview: { ...SLEEP_REVIEW_DEFAULTS },
     foreground: { ...FOREGROUND_CONTEXT_DEFAULTS },

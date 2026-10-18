@@ -33,8 +33,8 @@ export interface PlanningConfig {
 export const PLANNING_DEFAULTS: PlanningConfig = {
   enabled: false, provider: '', intervalMinutes: 30,
   reflectionProvider: '', reflectionMaxContextTokens: 12_000,
-  reflectionMaxOutputTokens: 1_600, reflectionTimeoutMs: 120_000,
-  maxContextTokens: 24_000, maxOutputTokens: 1_600, timeoutMs: 120_000,
+  reflectionMaxOutputTokens: 8_192, reflectionTimeoutMs: 120_000,
+  maxContextTokens: 24_000, maxOutputTokens: 4_096, timeoutMs: 120_000,
   maxResultAgeMs: 300_000,
   yieldToForeground: false, generationWaitTimeoutMs: 60_000,
   memoryFiles: 'sessions/_recent.md',
@@ -211,7 +211,7 @@ export function planningMessages(material: PlanningMaterial, maxTokens: number, 
 interface Activity { key: string; observedAt: number; text: string; }
 export type PlanningOutcome = 'completed' | 'empty' | 'expired' | 'failed' | 'timed_out' | 'cancelled' | 'discarded';
 export interface PlanningFailure {
-  code: 'missing_provider' | 'request_failed' | 'timeout' | 'result_expired' | 'invalid_plan';
+  code: 'missing_provider' | 'request_failed' | 'timeout' | 'result_expired' | 'invalid_plan' | 'empty_result';
   at: string;
 }
 interface PlanningOptions {
@@ -436,9 +436,14 @@ export class PeriodicPlanningReview {
           core.log.info('复盘采样后日程已推进，未投递旧建议', { data: { capturedAt, agendaRevision, currentAgendaRevision } });
           return;
         }
-        if (!question) this.reviewedVersion = version;
-        this.lastCompletedAt = new Date(this.now()).toISOString();
-        if (!text || text === '(nothing)') {
+        if (!text) {
+          finish('failed', 'empty_result');
+          core.log.warn('后台复盘没有返回正文，未消耗本次活动版本');
+          return;
+        }
+        if (text === '(nothing)') {
+          if (!question) this.reviewedVersion = version;
+          this.lastCompletedAt = new Date(this.now()).toISOString();
           finish('empty');
           return;
         }
@@ -454,6 +459,8 @@ export class PeriodicPlanningReview {
         }
         core.injectInternal(`[${question ? '后台因果复核' : '后台长期复盘'}；依据 ${capturedAt} 之前的记录，建议尚未执行]\n${bounded}`,
           question ? CAUSAL_REVIEW : PLANNING);
+        if (!question) this.reviewedVersion = version;
+        this.lastCompletedAt = new Date(this.now()).toISOString();
         finish('completed');
       } catch (error) {
         if (!controller.signal.aborted) {

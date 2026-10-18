@@ -190,7 +190,7 @@ export class StateMemory {
   summary(): string {
     const active = this.latest(this.load()).filter(claim => this.active(claim));
     const header = '[当前记忆记录；由 memory_record 管理。结论附原始观察，日程与现场由各自账本提供。]\n';
-    const footer = '\nmemory_record read 按 key 查证据；history 查旧版本；evidence 查收到的外部观察。写入需 expected_revision 和 evidence_id。经历笔记不会自动成为当前状态。';
+    const footer = '\nmemory_record read 按 key 查证据；history 查旧版本；evidence 只查近期128条观察；recall(query) 查持久历史及已配置游戏记忆。写入需 expected_revision 和 evidence_id。历史时间与发言人须保留。';
     let body = '';
     for (const claim of active.sort((a, b) => Date.parse(b.observation.observedAt) - Date.parse(a.observation.observedAt))) {
       const line = `${claim.key} r${claim.revision}：${claim.value}（观察 ${claim.observation.observedAt}，${claim.observation.source}）\n`;

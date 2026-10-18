@@ -64,7 +64,8 @@ import { DREAM_DEFAULTS,DreamContext,dreamHistoryWithinBudget,normalizeDreamConf
 import { DreamMemory,dreamWorkspaceTools } from './dream-memory.ts';
 import { DreamTaskQueue,DreamTaskStoppedError,dreamAbortable,dreamDelay } from './dream-task-queue.ts';
 import { ActionFailureReflection,FAILURE_REFLECTION_ADVICE } from './failure-reflection.ts';
-import { FOCUSED_COGNITION,FocusedCognition } from './focused-cognition.ts';
+import { FOCUSED_COGNITION, FocusedCognition, type FocusedCognitionConfig } from './focused-cognition.ts';
+import { historicalRecallTool, HISTORICAL_RECALL_DEFAULTS, type HistoricalRecallConfig } from './historical-recall.ts';
 import { FAST_FOREGROUND_DEFAULTS,ForegroundAdviser,type FastForegroundConfig,type ForegroundAdvice,type ForegroundScene } from './foreground-adviser.ts';
 import { FOREGROUND_CONTEXT_DEFAULTS,projectForeground,type ForegroundContextConfig } from './foreground-context.ts';
 import { ForegroundEpoch } from './foreground-epoch.ts';
@@ -419,6 +420,8 @@ export interface CortiVOptions extends CorminiOptions {
    */
   cognitionEnabled?: () => boolean;
   cognitionHistoryTokens?: () => number;
+  focusedCognition?: () => FocusedCognitionConfig;
+  historicalRecall?: () => HistoricalRecallConfig;
   blueprintCognition?: () => BlueprintCognitionConfig;
 }
 
@@ -454,7 +457,8 @@ export class CortiV extends Cormini {
   private commitChain: Promise<void> = Promise.resolve();
   /** 认知外包全局开关(现读);不给 = 恒开 */
   private readonly cognitionEnabled: () => boolean;
-  private readonly focusedCognition = new FocusedCognition();
+  private readonly focusedCognition: FocusedCognition;
+  private readonly historicalRecallConfig: () => HistoricalRecallConfig;
   private readonly recentSpeech: RecentSpeech;
   private deliveredSpeechNote = '';
   private deliveredPendingNote = '';
@@ -524,6 +528,8 @@ export class CortiV extends Cormini {
     super(opts);
     this.stateMemory = new StateMemory(this.memory);
     this.planningConfig = opts.planning ?? (() => PLANNING_DEFAULTS);
+    this.focusedCognition = new FocusedCognition(opts.focusedCognition);
+    this.historicalRecallConfig = opts.historicalRecall ?? (() => HISTORICAL_RECALL_DEFAULTS);
     this.dreamConfig = opts.dream ?? (() => DREAM_DEFAULTS);
     this.sleepReviewConfig = opts.sleepReview ?? (() => SLEEP_REVIEW_DEFAULTS);
     this.foregroundConfig = opts.foreground ?? (() => FOREGROUND_CONTEXT_DEFAULTS);
@@ -1410,7 +1416,8 @@ export class CortiV extends Cormini {
                       : t.name === 'procedure_adopt' ? this.committed(t, 'save', '[procedure adopted] ')
                         : t)),
       ...this.historyTools(),
-      this.stateMemory.tool(),
+      historicalRecallTool(this.stateMemory.tool(), { config: this.historicalRecallConfig,
+        worlds: () => this.worlds, search: reader(currentSearch) }),
       this.recallTool(),
       ...(this.referenceConfig().enabled ? [this.referenceTool()] : []),
     ];
