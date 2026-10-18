@@ -58,8 +58,26 @@ describe('CortiV pending work with the event loop', () => {
     const ledger = () => JSON.parse(readFileSync(join(memoryDir, 'pending-work.json'), 'utf8')) as {
       entries: Array<{ id: string; status: string; evidence?: { summary: string } }>;
     };
-    return { dir, persona, core, llm, actions, send, ledger };
+    return { dir, persona, core, llm, actions, send, ledger, world };
   }
+
+  it('reconciles World work before presenting pending context to the next real loop request', async () => {
+    const r = await open();
+    const reference = { world: 'social', scope: { realm: 'test', account: 'visitor', agent: 'fixture' },
+      subject: 'work', instance: 'accepted-1', revision: 1 };
+    let status = 'active';
+    Object.assign(r.world, { requestFacts: () => ({ text: 'Current observed state', snapshotTypes: [], workStates: [{ ...reference,
+      revision: 2, status, observedAt: new Date().toISOString(), evidence: { source: 'server', reference: 'event:1', text: 'Confirmed external result' } }] }) });
+    r.llm.script(toolReply([{ name: 'pending_work', args: { operation: 'defer', id: 'bound', note: 'Exact work result', after_seconds: 60, work_ref: reference } }]), toolReply([{ name: 'end_turn' }]));
+    await r.send('operator', 'Keep the unfinished work.');
+    await until(() => { try { return r.ledger().entries[0]?.status === 'waiting'; } catch { return false; } });
+    status = 'completed';
+    r.llm.script(toolReply([{ name: 'social_work' }]), toolReply([{ name: 'end_turn' }]));
+    await r.send('operator', 'Continue independent work.');
+    await until(() => r.ledger().entries[0]?.status === 'resolved' && r.actions.length === 1);
+    expect(r.core.bus.isDeliveryBlocked()).toBe(false);
+    expect(r.ledger().entries[0].evidence?.summary).toContain('Confirmed external result');
+  });
 
   it('asking and deferring leaves the foreground and unrelated conversations available', async () => {
     const rig = await open();

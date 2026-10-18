@@ -1,6 +1,7 @@
 /** Persona activity agenda: persistent intentions and evidence; no World execution. */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { matchingWorkState, readWorldWorkStates, workReferenceOf, type WorldWorkReference, type WorldWorkState } from './work-state-context.ts';
 
 export const AGENDA_FILE = 'activity-agenda.json';
 export const AGENDA_SUMMARY_MAX_CHARS = 1_200;
@@ -20,6 +21,9 @@ export interface AgendaItem {
 export interface AgendaPlan { summary: string; items: AgendaItem[]; }
 type AgendaStatus = 'queued' | 'active' | 'deferred' | 'done' | 'cancelled';
 interface AcceptedItem extends AgendaItem { status: AgendaStatus; note: string; updatedAt: string;
+  workRef?: WorldWorkReference;
+  workRefHistory?: WorldWorkReference[];
+  workEvidence?: WorldWorkState;
   sourceCapturedAt?: string;
   worldsUpdatedAt?: string;
   worldHistory?: Array<{ worlds?: string[]; correctedAt: string; correctionNote: string }>;
@@ -34,6 +38,7 @@ interface Ledger {
   revision: number;
   /** Proposals captured before this correction boundary cannot be reused. */
   premiseRevision?: number;
+  pendingRetirementRevision?: number;
   summary: string;
   items: AcceptedItem[];
   proposal: Proposal | null;
@@ -74,6 +79,9 @@ function validPlan(value: unknown): value is AgendaPlan {
 function validAccepted(value: unknown): value is AcceptedItem {
   return validItem(value) && object(value) && ['queued', 'active', 'deferred', 'done', 'cancelled'].includes(String(value.status))
     && text(value.note, 400, true) && timestamp(value.updatedAt)
+    && (value.workRef === undefined || !!workReferenceOf(value.workRef))
+    && (value.workRefHistory === undefined || Array.isArray(value.workRefHistory) && value.workRefHistory.every(ref => !!workReferenceOf(ref)))
+    && (value.workEvidence === undefined || object(value.workEvidence) && readWorldWorkStates(String(value.workEvidence.world), [value.workEvidence]).length === 1)
     && (value.sourceCapturedAt === undefined || timestamp(value.sourceCapturedAt))
     && (value.worldsUpdatedAt === undefined || timestamp(value.worldsUpdatedAt))
     && (value.worldHistory === undefined || (Array.isArray(value.worldHistory) && value.worldHistory.every(entry =>
@@ -130,6 +138,7 @@ export class ActivityAgenda {
     if (!object(saved) || saved.version !== 1 || !Number.isSafeInteger(saved.revision) || Number(saved.revision) < 0
       || (saved.premiseRevision !== undefined && (!Number.isSafeInteger(saved.premiseRevision)
         || Number(saved.premiseRevision) < 0 || Number(saved.premiseRevision) > Number(saved.revision)))
+      || (saved.pendingRetirementRevision !== undefined && (!Number.isSafeInteger(saved.pendingRetirementRevision) || Number(saved.pendingRetirementRevision) < 0))
       || !text(saved.summary, 300, true) || !Array.isArray(saved.items) || !saved.items.every(validAccepted)
       || saved.items.filter(item => !closed(item) && !restoredCompletion(item)).length > AGENDA_MAX_ITEMS
       || saved.items.filter(item => item.status === 'active').length > 1
@@ -164,7 +173,18 @@ export class ActivityAgenda {
     return this.summary();
   }
   operate(args: Record<string, unknown>): string {
-    if (Object.keys(args).some(key => !['operation', 'id', 'status', 'note', 'why', 'worlds', 'doneWhen', 'when', 'ifBlocked', 'offset', 'limit', 'includeCompleted', 'includeClosed', 'expected_revision'].includes(key))) return '[日程输入错误] 含有未知参数。';
+    if (Object.keys(args).some(key => !['operation', 'id', 'status', 'note', 'why', 'worlds', 'doneWhen', 'when', 'ifBlocked', 'offset', 'limit', 'includeCompleted', 'includeClosed', 'expected_revision', 'work_ref'].includes(key))) return '[日程输入错误] 含有未知参数。';
+    if (args.operation === 'bind') {
+      const item = this.ledger.items.find(item => item.id === args.id), ref = workReferenceOf(args.work_ref);
+      if (!item || closed(item) || !ref || args.expected_revision !== this.ledger.revision || !text(args.note, 400))
+        return '[日程输入错误] bind 需要开放阶段 id、当前 expected_revision、完整 work_ref 和 note 中的绑定依据。';
+      if (item.worlds !== undefined && !item.worlds.includes(ref.world)) return '[日程输入错误] work_ref 与本阶段 World 归属不符，先核验归属。';
+      const items = this.ledger.items.map(entry => entry.id === item.id ? { ...entry, workRef: ref,
+        workRefHistory: [...entry.workRefHistory ?? [], ...(entry.workRef ? [entry.workRef] : [])], updatedAt: this.stamp() } : entry);
+      this.save({ ...this.ledger, items, revision: this.ledger.revision + 1, premiseRevision: this.ledger.revision + 1, proposal: null });
+      return this.summary();
+    }
+    if (args.work_ref !== undefined) return '[日程输入错误] work_ref 通过 bind 绑定当前 World 的任务身份。';
     if (args.worlds !== undefined && (args.operation !== 'update' || !validWorlds(args.worlds))) return '[日程输入错误] worlds 仅用于 update，填写最多四个不同的 World id；空数组表示不属于特定世界，未知归属保持省略。';
     if (args.why !== undefined && args.operation !== 'update') return '[日程输入错误] why 只能通过 update 连同 note 和当前 expected_revision 订正。';
     if (args.doneWhen !== undefined && (args.operation !== 'update'
@@ -235,6 +255,7 @@ export class ActivityAgenda {
       }
       const items = this.ledger.items.map(entry => entry.id === item.id ? { ...entry, status: 'queued' as const,
         note: args.note as string, updatedAt: this.stamp(),
+        ...(entry.workRef ? { workRef: undefined, workRefHistory: [...entry.workRefHistory ?? [], entry.workRef] } : {}),
         corrections: [...entry.corrections ?? [], { status: entry.status, note: entry.note, updatedAt: entry.updatedAt }] } : entry);
       this.save({ ...this.ledger, revision: this.ledger.revision + 1, items });
       return this.operate({ operation: 'read', id: item.id });
@@ -330,6 +351,28 @@ export class ActivityAgenda {
     return [...lines, ...sections.map((part, index) => section(part, active && index === 0 ? activeBudget : budget)), footer].join('\n');
   }
   /** Background planning reads open objectives and bounded, separately labelled closure evidence. */
+  observePendingRetirement(revision: number): void {
+    if (revision <= (this.ledger.pendingRetirementRevision ?? 0)) return;
+    this.save({ ...this.ledger, revision: this.ledger.revision + 1, premiseRevision: this.ledger.revision + 1,
+      proposal: null, pendingRetirementRevision: revision });
+  }
+
+  reconcileWorldWork(world: string, observations: unknown): void {
+    const states = readWorldWorkStates(world, observations), updatedAt = this.stamp();
+    let changed = false;
+    const items = this.ledger.items.map(item => {
+      if (!item.workRef || closed(item)) return item;
+      const state = matchingWorkState(item.workRef, states);
+      if (!state || state.status === 'active') return item;
+      changed = true;
+      return { ...item, status: state.status === 'completed' ? 'done' as const : 'cancelled' as const,
+        note: clip(`World ${world} ${state.observedAt}：${state.evidence.text}`, 400), updatedAt, workEvidence: state,
+        corrections: [...item.corrections ?? [], { note: item.note, status: item.status, updatedAt: item.updatedAt }] };
+    });
+    if (changed) this.save({ ...this.ledger, items, revision: this.ledger.revision + 1,
+      premiseRevision: this.ledger.revision + 1, proposal: null });
+  }
+
   planningReadout(): string {
     const history = this.ledger.items.filter(closed)
       .sort((a, b) => Date.parse(a.updatedAt) - Date.parse(b.updatedAt));

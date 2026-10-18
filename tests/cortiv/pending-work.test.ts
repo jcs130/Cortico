@@ -6,6 +6,7 @@ import { PendingWork, PENDING_WORK_ID_MAX_CHARS, PENDING_WORK_OWNER, PENDING_WOR
 import { TimerStore } from '../../src/core/timers.ts';
 import { nullLogger } from '../../src/core/util.ts';
 import type { CoreApi, EventEnvelope } from '../../src/core/types.ts';
+import type { WorldWorkReference } from '../../bots/cortiv/persona/work-state-context.ts';
 
 const fsHooks = vi.hoisted(() => ({ onRename: null as null | ((from: string, to: string) => void) }));
 vi.mock('node:fs', async (importOriginal) => {
@@ -17,6 +18,10 @@ vi.mock('node:fs', async (importOriginal) => {
 });
 
 const cleanup: Array<() => void> = [];
+const workRef: WorldWorkReference = { world: 'garden', scope: { realm: 'test', account: 'visitor', agent: 'fixture' },
+  subject: 'survey', instance: 'acceptance-1', revision: 1 };
+const completion = { ...workRef, revision: 2, status: 'completed', observedAt: '2026-01-01T10:00:01Z',
+  evidence: { source: 'server', reference: 'event:1', text: 'Delivery confirmed' } };
 
 function rig(existing?: string) {
   const dir = existing ?? mkdtempSync(join(tmpdir(), 'cortico-pending-work-'));
@@ -56,6 +61,69 @@ afterEach(() => {
 });
 
 describe('PendingWork', () => {
+  it('retires a bound intention with exact server evidence, cancels its timer and preserves history through restart', () => {
+    const r = rig();
+    r.manager.operate({ operation: 'defer', id: 'bound', note: 'Complete this exact survey', after_seconds: 60, work_ref: workRef });
+    r.manager.reconcileWorldWork('garden', [{ ...completion, status: 'active' }]);
+    expect(r.saved().entries[0].status).toBe('waiting');
+    r.manager.reconcileWorldWork('garden', [completion]);
+    expect(r.saved().entries[0]).toMatchObject({ status: 'resolved', note: 'Complete this exact survey',
+      evidence: { workState: completion } });
+    expect(r.manager.retirementRevision()).toBe(1);
+    expect(r.timers.list()).toEqual([]);
+    expect(r.manager.operate({ operation: 'list' })).not.toContain('id="bound"');
+    expect(r.manager.operate({ operation: 'list', include_closed: true })).toContain('id="bound"');
+    expect(rig(r.dir).manager.summary()).toContain('已核验退出当前待办');
+    expect(rig(r.dir).manager.retirementRevision()).toBe(1);
+    expect(r.gate).not.toHaveBeenCalled();
+  });
+
+  it('does not match by words, another World/account/occurrence, old revisions or conflicting evidence', () => {
+    const r = rig();
+    r.manager.operate({ operation: 'defer', id: 'bound', note: 'survey', after_seconds: 60, work_ref: workRef });
+    r.manager.operate({ operation: 'defer', id: 'legacy', note: 'survey', after_seconds: 60 });
+    for (const row of [{ ...completion, instance: 'acceptance-2' }, { ...completion, revision: 0 },
+      { ...completion, scope: { ...workRef.scope, account: 'other' } }]) {
+      r.manager.reconcileWorldWork('garden', [row]);
+      expect(r.saved().entries[0].status).toBe('waiting');
+    }
+    r.manager.reconcileWorldWork('another-world', [completion]);
+    r.manager.reconcileWorldWork('garden', [completion, { ...completion, status: 'active' }]);
+    expect(r.saved().entries[0].status).toBe('waiting');
+    r.manager.reconcileWorldWork('garden', [completion]);
+    expect(r.saved().entries.map(item => item.status)).toEqual(['resolved', 'waiting']);
+  });
+
+  it('binds a legacy intention explicitly and prevents deferring the same confirmed closed occurrence', () => {
+    const r = rig(); r.manager.reconcileWorldWork('garden', [completion]);
+    r.manager.operate({ operation: 'defer', id: 'legacy', note: 'Exact unfinished survey', after_seconds: 60 });
+    expect(r.manager.operate({ operation: 'bind', id: 'legacy', work_ref: workRef })).toContain('resolved');
+    expect(r.manager.operate({ operation: 'defer', id: 'copy', note: 'same old work', after_seconds: 60, work_ref: workRef })).toContain('已关闭');
+    expect(r.saved().entries).toHaveLength(1);
+    const nextRef = { ...workRef, instance: 'acceptance-2' };
+    r.manager.operate({ operation: 'defer', id: 'next', note: 'A new occurrence', after_seconds: 60, work_ref: nextRef });
+    expect(r.saved().entries[1].status).toBe('waiting');
+  });
+
+  it('prioritizes newer intentions while preserving all older ready entries for paginated lookup', () => {
+    const r = rig();
+    for (let index = 0; index < 30; index++) r.manager.operate({ operation: 'defer', id: `old-${index}`, note: 'old intent '.repeat(40), after_seconds: 1 });
+    vi.advanceTimersByTime(1100);
+    r.manager.operate({ operation: 'defer', id: 'fresh', note: 'Current objective', after_seconds: 60 });
+    const text = r.manager.summary(); expect(text).toContain('id="fresh"'); expect(text).not.toContain('id="old-0"');
+    expect(r.manager.operate({ operation: 'list', limit: 20 })).toContain('id="old-0"');
+    expect(text.length).toBeLessThanOrEqual(PENDING_WORK_SUMMARY_MAX_CHARS);
+  });
+
+  it('keeps a failed reconciliation transaction retryable without losing its timer', () => {
+    const r = rig();
+    r.manager.operate({ operation: 'defer', id: 'bound', note: 'survey', after_seconds: 60, work_ref: workRef });
+    rejectSave(r.dir);
+    expect(() => r.manager.reconcileWorldWork('garden', [completion])).toThrow('file busy');
+    expect(r.saved().entries[0].status).toBe('waiting'); expect(r.timers.list()).toHaveLength(1);
+    fsHooks.onRename = null; r.manager.reconcileWorldWork('garden', [completion]);
+    expect(r.saved().entries[0].status).toBe('resolved'); expect(r.timers.list()).toEqual([]);
+  });
   function rejectSave(dir: string) {
     fsHooks.onRename = (_from, to) => {
       if (to === join(dir, 'pending-work.json')) throw Object.assign(new Error('file busy'), { code: 'EPERM' });
@@ -427,7 +495,8 @@ describe('PendingWork', () => {
     r.manager.operate({ operation: 'defer', id: 'review-now', note: '核对刚到的回答', wait_for: { sender_key: 'alice' } });
     r.manager.onDelivery([event()]);
     const text = r.manager.summary();
-    expect(text.indexOf('id="review-now"')).toBeLessThan(text.indexOf('id="wait-0"'));
+    expect(text.indexOf('id="review-now"')).toBeLessThan(text.indexOf('id="wait-19"'));
+    expect(r.manager.operate({ operation: 'list', limit: 20 })).toContain('id="wait-0"');
     expect(text).toContain('cursor=1');
     expect(text.length).toBeLessThanOrEqual(PENDING_WORK_SUMMARY_MAX_CHARS);
   });

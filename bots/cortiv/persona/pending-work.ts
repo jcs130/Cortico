@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { join } from 'node:path';
 import type { CoreApi, EventEnvelope, TimerEntry } from 'cortico/core/types.ts';
 import { nowIso } from 'cortico/core/util.ts';
+import { matchingWorkState, readWorldWorkStates, workReferenceOf, type WorldWorkReference, type WorldWorkState } from './work-state-context.ts';
 
 export const PENDING_WORK_OWNER = 'cortiv.pending-work';
 export const PENDING_WORK_ID_MAX_CHARS = 80;
@@ -25,6 +26,7 @@ interface Evidence {
   at: string;
   cursor?: number;
   summary: string;
+  workState?: WorldWorkState;
 }
 
 interface PendingEntry {
@@ -36,6 +38,7 @@ interface PendingEntry {
   waitFor?: EventFilter;
   timerId?: string;
   evidence?: Evidence;
+  workRef?: WorldWorkReference;
 }
 
 const FILTER_KEYS = ['source', 'type', 'sender_key', 'contains'] as const;
@@ -69,10 +72,14 @@ function validEntry(value: unknown): value is PendingEntry {
   if (value.waitFor !== undefined && !filterOf(value.waitFor)) return false;
   if (value.dueAt === undefined && value.waitFor === undefined) return false;
   if (value.timerId !== undefined && !bounded(value.timerId, 160)) return false;
+  if (value.workRef !== undefined && !workReferenceOf(value.workRef)) return false;
   if (value.evidence !== undefined) {
     if (!object(value.evidence) || !['event', 'timer', 'resolve', 'cancel'].includes(String(value.evidence.kind))
       || !stamp(value.evidence.at) || !bounded(value.evidence.summary, PENDING_WORK_NOTE_MAX_CHARS, false)
       || (value.evidence.cursor !== undefined && (!Number.isInteger(value.evidence.cursor) || Number(value.evidence.cursor) < 0))) return false;
+    if (value.evidence.workState !== undefined && (!object(value.evidence.workState)
+      || readWorldWorkStates(String(value.evidence.workState.world), [value.evidence.workState]).length !== 1
+      || !value.workRef)) return false;
   }
   return true;
 }
@@ -89,6 +96,8 @@ function idLabel(id: string): string {
 export class PendingWork {
   private readonly file: string;
   private entries: PendingEntry[] = [];
+  private retiredRevision = 0;
+  private readonly worldWorkStates = new Map<string, WorldWorkState[]>();
 
   constructor(
     private readonly core: CoreApi,
@@ -104,7 +113,13 @@ export class PendingWork {
       throw new Error('pending-work.json 格式无效；原文件未修改');
     }
     this.entries = saved.entries;
+    if (saved.retirementRevision !== undefined && (!Number.isSafeInteger(saved.retirementRevision) || Number(saved.retirementRevision) < 0))
+      throw new Error('pending-work.json retirementRevision 无效；原文件未修改');
+    this.retiredRevision = saved.retirementRevision === undefined
+      ? this.entries.filter(item => item.status === 'resolved' || item.status === 'cancelled').length : Number(saved.retirementRevision);
   }
+
+  retirementRevision(): number { return this.retiredRevision; }
 
   /** 在到期处理器注册后调用；恢复索引，并为离线期间到期的待办生成一次复核提示。 */
   restore(): void {
@@ -133,12 +148,21 @@ export class PendingWork {
   }
 
   operate(args: Record<string, unknown>): string {
-    if (Object.keys(args).some((key) => !['operation', 'id', 'note', 'after_seconds', 'wait_for', 'result', 'include_closed', 'offset', 'limit'].includes(key))) {
+    if (Object.keys(args).some((key) => !['operation', 'id', 'note', 'after_seconds', 'wait_for', 'result', 'include_closed', 'offset', 'limit', 'work_ref'].includes(key))) {
       return '[pending_work 输入错误] 含有未知参数。';
     }
     if (args.operation === 'list') return this.list(args);
     if (args.operation === 'defer') return this.defer(args);
-    if (args.operation !== 'resolve' && args.operation !== 'cancel') return '[pending_work 输入错误] operation 必须为 defer/list/resolve/cancel。';
+    if (args.operation === 'bind') {
+      const item = typeof args.id === 'string' ? this.findByInputId(args.id) : undefined;
+      const ref = workReferenceOf(args.work_ref);
+      if (!item || !ref) return '[pending_work 输入错误] bind 需要现有 id 和完整 work_ref；从当前 World workStates 读取身份。';
+      if (item.status === 'resolved' || item.status === 'cancelled') return '[pending_work] 该待办已关闭；绑定未使它重新开放。';
+      this.commit({ ...item, workRef: ref });
+      this.reconcileWorldWork(ref.world, this.worldWorkStates.get(ref.world));
+      return `[pending_work] ${idLabel(item.id)} 已绑定 ${ref.world}/${ref.subject} 批次 ${ref.instance}；状态 ${this.findByInputId(item.id)!.status}。`;
+    }
+    if (args.operation !== 'resolve' && args.operation !== 'cancel') return '[pending_work 输入错误] operation 必须为 defer/list/resolve/cancel/bind。';
     const item = typeof args.id === 'string' ? this.findByInputId(args.id) : undefined;
     if (!bounded(item?.id ?? args.id, PENDING_WORK_ID_MAX_CHARS)) return '[pending_work 输入错误] 提供有效的待办 id。';
     if (args.result !== undefined && !bounded(args.result, PENDING_WORK_NOTE_MAX_CHARS, false)) return '[pending_work 输入错误] result 必须为长度不超过 600 的文本。';
@@ -175,9 +199,14 @@ export class PendingWork {
   }
 
   summary(): string {
-    const active = [...this.entries.filter((item) => item.status === 'ready'), ...this.entries.filter((item) => item.status === 'waiting')];
-    if (active.length === 0) return '';
+    const active = this.entries.map((item, order) => ({ item, order }))
+      .filter(({ item }) => item.status === 'ready' || item.status === 'waiting')
+      .sort((a, b) => Date.parse(b.item.registeredAt) - Date.parse(a.item.registeredAt) || b.order - a.order).map(({ item }) => item);
+    const retired = this.entries.filter(item => item.evidence?.workState && ['resolved', 'cancelled'].includes(item.status))
+      .sort((a, b) => Date.parse(b.evidence!.at) - Date.parse(a.evidence!.at)).slice(0, 3);
+    if (active.length === 0 && retired.length === 0) return '';
     const lines = ['[待办：等待不占用前台，待复核不代表完成]'];
+    if (retired.length) lines.push('[已核验退出当前待办] ' + retired.map(item => `${idLabel(item.id)} ${clip(item.workRef!.subject, 48)} ${item.status}；依据 ${item.evidence!.workState!.observedAt}`).join('；'));
     for (const [index, item] of active.entries()) {
       const line = this.line(item, false);
       const rest = `\n还有 ${active.length - index} 项；pending_work list 查看。`;
@@ -188,6 +217,21 @@ export class PendingWork {
       lines.push(line);
     }
     return lines.join('\n');
+  }
+
+  reconcileWorldWork(world: string, observations: unknown): void {
+    const states = readWorldWorkStates(world, observations);
+    this.worldWorkStates.set(world, states);
+    for (const item of [...this.entries]) {
+      if (!item.workRef || !['waiting', 'ready'].includes(item.status)) continue;
+      const state = matchingWorkState(item.workRef, states);
+      if (!state || state.status === 'active') continue;
+      const next: PendingEntry = { ...item, status: state.status === 'completed' ? 'resolved' : 'cancelled',
+        evidence: { kind: state.status === 'completed' ? 'resolve' : 'cancel', at: this.now(),
+          summary: clip(`World ${world} ${state.observedAt} ${state.evidence.text}`, PENDING_WORK_NOTE_MAX_CHARS), workState: state } };
+      delete next.timerId;
+      this.commit(next); this.cancelTimers(next); this.log(next);
+    }
   }
 
   private list(args: Record<string, unknown>): string {
@@ -209,6 +253,11 @@ export class PendingWork {
 
   private defer(args: Record<string, unknown>): string {
     const existing = typeof args.id === 'string' ? this.findByInputId(args.id) : undefined;
+    const workRef = args.work_ref === undefined ? existing?.workRef : workReferenceOf(args.work_ref);
+    if (args.work_ref !== undefined && !workRef) return '[pending_work 输入错误] work_ref 必须含完整的 World、作用域、任务身份、批次和版本。';
+    const known = workRef ? matchingWorkState(workRef, [...this.worldWorkStates.get(workRef.world) ?? [],
+      ...this.entries.flatMap(item => item.evidence?.workState ? [item.evidence.workState] : [])]) : null;
+    if (known && known.status !== 'active') return `[pending_work 已关闭] ${workRef!.subject} 批次 ${workRef!.instance} 已有 ${known.observedAt} 的 ${known.status} 回执；旧意图未重新挂起。依据：${known.evidence.text}`;
     if (args.id !== undefined && !bounded(existing?.id ?? args.id, PENDING_WORK_ID_MAX_CHARS)) return '[pending_work 输入错误] id 必须为非空文本且不超过 80 字符。';
     if (!bounded(args.note, PENDING_WORK_NOTE_MAX_CHARS)) return '[pending_work 输入错误] note 必须为非空文本且不超过 600 字符。';
     const waitFor = args.wait_for === undefined ? undefined : filterOf(args.wait_for);
@@ -220,6 +269,7 @@ export class PendingWork {
     const id = existing?.id ?? (typeof args.id === 'string' ? args.id : `work_${randomUUID().slice(0, 12)}`);
     const item: PendingEntry = {
       id, note: args.note, status: 'waiting', registeredAt: this.now(),
+      ...(workRef ? { workRef } : {}),
       ...(typeof delay === 'number' ? { dueAt: new Date(Date.now() + delay * 1000).toISOString() } : {}),
       ...(waitFor ? { waitFor } : {}),
     };
@@ -286,7 +336,8 @@ export class PendingWork {
     const trigger = item.status === 'waiting'
       ? `${item.dueAt ? ` 到 ${item.dueAt}` : ''}${item.waitFor ? ` 条件 ${JSON.stringify(item.waitFor)}` : ''}`
       : item.evidence ? ` 线索 ${item.evidence.at}${item.evidence.cursor === undefined ? '' : ` cursor=${item.evidence.cursor}`} ${clip(item.evidence.summary, full ? 240 : 100)}` : '';
-    return `${idLabel(item.id)} [${label}] ${full ? item.note : clip(item.note, 140)}${full ? trigger : trigger ? ` ${clip(trigger, 200)}` : ''}`;
+    return `${idLabel(item.id)} [${label}] ${full ? item.note : clip(item.note, 140)}${full ? trigger : trigger ? ` ${clip(trigger, 200)}` : ''}`
+      + (full && item.workRef ? ` work_ref=${JSON.stringify(item.workRef)}` : '');
   }
 
   private now(): string { return nowIso(this.timezone()); }
@@ -296,11 +347,14 @@ export class PendingWork {
     const index = this.entries.findIndex((entry) => entry.id === item.id);
     const next = [...this.entries];
     if (index < 0) next.push(item); else next[index] = item;
+    const retirementRevision = this.retiredRevision + (['resolved', 'cancelled'].includes(item.status)
+      && (index < 0 || !['resolved', 'cancelled'].includes(this.entries[index].status)) ? 1 : 0);
     mkdirSync(this.memoryDir, { recursive: true });
     const temporary = `${this.file}.tmp`;
-    writeFileSync(temporary, JSON.stringify({ version: 1, entries: next }, null, 2), 'utf8');
+    writeFileSync(temporary, JSON.stringify({ version: 1, retirementRevision, entries: next }, null, 2), 'utf8');
     renameSync(temporary, this.file);
     this.entries = next;
+    this.retiredRevision = retirementRevision;
   }
 
   private log(item: PendingEntry): void {

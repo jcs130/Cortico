@@ -31,6 +31,38 @@ function adopt(agenda: ActivityAgenda, value = plan()) {
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
 describe('persistent Persona activity agenda', () => {
+  it('retires a pending-work-dependent proposal once and rejects its later result across restart', () => {
+    const { agenda, dir } = rig(); adopt(agenda);
+    const before = agenda.revision(); agenda.propose(JSON.stringify(plan()), before, stamp);
+    agenda.observePendingRetirement(7);
+    expect(agenda.state().proposal).toBeNull();
+    const after = agenda.revision(); agenda.observePendingRetirement(7);
+    expect(agenda.revision()).toBe(after);
+    const restored = new ActivityAgenda(dir, now); restored.propose(JSON.stringify(plan()), before, stamp);
+    expect(restored.state().proposal).toBeNull();
+  });
+  it('retires a bound stage and captured proposals only for the same authoritative occurrence', () => {
+    const { agenda, dir } = rig(); adopt(agenda);
+    const workRef = { world: 'garden', scope: { realm: 'test', account: 'visitor', agent: 'fixture' }, subject: 'work', instance: 'accepted-1', revision: 1 };
+    const evidence = { ...workRef, revision: 2, status: 'completed', observedAt: stamp,
+      evidence: { source: 'server', reference: 'event:1', text: 'Confirmed delivery' } };
+    agenda.operate({ operation: 'bind', id: 'finish-home', expected_revision: agenda.revision(), note: 'This external result fully settles the stage', work_ref: workRef });
+    const before = agenda.revision(); agenda.propose(JSON.stringify(plan()), before, stamp);
+    agenda.reconcileWorldWork('another', [evidence]);
+    expect(agenda.state().items[0].status).toBe('queued');
+    agenda.reconcileWorldWork('garden', [{ ...evidence, instance: 'accepted-2' }]);
+    expect(agenda.state().items[0].status).toBe('queued');
+    agenda.reconcileWorldWork('garden', [evidence]);
+    expect(agenda.state()).toMatchObject({ proposal: null, items: [{ status: 'done', workEvidence: evidence }, { status: 'queued' }] });
+    expect(agenda.revision()).toBeGreaterThan(before);
+    expect(new ActivityAgenda(dir, now).state().items[0].workEvidence).toEqual(evidence);
+    agenda.propose(JSON.stringify(plan()), before, stamp);
+    expect(agenda.state().items[0].status).toBe('done');
+    agenda.operate({ operation: 'reopen', id: 'finish-home', expected_revision: agenda.revision(), note: 'Fresh evidence contradicts the previous binding.' });
+    agenda.reconcileWorldWork('garden', [evidence]);
+    expect(agenda.state().items[0].status).toBe('queued');
+    expect(agenda.state().items[0].workRefHistory).toContainEqual(workRef);
+  });
   it('preserves separate World attribution through adoption, focus, restart and planning', () => {
     const { agenda, dir } = rig(), value = plan();
     value.items[0].worlds = ['garden']; value.items[1].worlds = ['arena'];

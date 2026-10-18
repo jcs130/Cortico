@@ -78,6 +78,7 @@ PENDING_WORK_SELECTOR_MAX_CHARS,
 PendingWork,
 } from './pending-work.ts';
 import { PLANNING,PLANNING_DEFAULTS,PeriodicPlanningReview,causalReviewTail,type PlanningConfig } from './planning-review.ts';
+import { readWorldWorkStates, WORK_REFERENCE_SCHEMA } from './work-state-context.ts';
 import { RecentSpeech } from './recent-speech.ts';
 import { FAST_REFERENCE_DEFAULTS,type FastReferenceConfig } from './reference-adviser.ts';
 import { REFERENCE_LIBRARY_DEFAULTS,ReferenceLibrary,type ReferenceLibraryConfig } from './reference-library.ts';
@@ -566,8 +567,7 @@ export class CortiV extends Cormini {
           try { return { file, text: this.readOverride(file) ?? new MemoryNoteProvenance(this.memory).readFile(file) }; }
           catch (error) { return { file, text: `[读取失败: ${String(error)}]` }; }
         })],
-        pending: this.pendingWork?.summary() ?? '',
-        observations: [this.stateMemory.summary(), ...this.requestWorldFacts().pins.map(record => itemText(record.item))].join('\n\n'),
+        ...this.planningWorldInputs(),
       }),
     });
     core.timers.onDue((entry) => {
@@ -687,6 +687,7 @@ export class CortiV extends Cormini {
       core.injectInternal(speech || '[memory] 近 30 分钟没有近期台词记录。', 'recent_speech');
       this.deliveredSpeechNote = speech;
     }
+    this.requestWorldFacts();
     const pending = this.pendingWork?.summary() ?? '';
     if (pending !== this.deliveredPendingNote) {
       core.injectInternal(pending || '[待办] 当前没有等待中或待复核的事项。', 'pending_work');
@@ -727,12 +728,15 @@ export class CortiV extends Cormini {
         + 'defer records what is waiting, with a review delay and/or an external event selector; '
         + 'list reads the current items, resolve records a verified result, cancel abandons an item. '
         + 'A matching event or elapsed delay only makes the item ready to review, not completed. '
+        + 'bind attaches an existing intention to a complete work_ref from current World workStates. Only bind when that external result fully settles this intention; '
+        + 'matching server-confirmed completion/cancellation retires it automatically with evidence, and an old occurrence cannot reopen. '
         + 'This returns immediately and never blocks other events or controls a World.',
       tags: ['write'],
       parameters: {
         type: 'object', additionalProperties: false,
         properties: {
-          operation: { type: 'string', enum: ['defer', 'list', 'resolve', 'cancel'] },
+          operation: { type: 'string', enum: ['defer', 'list', 'resolve', 'cancel', 'bind'] },
+          work_ref: { ...WORK_REFERENCE_SCHEMA, description: 'defer/bind: copy the exact world, scope, subject, instance and revision from current World task identities; do not guess from a name or old count.' },
           id: { type: 'string', minLength: 1, maxLength: PENDING_WORK_ID_MAX_CHARS + 1,
             description: 'Raw id from id= output; exact ids take precedence. A legacy leading # aliases an existing raw id only when no exact id exists. New ids are at most 80 characters; the extra character is only for an existing legacy alias. Defer without id creates an item.' },
           note: { type: 'string', minLength: 1, maxLength: PENDING_WORK_NOTE_MAX_CHARS,
@@ -756,6 +760,7 @@ export class CortiV extends Cormini {
       },
       handler: async (args) => {
         const text = this.pendingWork?.operate(args) ?? '[pending_work unavailable] Persona is not attached.';
+        if (this.pendingWork) this.activityAgenda?.observePendingRetirement(this.pendingWork.retirementRevision());
         return text.startsWith('[pending_work 输入错误]') || text.startsWith('[pending_work unavailable]')
           ? { failed: true, text } : text;
       },
@@ -772,12 +777,14 @@ export class CortiV extends Cormini {
          + 'amend corrects the note of a closed stage using the expected_revision from read; it preserves status and prior note history. '
          + 'reopen corrects a mistaken completion using the exact expected_revision from read and fresh contradictory evidence in note. It returns that done stage to queued, preserves its prior closure and objective, and keeps the current active stage. Cancelled stages cannot reopen. '
         + 'worlds records the World ids supported by a stage\'s evidence; omitted legacy attribution is unknown, [] means no particular World. update worlds requires expected_revision and evidence in note, preserves attribution history, and retires dependent proposals. Inventory, resources, clocks, prerequisites and completion evidence remain specific to each World. '
+        + 'bind attaches an open stage to an exact work_ref from current World identities with expected_revision and evidence in note; only use it when that external result fully settles the stage. Matching server completion retires the stage and stale proposals automatically. '
         + 'completion is never inferred from time or task acceptance. Details and references are loaded only when needed.',
       tags: ['write'],
       parameters: {
         type: 'object', additionalProperties: false,
         properties: {
-          operation: { type: 'string', enum: ['read', 'review', 'adopt', 'focus', 'update', 'amend', 'reopen'] },
+          operation: { type: 'string', enum: ['read', 'review', 'adopt', 'focus', 'update', 'amend', 'reopen', 'bind'] },
+          work_ref: { ...WORK_REFERENCE_SCHEMA, description: 'bind: exact current World work identity whose external outcome fully settles this stage; requires expected_revision and note.' },
           expected_revision: { type: 'integer', minimum: 0, description: 'Exact current agenda revision from read; required for amend/reopen and update with why/worlds/doneWhen. Stale corrections leave the agenda unchanged.' },
           question: { type: 'string', minLength: 1, maxLength: 1200,
             description: 'review: focused question about evidence, a difficult strategy or an uncertain cause; selects the reflection profile. Omit for a routine agenda proposal.' },
@@ -1071,6 +1078,13 @@ export class CortiV extends Cormini {
       try {
         const facts = world.requestFacts();
         if (!facts?.text.trim()) continue;
+        const workStates = readWorldWorkStates(world.id, (facts as typeof facts & { workStates?: unknown }).workStates);
+        this.pendingWork?.reconcileWorldWork(world.id, workStates);
+        this.activityAgenda?.reconcileWorldWork(world.id, workStates);
+        const workIndex = [...workStates.filter(state => state.status === 'active'),
+          ...workStates.filter(state => state.status !== 'active').slice(-3)]
+          .map(({ evidence, ...state }) => ({ ...state, evidence: { source: evidence.source, reference: evidence.reference } }));
+        if (workIndex.length) pins.push(message('user', `[${world.id} 当前任务身份；绑定意图时复制 work_ref，历史完成不再是当前待办]\n${JSON.stringify(workIndex)}`));
         pins.push(...(facts.parts?.length
           ? facts.parts.map(part => message('user', `[${world.id} 当前已观察事实 · ${part.key}]\n${part.text || '本项当前无内容。'}`))
           : [message('user', `[${world.id} 当前已观察事实]\n${facts.text}`)]));
@@ -1079,7 +1093,14 @@ export class CortiV extends Cormini {
         this.core?.log.warn('本轮 World 事实不可用，保留原始状态链', { world: world.id, error: String(error) });
       }
     }
+    if (this.pendingWork) this.activityAgenda?.observePendingRetirement(this.pendingWork.retirementRevision());
     return { pins, coveredSnapshots };
+  }
+
+  private planningWorldInputs(): { pending: string; observations: string } {
+    const facts = this.requestWorldFacts();
+    return { pending: this.pendingWork?.summary() ?? '',
+      observations: [this.stateMemory.summary(), ...facts.pins.map(record => itemText(record.item))].join('\n\n') };
   }
 
   private readonly actionFailureReflection = new ActionFailureReflection();
