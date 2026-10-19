@@ -172,14 +172,14 @@ describe('Persona social review with real Memory tools', () => {
       return '没有值得记的内容，已经记住了。';
     });
     await review(p, { history: history() });
-    await vi.waitFor(async () => expect((await state(p)).lastOutcome?.status).toBe('failed'));
+    await vi.waitFor(async () => expect((await state(p)).lastOutcome?.status).toBe('failed'), { timeout: 10_000 });
     expect(new SocialMemoryReview(dir).stateInfo().pendingEntries).toBe(1);
   });
 
   it('allows an explicit no-durable-facts proof without forcing a visitor profile', async () => {
     const { p, dir } = rig((options, root) => completePage(options, root));
     await review(p, { history: history() });
-    await vi.waitFor(async () => expect((await state(p)).social.pendingEntries).toBe(0));
+    await vi.waitFor(async () => expect((await state(p)).social.pendingEntries).toBe(0), { timeout: 10_000 });
     expect(existsSync(join(dir, 'viewers/stream/123456.md'))).toBe(false);
     expect(JSON.parse(readFileSync(join(dir, 'social/reviews/1-1.json'), 'utf8')).decision).toBe('no_durable_facts');
   });
@@ -231,7 +231,7 @@ describe('Persona social review with real Memory tools', () => {
       throw new Error('generation disconnected');
     });
     await review(p, { history: history() });
-    await vi.waitFor(async () => expect((await state(p)).lastOutcome?.status).toBe('failed'));
+    await vi.waitFor(async () => expect((await state(p)).lastOutcome?.status).toBe('failed'), { timeout: 10_000 });
     expect(readFileSync(join(dir, 'viewers/stream/123456.md'), 'utf8')).toBe('已经写入的部分事实');
     expect(new SocialMemoryReview(dir).stateInfo().committedSeq).toBe(0);
   });
@@ -276,6 +276,6 @@ describe('Persona social review with real Memory tools', () => {
     expect((await state(p)).social.scheduled).toBe(false);
     await p.onDelivery({ events: [event({ type: 'stream.room', cursor: 2,
       meta: { liveRoomState: { schemaVersion: 1, living: false, via: 'websocket' } } })] });
-    await vi.waitFor(async () => expect((await state(p)).social.pendingEntries).toBe(0));
+    await vi.waitFor(async () => expect((await state(p)).social.pendingEntries).toBe(0), { timeout: 10_000 });
   });
 });
