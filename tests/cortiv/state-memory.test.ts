@@ -236,13 +236,13 @@ describe('current memory across Persona read surfaces', () => {
         expect(itemText(reply.item)).toBe(receipt);
       }
     }
-    expect(await reader.handler({ path: RECENT_FILE, history: false }, ctx)).not.toContain(original);
+    expect(await reader.handler({ path: RECENT_FILE, history: false }, ctx)).toContain(original);
     expect(await reader.handler({ path: RECENT_FILE, history: true }, ctx)).toContain(original);
     expect(await grep.handler({ pattern: '旧取材点', history: true }, ctx)).toContain(`${RECENT_FILE}:1:`);
     expect(memory.readFile(RECENT_FILE)).toBe(original);
   });
 
-  it('discloses the current view before pagination and retrieves original coordinates through explicit history', async () => {
+  it('preserves original prose pagination and provenance while keeping history compatibility', async () => {
     const { dir, memory } = rig();
     const journal = [...Array.from({ length: 60 }, (_, index) => `旧经历 ${index + 1}`),
       '2026-08-01T10:00:00Z 取材回执：箱子 (-10,64,20) 存入原木2个'].join('\n');
@@ -252,24 +252,24 @@ describe('current memory across Persona read surfaces', () => {
     personas.push(persona); persona.attach(makeFakeHarnessApi());
     const tools = persona.declareSessions().find(session => session.id === 'main')!.tools();
     const reader = tools.find(tool => tool.name === 'read_file')!;
-    const view = await reader.handler({ path: RECENT_FILE, offset: -1, limit: 1, max_chars: 1 }, ctx) as string;
-    expect(view.startsWith('[当前记忆视图；')).toBe(true);
-    expect(view).toContain('行号和分页只对应此视图');
-    expect(view).toContain(JSON.stringify({ path: RECENT_FILE, history: true }));
-    expect(view).not.toContain('(-10,64,20)');
-    const readRecords = [functionCall('view', 'read_file', JSON.stringify({ path: RECENT_FILE, offset: -1, limit: 1, max_chars: 1 })),
+    const view = await reader.handler({ path: RECENT_FILE, offset: -1, limit: 1 }, ctx) as string;
+    expect(view.startsWith('[记忆来源')).toBe(true);
+    expect(view).toContain('第 61-61 行,共 61 行');
+    expect(view).toContain('修改时间不代表事实发生时间');
+    expect(view).toContain('(-10,64,20)');
+    const readRecords = [functionCall('view', 'read_file', JSON.stringify({ path: RECENT_FILE, offset: -1, limit: 1 })),
       functionResult('view', view), message('user', '查原始经历')];
-    const requestView = persona.prepareRequest({ sessionId: 'main', round: 2, messages: readRecords })!
+    const requestView = (persona.prepareRequest({ sessionId: 'main', round: 2, messages: readRecords }) ?? readRecords)
       .filter(record => record.item.type === 'function_call_output').map(record => itemText(record.item)).join('\n');
     expect(requestView).toContain(RECENT_FILE);
-    expect(requestView).toContain('history:true'); expect(requestView).not.toContain('(-10,64,20)');
+    expect(requestView).toContain('修改时间不代表事实发生时间'); expect(requestView).toContain('(-10,64,20)');
     const history = await reader.handler({ path: RECENT_FILE, offset: -1, limit: 1, history: true }, ctx) as string;
     expect(history).toContain('第 61-61 行,共 61 行');
     expect(history).toContain('2026-08-01T10:00:00Z 取材回执：箱子 (-10,64,20) 存入原木2个');
     const grep = tools.find(tool => tool.name === 'grep_files')!;
     const search = await grep.handler({ pattern: '取材回执' }, ctx) as string;
     expect(search.startsWith('[检索范围：')).toBe(true);
-    expect(search).toContain('原参数加 history:true'); expect(search).not.toContain('(-10,64,20)');
+    expect(search).toContain('修改时间'); expect(search).toContain('(-10,64,20)');
     expect(await grep.handler({ pattern: '取材回执', history: true }, ctx)).toContain(`${RECENT_FILE}:61:`);
     const methodSearch = await grep.handler({ pattern: '普通方法说明' }, ctx) as string;
     const searchRecords = [functionCall('method', 'grep_files', '{"pattern":"普通方法说明"}'), functionResult('method', methodSearch),
@@ -282,7 +282,7 @@ describe('current memory across Persona read surfaces', () => {
     expect(memory.readFile(RECENT_FILE)).toBe(journal);
   });
 
-  it('keeps legacy text out of default reads, search, planning and handoff while allowing explicit history', async () => {
+  it('keeps prose readable without replacing current claims or exposing raw derived-ledger history', async () => {
     const { dir, memory } = rig();
     writeFileSync(join(dir, 'CONSTITUTION.md'), '保留身份与原则');
     memory.writeFileAtomic(RECENT_FILE, '旧门缺材料'); memory.writeFileAtomic('goals/project.md', '旧项目状态也缺材料');
@@ -293,8 +293,9 @@ describe('current memory across Persona read surfaces', () => {
     personas.push(persona); persona.attach(makeFakeHarnessApi({ injectExternal: value => { injected.push(value); } }));
     const tools = persona.declareSessions().find(session => session.id === 'main')!.tools();
     const reader = tools.find(tool => tool.name === 'read_file')!;
-    expect(await reader.handler({ path: RECENT_FILE }, ctx)).not.toContain('旧门缺材料');
-    expect(await reader.handler({ path: `alias/../${RECENT_FILE}` }, ctx)).not.toContain('旧门缺材料');
+    expect(await reader.handler({ path: RECENT_FILE }, ctx)).toContain('旧门缺材料');
+    expect(await reader.handler({ path: `alias/../${RECENT_FILE}` }, ctx)).toContain('旧门缺材料');
+    expect(await reader.handler({ path: 'goals/project.md' }, ctx)).toContain('旧项目状态也缺材料');
     expect(await reader.handler({ path: RECENT_FILE, history: true }, ctx)).toContain('旧门缺材料');
     const backup = JSON.parse(memory.readFile(STATE_MEMORY_FILE)).legacy[RECENT_FILE].archive;
     expect(await reader.handler({ path: backup }, ctx)).not.toContain('旧门缺材料');
@@ -303,13 +304,13 @@ describe('current memory across Persona read surfaces', () => {
     expect(await reader.handler({ path: STATE_MEMORY_FILE, history: true }, ctx)).toContain('"legacy":');
     expect(await reader.handler({ path: 'CONSTITUTION.md' }, ctx)).toContain('保留身份与原则');
     const grep = tools.find(tool => tool.name === 'grep_files')!;
-    expect(await grep.handler({ pattern: '缺材料' }, ctx)).not.toContain('旧门缺材料');
+    expect(await grep.handler({ pattern: '缺材料' }, ctx)).toContain('旧门缺材料');
     expect(await grep.handler({ pattern: '缺材料', history: true }, ctx)).toContain('旧门缺材料');
     const records = [functionCall('legacy', 'read_file', JSON.stringify({ path: RECENT_FILE })),
       functionResult('legacy', '旧门缺材料', { ts: oldAt }), message('user', '继续当前工作')];
-    expect(persona.prepareRequest({ sessionId: 'main', round: 1, messages: records })!.map(record => itemText(record.item)).join('\n')).not.toContain('旧门缺材料');
+    expect((persona.prepareRequest({ sessionId: 'main', round: 1, messages: records }) ?? records).map(record => itemText(record.item)).join('\n')).toContain('旧门缺材料');
     await persona.onHandoff(records, { hardTokens: null });
-    expect(injected.join('\n')).not.toContain('旧门缺材料');
+    expect(injected.join('\n')).toContain('旧门缺材料');
     expect(await tools.find(tool => tool.name === 'write_file')!.handler({ path: STATE_MEMORY_FILE, content: '{}' }, ctx)).toContain('由记忆管理器维护');
     expect(await tools.find(tool => tool.name === 'write_file')!.handler({ path: `alias/../${STATE_MEMORY_FILE}`, content: '{}' }, ctx)).toContain('由记忆管理器维护');
   });

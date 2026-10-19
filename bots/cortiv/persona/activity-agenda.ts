@@ -5,7 +5,9 @@ import { matchingWorkState, readWorldWorkStates, workReferenceOf, type WorldWork
 
 export const AGENDA_FILE = 'activity-agenda.json';
 export const AGENDA_SUMMARY_MAX_CHARS = 1_200;
+/** Per-proposal and per-page reading limit; persistent objectives have no working-set quota. */
 export const AGENDA_MAX_ITEMS = 8;
+export const AGENDA_INTENT_CONTEXT_MAX_CHARS = 4_000;
 export const AGENDA_RECENT_COMPLETIONS = 3;
 export interface AgendaItem {
   id: string;
@@ -107,7 +109,6 @@ function validAccepted(value: unknown): value is AcceptedItem {
       && (entry.status === undefined || ['queued', 'active', 'deferred', 'done', 'cancelled'].includes(String(entry.status))))));
 }
 function closed(item: AcceptedItem): boolean { return item.status === 'done' || item.status === 'cancelled'; }
-function restoredCompletion(item: AcceptedItem): boolean { return !!item.corrections?.some(entry => entry.status === 'done'); }
 function closedLabel(item: AcceptedItem): string { return item.status === 'cancelled' ? '已撤销' : '已完成'; }
 function cleanItem(item: AgendaItem): AgendaItem {
   return { id: item.id, title: item.title, why: item.why, doneWhen: item.doneWhen,
@@ -147,7 +148,6 @@ export class ActivityAgenda {
         || Number(saved.premiseRevision) < 0 || Number(saved.premiseRevision) > Number(saved.revision)))
       || (saved.pendingRetirementRevision !== undefined && (!Number.isSafeInteger(saved.pendingRetirementRevision) || Number(saved.pendingRetirementRevision) < 0))
       || !text(saved.summary, 300, true) || !Array.isArray(saved.items) || !saved.items.every(validAccepted)
-      || saved.items.filter(item => !closed(item) && !restoredCompletion(item)).length > AGENDA_MAX_ITEMS
       || saved.items.filter(item => item.status === 'active').length > 1
       || new Set(saved.items.map(item => item.id)).size !== saved.items.length
       || !(saved.proposal === null || (validPlan(saved.proposal) && object(saved.proposal)
@@ -191,8 +191,6 @@ export class ActivityAgenda {
         return '[日程输入错误] start 需要当前 expected_revision、新 id、title、worlds、why（自己的目的）、doneWhen；references 可列原始回执入口。它仅记录意图，不执行或完成 World 动作。';
       if (this.ledger.items.some(entry => entry.id === item.id))
         return '[日程输入错误] 此 id 已有记录；先 read 对账。原目标、历史及进展保持不变，不能用 start 覆盖。';
-      if (this.ledger.items.filter(entry => !closed(entry)).length >= AGENDA_MAX_ITEMS)
-        return '[日程输入错误] 开放阶段已满；先核对并完成或明确撤销已有目标。';
       const at = this.stamp();
       this.save({ ...this.ledger, revision: this.ledger.revision + 1, premiseRevision: this.ledger.revision + 1,
         proposal: null, items: [...this.ledger.items.map(entry => entry.status === 'active'
@@ -263,7 +261,6 @@ export class ActivityAgenda {
       });
       // Omission from a generated proposal is not a foreground cancellation decision.
       const retained = this.ledger.items.filter(item => !items.some(next => next.id === item.id));
-      if ([...retained, ...items].filter(item => !closed(item)).length > AGENDA_MAX_ITEMS) return this.capacityError();
       this.save({ ...this.ledger, revision: this.ledger.revision + 1, summary: draft.summary, items: [...retained, ...items], proposal: null });
       return this.summary();
     }
@@ -386,15 +383,22 @@ export class ActivityAgenda {
     const budget = otherCount ? Math.max(0, Math.floor((remaining - activeBudget) / otherCount)) : 0;
     return [...lines, ...sections.map((part, index) => section(part, active && index === 0 ? activeBudget : budget)), footer].join('\n');
   }
-  /** Open declared purposes survive a different active World; archived purposes remain historical. */
+  /** The active purpose precedes bounded other intentions; omitted objectives remain in the ledger. */
   intentContext(): string {
-    const items = this.ledger.items.filter(item => item.intentDeclaredAt && !closed(item));
+    const items = this.ledger.items.filter(item => !closed(item)).sort((a, b) =>
+      Number(b.status === 'active') - Number(a.status === 'active') || Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
     if (!items.length) return '';
-    return ['[持续任务目的；自己的选择，不是 World 当前事实或已完成证明]',
-      ...items.map(item => `id=${JSON.stringify(item.id)} [${worldLabel(item)}] ${item.status}；${item.title}\n`
-        + `目的：${item.why}（声明于 ${item.whyUpdatedAt ?? item.intentDeclaredAt}）；完成条件：${item.doneWhen}\n`
-        + `原文入口：${item.references.length ? item.references.join('；') : '未绑定，按需查实际回执。'}`),
-      '新消息和新材料不自动改变用途或承诺；重新选择目标时明确记录调整。当前资源按同一 World 新回执核验。'].join('\n');
+    const lines = ['[持续任务目的；自己的选择，不是 World 当前事实或已完成证明]'];
+    const footer = '新消息和新材料不自动改变用途或承诺；改变目标时明确记录。当前资源按同一 World 新回执核验。未展开的目标仍保留，activity_plan read 分页或按 id 查询。';
+    let shown = 0;
+    for (const item of items.slice(0, AGENDA_MAX_ITEMS)) {
+      const text = `id=${JSON.stringify(item.id)} [${worldLabel(item)}] ${item.status}；${item.title}\n`
+        + `目的：${item.why}（记录来源 ${item.whyUpdatedAt ?? item.intentDeclaredAt ?? item.sourceCapturedAt ?? '未记录'}）；完成条件：${item.doneWhen}\n`
+        + `原文入口：${item.references.length ? item.references.join('；') : '未绑定，按需查实际回执。'}`;
+      if ([...lines, text, footer].join('\n').length + 80 > AGENDA_INTENT_CONTEXT_MAX_CHARS) break;
+      lines.push(text); shown++;
+    }
+    return [...lines, `本次展开 ${shown}/${items.length} 个开放目的；未展开不表示完成或取消。`, footer].join('\n');
   }
   /** Background planning reads open objectives and bounded, separately labelled closure evidence. */
   observePendingRetirement(revision: number): void {
@@ -438,7 +442,6 @@ export class ActivityAgenda {
     if (current) return closed(current)
       ? `[日程] 此 id ${closedLabel(current)}，原记录保留；新的目的需要单独规划。`
       : '[日程] 此 id 已在现有日程中，进展保留；用 focus/update 选择或记录，不覆盖。';
-    if (this.ledger.items.filter(entry => !closed(entry)).length >= AGENDA_MAX_ITEMS) return this.capacityError();
     const remaining = draft.items.filter(entry => entry.id !== id);
     this.save({ ...this.ledger, revision: this.ledger.revision + 1,
       items: [...this.ledger.items, { ...cleanItem(item), sourceCapturedAt: draft.capturedAt,
@@ -449,9 +452,6 @@ export class ActivityAgenda {
   private missingItem(id: unknown): string {
     if (this.ledger.proposal?.items.some(item => item.id === id)) return `[日程输入错误] id=${JSON.stringify(id)} 是后台候选，尚未采用；read 带此 id 定向核验，adopt 带此 id 明确采用后才能 focus/update。本次未保存进展。`;
     return `[日程输入错误] 未找到已采用阶段 id=${JSON.stringify(id) ?? 'null'}。当前阶段 id：${JSON.stringify(this.ledger.items.filter(item => !closed(item)).map(item => item.id))}；后台候选 id：${JSON.stringify(this.ledger.proposal?.items.map(item => item.id) ?? [])}。read 带目标 id 定向查询。`;
-  }
-  private capacityError(): string {
-    return '[日程] 未完成阶段已达到上限；先按实际依据 update 完成、或以 cancelled 明确撤销不再推进的阶段。挂起仍是未完成，不能通过省略候选删除旧目标。';
   }
   private stamp(): string { return new Date(this.now()).toISOString(); }
   private save(next: Ledger): void {

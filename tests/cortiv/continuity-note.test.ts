@@ -41,7 +41,7 @@ describe('versioned continuity in foreground requests', () => {
     const first = r.prepare();
     r.remember('桥梁支撑已验收，下一步铺桥面。', 1);
     const next = r.prepare();
-    const current = next.findIndex(row => itemText(row.item).startsWith('[当前记忆记录'));
+    const current = next.findIndex(row => itemText(row.item).includes('[当前记忆记录'));
     expect(next.slice(0, current)).toEqual(first.slice(0, current));
     expect(text(next)).toContain('桥梁支撑已验收');
     expect(text(next)).not.toContain('桥梁支撑尚未验收');
@@ -52,30 +52,34 @@ describe('versioned continuity in foreground requests', () => {
     const r = rig(); r.remember('桥梁路线已核验，下一步准备桥面。');
     r.persona.memory.writeFileAtomic(RECENT_FILE, '旧记录：路线尚未勘测'); r.prepare();
     r.persona.memory.writeFileAtomic(RECENT_FILE, '刚整理：路线尚未勘测');
-    expect(text(r.prepare())).toContain('桥梁路线已核验'); expect(text(r.prepare())).not.toContain('路线尚未勘测');
+    expect(text(r.prepare())).toContain('桥梁路线已核验'); expect(text(r.prepare())).toContain('路线尚未勘测');
+    expect(text(r.prepare()).indexOf('路线尚未勘测')).toBeLessThan(text(r.prepare()).indexOf('桥梁路线已核验'));
     rmSync(join(r.memoryDir, RECENT_FILE));
     const restored = new CortiV({ memoryDir: r.memoryDir, foreground: () => r.config });
     const next = restored.prepareRequest({ sessionId: 'main', round: 1, messages: r.records })!;
     expect(text(next)).toContain('桥梁路线已核验'); expect(validatePairing(next)).toEqual([]);
   });
-  it('exposes configured historical entry points before World facts without injecting old project states', () => {
+  it('quotes configured historical sources before newer World facts without promoting old states', () => {
     const r = rig(); r.config.memoryFiles = 'goals/projects.md\ngoals/preferences.md';
     r.persona.memory.writeFileAtomic('goals/projects.md', '# 旧项目\n- 工作间尚未完成。');
     r.persona.memory.writeFileAtomic('goals/preferences.md', '# 当时的生活安排');
     const first = r.prepare(); const index = first.findIndex(row => itemText(row.item).startsWith('[长期记忆索引]'));
     expect(index).toBeGreaterThan(-1);
     expect(first.findIndex(row => itemText(row.item).includes('workshop complete'))).toBeGreaterThan(index);
-    expect(itemText(first[index].item)).toContain('goals/projects.md'); expect(text(first)).not.toContain('工作间尚未完成');
+    expect(itemText(first[index].item)).toContain('goals/projects.md'); expect(text(first)).toContain('工作间尚未完成');
+    expect(itemText(first[index].item)).toContain('历史线索');
     r.persona.memory.writeFileAtomic('goals/projects.md', '# 新写入的旧结论\n- 工作间尚未完成。');
-    expect(text(r.prepare())).not.toContain('工作间尚未完成');
+    expect(text(r.prepare())).toContain('工作间尚未完成');
+    expect(text(r.prepare()).indexOf('工作间尚未完成')).toBeLessThan(text(r.prepare()).indexOf('workshop complete'));
   });
   it('keeps current claims and newer World facts without modifying original notes or session records', () => {
     const r = rig(); r.remember('实际已验收的路线，详情 design/bridge.md。');
     const note = '旧计划：路线未验收'; r.persona.memory.writeFileAtomic(RECENT_FILE, note);
     const before = structuredClone(r.records); const view = r.prepare();
-    const source = view.findIndex(row => itemText(row.item).startsWith('[当前记忆记录'));
+    const source = view.findIndex(row => itemText(row.item).includes('[当前记忆记录'));
     expect(view.findIndex(row => itemText(row.item).includes('workshop complete'))).toBeGreaterThan(source);
-    expect(itemText(view[source].item)).toContain('design/bridge.md'); expect(text(view)).not.toContain(note);
+    expect(itemText(view[source].item)).toContain('design/bridge.md'); expect(text(view)).toContain(note);
+    expect(text(view).indexOf(note)).toBeLessThan(text(view).indexOf('实际已验收的路线'));
     expect(readFileSync(join(r.memoryDir, RECENT_FILE), 'utf8')).toBe(note);
     expect(r.records).toEqual(before); expect(validatePairing(view)).toEqual([]);
   });
@@ -84,7 +88,9 @@ describe('versioned continuity in foreground requests', () => {
     r.remember('路线已通行验收', 1); const second = r.prepare();
     expect(text(second)).not.toContain('路线尚未核验'); expect(text(second)).toContain('路线已通行验收');
     expect(r.prepare()).toEqual(second);
-    r.persona.memory.writeFileAtomic(RECENT_FILE, '路线尚未核验'); expect(text(r.prepare())).not.toContain('路线尚未核验');
+    r.persona.memory.writeFileAtomic(RECENT_FILE, '路线尚未核验');
+    const withHistory = text(r.prepare()); expect(withHistory).toContain('路线已通行验收');
+    expect(withHistory.indexOf('路线尚未核验')).toBeLessThan(withHistory.indexOf('路线已通行验收'));
   });
   it('removes a retired claim and does not infer retirement from a deleted prose note', () => {
     const r = rig(); r.remember('旧路线入口'); r.persona.memory.writeFileAtomic(RECENT_FILE, '旧路线入口'); r.prepare();
@@ -95,20 +101,21 @@ describe('versioned continuity in foreground requests', () => {
   });
   it('bounds automatic current memory and retains full historical prose for explicit reading', async () => {
     const r = rig(); const note = '# 历史\n' + '带日期的旧观察。'.repeat(2000); r.persona.memory.writeFileAtomic(RECENT_FILE, note);
-    const noteText = itemText(r.prepare().find(row => itemText(row.item).startsWith('[当前记忆记录'))!.item);
-    expect(noteText.length).toBeLessThan(STATE_MEMORY_MAX_CHARS + 200); expect(noteText).toContain('history:true');
+    const noteText = itemText(r.prepare().find(row => itemText(row.item).includes('[当前记忆记录'))!.item);
+    expect(noteText.length).toBeLessThan(STATE_MEMORY_MAX_CHARS + 1200); expect(noteText).toContain('read_file 可读完整原文');
     const reader = r.persona.declareSessions()[0].tools().find(tool => tool.name === 'read_file')!;
     const read = await reader.handler({ path: RECENT_FILE, history: true, max_chars: 30000 }, { role: 'main', log: nullLogger() });
     expect(read).toContain(note); expect(r.persona.memory.readFile(RECENT_FILE)).toBe(note);
   });
-  it('delivers changed structured state once when projection is disabled and ignores copied prose', () => {
+  it('delivers changed prose and structured claims separately when projection is disabled', () => {
     const r = rig(); const injected: string[] = [];
     r.persona.attach(makeFakeHarnessApi({ injectInternal: (body, type) => { if (type === 'recent_memory') injected.push(body); } }));
     r.remember('桥梁路线已核验'); r.config.enabled = false;
     r.persona.onDelivery({ events: [] }); r.persona.onDelivery({ events: [] });
     expect(injected).toHaveLength(1); expect(injected[0]).toContain('桥梁路线已核验');
-    r.persona.memory.writeFileAtomic(RECENT_FILE, '桥梁路线未核验'); r.persona.onDelivery({ events: [] }); expect(injected).toHaveLength(1);
+    r.persona.memory.writeFileAtomic(RECENT_FILE, '桥梁路线未核验'); r.persona.onDelivery({ events: [] }); expect(injected).toHaveLength(2);
+    expect(injected[1]).toContain('桥梁路线已核验'); expect(injected[1]).toContain('旧读数和进展须与较新 World 回执核验');
     r.remember('桥面实际验收通过', 1); r.persona.onDelivery({ events: [] });
-    expect(injected).toHaveLength(2); expect(injected[1]).toContain('桥面实际验收通过');
+    expect(injected).toHaveLength(3); expect(injected[2]).toContain('桥面实际验收通过');
   });
 });

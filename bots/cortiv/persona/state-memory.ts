@@ -9,7 +9,7 @@ export const STATE_MEMORY_FILE = '.state-memory.json';
 export const MEMORY_HISTORY_DIR = '.memory-history';
 export const STATE_MEMORY_MAX_CHARS = 1800;
 /** Default search receipts carrying this header excluded managed historical bodies before matching. */
-export const STATE_MEMORY_SEARCH_NOTICE = '[检索范围：默认省略状态笔记的历史正文；查原始经历、坐标或回执，原参数加 history:true，再用 read_file 带 history:true 读命中段落。]\n';
+export const STATE_MEMORY_SEARCH_NOTICE = '[检索范围：普通目标、偏好、经历及交接文件按原文检索；仅内部结论账本及其版本归档默认省略正文，查这些原始版本可加 history:true。命中保留来源，旧观察须核对较新 World 回执。]\n';
 const digest = (text: string): string => createHash('sha256').update(text).digest('hex');
 const dated = (value: unknown): value is string => typeof value === 'string'
   && /(?:Z|[+-]\d{2}:\d{2})$/.test(value) && Number.isFinite(Date.parse(value));
@@ -189,7 +189,7 @@ export class StateMemory {
 
   summary(): string {
     const active = this.latest(this.load()).filter(claim => this.active(claim));
-    const header = '[当前记忆记录；由 memory_record 管理。结论附原始观察，日程与现场由各自账本提供。]\n';
+    const header = '[当前记忆记录；由 memory_record 管理。当前指每个 key 的最新有效版本，不保证现场仍如此；结论附观察时间，日程与现场由各自账本提供。]\n';
     const footer = '\nmemory_record read 按 key 查证据；history 查旧版本；evidence 只查近期128条观察；recall(query) 查持久历史及已配置游戏记忆。写入需 expected_revision 和 evidence_id。历史时间与发言人须保留。';
     let body = '';
     for (const claim of active.sort((a, b) => Date.parse(b.observation.observedAt) - Date.parse(a.observation.observedAt))) {

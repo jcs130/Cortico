@@ -2,7 +2,7 @@ import { afterEach, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ActivityAgenda, AGENDA_FILE } from '../../bots/cortiv/persona/activity-agenda.ts';
+import { ActivityAgenda, AGENDA_FILE, AGENDA_MAX_ITEMS, AGENDA_INTENT_CONTEXT_MAX_CHARS } from '../../bots/cortiv/persona/activity-agenda.ts';
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 function rig() {
@@ -55,4 +55,18 @@ it('updates evidence references with a revision while retaining the original pur
   expect(restored.intentContext()).toContain('为自己升级装备');
   const read = JSON.parse(restored.operate({ operation: 'read', id: 'own-equipment' }));
   expect(read.items[0].referenceHistory[0].references).toEqual(['receipt:paid-materials']);
+});
+it('retains goals beyond the reading window without forcing cancellation and keeps the active purpose visible', () => {
+  const { agenda, dir, start } = rig();
+  for (let index = 0; index < AGENDA_MAX_ITEMS * 3; index++) start('purpose-' + index, 'correspondence', 'Prepare notebook ' + index);
+  const restored = new ActivityAgenda(dir);
+  expect(restored.state().items).toHaveLength(AGENDA_MAX_ITEMS * 3);
+  expect(restored.state().items.filter(item => ['done', 'cancelled'].includes(item.status))).toHaveLength(0);
+  expect(restored.intentContext()).toContain('purpose-' + (AGENDA_MAX_ITEMS * 3 - 1));
+  expect(restored.intentContext().length).toBeLessThanOrEqual(AGENDA_INTENT_CONTEXT_MAX_CHARS);
+  const page = JSON.parse(restored.operate({ operation: 'read' }));
+  expect(page.items).toHaveLength(AGENDA_MAX_ITEMS);
+  expect(page.page.total).toBe(AGENDA_MAX_ITEMS * 3);
+  expect(page.page.nextOffset).toBe(AGENDA_MAX_ITEMS);
+  expect(restored.state()).toEqual(agenda.state());
 });

@@ -378,7 +378,7 @@ describe('persistent Persona activity agenda', () => {
     expect(agenda.operate({ ...input, expected_revision: agenda.revision() })).toContain('错误');
     expect(readFileSync(join(dir, AGENDA_FILE), 'utf8')).toBe(reopened);
   });
-  it('corrects a completion at capacity, restores it after restart and still limits newly adopted goals', () => {
+  it('corrects a completion beyond the reading page and retains additional goals across restart', () => {
     const { agenda, dir } = rig();
     adopt(agenda, { ...plan(), items: Array.from({ length: AGENDA_MAX_ITEMS }, (_, index) => ({ ...plan().items[0], id: `stage-${index}` })) });
     agenda.operate({ operation: 'update', id: 'stage-0', status: 'done', note: '原完成记录' });
@@ -395,22 +395,25 @@ describe('persistent Persona activity agenda', () => {
     expect(JSON.parse(restored.operate({ operation: 'read' })).page.nextOffset).toBe(AGENDA_MAX_ITEMS);
     expect(restored.summary().length).toBeLessThanOrEqual(AGENDA_SUMMARY_MAX_CHARS);
     restored.propose(JSON.stringify({ ...plan(), items: [{ ...plan().items[1], id: 'new-goal' }] }), restored.revision(), stamp);
-    const pending = readFileSync(join(dir, AGENDA_FILE), 'utf8');
-    expect(restored.operate({ operation: 'adopt', id: 'new-goal' })).toContain('上限');
-    expect(readFileSync(join(dir, AGENDA_FILE), 'utf8')).toBe(pending);
+    restored.operate({ operation: 'adopt', id: 'new-goal' });
+    expect(restored.state().items.find(item => item.id === 'new-goal')?.status).toBe('queued');
     restored.operate({ operation: 'update', id: 'stage-0', status: 'cancelled', note: '未达到原条件，决定不继续本次目标' });
-    expect(restored.operate({ operation: 'adopt', id: 'new-goal' })).toContain('上限');
+    const beforeRetry = restored.state();
+    restored.operate({ operation: 'adopt', id: 'new-goal' });
+    expect(restored.state()).toEqual(beforeRetry);
     restored.operate({ operation: 'update', id: 'stage-1', status: 'done', note: '该阶段实际验收通过' });
     restored.operate({ operation: 'adopt', id: 'new-goal' });
     expect(restored.state().items.find(item => item.id === 'new-goal')).toMatchObject({ status: 'queued' });
     expect(new ActivityAgenda(dir, now).state()).toEqual(restored.state());
   });
-  it('rejects over-capacity persisted goals that have no completion correction evidence', () => {
+  it('reads persisted goals beyond one page without rewriting or closing them', () => {
     const { agenda, dir } = rig();
     adopt(agenda, { ...plan(), items: Array.from({ length: AGENDA_MAX_ITEMS }, (_, index) => ({ ...plan().items[0], id: `stage-${index}` })) });
-    const malformed = agenda.state(); malformed.items.push({ ...malformed.items[0], id: 'extra' });
-    const text = JSON.stringify(malformed); writeFileSync(join(dir, AGENDA_FILE), text);
-    expect(() => new ActivityAgenda(dir, now)).toThrow('格式无效');
+    const larger = agenda.state(); larger.items.push({ ...larger.items[0], id: 'extra' });
+    const text = JSON.stringify(larger); writeFileSync(join(dir, AGENDA_FILE), text);
+    const restored = new ActivityAgenda(dir, now);
+    expect(restored.state().items).toEqual(larger.items);
+    expect(JSON.parse(restored.operate({ operation: 'read' })).page.nextOffset).toBe(AGENDA_MAX_ITEMS);
     expect(readFileSync(join(dir, AGENDA_FILE), 'utf8')).toBe(text);
   });
   it('a background proposal cannot undo a reopened completion or replace its correction evidence', () => {
@@ -575,13 +578,14 @@ describe('persistent Persona activity agenda', () => {
     expect(agenda.operate({ operation: 'adopt', id: 'river' })).toContain('进展保留');
     expect(agenda.state()).toEqual(before);
   });
-  it('selected adoption at capacity leaves the ledger and proposal unchanged', () => {
+  it('selected adoption keeps older objectives when one reading page is already full', () => {
     const { agenda } = rig();
     adopt(agenda, { ...plan(), items: Array.from({ length: 8 }, (_, index) => ({ ...plan().items[0], id: String(index) })) });
     agenda.propose(JSON.stringify(plan()), agenda.revision(), stamp);
     const before = agenda.state();
-    expect(agenda.operate({ operation: 'adopt', id: 'river' })).toContain('上限');
-    expect(agenda.state()).toEqual(before);
+    agenda.operate({ operation: 'adopt', id: 'river' });
+    expect(agenda.state().items.slice(0, AGENDA_MAX_ITEMS)).toEqual(before.items);
+    expect(agenda.state().items.find(item => item.id === 'river')?.status).toBe('queued');
   });
   it('completed stages release capacity and retain evidence across selected adoption and restart', () => {
     const { dir, agenda } = rig();
@@ -841,13 +845,14 @@ describe('persistent Persona activity agenda', () => {
     expect(agenda.state().items.filter(item => existing.some(old => old.id === item.id))).toEqual(existing);
     expect(new ActivityAgenda(dir, now).state().items.map(item => item.id)).toEqual(['finish-home', 'river', 'new-trip']);
   });
-  it('whole adoption cannot silently drop open goals to make room at capacity', () => {
+  it('whole adoption retains omitted open goals beyond one reading page', () => {
     const { agenda } = rig();
     adopt(agenda, { ...plan(), items: Array.from({ length: AGENDA_MAX_ITEMS }, (_, index) => ({ ...plan().items[0], id: String(index) })) });
     agenda.propose(JSON.stringify(plan()), agenda.revision(), stamp);
     const before = agenda.state();
-    expect(agenda.operate({ operation: 'adopt' })).toContain('上限');
-    expect(agenda.state()).toEqual(before);
+    agenda.operate({ operation: 'adopt' });
+    expect(agenda.state().items.slice(0, AGENDA_MAX_ITEMS)).toEqual(before.items);
+    expect(agenda.state().items).toHaveLength(AGENDA_MAX_ITEMS + plan().items.length);
   });
   it('the per-call summary is bounded while full details remain readable', () => {
     const { agenda } = rig();

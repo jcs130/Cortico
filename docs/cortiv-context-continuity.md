@@ -1,4 +1,4 @@
-<!-- Owner: bots/cortiv/persona/activity-agenda.ts, historical-recall.ts, and packages/cortico-world-dungeon-context/src/context.ts -->
+<!-- Owner: bots/cortiv/persona/persona.ts, activity-agenda.ts, historical-recall.ts, and packages/cortico-world-dungeon-context/src/context.ts -->
 
 # Continuous intentions and observed state
 
@@ -9,3 +9,7 @@
 The private Dungeon API 5 adapter pins upstream 0.1.4 for the existing modified host. Current upstream 0.2.0 declares API 6; this compatibility adapter is not an API 6 public release. Original authentication, events, account and execution remain with upstream. Cached observations and exact receipt archives use the host's World facts/read-tool contracts. Potential mutations, relevant events, expiry and scope changes invalidate old resource readings. A late read cannot restore invalidated state, and an old account's receipt cannot become a new account's observation. Archives are historical after restart.
 
 No fixed gifting policy is imposed. The Persona checks the declared purpose, actual purchase or commission agreement, current resources and original receipts before choosing an irreversible transfer. A seller or a material source alone does not establish a commission. Raw server suggestions are optional candidates.
+
+Long-term goals, preferences, recent notes and handoff prose remain directly readable by file and original line number. Configuring a file as a foreground or planning source does not convert it into a current-state database. Bounded source excerpts and recent experience accompany compact requests; the derived claim ledger remains separate. Original prose can describe older state, so its source and observation time must be checked against fresh World receipts. Existing files and explicit `history:true` reads retain their paths and contents.
+
+The agenda's eight-item limit applies to a proposal and a reading page. Persistence can retain more open objectives. The intent window is bounded to eight entries and 4,000 characters, with the active choice first. Starting another objective does not require closing an unrelated unfinished one. Existing ledgers load without rewriting or removing records.

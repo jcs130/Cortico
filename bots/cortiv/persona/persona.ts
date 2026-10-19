@@ -917,7 +917,7 @@ export class CortiV extends Cormini {
       ...(agenda ? ['activity_plan', ...(this.planningConfig().agendaEnabled ? ['planning'] : [])] : []),
     ];
     const pins = [...ctx.messages.filter(record => !!record.item.id && this.deferredInputIds.has(record.item.id)),
-      ...[recentMemory, index, lifecycle].filter(Boolean).map(text => message('user', text)), ...facts.pins, ...[recentSpeech, this.actionEvidence(ctx.messages), pending, agenda, this.activityAgenda?.intentContext() ?? '', this.viewerEncounters.text(), this.viewerRecallContext.text(), this.referenceLibrary.context()].filter(Boolean)
+      ...[index, recentMemory, lifecycle].filter(Boolean).map(text => message('user', text)), ...facts.pins, ...[recentSpeech, this.actionEvidence(ctx.messages), pending, agenda, this.activityAgenda?.intentContext() ?? '', this.viewerEncounters.text(), this.viewerRecallContext.text(), this.referenceLibrary.context()].filter(Boolean)
       .map((text) => message('user', text))];
     const handoffSources = new Map<string, { digest: string; original: boolean }>();
     this.foregroundCurrentHandoffs = ctx.messages.flatMap((record) => {
@@ -1391,7 +1391,7 @@ export class CortiV extends Cormini {
     const reader = (tool: ToolDef): ToolDef => ({ ...tool,
       parameters: { ...tool.parameters, properties: { ...tool.parameters.properties as Record<string, unknown>,
         history: { type: 'boolean', description: 'Explicitly read historical prose; it cannot update current state by being copied into a new note.' } } },
-      description: tool.description + ' Current-state notes return a managed view by default; its offsets refer to that view. Use history:true to find original experiences, coordinates or receipts in historical prose.',
+      description: tool.description + ' Ordinary goals, preferences, experience and handoff files return original prose with source metadata. Only the internal claim ledger and its version archives use a managed view; history:true reads their original source. Reading prose does not make it current World state.',
       handler: async (args, ctx) => {
         if (args.history !== undefined && typeof args.history !== 'boolean') {
           return { failed: true, text: 'history 须为布尔值 true 或 false；查历史原文用 history:true（不加引号）。本次未读取。' };
@@ -2454,7 +2454,12 @@ export class CortiV extends Cormini {
   }
 
   private recentMemoryNote(): string {
-    return this.stateMemory.summary() + '\n' + this.stateMemory.historicalSource(RECENT_FILE);
+    let recent = '';
+    try { recent = this.memory.readFile(RECENT_FILE).trim(); } catch { /* The source may not have been written yet. */ }
+    return (recent
+      ? `[近期经历短笺；来源 ${RECENT_FILE}。它保留话题与意图，旧读数和进展须与较新 World 回执核验；read_file 可读完整原文。]\n`
+        + new MemoryNoteProvenance(this.memory).describe(RECENT_FILE) + '\n' + excerptRecent(recent)
+      : this.stateMemory.historicalSource(RECENT_FILE)) + '\n' + this.stateMemory.summary();
   }
 
   private stateNotePaths(): string[] {
@@ -2473,9 +2478,8 @@ export class CortiV extends Cormini {
   private isStateNote(path: string): boolean {
     const key = this.stateNoteKey(path);
     if (key === null) return false;
-    return key === STATE_MEMORY_FILE || key.startsWith(`${MEMORY_HISTORY_DIR}/`)
-      || key.startsWith('sessions/') || key.startsWith(HANDOFF_DIR.toLowerCase())
-      || this.stateNotePaths().some(entry => this.stateNoteKey(entry) === key);
+    // A configured reading source is prose, not a derived current-state database.
+    return key === STATE_MEMORY_FILE || key.startsWith(`${MEMORY_HISTORY_DIR}/`);
   }
 
   protected override readOverride(path: string): string | null {
@@ -2504,7 +2508,7 @@ export class CortiV extends Cormini {
       '接下来那条 user 消息是捕获的记录快照，开头标明整理缘由、观察截止时间和排队时间；整理期间的新事件不在这份快照中。',
       '若其后还有 World 只读事实消息，按其中的回执时间核对旧记录；已证实完成的目标不要再写成未完成。',
       '你的工具就是你自己的工作区文件工具。',
-      '经历写入短笺并保留原始观察时间，写短笺不以读完归档为前提；当前结论用 memory_record read/evidence/set 按稳定对象编号和版本修订。短笺是历史，不自动回灌当前状态；需要原文时 read_file 带 history:true。',
+      '经历写入短笺并保留原始观察时间，写短笺不以读完归档为前提；当前结论用 memory_record read/evidence/set 按稳定对象编号和版本修订。短笺和普通目标、偏好文件可直接 read_file 读原文；其节选保留历史性质，不能自动成为现场状态。内部结论账本的原始版本用 history:true。',
       '历史正文保留过去的观察、请求和实际回执。原生工具请求只表示当时想做什么，执行是否成功看实际回执；历史内容不作为现在的新工具调用。',
       '工作区与前台共用。修改已有文件前先 read_file 读取当前版本；收到 memory conflict 时重新读并核对、合并，不能用旧正文覆写。新文件可直接写；本次短笺的初始版本已读取。',
       `近期状态 ${RECENT_FILE} 若已被其他线程更新，本次旧材料不能再覆写它；重新读取也不能解除版本限制。有证据的经历可写入场次记录，结论注明观察截止时间，由主意识结合更新后的现场接续。`,

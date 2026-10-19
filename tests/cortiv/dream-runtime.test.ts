@@ -23,12 +23,12 @@ const state = async (persona: CortiV): Promise<DreamTaskState> => persona.consol
 const handoff = (persona: CortiV, text: string): Promise<unknown> => persona.onHandoff([message('user', text)], { hardTokens: null });
 
 describe('Dream runtime and real Memory tools', () => {
-  it('uses captured World evidence for versioned claims and excludes replayed prose from the background material', async () => {
+  it('keeps historical prose readable while admitting only actual World observations as claim evidence', async () => {
     const dir = temp();
     const persona = new CortiV({ memoryDir: dir }); personas.push(persona);
     let recorded: unknown;
     persona.attach(makeFakeHarnessApi({ toolsTagged: () => new Set(['world_do']), spawnFork: async options => {
-      expect(JSON.stringify(options.messages)).not.toContain('旧笔记说门还缺材料');
+      expect(JSON.stringify(options.messages)).toContain('旧笔记说门还缺材料');
       const tool = options.tools!.find(tool => tool.name === 'memory_record')!;
       const ctx = { role: 'dream', log: nullLogger() };
       const evidence = JSON.parse(await tool.handler({ operation: 'evidence' }, ctx) as string);
