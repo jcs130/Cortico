@@ -1,4 +1,4 @@
-<!-- Owner: bots/cortiv/index.ts, bots/cortiv/persona/persona.ts, bots/cortiv/persona/activity-agenda.ts, bots/cortiv/persona/state-memory.ts, bots/cortiv/persona/ORIENTATION.md -->
+<!-- Owner: bots/cortiv/index.ts, bots/cortiv/persona/persona.ts, bots/cortiv/persona/activity-agenda.ts, bots/cortiv/persona/pending-work.ts, bots/cortiv/persona/state-memory.ts, bots/cortiv/persona/ORIENTATION.md -->
 
 # bots/cortiv
 
@@ -69,6 +69,8 @@ Memory 使用工作区文件，由 [Persona](persona/persona.ts) 管理。
 该入口保留在正文分页之外；历史正文不会因读取或重新整理而更新当前结论。
 请求投影保留普通文件读取，以及带范围声明、仅省略内部结论账本及其版本归档正文的新检索结果。
 未带此声明的旧检索回执需按历史显式重读；普通方法和资料的检索命中仍可供模型使用。
+
+结构化记录用 observation/event/belief 分别保存临时观测、历史事件和认识经验。临时观测需要从原始观察时间起算的期限，旧记录保留为 legacy 并按证据逐条 classify；分类不改旧值或观察时间。提醒用稳定 id、revision 和 request_id 对账，intent_id 关联已采用目标，work_ref 关联外部执行；两者的关闭含义分别核验。旧提醒和异常来源可定向查询、review 或 link，修改前记录留在 history。详见 [记忆语义](../../docs/cortiv-memory-semantics.md) 和 [待办契约](persona/PENDING_WORK.md)。
 
 工作区读写工具允许自主编写、修订和检索 `methods/` 下的方法、JSON 动作序列和 JavaScript，沿用工作区路径边界和 Git 提交。`methods/index.md` 提供按需入口；环境声明 `mc_script` 时可读回源码执行，由真实任务终态和新状态驱动分支。方法记录源码哈希、适用条件、时间、前后回执、验证范围和回滚版本；脚本完成仍需核对原目标。这组权限不包含客户端源码、系统服务或模型权重的修改工具。
 

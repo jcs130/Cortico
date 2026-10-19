@@ -58,7 +58,7 @@ describe('CortiV pending work with the event loop', () => {
       type: 'social.chat', source: 'social', senderKey, text, ts: new Date().toISOString(),
     }, { trigger: 'flush' });
     const ledger = () => JSON.parse(readFileSync(join(memoryDir, 'pending-work.json'), 'utf8')) as {
-      entries: Array<{ id: string; status: string; evidence?: { summary: string } }>;
+      entries: Array<{ id: string; status: string; revision: number; evidence?: { summary: string } }>;
     };
     return { dir, persona, core, llm, actions, send, ledger, world };
   }
@@ -125,6 +125,7 @@ describe('CortiV pending work with the event loop', () => {
     expect(JSON.stringify(rig.persona.sessionHead())).toBe(stableHead);
 
     rig.llm.script(toolReply([{ name: 'pending_work', args: { operation: 'resolve', id: 'search-reply',
+      expected_revision: rig.ledger().entries[0].revision,
       result: 'Checked the guide response; the old search has ended.' } }]), toolReply([{ name: 'end_turn' }]));
     await until(() => rig.llm.calls.length >= 7);
     await rig.send('operator', 'Record the verified conclusion.');

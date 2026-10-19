@@ -17,9 +17,14 @@ const text = (value: unknown, max: number): value is string => typeof value === 
   && !!value.trim() && value.length <= max;
 
 export interface MemoryObservation { id: string; reference?: string; source: string; observedAt: string; text: string; }
+export type MemoryClaimKind = 'observation' | 'event' | 'belief';
+const CLAIM_KINDS: readonly MemoryClaimKind[] = ['observation', 'event', 'belief'];
 export interface MemoryClaim {
   key: string; revision: number; value: string; recordedAt: string;
   observation: MemoryObservation; expiresAt: string | null; retired: boolean;
+  /** Missing on legacy entries; classification does not advance the observation time. */
+  kind?: MemoryClaimKind;
+  classificationReason?: string;
 }
 interface Ledger {
   version: 1;
@@ -38,6 +43,9 @@ export class StateMemory {
     if (saved.version !== 1 || !Array.isArray(saved.claims) || !saved.legacy || typeof saved.legacy !== 'object'
       || saved.claims.some(claim => !text(claim.key, 120) || !Number.isSafeInteger(claim.revision) || claim.revision < 1
         || !text(claim.value, 600) || !dated(claim.recordedAt) || typeof claim.retired !== 'boolean'
+        || (claim.kind !== undefined && !CLAIM_KINDS.includes(claim.kind))
+        || (claim.classificationReason !== undefined && !text(claim.classificationReason, 600))
+        || (claim.kind === 'observation' && claim.expiresAt === null)
         || (claim.expiresAt !== null && !dated(claim.expiresAt)) || !claim.observation
         || !dated(claim.observation.observedAt) || !text(claim.observation.id, 80)
         || !text(claim.observation.source, 160) || !text(claim.observation.text, 8000))) {
@@ -120,8 +128,26 @@ export class StateMemory {
     return !claim.retired && (claim.expiresAt === null || Date.parse(claim.expiresAt) > this.now());
   }
 
+  private expiry(args: Record<string, unknown>, observation: MemoryObservation, kind: MemoryClaimKind | undefined): string | null {
+    if (args.expires_at !== undefined && args.valid_for_seconds !== undefined) throw new Error('expires_at 与 valid_for_seconds 二选一');
+    let expiresAt = args.expires_at ?? null;
+    if (args.valid_for_seconds !== undefined) {
+      if (typeof args.valid_for_seconds !== 'number' || !Number.isFinite(args.valid_for_seconds) || args.valid_for_seconds <= 0)
+        throw new Error('valid_for_seconds 必须为可表示时间的正数，以原始观察时间起算');
+      const expiry = Date.parse(observation.observedAt) + args.valid_for_seconds * 1000;
+      if (!Number.isFinite(new Date(expiry).getTime())) throw new Error('有效期无法表示');
+      expiresAt = new Date(expiry).toISOString();
+    }
+    if (expiresAt !== null && (!dated(expiresAt) || Date.parse(expiresAt) <= Date.parse(observation.observedAt)))
+      throw new Error('expires_at 必须晚于原始观察；写入或读取时间不能使旧观察续期');
+    if (kind === 'observation' && expiresAt === null) throw new Error('observation 是临时观测，必须提供 expires_at 或 valid_for_seconds');
+    return expiresAt as string | null;
+  }
+
   operate(args: Record<string, unknown>): string | { failed: true; text: string } {
     try {
+      if (args.kind !== undefined && args.kind !== 'legacy' && !CLAIM_KINDS.includes(args.kind as MemoryClaimKind))
+        throw new Error('kind 必须为 observation/event/belief；read/history 可用 legacy 查询未分类旧记录');
       if (args.operation === 'evidence') {
         if (args.evidence_id !== undefined) {
           const entry = this.observations.get(String(args.evidence_id))
@@ -150,27 +176,50 @@ export class StateMemory {
           interpretation: '实际观察原文，包含失败回执；id 用于 evidence_id，reference 只是来源编号。truncated 表示仅预览，用 evidence_id 读取全文再解释。未命中仅说明当前保留的观察没有匹配项；读文件和自己的台词不产生观察证据。' });
       }
       if (args.operation === 'read' || args.operation === 'history') {
+        if (args.query !== undefined) throw new Error('read/history 按 key 读取，不能接受 query。按主题查持久历史请用 memory_record {"operation":"recall","query":"查询词"}；当前未返回任何旧记录。');
         if (args.operation === 'history' && !text(args.key, 120)) throw new Error('history 需要 key');
+        if (args.include_inactive !== undefined && typeof args.include_inactive !== 'boolean') throw new Error('include_inactive 必须为布尔值');
         const ledger = this.load();
         const offset = args.offset ?? 0;
         const limit = args.limit ?? 8;
         if (!Number.isSafeInteger(offset) || Number(offset) < 0 || !Number.isSafeInteger(limit)
           || Number(limit) < 1 || Number(limit) > 20) throw new Error('分页 offset >= 0，limit 为 1 至 20');
-        const all = (args.operation === 'history' ? ledger.claims : this.latest(ledger).filter(claim => args.key !== undefined || this.active(claim)))
-          .filter(claim => args.key === undefined || claim.key === args.key);
+        const all = (args.operation === 'history' ? ledger.claims : this.latest(ledger).filter(claim => args.key !== undefined || args.include_inactive === true || this.active(claim)))
+          .filter(claim => (args.key === undefined || claim.key === args.key)
+            && (args.kind === undefined || (claim.kind ?? 'legacy') === args.kind));
         return JSON.stringify({ claims: all.slice(Number(offset), Number(offset) + Number(limit)).map(claim => ({ ...claim,
+          kind: claim.kind ?? 'legacy',
+          interpretation: claim.kind === 'observation' ? '短时观察的版本和有效期；实际现场由较新 World 回执核验'
+            : claim.kind === 'event' ? '发生过的事件；不证明现场状态持续不变'
+              : claim.kind === 'belief' ? '基于所附观察的认识或经验，可被新证据修订'
+                : '未分类旧记录，保留原始内容和证据；不得默认为持续有效的现场读数',
           active: this.active(claim) && this.latest(ledger).find(head => head.key === claim.key)?.revision === claim.revision,
           observation: { ...claim.observation, text: claim.observation.text.slice(0, 600), chars: claim.observation.text.length } })),
           total: all.length, nextOffset: Number(offset) + Number(limit) < all.length ? Number(offset) + Number(limit) : null });
+      }
+      if (args.operation === 'classify') {
+        if (!text(args.key, 120) || !Number.isSafeInteger(args.expected_revision) || !text(args.reason, 600)
+          || !CLAIM_KINDS.includes(args.kind as MemoryClaimKind)) throw new Error('classify 需要 key、expected_revision、kind 和 reason；先读原始证据，不修改旧正文');
+        return this.transaction(ledger => {
+          const previous = this.latest(ledger).find(claim => claim.key === args.key);
+          if (!previous || previous.revision !== args.expected_revision) throw new Error('版本冲突或未找到该 key；未分类');
+          if (previous.kind !== undefined || previous.retired) throw new Error('classify 只分类未撤回的旧记录；已有分类的认识修订需要较新的外部观察');
+          const expiresAt = this.expiry(args.expires_at === undefined && args.valid_for_seconds === undefined
+            ? { ...args, ...(previous.expiresAt ? { expires_at: previous.expiresAt } : {}) } : args,
+          previous.observation, args.kind as MemoryClaimKind);
+          if (previous.expiresAt !== null && (expiresAt === null || Date.parse(expiresAt) > Date.parse(previous.expiresAt)))
+            throw new Error('分类不能延长或移除原有效期；观察时间保持原值');
+          const claim: MemoryClaim = { ...previous, revision: previous.revision + 1, kind: args.kind as MemoryClaimKind,
+            classificationReason: args.reason as string, expiresAt, recordedAt: new Date(this.now()).toISOString() };
+          ledger.claims.push(claim);
+          return { result: JSON.stringify({ recorded: claim, interpretation: '旧内容及观察时间未改；分类不证明原解释正确，也不使过期观察重新有效。' }), changed: true };
+        });
       }
       if (!['set', 'retire'].includes(String(args.operation)) || !text(args.key, 120)
         || !Number.isSafeInteger(args.expected_revision) || Number(args.expected_revision) < 0
         || !text(args.value, 600)) throw new Error('set/retire 需要 key、expected_revision 和 value（结论或撤回原因）');
       const observation = this.observations.get(String(args.evidence_id));
       if (!observation) throw new Error('evidence_id 不属于已收到的外部观察；先 evidence 查原始回执，使用返回的 id，不能用任务号、消息号或 reference 代替。query 可用单个关键词，省略时列最近观察');
-      const expiresAt = args.expires_at ?? null;
-      if (expiresAt !== null && (!dated(expiresAt) || Date.parse(expiresAt) <= this.now()
-        || Date.parse(expiresAt) <= Date.parse(observation.observedAt))) throw new Error('expires_at 必须晚于观察和当前时刻');
       return this.transaction(ledger => {
         const previous = this.latest(ledger).find(claim => claim.key === args.key);
         const revision = previous?.revision ?? 0;
@@ -178,7 +227,13 @@ export class StateMemory {
         if (previous && Date.parse(observation.observedAt) <= Date.parse(previous.observation.observedAt)) {
           throw new Error('观察时间未推进；旧证据不能覆盖、续期或复活当前结论');
         }
+        const kind = args.operation === 'retire' ? previous?.kind : args.kind ?? previous?.kind;
+        if (args.operation === 'set' && !CLAIM_KINDS.includes(kind as MemoryClaimKind))
+          throw new Error('set 需要 kind：临时观测 observation、发生过的事件 event 或认识经验 belief；旧记录可先 classify');
+        const expiresAt = args.operation === 'retire' ? previous?.expiresAt ?? null
+          : this.expiry(args, observation, kind as MemoryClaimKind);
         const claim: MemoryClaim = { key: args.key as string, revision: revision + 1, value: args.value as string,
+          ...(kind && kind !== 'legacy' ? { kind: kind as MemoryClaimKind } : {}),
           observation: structuredClone(observation), expiresAt: expiresAt as string | null,
           recordedAt: new Date(this.now()).toISOString(), retired: args.operation === 'retire' };
         ledger.claims.push(claim);
@@ -189,11 +244,13 @@ export class StateMemory {
 
   summary(): string {
     const active = this.latest(this.load()).filter(claim => this.active(claim));
-    const header = '[当前记忆记录；由 memory_record 管理。当前指每个 key 的最新有效版本，不保证现场仍如此；结论附观察时间，日程与现场由各自账本提供。]\n';
-    const footer = '\nmemory_record read 按 key 查证据；history 查旧版本；evidence 只查近期128条观察；recall(query) 查持久历史及已配置游戏记忆。写入需 expected_revision 和 evidence_id。历史时间与发言人须保留。';
+    const header = '[当前记忆记录；由 memory_record 管理。有效指版本与期限，不保证现场仍如此；区分临时观测、历史事件、认识经验和未分类旧记录。日程与现场由各自账本提供。]\n'
+      + `有效记录 ${active.length} 条，其中未分类旧记录 ${active.filter(claim => claim.kind === undefined).length} 条；未展开的条目仍可定向查询。\n`;
+    const footer = '\nmemory_record read 按 key/kind 查询；history 查旧版本；evidence 只查近期128条观察；recall(query) 查持久历史及已配置游戏记忆。未分类旧记录先查原始证据再 classify，不能据省略判断不存在。';
     let body = '';
     for (const claim of active.sort((a, b) => Date.parse(b.observation.observedAt) - Date.parse(a.observation.observedAt))) {
-      const line = `${claim.key} r${claim.revision}：${claim.value}（观察 ${claim.observation.observedAt}，${claim.observation.source}）\n`;
+      const label = { observation: '临时观测', event: '历史事件', belief: '认识经验', legacy: '未分类旧记录' }[claim.kind ?? 'legacy'];
+      const line = `[${label}] ${claim.key} r${claim.revision}：${claim.value}（观察 ${claim.observation.observedAt}，${claim.observation.source}${claim.expiresAt ? `，有效至 ${claim.expiresAt}` : ''}）\n`;
       if (header.length + body.length + line.length + footer.length > STATE_MEMORY_MAX_CHARS) break;
       body += line;
     }
@@ -209,13 +266,17 @@ export class StateMemory {
 
   tool(): ToolDef {
     return { name: 'memory_record', tags: ['read', 'write'],
-      description: 'Read versioned current claims or their dated history. evidence lists received external observations (including failures). set/retire requires a stable object/property key, the exact current revision (0 for new key), value and evidence_id. New evidence must be later than the previous observation. Use expires_at for temporary readings. Rewriting prose never updates these records; completion remains in activity_plan and pending_work. A claim is an interpretation; inspect its evidence.',
+      description: 'Read versioned interpretations and dated history, filtered by key or kind. set requires kind: observation (temporary reading, requires expiry), event (past occurrence) or belief (revisable understanding). valid_for_seconds starts at the original observation, never at reading or writing time. evidence lists actual observations including failures. set/retire requires the exact revision (0 for new key), value and evidence_id; new evidence must be later. Legacy entries remain unclassified; classify with key/revision/kind/reason preserves their value and observation time, cannot extend an old expiry, and does not establish correctness. Rewriting prose does not update these records; goals and World facts retain their own authority.',
       parameters: { type: 'object', additionalProperties: false, properties: {
-        operation: { type: 'string', enum: ['read', 'history', 'evidence', 'set', 'retire'] },
+        operation: { type: 'string', enum: ['read', 'history', 'evidence', 'set', 'retire', 'classify'] },
+        kind: { type: 'string', enum: [...CLAIM_KINDS, 'legacy'], description: 'set/classify: observation, event or belief. read/history: legacy selects unclassified old entries.' },
+        reason: { type: 'string', minLength: 1, maxLength: 600, description: 'classify: interpretation of the original evidence; original value and observation time are retained.' },
         key: { type: 'string', minLength: 1, maxLength: 120 },
         expected_revision: { type: 'integer', minimum: 0 }, value: { type: 'string', minLength: 1, maxLength: 600 },
         evidence_id: { type: 'string', maxLength: 80, description: 'Exact id returned by evidence. A task number, message id or reference is not this id.' },
         expires_at: { type: 'string' },
+        valid_for_seconds: { type: 'number', exclusiveMinimum: 0, description: 'Expiry relative to the original observation time. An already expired observation stays historical.' },
+        include_inactive: { type: 'boolean', description: 'read: also include expired and retired latest versions for explicit review; does not reactivate them.' },
         query: { type: 'string', maxLength: 300,
           description: 'Evidence search: whitespace-separated literal terms, case-insensitive; all terms must occur in one retained observation (source, reference, id or text). Omit to list recent observations. Searches up to 128 retained observations, newest observation time first; offset/limit paginate results. Read a truncated preview in full using its id before interpreting it.' },
         offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 20 },
@@ -234,7 +295,7 @@ export class StateMemory {
       if (itemText(record.item).startsWith('[tool failed]')) return record;
       const call = calls.get(record.item.call_id);
       if (!call || call.args.history === true || call.args.operation === 'history') return record;
-      if (call.name === 'memory_record' && ['read', 'set', 'retire'].includes(call.args.operation)) {
+      if (call.name === 'memory_record' && ['read', 'set', 'retire', 'classify'].includes(call.args.operation)) {
         if (itemText(record.item).startsWith('[memory failed]')) return record;
         const args = call.args.operation === 'read' ? call.args : { operation: 'read', key: call.args.key };
         const current = this.operate(args);

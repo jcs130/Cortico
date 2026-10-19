@@ -34,7 +34,7 @@ describe('Dream runtime and real Memory tools', () => {
       const evidence = JSON.parse(await tool.handler({ operation: 'evidence' }, ctx) as string);
       expect(evidence.observations).toHaveLength(1);
       expect(evidence.observations[0]).toMatchObject({ observedAt: '2026-08-01T11:00:00Z', reference: 'cross' });
-      recorded = await tool.handler({ operation: 'set', key: 'portal/last-crossing', value: '实际穿门已验证',
+      recorded = await tool.handler({ operation: 'set', kind: 'event', key: 'portal/last-crossing', value: '实际穿门已验证',
         expected_revision: 0, evidence_id: evidence.observations[0].id }, ctx);
       return '(nothing)';
     } }));

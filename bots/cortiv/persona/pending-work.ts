@@ -1,5 +1,5 @@
 /** Persona 待办：Memory 保存任务，Core 定时器只索引到期时间；事件触发仅表示可以复核。 */
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { CoreApi, EventEnvelope, TimerEntry } from 'cortico/core/types.ts';
@@ -29,6 +29,20 @@ interface Evidence {
   workState?: WorldWorkState;
 }
 
+export interface PendingIntent {
+  id: string;
+  status: string;
+  worlds?: readonly string[];
+}
+export interface PendingWorkOptions {
+  worlds?: () => readonly string[];
+  intents?: () => readonly PendingIntent[];
+}
+interface PendingContext {
+  worlds?: ReadonlySet<string>;
+  intents?: ReadonlyMap<string, PendingIntent>;
+}
+
 interface PendingEntry {
   id: string;
   note: string;
@@ -39,6 +53,13 @@ interface PendingEntry {
   timerId?: string;
   evidence?: Evidence;
   workRef?: WorldWorkReference;
+  intentId?: string;
+  revision?: number;
+  updatedAt?: string;
+  reviewedAt?: string;
+  reviewResult?: string;
+  request?: { id: string; fingerprint: string };
+  history?: Array<Omit<PendingEntry, 'history'>>;
 }
 
 const FILTER_KEYS = ['source', 'type', 'sender_key', 'contains'] as const;
@@ -73,6 +94,20 @@ function validEntry(value: unknown): value is PendingEntry {
   if (value.dueAt === undefined && value.waitFor === undefined) return false;
   if (value.timerId !== undefined && !bounded(value.timerId, 160)) return false;
   if (value.workRef !== undefined && !workReferenceOf(value.workRef)) return false;
+  if (value.intentId !== undefined && !bounded(value.intentId, 80)) return false;
+  if (value.revision !== undefined && (!Number.isSafeInteger(value.revision) || Number(value.revision) < 1)) return false;
+  if (value.updatedAt !== undefined && !stamp(value.updatedAt)) return false;
+  if (value.reviewedAt !== undefined && !stamp(value.reviewedAt)) return false;
+  if (value.reviewResult !== undefined && !bounded(value.reviewResult, PENDING_WORK_NOTE_MAX_CHARS)) return false;
+  if (value.request !== undefined && (!object(value.request) || !bounded(value.request.id, 160)
+    || typeof value.request.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(value.request.fingerprint))) return false;
+  if (value.history !== undefined && (!Array.isArray(value.history)
+    || value.history.some(row => !object(row) || row.history !== undefined || !validEntry(row)))) return false;
+  if (Array.isArray(value.history) && value.history.length) {
+    const base = value.history[0].revision ?? 1;
+    if (value.history.some((row, index) => row.id !== value.id || (row.revision ?? 1) !== base + index)
+      || value.revision !== base + value.history.length) return false;
+  }
   if (value.evidence !== undefined) {
     if (!object(value.evidence) || !['event', 'timer', 'resolve', 'cancel'].includes(String(value.evidence.kind))
       || !stamp(value.evidence.at) || !bounded(value.evidence.summary, PENDING_WORK_NOTE_MAX_CHARS, false)
@@ -103,6 +138,7 @@ export class PendingWork {
     private readonly core: CoreApi,
     private readonly memoryDir: string,
     private readonly timezone: () => string,
+    private readonly options: PendingWorkOptions = {},
   ) {
     this.file = join(memoryDir, 'pending-work.json');
     if (!existsSync(this.file)) return;
@@ -148,26 +184,56 @@ export class PendingWork {
   }
 
   operate(args: Record<string, unknown>): string {
-    if (Object.keys(args).some((key) => !['operation', 'id', 'note', 'after_seconds', 'wait_for', 'result', 'include_closed', 'offset', 'limit', 'work_ref'].includes(key))) {
+    if (Object.keys(args).some((key) => !['operation', 'id', 'note', 'after_seconds', 'wait_for', 'result', 'include_closed', 'offset', 'limit', 'work_ref',
+      'intent_id', 'expected_revision', 'request_id', 'world', 'status', 'needs_review', 'query'].includes(key))) {
       return '[pending_work 输入错误] 含有未知参数。';
     }
+    if (args.expected_revision !== undefined && (!Number.isSafeInteger(args.expected_revision) || Number(args.expected_revision) < 0))
+      return '[pending_work 输入错误] expected_revision 必须为非负整数。';
     if (args.operation === 'list') return this.list(args);
+    if (args.operation === 'read' || args.operation === 'history') return this.read(args);
     if (args.operation === 'defer') return this.defer(args);
+    if (args.operation === 'link' || args.operation === 'review') {
+      const item = typeof args.id === 'string' ? this.findByInputId(args.id) : undefined;
+      if (!item) return '[pending_work 输入错误] 先 read 获取已有 id 和 revision。';
+      const conflict = this.revisionError(item, args.expected_revision);
+      if (conflict) return conflict;
+      if (!bounded(args.result, PENDING_WORK_NOTE_MAX_CHARS)) return '[pending_work 输入错误] link/review 需要 result 中的核验依据。';
+      if (args.operation === 'link') {
+        const error = this.intentError(args.intent_id);
+        if (error) return error;
+        if (['resolved', 'cancelled'].includes(item.status)) return '[pending_work 输入错误] 已关闭的提醒不能链接新的目的；请为新目的使用新 id。';
+      }
+      const correctedFilter = args.operation === 'review' && args.wait_for !== undefined ? filterOf(args.wait_for) : undefined;
+      if (correctedFilter === null) return '[pending_work 输入错误] wait_for 需要非空 source/type/sender_key/contains 条件。';
+      const selectorError = correctedFilter && this.eventSourceError(correctedFilter);
+      if (selectorError) return selectorError;
+      this.commit({ ...item, ...(args.operation === 'link' ? { intentId: args.intent_id as string } : {}),
+        ...(correctedFilter ? { waitFor: correctedFilter } : {}),
+        reviewedAt: this.now(), reviewResult: args.result });
+      return this.read({ operation: 'read', id: item.id });
+    }
     if (args.operation === 'bind') {
       const item = typeof args.id === 'string' ? this.findByInputId(args.id) : undefined;
       const ref = workReferenceOf(args.work_ref);
       if (!item || !ref) return '[pending_work 输入错误] bind 需要现有 id 和完整 work_ref；从当前 World workStates 读取身份。';
       if (item.status === 'resolved' || item.status === 'cancelled') return '[pending_work] 该待办已关闭；绑定未使它重新开放。';
+      const conflict = this.revisionError(item, args.expected_revision);
+      if (conflict) return conflict;
+      if (this.options.worlds && !this.options.worlds().includes(ref.world)) return '[pending_work 输入错误] work_ref.world 不是当前配置的 World id。';
       this.commit({ ...item, workRef: ref });
       this.reconcileWorldWork(ref.world, this.worldWorkStates.get(ref.world));
       return `[pending_work] ${idLabel(item.id)} 已绑定 ${ref.world}/${ref.subject} 批次 ${ref.instance}；状态 ${this.findByInputId(item.id)!.status}。`;
     }
-    if (args.operation !== 'resolve' && args.operation !== 'cancel') return '[pending_work 输入错误] operation 必须为 defer/list/resolve/cancel/bind。';
+    if (args.operation !== 'resolve' && args.operation !== 'cancel') return '[pending_work 输入错误] operation 必须为 defer/read/list/history/link/review/resolve/cancel/bind。';
     const item = typeof args.id === 'string' ? this.findByInputId(args.id) : undefined;
     if (!bounded(item?.id ?? args.id, PENDING_WORK_ID_MAX_CHARS)) return '[pending_work 输入错误] 提供有效的待办 id。';
     if (args.result !== undefined && !bounded(args.result, PENDING_WORK_NOTE_MAX_CHARS, false)) return '[pending_work 输入错误] result 必须为长度不超过 600 的文本。';
     if (!item) return '[pending_work 输入错误] 找不到该待办 id。';
     if (item.status === 'resolved' || item.status === 'cancelled') return `[pending_work] ${idLabel(item.id)} 已${item.status === 'resolved' ? '结清' : '取消'}，没有再次改变。`;
+    const conflict = this.revisionError(item, args.expected_revision);
+    if (conflict) return conflict;
+    if (!bounded(args.result, PENDING_WORK_NOTE_MAX_CHARS)) return '[pending_work 输入错误] resolve/cancel 需要 result 中的核验依据或明确撤销原因。';
     const kind = args.operation;
     const next: PendingEntry = { ...item, status: kind === 'resolve' ? 'resolved' : 'cancelled',
       evidence: { kind, at: this.now(), summary: typeof args.result === 'string' ? args.result : '' } };
@@ -199,15 +265,17 @@ export class PendingWork {
   }
 
   summary(): string {
-    const active = this.activeEntries();
+    const context = this.context();
+    const active = this.activeEntries(context);
     const retired = this.entries.filter(item => item.evidence?.workState && ['resolved', 'cancelled'].includes(item.status))
       .sort((a, b) => Date.parse(b.evidence!.at) - Date.parse(a.evidence!.at)).slice(0, 3);
     if (active.length === 0 && retired.length === 0) return '';
-    const lines = ['[待办：等待不占用前台，待复核不代表完成]'];
+    const reviewCount = active.filter(item => this.issues(item, context).length).length;
+    const lines = [`[待办：等待不占用前台，待复核不代表完成；开放 ${active.length} 项，其中 ${reviewCount} 项需核验登记信息]`];
     if (retired.length) lines.push('[已核验退出当前待办] ' + retired.map(item => `${idLabel(item.id)} ${clip(item.workRef!.subject, 48)} ${item.status}；依据 ${item.evidence!.workState!.observedAt}`).join('；'));
     for (const [index, item] of active.entries()) {
-      const line = this.line(item, false);
-      const rest = `\n还有 ${active.length - index} 项；pending_work list 查看。`;
+      const line = this.line(item, false, context);
+      const rest = `\n还有 ${active.length - index} 项；pending_work list 可按 intent_id/world/needs_review/query 筛选，read 按 id 展开。`;
       if (lines.join('\n').length + line.length + rest.length + 1 > PENDING_WORK_SUMMARY_MAX_CHARS) {
         lines.push(rest.trim());
         break;
@@ -240,39 +308,77 @@ export class PendingWork {
     }
     const offset = Number(args.offset ?? 0);
     const limit = Number(args.limit ?? 10);
-    const active = this.activeEntries();
-    const visible = args.include_closed === true ? this.entries : active;
+    const context = this.context();
+    const active = this.activeEntries(context);
+    const filtered = this.select(args.include_closed === true ? this.entries : active, args, context);
+    if (typeof filtered === 'string') return filtered;
+    const visible = filtered;
     const page = visible.slice(offset, offset + limit);
     const next = offset + page.length < visible.length ? offset + page.length : null;
     const counts = `活跃 ${active.length} 项，已结清 ${this.entries.filter((item) => item.status === 'resolved').length} 项，已取消 ${this.entries.filter((item) => item.status === 'cancelled').length} 项`;
-    return `[pending_work] ${counts}；本页 ${page.length} 项，offset=${offset}，next_offset=${next ?? '无'}。`
-      + (page.length > 0 ? `\n${page.map((item) => this.line(item, true)).join('\n')}` : '\n本页没有待办。');
+    return `[pending_work] ${counts}；匹配 ${visible.length} 项；本页 ${page.length} 项，offset=${offset}，next_offset=${next ?? '无'}。`
+      + (page.length > 0 ? `\n${page.map((item) => this.line(item, true, context)).join('\n')}` : '\n本页没有待办。');
   }
 
-  private activeEntries(): PendingEntry[] {
+  private activeEntries(context: PendingContext): PendingEntry[] {
+    const activeIds = new Set([...context.intents?.values() ?? []].filter(item => item.status === 'active').map(item => item.id));
     return this.entries.map((item, order) => ({ item, order }))
       .filter(({ item }) => item.status === 'ready' || item.status === 'waiting')
-      .sort((a, b) => Date.parse(b.item.registeredAt) - Date.parse(a.item.registeredAt) || b.order - a.order).map(({ item }) => item);
+      .sort((a, b) => Number(!!b.item.intentId && activeIds.has(b.item.intentId)) - Number(!!a.item.intentId && activeIds.has(a.item.intentId))
+        || Date.parse(b.item.registeredAt) - Date.parse(a.item.registeredAt) || b.order - a.order).map(({ item }) => item);
   }
 
   private defer(args: Record<string, unknown>): string {
     const existing = typeof args.id === 'string' ? this.findByInputId(args.id) : undefined;
+    if (!bounded(existing?.id ?? args.id, PENDING_WORK_ID_MAX_CHARS)) return '[pending_work 输入错误] defer 需要自己选择的稳定 id；同一提醒复用原 id，先 read/list 对账。';
+    if (existing && ['resolved', 'cancelled'].includes(existing.status)) return '[pending_work 已关闭] 原 id 和终态保留；新的事项使用新 id。';
+    if (args.request_id !== undefined && !bounded(args.request_id, 160)) return '[pending_work 输入错误] request_id 必须为非空文本且不超过160字符。';
+    const selector = args.wait_for === undefined ? undefined : filterOf(args.wait_for);
+    if (selector === null) return '[pending_work 输入错误] wait_for 必须含非空 source/type/sender_key/contains 条件，条件按 AND 匹配。';
     const workRef = args.work_ref === undefined ? existing?.workRef : workReferenceOf(args.work_ref);
     if (args.work_ref !== undefined && !workRef) return '[pending_work 输入错误] work_ref 必须含完整的 World、作用域、任务身份、批次和版本。';
+    if (workRef && this.options.worlds && !this.options.worlds().includes(workRef.world))
+      return '[pending_work 输入错误] work_ref.world 不是当前配置的 World id。';
+    const fingerprint = createHash('sha256').update(JSON.stringify([
+      existing?.id ?? args.id, args.note, args.after_seconds ?? null,
+      selector ? FILTER_KEYS.map(key => selector[key] ?? null) : null,
+      args.intent_id ?? null,
+      args.work_ref !== undefined && workRef ? [workRef.world, workRef.scope.realm, workRef.scope.account, workRef.scope.agent,
+        workRef.subject, workRef.instance, workRef.revision] : null,
+    ])).digest('hex');
+    if (args.request_id) {
+      const previous = this.entries.flatMap(entry => [entry, ...entry.history ?? []]).find(item => item.request?.id === args.request_id);
+      if (previous) return previous.request!.fingerprint === fingerprint
+        ? `[pending_work] request_id=${JSON.stringify(args.request_id)} 已登记；未重设等待或定时器。\n${this.read({ operation: 'read', id: previous.id })}`
+        : '[pending_work 输入错误] 相同 request_id 的内容发生变化；原记录和定时器未修改。';
+    }
+    if (existing) {
+      const conflict = this.revisionError(existing, args.expected_revision);
+      if (conflict) return conflict;
+    } else if (args.expected_revision !== undefined && args.expected_revision !== 0) return '[pending_work 输入错误] 新 id 的 expected_revision 为0。';
+    const intentId = args.intent_id ?? existing?.intentId;
+    if (intentId !== undefined) {
+      const error = this.intentError(intentId);
+      if (error) return error;
+    }
     const known = workRef ? matchingWorkState(workRef, [...this.worldWorkStates.get(workRef.world) ?? [],
       ...this.entries.flatMap(item => item.evidence?.workState ? [item.evidence.workState] : [])]) : null;
     if (known && known.status !== 'active') return `[pending_work 已关闭] ${workRef!.subject} 批次 ${workRef!.instance} 已有 ${known.observedAt} 的 ${known.status} 回执；旧意图未重新挂起。依据：${known.evidence.text}`;
     if (args.id !== undefined && !bounded(existing?.id ?? args.id, PENDING_WORK_ID_MAX_CHARS)) return '[pending_work 输入错误] id 必须为非空文本且不超过 80 字符。';
     if (!bounded(args.note, PENDING_WORK_NOTE_MAX_CHARS)) return '[pending_work 输入错误] note 必须为非空文本且不超过 600 字符。';
-    const waitFor = args.wait_for === undefined ? undefined : filterOf(args.wait_for);
-    if (waitFor === null) return '[pending_work 输入错误] wait_for 必须含非空 source/type/sender_key/contains 条件，条件按 AND 匹配。';
+    const waitFor = selector;
+    const selectorError = waitFor && this.eventSourceError(waitFor);
+    if (selectorError) return selectorError;
     const delay = args.after_seconds;
     if (delay !== undefined && (typeof delay !== 'number' || !Number.isFinite(delay) || delay <= 0
       || !Number.isFinite(new Date(Date.now() + delay * 1000).getTime()))) return '[pending_work 输入错误] after_seconds 必须为可表示时间的正数。';
     if (delay === undefined && waitFor === undefined) return '[pending_work 输入错误] 至少提供 after_seconds 或 wait_for。';
-    const id = existing?.id ?? (typeof args.id === 'string' ? args.id : `work_${randomUUID().slice(0, 12)}`);
+    const id = existing?.id ?? args.id as string;
     const item: PendingEntry = {
       id, note: args.note, status: 'waiting', registeredAt: this.now(),
+      reviewedAt: this.now(),
+      ...(intentId ? { intentId: intentId as string } : {}),
+      ...(args.request_id ? { request: { id: args.request_id as string, fingerprint } } : {}),
       ...(workRef ? { workRef } : {}),
       ...(typeof delay === 'number' ? { dueAt: new Date(Date.now() + delay * 1000).toISOString() } : {}),
       ...(waitFor ? { waitFor } : {}),
@@ -286,7 +392,79 @@ export class PendingWork {
     }
     this.cancelTimers(item, item.timerId);
     this.log(item);
-    return `[pending_work] ${idLabel(id)} 已挂到后台等待${item.dueAt ? `，复核时间 ${item.dueAt}` : ''}。触发只会提醒复核，未判定完成；前台可以继续其他事情。`;
+    return `[pending_work] ${idLabel(id)} revision=${this.findByInputId(id)!.revision} 已挂到后台等待${item.dueAt ? `，复核时间 ${item.dueAt}` : ''}。触发只会提醒复核，未判定完成；前台可以继续其他事情。`;
+  }
+
+  private revisionError(item: PendingEntry, expected: unknown): string | null {
+    return expected === (item.revision ?? 1) ? null
+      : `[pending_work 输入错误] 版本冲突：${idLabel(item.id)} 当前 revision=${item.revision ?? 1}；先 read，修改时带 expected_revision。原记录未修改。`;
+  }
+
+  private eventSourceError(filter: EventFilter): string | null {
+    return filter.source && (['core', 'persona'].includes(filter.source)
+      || (this.options.worlds && !this.options.worlds().includes(filter.source)))
+      ? '[pending_work 输入错误] wait_for.source 必须是外部事件的 World id，不能拼接事件类型；type 单独填写。当前 World ids：'
+        + JSON.stringify(this.options.worlds?.() ?? []) + '。原记录未修改。' : null;
+  }
+
+  private intentError(id: unknown): string | null {
+    if (!bounded(id, 80)) return '[pending_work 输入错误] intent_id 需要 activity_plan 中已采用目标的精确 id。';
+    const intent = this.options.intents?.().find(item => item.id === id);
+    return intent && !['done', 'cancelled'].includes(intent.status) ? null
+      : '[pending_work 输入错误] intent_id 未找到开放的已采用目标；先 activity_plan read 核验。';
+  }
+
+  private context(): PendingContext {
+    return { ...(this.options.worlds ? { worlds: new Set(this.options.worlds()) } : {}),
+      ...(this.options.intents ? { intents: new Map(this.options.intents().map(item => [item.id, item])) } : {}) };
+  }
+
+  private issues(item: PendingEntry, context: PendingContext): string[] {
+    const issues: string[] = [];
+    if (!item.reviewedAt) issues.push('legacy_unreviewed');
+    if (item.waitFor?.source && (['core', 'persona'].includes(item.waitFor.source)
+      || (context.worlds && !context.worlds.has(item.waitFor.source)))) issues.push('unknown_event_source');
+    if (item.intentId && context.intents) {
+      const intent = context.intents.get(item.intentId);
+      if (!intent) issues.push('unknown_intent');
+      else if (['done', 'cancelled'].includes(intent.status)) issues.push('closed_intent');
+    }
+    return issues;
+  }
+
+  private select(entries: PendingEntry[], args: Record<string, unknown>, context: PendingContext): PendingEntry[] | string {
+    if (args.status !== undefined && !STATUSES.has(String(args.status))) return '[pending_work 输入错误] status 必须为 waiting/ready/resolved/cancelled。';
+    if (args.needs_review !== undefined && typeof args.needs_review !== 'boolean') return '[pending_work 输入错误] needs_review 必须为布尔值。';
+    if (args.query !== undefined && !bounded(args.query, 300, false)) return '[pending_work 输入错误] query 必须为不超过300字符的文本。';
+    for (const key of ['world', 'intent_id', 'id']) if (args[key] !== undefined && !bounded(args[key], key === 'id' ? 81 : 80))
+      return `[pending_work 输入错误] ${key} 需要有效的精确标识。`;
+    const terms = String(args.query ?? '').toLowerCase().split(/\s+/u).filter(Boolean);
+    const exact = typeof args.id === 'string' ? this.findByInputId(args.id)?.id : undefined;
+    return entries.filter(item => (args.id === undefined || item.id === exact)
+      && (args.intent_id === undefined || item.intentId === args.intent_id)
+      && (args.status === undefined || item.status === args.status)
+      && (args.needs_review === undefined || !!this.issues(item, context).length === args.needs_review)
+      && (args.world === undefined || item.waitFor?.source === args.world || item.workRef?.world === args.world
+        || !!context.intents?.get(item.intentId ?? '')?.worlds?.includes(String(args.world)))
+      && terms.every(term => `${item.id}\n${item.note}\n${item.intentId ?? ''}`.toLowerCase().includes(term)));
+  }
+
+  private read(args: Record<string, unknown>): string {
+    const item = typeof args.id === 'string' ? this.findByInputId(args.id) : undefined;
+    if (!item) return '[pending_work 输入错误] read/history 需要已有的精确 id；list 可按 world/intent_id/needs_review/query 查询。';
+    if (args.operation === 'history') {
+      const offset = args.offset ?? 0, limit = args.limit ?? 8;
+      if (!Number.isSafeInteger(offset) || Number(offset) < 0 || !Number.isSafeInteger(limit) || Number(limit) < 1 || Number(limit) > PENDING_WORK_LIST_MAX_ENTRIES)
+        return '[pending_work 输入错误] history offset>=0，limit为1至20。';
+      const { history, ...current } = item;
+      const versions = [...history ?? [], current];
+      return JSON.stringify({ id: item.id, versions: versions.slice(Number(offset), Number(offset) + Number(limit)), total: versions.length,
+        nextOffset: Number(offset) + Number(limit) < versions.length ? Number(offset) + Number(limit) : null });
+    }
+    const { history, ...current } = item;
+    return JSON.stringify({ ...current, revision: item.revision ?? 1, historyCount: history?.length ?? 0,
+      issues: this.issues(item, this.context()), reviewTimePassed: !!item.dueAt && Date.parse(item.dueAt) <= Date.now(),
+      interpretation: '提醒及复核线索，不是目标或现场真相。到点只表示可以复查；链接目标和绑定外部执行分别记录。旧条目未因加载、遗漏或复核时间而关闭。' });
   }
 
   /** Exact ids take precedence, including literal # ids; fallback accepts one legacy display prefix. */
@@ -335,12 +513,14 @@ export class PendingWork {
     return result.id;
   }
 
-  private line(item: PendingEntry, full: boolean): string {
+  private line(item: PendingEntry, full: boolean, context: PendingContext): string {
     const label = { waiting: '等待', ready: '待复核', resolved: '已结清', cancelled: '已取消' }[item.status];
     const trigger = item.status === 'waiting'
       ? `${item.dueAt ? ` 到 ${item.dueAt}` : ''}${item.waitFor ? ` 条件 ${JSON.stringify(item.waitFor)}` : ''}`
       : item.evidence ? ` 线索 ${item.evidence.at}${item.evidence.cursor === undefined ? '' : ` cursor=${item.evidence.cursor}`} ${clip(item.evidence.summary, full ? 240 : 100)}` : '';
-    return `${idLabel(item.id)} [${label}] ${full ? item.note : clip(item.note, 140)}${full ? trigger : trigger ? ` ${clip(trigger, 200)}` : ''}`
+    const issues = this.issues(item, context);
+    return `${idLabel(item.id)} [${label}] revision=${item.revision ?? 1}${item.intentId ? ` intent_id=${JSON.stringify(item.intentId)}` : ''} ${full ? item.note : clip(item.note, 140)}${full ? trigger : trigger ? ` ${clip(trigger, 200)}` : ''}`
+      + (issues.length ? ` 核验=${issues.join(',')}` : '')
       + (full && item.workRef ? ` work_ref=${JSON.stringify(item.workRef)}` : '');
   }
 
@@ -349,6 +529,11 @@ export class PendingWork {
   /** Memory 提交成功后才更新运行态；失败的同一操作可以再次提交。 */
   private commit(item: PendingEntry): void {
     const index = this.entries.findIndex((entry) => entry.id === item.id);
+    if (index >= 0) {
+      const { history, ...previous } = this.entries[index];
+      item = { ...item, revision: (previous.revision ?? 1) + 1, history: [...history ?? [], previous] };
+    } else item = { ...item, revision: 1 };
+    item.updatedAt = this.now();
     const next = [...this.entries];
     if (index < 0) next.push(item); else next[index] = item;
     const retirementRevision = this.retiredRevision + (['resolved', 'cancelled'].includes(item.status)

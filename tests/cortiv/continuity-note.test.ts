@@ -24,7 +24,7 @@ function rig() {
   const prepare = () => persona.prepareRequest({ sessionId: 'main', round: 1, messages: records })!;
   const remember = (value: string, revision = 0) => {
     const evidence_id = state.observe({ source: 'game/result', observedAt: `2026-01-01T00:00:${String(10 + revision).padStart(2, '0')}Z`, text: value });
-    return state.operate({ operation: 'set', key: 'project/bridge', value, expected_revision: revision, evidence_id });
+    return state.operate({ operation: 'set', kind: 'belief', key: 'project/bridge', value, expected_revision: revision, evidence_id });
   };
   return { persona, state, remember, memoryDir, config, records, prepare };
 }

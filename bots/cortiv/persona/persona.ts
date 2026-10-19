@@ -561,7 +561,10 @@ export class CortiV extends Cormini {
     this.worldLifecycle.restore(core.personaState()[WORLD_LIFECYCLE_STATE_KEY]);
     if (this.worldLifecycle.sync(this.worlds)) this.saveWorldLifecycle();
     this.sleepReview = new SleepReview(core, this.sleepReviewConfig);
-    this.pendingWork = new PendingWork(core, this.memoryDir, this.timezone);
+    this.pendingWork = new PendingWork(core, this.memoryDir, this.timezone, {
+      worlds: () => this.worlds.map(world => world.id),
+      intents: () => this.activityAgenda?.state().items ?? [],
+    });
     this.activityAgenda = new ActivityAgenda(this.memoryDir, Date.now, items => this.brainMetrics.agenda(items));
     this.stateMemory.migrate(this.stateNotePaths());
     this.planningReview = new PeriodicPlanningReview({
@@ -733,26 +736,32 @@ export class CortiV extends Cormini {
       description:
         'Keep an unfinished intention in persistent memory while continuing other work. '
         + 'defer records what is waiting, with a review delay and/or an external event selector; '
-        + 'list reads the current items, resolve records a verified result, cancel abandons an item. '
+        + 'Use a stable id for defer; read returns an exact item and revision, list filters by intent_id/world/status/needs_review/query, history reads prior versions. '
+        + 'Changes to an existing item require its expected_revision from read. request_id makes a defer retry idempotent without resetting its timer. '
+        + 'link attaches a reminder to an adopted activity_plan intent_id with a reason in result. review records checked evidence and can correct wait_for while retaining the original time and status. '
+        + 'resolve records a verified result, cancel abandons an item; both require evidence or a reason in result. '
         + 'A matching event or elapsed delay only makes the item ready to review, not completed. '
         + 'bind attaches an existing intention to a complete work_ref from current World workStates. Only bind when that external result fully settles this intention; '
         + 'matching server-confirmed completion/cancellation retires it automatically with evidence, and an old occurrence cannot reopen. '
         + 'This returns immediately and never blocks other events or controls a World.',
-      tags: ['write'],
+      tags: ['read', 'write'],
       parameters: {
         type: 'object', additionalProperties: false,
         properties: {
-          operation: { type: 'string', enum: ['defer', 'list', 'resolve', 'cancel', 'bind'] },
+          operation: { type: 'string', enum: ['defer', 'read', 'list', 'history', 'link', 'review', 'resolve', 'cancel', 'bind'] },
           work_ref: { ...WORK_REFERENCE_SCHEMA, description: 'defer/bind: copy the exact world, scope, subject, instance and revision from current World task identities; do not guess from a name or old count.' },
           id: { type: 'string', minLength: 1, maxLength: PENDING_WORK_ID_MAX_CHARS + 1,
-            description: 'Raw id from id= output; exact ids take precedence. A legacy leading # aliases an existing raw id only when no exact id exists. New ids are at most 80 characters; the extra character is only for an existing legacy alias. Defer without id creates an item.' },
+            description: 'Required for defer/read/history and changes. Choose a stable id for a new reminder and reuse it for the same reminder. Exact ids take precedence; a legacy leading # can alias an existing raw id. New ids are at most 80 characters.' },
+          expected_revision: { type: 'integer', minimum: 0, description: 'Exact revision from read for changes to an existing item; 0 for a new id.' },
+          request_id: { type: 'string', minLength: 1, maxLength: 160, description: 'defer: stable retry id for identical content. Reuse returns the existing record without resetting time.' },
+          intent_id: { type: 'string', minLength: 1, maxLength: 80, description: 'defer/link: exact open adopted activity_plan id; list filters its reminders. The link does not complete or change the goal.' },
           note: { type: 'string', minLength: 1, maxLength: PENDING_WORK_NOTE_MAX_CHARS,
             description: 'Required for defer: what remains to do and what evidence is needed.' },
           after_seconds: { type: 'number', exclusiveMinimum: 0,
             description: 'Review after this delay; time passing does not prove success.' },
           wait_for: {
             type: 'object', minProperties: 1, additionalProperties: false,
-            description: 'Match provided fields with AND; a text match is only a candidate observation.',
+            description: 'Match provided fields with AND. source is the actual configured World id; type is a separate event type. A text match is only a candidate observation.',
             properties: Object.fromEntries(['source', 'type', 'sender_key', 'contains'].map((key) => [key, {
               type: 'string', minLength: 1, maxLength: PENDING_WORK_SELECTOR_MAX_CHARS,
             }])),
@@ -760,6 +769,10 @@ export class CortiV extends Cormini {
           result: { type: 'string', maxLength: PENDING_WORK_NOTE_MAX_CHARS,
             description: 'Evidence checked when resolving, or the reason for cancellation.' },
           include_closed: { type: 'boolean', description: 'list: include resolved and cancelled items.' },
+          world: { type: 'string', minLength: 1, maxLength: 80, description: 'list: filter by event World, bound work World or linked goal World.' },
+          status: { type: 'string', enum: ['waiting', 'ready', 'resolved', 'cancelled'], description: 'list: exact status; include_closed is needed for a closed status.' },
+          needs_review: { type: 'boolean', description: 'list: filter legacy unreviewed records, unknown event sources or missing/closed linked goals. Does not close them.' },
+          query: { type: 'string', maxLength: 300, description: 'list: all whitespace-separated literal terms must occur in id, note or intent_id, case-insensitive.' },
           offset: { type: 'integer', minimum: 0, description: 'list: skip this many items.' },
           limit: { type: 'integer', minimum: 1, maximum: PENDING_WORK_LIST_MAX_ENTRIES, description: 'list: page size, default 10.' },
         },
@@ -777,7 +790,7 @@ export class CortiV extends Cormini {
         + 'start directly records a self-chosen multi-step intention without a background proposal: use a new stable id, title, worlds, why (purpose/beneficiary), doneWhen and current expected_revision from read; references may name original evidence. It does not execute an action. '
         + 'review with question selects the configured reflection provider and context/output budgets for a focused causal or strategy review, without replacing the agenda or blocking action. '
         + 'Use this proactively for a difficult decision or revising a method; publicTopic optionally announces an accepted review to main for a brief audience-facing progress summary, never raw reasoning. '
-        + 'read pages open stages by default; includeCompleted:true adds completed history, includeClosed:true adds completed and cancelled history; id reads only that stage or candidate with its dated metadata. Closed evidence does not occupy open-stage capacity. '
+        + 'read pages open stages by default; includeCompleted:true adds completed history, includeClosed:true adds completed and cancelled history; id reads only that stage or candidate with its dated metadata. Reading limits do not restrict persistent goal storage. '
         + 'Read and verify a background proposal before adopt. adopt with id adds that new candidate while preserving '
         + 'existing progress; omit id to merge the whole proposal only when its revision is current, retaining omitted goals and evidence. focus selects a current stage. update records actual progress '
         + 'or marks a stage done/deferred/queued/cancelled with evidence or an explicit cancellation reason in note. update can revise when/ifBlocked with fresh evidence in note while preserving the objective and completion criteria. update with why corrects an obsolete premise using the exact expected_revision from read and evidence in note; it retains dated premise history and the original objective. A changed premise retires dependent proposals, including late results captured before that correction; review requests a fresh proposal. Adoption preserves existing stage conditions and evidence. Cancelled is not completed; neither closed status can be reopened by an old proposal. Plans do not execute World actions; '
@@ -2508,7 +2521,7 @@ export class CortiV extends Cormini {
       '接下来那条 user 消息是捕获的记录快照，开头标明整理缘由、观察截止时间和排队时间；整理期间的新事件不在这份快照中。',
       '若其后还有 World 只读事实消息，按其中的回执时间核对旧记录；已证实完成的目标不要再写成未完成。',
       '你的工具就是你自己的工作区文件工具。',
-      '经历写入短笺并保留原始观察时间，写短笺不以读完归档为前提；当前结论用 memory_record read/evidence/set 按稳定对象编号和版本修订。短笺和普通目标、偏好文件可直接 read_file 读原文；其节选保留历史性质，不能自动成为现场状态。内部结论账本的原始版本用 history:true。',
+      '经历写入短笺并保留原始观察时间，写短笺不以读完归档为前提；结构化记录用 memory_record read/evidence/set 按稳定对象编号和版本修订，明确 kind：临时观测 observation 需有效期，历史事件 event，认识经验 belief。旧记录为未分类历史，classify 需核对原始证据并保留原观察时间，不能续期。短笺和普通目标、偏好文件可直接 read_file 读原文；其节选保留历史性质，不能自动成为现场状态。内部结论账本的原始版本用 history:true。',
       '历史正文保留过去的观察、请求和实际回执。原生工具请求只表示当时想做什么，执行是否成功看实际回执；历史内容不作为现在的新工具调用。',
       '工作区与前台共用。修改已有文件前先 read_file 读取当前版本；收到 memory conflict 时重新读并核对、合并，不能用旧正文覆写。新文件可直接写；本次短笺的初始版本已读取。',
       `近期状态 ${RECENT_FILE} 若已被其他线程更新，本次旧材料不能再覆写它；重新读取也不能解除版本限制。有证据的经历可写入场次记录，结论注明观察截止时间，由主意识结合更新后的现场接续。`,

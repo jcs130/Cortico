@@ -7,13 +7,23 @@
 
 | operation | 行为 |
 | --- | --- |
-| `defer` | 保存意图、新证据条件与回访时间；立即返回待办 id |
-| `list` | 分页读取待办，默认只显示活跃事项 |
-| `resolve` | 模型核验结果后结清指定事项 |
-| `cancel` | 取消指定事项及其定时器 |
+| `defer` | 使用稳定 id 保存提醒、证据条件与回访时间 |
+| `read` | 按精确 id 读取记录、revision、关联目的及核验问题 |
+| `list` | 分页读取待办，可按 id、intent_id、world、status、needs_review、query 筛选 |
+| `history` | 按 id 分页读取修改前的原记录及当前版本 |
+| `link` | 关联已采用且开放的 activity_plan 目的，需要 result 中的依据 |
+| `review` | 留下核验依据，可订正 wait_for，保持原登记时间、复查时间和状态 |
+| `resolve` | 模型核验结果后结清指定提醒，需要 result 中的依据 |
+| `cancel` | 根据 result 中的明确原因取消提醒及其定时器 |
+| `bind` | 绑定完整的 World work_ref；该外部结果必须足以结清整个提醒 |
 
-`defer` 提供 `note`，并至少提供 `after_seconds` 或 `wait_for` 中一项。
+`defer` 提供稳定 `id`、`note`，并至少提供 `after_seconds` 或 `wait_for` 中一项。
+已有条目的修改需要 `read` 返回的 `expected_revision`；旧版本不会覆盖新事件或核验结果。
+同一项提醒复用原 id，已关闭 id 不会被 defer 重新开放。新的事项需要新 id。
+`request_id` 标识一次 defer 请求，重复内容返回现存记录而不重设定时器；同一请求号改内容会失败。
 `wait_for` 可包含 `source`、`type`、`sender_key`、`contains`；提供的条件按 AND 匹配。
+`source` 是实际配置的 World id，事件类型单独填写 `type`。新来源无效时不保存记录或定时器。
+旧错误来源保留并标为待核验；订正须基于实际事件契约，不能静默拆分或猜测来源。
 `contains` 使用区分大小写的字面文本。事件须在登记之后产生；内部提醒不会触发外部等待条件。
 使用已有 `id` 再次 `defer` 会更新该事项并替换旧定时器。
 
@@ -28,6 +38,7 @@
 ```json
 {
   "operation": "defer",
+  "id": "confirm-guide-answer",
   "note": "等对方确认刚才的问题；收到消息后核对实际结果",
   "after_seconds": 120,
   "wait_for": { "source": "chat", "sender_key": "partner" }
@@ -42,6 +53,8 @@
 `waiting` 在匹配的新外部事件到达，或复核时间到达后，变为 `ready`。
 Persona 保存触发时间、事件游标和精简证据，并注入一次复核提醒。
 `ready` 表示有线索可检查；最终 `resolved` 或 `cancelled` 由模型明确选择。
+`intent_id` 关联一个已采用且开放的目的；父目标关闭后，旧提醒保留并标为需要核验，不自动取消或重新开放目标。
+外部 work_ref 与父目标关联分别保存；提醒结清不会完成父目标。是否已满足原 doneWhen 仍由主意识核对。
 事件先到会取消该事项的定时器，避免到期后重复通知。
 
 Memory 原子替换成功后才发布新状态、移除旧定时器和注入复核提醒。
@@ -50,6 +63,11 @@ Memory 原子替换成功后才发布新状态、移除旧定时器和注入复�
 主会话每次获取一份稳定、最多 1600 字符的活跃摘要。完整记录留在 Memory，
 `list` 分页读取；结束回合和上下文交接不清空待办。重启时恢复等待索引，
 离线期间到期的事项转为待复核，已有终态不会重新执行。
+
+摘要优先展示关联当前活跃目标的提醒，再按登记时间展示其他条目，并给出待核验数量。
+缺少 reviewedAt 的旧记录标为 legacy_unreviewed，未知事件来源和已关闭/缺失的父目标另列诊断。
+加载不改旧正文或状态；review 只记录核验，时间已过及措辞相似均不构成关闭证据。
+文件保留 version:1 的兼容读取，新 revision/history/关联字段是增量字段；修改前的原条目进入 history。
 
 ## 并发边界
 

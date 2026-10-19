@@ -1,7 +1,8 @@
 `persona.ts` 与 `state-memory.ts` 定义工作区记忆的读取与更新。
 
 * 知识按领域分目录保存;各领域要记什么，见对应提示词段;目录内文件自定。
-* 当前结论用 `memory_record` 管理：先 read 查稳定对象/属性的 key 与 revision，再 evidence 查实际观察，set 带 expected_revision、evidence_id 和结论。旧版本和旧证据不能覆盖新记录；临时读数注明 expires_at，错误结论用 retire 留下撤回依据。结论是对观察的解释，原始回执里也可能是失败，不能把有证据编号当作已完成。
+* 结构化记录用 `memory_record` 管理：先 read 查稳定对象/属性的 key 与 revision，再 evidence 查实际观察，set 带 expected_revision、evidence_id、kind 和结论。临时观测用 observation，必须注明 expires_at 或 valid_for_seconds；期限从原始观察时间起算，旧读数不能靠重新写入续期。已发生的事件用 event，认识或经验用 belief；它们也不能代替当前现场。错误结论用 retire 留下依据，旧版本和旧证据不能覆盖新记录。
+  旧记录无 kind 时保留为 legacy，可 read 按 kind 和 include_inactive 查回。核对原始证据后，用 classify 带 key、expected_revision、kind、reason 分类；临时观测还需期限。分类保留旧值和原始观察时间，不能延长旧期限，也不证明原解释正确。历史版本始终可读。
   evidence 的 query 用空格分隔关键词，同一观察须包含全部词，忽略大小写；省略 query 列最近观察，offset/limit 分页。检索范围是当前保留的最多 128 条外部观察，未命中不证明从未发生。使用返回的 id 读取原文或写入，reference 仅是来源编号；预览标记 truncated 时先读全文。
 * `sessions/_recent.md` 保存带观察时间的经历与详情入口。目标、偏好、短笺与 session/handoff 笔记可用 `read_file` 直接按原文行号读取，`grep_files` 检索原文；`history:true` 仍兼容。回执保留来源和时间，笔记正文不自动成为当前状态。重写正文不更新结构化结论；位置、生命、饥饿、背包和队列仍由 World 提供。内部当前事实账本及其旧版本通过 `memory_record` 按 key 查询。
 * 一件事实只存一处。
@@ -9,6 +10,7 @@
 * `pending-work.json` 由 `pending_work` 工具维护，保存等待条件、复核线索和结清结果；
   重启后仍会恢复。用这个工具更新待办，不直接覆写该文件。每轮只浮现精简的活跃待办，
   要查完整记录用 `pending_work` 的 list。
+  提醒复用稳定 id；已有条目的修改先 read，再带 expected_revision，重试 defer 可复用同一个 request_id，不能每次醒来新建一份。用 intent_id 关联已采用的 activity_plan 目标，外部执行另用 work_ref 绑定。提醒结清不证明父目标完成。list 可按 intent_id、world、needs_review、query 定向查，history 保留修改前记录。旧条目及异常事件来源是待核验线索，不自动当作新目标；review 留核验依据，可订正 wait_for 而保留原时间和状态。source 只填实际 World id，事件类型另填 type；未知来源、到点或相似措辞都不构成自动撤销依据。
 * 时间一律写现实日期时间,或者锚在现实发生过的事上(哪一场直播、跟谁说过的哪句话)。
   跨场次对得上账的只有这两种;游戏内的天数、「睡了几觉」这类自己数的数对不齐,
   当场描述可以,别拿来当索引旧笔记的锚。

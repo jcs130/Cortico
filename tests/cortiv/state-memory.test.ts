@@ -30,7 +30,7 @@ function rig() {
 }
 function set(state: StateMemory, value: string, observedAt: string, revision: number) {
   const evidence_id = state.observe({ source: 'world/task', observedAt, text: value })!;
-  return state.operate({ operation: 'set', key: 'project/portal/access', value, expected_revision: revision, evidence_id });
+  return state.operate({ operation: 'set', kind: 'belief', key: 'project/portal/access', value, expected_revision: revision, evidence_id });
 }
 
 describe('versioned current memory', () => {
@@ -67,7 +67,7 @@ describe('versioned current memory', () => {
 
   it('excludes expired and retired claims from current retrieval while retaining tombstone revisions', () => {
     const { state, memory } = rig(); const evidence_id = state.observe({ source: 'world/read', observedAt: oldAt, text: '临时状态' });
-    state.operate({ operation: 'set', key: 'temporary', value: '短时读数', expected_revision: 0, evidence_id,
+    state.operate({ operation: 'set', kind: 'observation', key: 'temporary', value: '短时读数', expected_revision: 0, evidence_id,
       expires_at: '2026-08-01T12:01:00Z' });
     const expired = new StateMemory(memory, () => now() + 120_000);
     expect(expired.summary()).not.toContain('短时读数');
@@ -103,7 +103,7 @@ describe('versioned current memory', () => {
     expect(entry).toMatchObject({ source: 'world/world.chat', reference: '101', observedAt: newAt, text: body, truncated: false });
     expect(JSON.parse(state.operate({ operation: 'evidence', query: 'world/world.chat 101' }) as string).observations[0].id).toBe(entry.id);
     expect(state.operate({ operation: 'set', key: 'route/north', expected_revision: 0, value: '尚未验证', evidence_id: '101' })).toMatchObject({ failed: true });
-    expect(state.operate({ operation: 'set', key: 'route/north', expected_revision: 0, value: '尚未验证', evidence_id: entry.id })).not.toHaveProperty('failed');
+    expect(state.operate({ operation: 'set', kind: 'belief', key: 'route/north', expected_revision: 0, value: '尚未验证', evidence_id: entry.id })).not.toHaveProperty('failed');
     expect(JSON.parse(state.operate({ operation: 'read', key: 'route/north' }) as string).claims[0].observation.text).toBe(body);
   });
 
@@ -142,7 +142,7 @@ describe('versioned current memory', () => {
     const { state } = rig();
     for (let index = 0; index < 15; index++) {
       const evidence_id = state.observe({ source: 'world/read', observedAt: newAt, text: `原文 ${index}` + '文'.repeat(7000) });
-      state.operate({ operation: 'set', key: `object/${index}`, value: '结论'.repeat(250), expected_revision: 0, evidence_id });
+      state.operate({ operation: 'set', kind: 'belief', key: `object/${index}`, value: '结论'.repeat(250), expected_revision: 0, evidence_id });
     }
     expect(state.summary().length).toBeLessThanOrEqual(STATE_MEMORY_MAX_CHARS);
     const preview = state.operate({ operation: 'evidence' }) as string;
@@ -156,7 +156,7 @@ describe('versioned current memory', () => {
     const { state } = rig(); set(state, '较早有效结论', oldAt, 0);
     for (let index = 0; index < 10; index++) {
       const evidence_id = state.observe({ source: 'world/read', observedAt: newAt, text: `新观察 ${index}` });
-      state.operate({ operation: 'set', key: `new/${index}`, value: '当前读数'.repeat(100), expected_revision: 0, evidence_id });
+      state.operate({ operation: 'set', kind: 'observation', valid_for_seconds: 86400, key: `new/${index}`, value: '当前读数'.repeat(100), expected_revision: 0, evidence_id });
     }
     expect(state.summary()).not.toContain('较早有效结论');
     const records = [functionCall('target', 'memory_record', '{"operation":"read","key":"project/portal/access"}'),
@@ -209,7 +209,8 @@ describe('current memory across Persona read surfaces', () => {
     expect(existsSync(file) ? readFileSync(file, 'utf8') : null).toBe(before);
     expect(await tool.handler({ operation: 'defer', id: 'fish', note: '等新的钓竿', after_seconds: 120 }, ctx)).not.toHaveProperty('failed');
     expect(JSON.parse(readFileSync(file, 'utf8')).entries.find((entry: { id: string }) => entry.id === 'fish')?.status).toBe('waiting');
-    await tool.handler({ operation: 'resolve', id: 'fish', result: '已确认新钓竿入包' }, ctx);
+    const pending = JSON.parse(await tool.handler({ operation: 'read', id: 'fish' }, ctx) as string);
+    await tool.handler({ operation: 'resolve', id: 'fish', expected_revision: pending.revision, result: '已确认新钓竿入包' }, ctx);
     expect(JSON.parse(readFileSync(file, 'utf8')).entries.find((entry: { id: string }) => entry.id === 'fish')?.status).toBe('resolved');
   });
 
