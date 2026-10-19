@@ -112,6 +112,12 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.20.1)(jsdom@30.0.1(canvas@3.2.3))(lightningcss@1.32.0)
 
+  packages/cortico-world-dungeon-context:
+    dependencies:
+      cortico-world-dungeon:
+        specifier: 0.1.4
+        version: 0.1.4
+
   packages/cortico-world-qiandengji:
     dependencies:
       mineflayer:
@@ -1625,6 +1631,10 @@ packages:
     resolution: {integrity: sha512-tJtZBBHA6vjIAaF6EnIaq6laBBP9aq/Y3ouVJjEfoHbRBcHBAHYcMh/w8LDrk2PvIMMq8gmopa5D4V8RmbrxGw==}
     engines: {node: '>= 0.10'}
 
+  cortico-world-dungeon@0.1.4:
+    resolution: {integrity: sha512-oWFkTanLyxWVuQl/EtWVRWYkSaNCIhNGD6iokKnuwn2ZZS3auniC5zsD7HsGzLOhHSmVtro4CL60wHczcPhmVQ==}
+    engines: {node: '>=22'}
+
   crelt@1.0.7:
     resolution: {integrity: sha512-aK6BbWfhf4U/wCcLHKPJl/xa6VkVstRaPywWtMKGwuOLc/wZTyQYuoxgvZnNsBvv7Kg3YTBQYYBCggcviQczuA==}
 
@@ -2565,10 +2575,11 @@ packages:
     resolution: {integrity: sha512-xRXBn0pPqQTVQiC8wyQrKs2MOlX24zQ0POGaj0kultvoOCstBQM5yvOhAVSUwOMjQtTvsPWoNCHfPGwaaQJhTw==}
     engines: {node: '>= 18'}
 
-  set-blocking@2.0.0:
-    resolution: {integrity: sha512-KiKBS8AnWGEyLzofFfmvKwpdPzqiy16LvQfK3yv/fVH7Bj13/wl3JSR1J+rfgRE9q7xUJK4qvgS8raSOeLUehw==}
   ses@2.3.0:
     resolution: {integrity: sha512-qd3iWzDqGKllI2FmExKsWLrJwt+6COWb8jUdzaCn8Cq5OTeoXdQ62Gn/xLy0GWLORC3du6yBAVe/V0B0dLVKew==}
+
+  set-blocking@2.0.0:
+    resolution: {integrity: sha512-KiKBS8AnWGEyLzofFfmvKwpdPzqiy16LvQfK3yv/fVH7Bj13/wl3JSR1J+rfgRE9q7xUJK4qvgS8raSOeLUehw==}
 
   setprototypeof@1.2.0:
     resolution: {integrity: sha512-E5LDX7Wrp85Kil5bhZv46j8jOeboKq5JMmYM3gVGdGH8xFpPWXUMsNrlODCrkoxMEeNi/XZIwuRvY4XNwYMJpw==}
@@ -4033,6 +4044,8 @@ snapshots:
       object-assign: 4.1.1
       vary: 1.1.2
 
+  cortico-world-dungeon@0.1.4: {}
+
   crelt@1.0.7: {}
 
   css-tree@3.2.1:
@@ -5251,12 +5264,13 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  set-blocking@2.0.0: {}
   ses@2.3.0:
     dependencies:
       '@endo/cache-map': 1.1.0
       '@endo/env-options': 1.1.11
       '@endo/immutable-arraybuffer': 2.0.0
+
+  set-blocking@2.0.0: {}
 
   setprototypeof@1.2.0: {}
 

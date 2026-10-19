@@ -1,0 +1,10 @@
+{
+  "upstream": "cortico-world-dungeon",
+  "runtimeVersion": "0.1.4",
+  "runtimeProtocol": 2,
+  "latestInspectedVersion": "0.2.0",
+  "latestExtensionApi": 6,
+  "purpose": "Explicit private API 5 compatibility for the existing modified host; not a public replacement for the API 6 package.",
+  "license": "MIT",
+  "changes": ["Wrap existing World tools and events", "Cache dated observations without network polling", "Archive original receipts under the World data directory"]
+}

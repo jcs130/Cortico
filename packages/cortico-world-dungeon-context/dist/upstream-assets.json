@@ -1,0 +1,8 @@
+{
+  "upstream": "cortico-world-dungeon",
+  "version": "0.1.4",
+  "hashes": {
+    "console.js": "715e4d931fac6fa1e070fc8418bc36fdf1b6c9d2e49b8d2ae118cb408821432e",
+    "console.css": "24c581d0979c59b0791d27d6c09e30ba61722253c4056a5173e13bcf445956d1"
+  }
+}

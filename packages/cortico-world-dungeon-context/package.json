@@ -1,0 +1,41 @@
+{
+  "name": "cortico-world-dungeon-context-api5",
+  "version": "0.1.0-dev.20261019",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Private API 5 compatibility adapter for observed Dungeon facts and receipt archives",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./context": "./src/context.ts"
+  },
+  "files": [
+    "src",
+    "dist",
+    "scripts/build.mjs",
+    "README.md",
+    "PROVENANCE.json",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs"
+  },
+  "cortico": {
+    "kind": "world",
+    "api": 5,
+    "consoleClient": "dist/console.js",
+    "consoleStyle": "dist/console.css"
+  },
+  "dependencies": {
+    "cortico-world-dungeon": "0.1.4"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "cortico-world",
+    "cortico",
+    "private-api5-compatibility"
+  ]
+}

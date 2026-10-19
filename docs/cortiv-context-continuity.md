@@ -1,0 +1,11 @@
+<!-- Owner: bots/cortiv/persona/activity-agenda.ts, historical-recall.ts, and packages/cortico-world-dungeon-context/src/context.ts -->
+
+# Continuous intentions and observed state
+
+`activity_plan start` records a Persona-selected intention without waiting for background planning. Read the current revision first, then supply a new stable id, title, World ids, purpose in `why`, completion criterion in `doneWhen`, and optional evidence references. Starting a stage does not perform an external action. Open declared purposes accompany foreground, full-context and startup requests across World switches. `update references` requires the current revision and evidence in `note`; original references remain in dated history. Completion, cancellation and premise corrections retain the existing versioned agenda semantics. A candidate cannot silently replace an already declared purpose.
+
+`memory_record recall` accepts optional `world`. `historicalRecall.workspaceRoots` explicitly maps World ids to workspace-relative directories with one `world=path` per line. A scoped request searches only those roots and the same World's configured external read source. Missing configuration remains unavailable; it does not search another World instead. Unscoped requests retain their prior behavior. History keeps original speakers, dates and references and is not current-state evidence.
+
+The private Dungeon API 5 adapter pins upstream 0.1.4 for the existing modified host. Current upstream 0.2.0 declares API 6; this compatibility adapter is not an API 6 public release. Original authentication, events, account and execution remain with upstream. Cached observations and exact receipt archives use the host's World facts/read-tool contracts. Potential mutations, relevant events, expiry and scope changes invalidate old resource readings. A late read cannot restore invalidated state, and an old account's receipt cannot become a new account's observation. Archives are historical after restart.
+
+No fixed gifting policy is imposed. The Persona checks the declared purpose, actual purchase or commission agreement, current resources and original receipts before choosing an irreversible transfer. A seller or a material source alone does not establish a commission. Raw server suggestions are optional candidates.
