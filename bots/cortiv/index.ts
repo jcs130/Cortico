@@ -86,6 +86,8 @@ export const CORTIV_HISTORICAL_RECALL_CONFIG_GROUP: ConfigGroup = {
     properties: {
       'historicalRecall.enabled': { type: 'boolean', title: '启用游戏记忆回查', 'x-hot': true },
       'historicalRecall.worldId': { type: 'string', title: '游戏 World id', 'x-hot': true },
+      'historicalRecall.workspaceRoots': { type: 'string', title: 'World 历史目录', 'x-hot': true,
+        description: '每行 worldId=工作区相对目录。recall 带 world 时只检索对应目录及同 World 外部源；未配置则明确不可用，不回退到其他世界。' },
       'historicalRecall.toolName': { type: 'string', title: '游戏记忆工具名', 'x-hot': true,
         description: '必须提供 Agent MC World 的 action:service, operation:prepare 公共契约。只查询当前挂载的明确工具，不探测或启动其他 World。' },
       'historicalRecall.maxBytes': { type: 'integer', minimum: 512, maximum: 32768, title: '游戏历史正文预算(UTF-8字节)', 'x-hot': true },

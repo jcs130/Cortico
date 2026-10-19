@@ -700,7 +700,7 @@ export class CortiV extends Cormini {
       core.injectInternal(pending || '[待办] 当前没有等待中或待复核的事项。', 'pending_work');
       this.deliveredPendingNote = pending;
     }
-    const agenda = this.activityAgenda?.summary() ?? '';
+    const agenda = [this.activityAgenda?.summary(), this.activityAgenda?.intentContext()].filter(Boolean).join('\n');
     if (agenda !== this.deliveredAgendaNote) {
       core.injectInternal(agenda, 'activity_plan');
       this.deliveredAgendaNote = agenda;
@@ -774,6 +774,7 @@ export class CortiV extends Cormini {
     }, {
       name: 'activity_plan',
       description: 'Read a persistent flexible activity agenda; review requests asynchronous planning and returns immediately. '
+        + 'start directly records a self-chosen multi-step intention without a background proposal: use a new stable id, title, worlds, why (purpose/beneficiary), doneWhen and current expected_revision from read; references may name original evidence. It does not execute an action. '
         + 'review with question selects the configured reflection provider and context/output budgets for a focused causal or strategy review, without replacing the agenda or blocking action. '
         + 'Use this proactively for a difficult decision or revising a method; publicTopic optionally announces an accepted review to main for a brief audience-facing progress summary, never raw reasoning. '
         + 'read pages open stages by default; includeCompleted:true adds completed history, includeClosed:true adds completed and cancelled history; id reads only that stage or candidate with its dated metadata. Closed evidence does not occupy open-stage capacity. '
@@ -790,9 +791,11 @@ export class CortiV extends Cormini {
       parameters: {
         type: 'object', additionalProperties: false,
         properties: {
-          operation: { type: 'string', enum: ['read', 'review', 'adopt', 'focus', 'update', 'amend', 'reopen', 'bind'] },
+          operation: { type: 'string', enum: ['read', 'start', 'review', 'adopt', 'focus', 'update', 'amend', 'reopen', 'bind'] },
+          title: { type: 'string', minLength: 1, maxLength: 100, description: 'start: the chosen objective, including who the result is for when relevant.' },
+          references: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 160 }, description: 'start/update: exact receipt or Memory references. update needs expected_revision and note and retains prior references; references are not proof of completion.' },
           work_ref: { ...WORK_REFERENCE_SCHEMA, description: 'bind: exact current World work identity whose external outcome fully settles this stage; requires expected_revision and note.' },
-          expected_revision: { type: 'integer', minimum: 0, description: 'Exact current agenda revision from read; required for amend/reopen and update with why/worlds/doneWhen. Stale corrections leave the agenda unchanged.' },
+          expected_revision: { type: 'integer', minimum: 0, description: 'Exact current agenda revision from read; required for start/amend/reopen/bind and update with why/worlds/doneWhen/references. Stale corrections leave the agenda unchanged.' },
           question: { type: 'string', minLength: 1, maxLength: 1200,
             description: 'review: focused question about evidence, a difficult strategy or an uncertain cause; selects the reflection profile. Omit for a routine agenda proposal.' },
           publicTopic: { type: 'string', minLength: 1, maxLength: 120,
@@ -869,10 +872,12 @@ export class CortiV extends Cormini {
       { coveredCheckpoints: staleCheckpoints, replaceCurrentState: true });
     const refreshed = current.length !== original.length || current.some((record, index) => record !== original[index]);
     const lifecycle = ctx.sessionId === MAIN ? this.currentWorldLifecycle() : '';
+    const intentions = ctx.sessionId === MAIN ? this.activityAgenda?.intentContext() ?? '' : '';
     const complete = (): ContextRecord[] | null => {
       const claims = this.stateMemory.hasClaims();
-      if (!refreshed && !claims && !lifecycle) return null;
-      const records = [...current, ...(refreshed || claims ? [message('user', this.stateMemory.summary())] : [])];
+      if (!refreshed && !claims && !lifecycle && !intentions) return null;
+      const records = [...current, ...(refreshed || claims ? [message('user', this.stateMemory.summary())] : []),
+        ...(intentions ? [message('user', intentions)] : [])];
       if (lifecycle) {
         const firstBody = records.findIndex(record => !record.context.head
           && !(record.item.type === 'message' && (record.item.role === 'system' || record.item.role === 'developer')));
@@ -912,7 +917,7 @@ export class CortiV extends Cormini {
       ...(agenda ? ['activity_plan', ...(this.planningConfig().agendaEnabled ? ['planning'] : [])] : []),
     ];
     const pins = [...ctx.messages.filter(record => !!record.item.id && this.deferredInputIds.has(record.item.id)),
-      ...[recentMemory, index, lifecycle].filter(Boolean).map(text => message('user', text)), ...facts.pins, ...[recentSpeech, this.actionEvidence(ctx.messages), pending, agenda, this.viewerEncounters.text(), this.viewerRecallContext.text(), this.referenceLibrary.context()].filter(Boolean)
+      ...[recentMemory, index, lifecycle].filter(Boolean).map(text => message('user', text)), ...facts.pins, ...[recentSpeech, this.actionEvidence(ctx.messages), pending, agenda, this.activityAgenda?.intentContext() ?? '', this.viewerEncounters.text(), this.viewerRecallContext.text(), this.referenceLibrary.context()].filter(Boolean)
       .map((text) => message('user', text))];
     const handoffSources = new Map<string, { digest: string; original: boolean }>();
     this.foregroundCurrentHandoffs = ctx.messages.flatMap((record) => {

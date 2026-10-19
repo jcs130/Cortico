@@ -1,0 +1,32 @@
+import { afterEach, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { CortiV } from '../../bots/cortiv/persona/persona.ts';
+import { HISTORICAL_RECALL_DEFAULTS } from '../../bots/cortiv/persona/historical-recall.ts';
+import { makeFakeHarnessApi } from '../core/helpers.ts';
+import { nullLogger } from '../../src/core/util.ts';
+import type { World } from '../../src/core/types.ts';
+const cleanup: Array<() => void> = [];
+afterEach(() => { for (const fn of cleanup.splice(0)) fn(); });
+it('keeps two Worlds historical topics separate and never falls back to a different game service', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'scoped-history-'));
+  let remoteReads = 0;
+  const external = { id: 'field', tools: () => [{ name: 'field_memory', tags: ['read'], handler: async () => { remoteReads++; return 'field-only'; } }] } as unknown as World;
+  const persona = new CortiV({ memoryDir: dir, worlds: [external], historicalRecall: () => ({ ...HISTORICAL_RECALL_DEFAULTS,
+    enabled: true, worldId: 'field', toolName: 'field_memory', workspaceRoots: 'field=field\ntown=town' }) });
+  persona.attach(makeFakeHarnessApi()); cleanup.push(() => { persona.stopRhythm(); rmSync(dir, { recursive: true, force: true }); });
+  persona.memory.writeFileAtomic('field/old.md', '[earlier] bow belonged to field-player.');
+  persona.memory.writeFileAtomic('town/old.md', '[earlier] bow materials were bought by town-player.');
+  const tool = persona.declareSessions().find(x => x.id === 'main')!.tools().find(x => x.name === 'memory_record')!;
+  const invoke = (world: string) => tool.handler({ operation: 'recall', query: 'bow', world }, { role: 'main', log: nullLogger() });
+  const result = JSON.parse(await invoke('town') as string);
+  expect(result.sources[0].text).toContain('town-player');
+  expect(result.sources[0].text).not.toContain('field-player');
+  expect(result.sources[1].text).not.toContain('field-only');
+  expect(remoteReads).toBe(0);
+  const missing = JSON.parse(await invoke('unknown') as string);
+  expect(missing.sources[0].text).not.toContain('town-player');
+  expect(missing.sources[0].status).toBe('unavailable');
+  expect(remoteReads).toBe(0);
+});
