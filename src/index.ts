@@ -111,6 +111,8 @@ export class AvatarStageWorld implements World {
           {
             trigger:
               event.type !== "avatar.voice" &&
+              !(event.type === 'avatar.action' && ['speech', 'presentation'].includes(String(event.data.kind))
+                && ['completed', 'cancelled'].includes(String(event.data.status))) &&
               [
                 "completed",
                 "failed",
@@ -310,8 +312,9 @@ export class AvatarStageWorld implements World {
       text:
         `[演出现场] ${state.audioOwner ? "音频输出已连接" : "没有已启用的音频输出"}；` +
         `${state.foreground ? "音频队列忙碌" : "音频队列空闲"}。已连接不等于台词已播放。\n${this.commentary?.facts() ?? ""}` +
+        ((state.voice as any)?.busyPolicy==='preserve'?'\n[连续发言] 当前一句播完前，新台词会跳过，不排队也不打断；忙碌时继续其他行动，不循环重试旧台词。只有明确需要打断时才interrupt。':'') +
         `\n[语音文本契约] ${textFormat}；按语音状态的 writingGuide 和按需编写指南起草。` +
-        '\n[联合演出] avatar_voice speak 可同时传 performance={emotion,expression,bodyClip}，由本地脚本随这句音频调度，无需再推理或等待 actionId；可与游戏工具同一回复输出。status.performance 给出当前可用名称。emotion 不代表语音服务支持情绪控制。' +
+        '\n[联合演出] avatar_voice speak 可同时传 performance={emotion,expression,bodyClip}，与你这句音频同步，无需再推理或等待 actionId；可与游戏工具同一回复输出。status.performance 给出当前可用名称。emotion 不代表语音服务支持情绪控制。' +
         (this.presentation?.audioEnabled() ? '\n[桌宠音频] avatar_voice 的 performance 使用桌宠词表；avatar_control 骨骼指令属于演出室。' : '') +
         (this.director?.status().enabled
           ? `\n[演出快选择] ${this.director.status().hostDecisionAvailable ? "可用，随台词并行选择已安装的表情和动作" : "宿主未提供决策接口，仍可显式选动作"}。`
@@ -341,6 +344,10 @@ export class AvatarStageWorld implements World {
                 type: "string", enum: ["plain", "drama-3"], "x-hot": false,
                 title: "所选服务的台词格式",
                 description: "plain 为自然口语；drama-3 允许方括号声音指令。需与实际后端一致，保存后重启生效。",
+              },
+              "worlds.avatar-stage.voice.busyPolicy": {
+                type:'string',enum:['replace','preserve'],'x-hot':false,title:'新台词遇到正在播放的音频',
+                description:'preserve 保留当前一句，跳过新台词且不合成；replace 用新台词打断。显式 interrupt 始终可打断。',
               },
             },
           },
@@ -451,7 +458,7 @@ const definition: WorldDefinition<WorldConfig> = {
     port: 0,
     dataDir: "",
     avatars: [],
-    voice: { url: "", model: "", voice: "", textFormat: "plain" },
+    voice: { url: "", model: "", voice: "", textFormat: "plain", busyPolicy:"replace" },
     presentation: { mode: 'stage', url: '' },
     commentary: { ...COMMENTARY_DEFAULTS },
     director: { ...DIRECTOR_DEFAULTS },

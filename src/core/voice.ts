@@ -131,6 +131,7 @@ export class VoiceService {
       prebufferMs: 480,
       transport: "chunked-wav",
       textFormat: c?.textFormat ?? "plain",
+      busyPolicy: c?.busyPolicy ?? 'replace',
       writingGuide:
         c?.textFormat === "drama-3"
           ? "Use short speakable sentences. Optional square-bracket voice directions, e.g. [warm, cheerful], are TTS delivery cues. Body/expression actions go through avatar_control. No narrator/character prefix or speaker switching for a single configured voice. See the World speech-writing guide for local backend limits."

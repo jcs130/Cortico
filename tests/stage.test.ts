@@ -94,6 +94,32 @@ async function speechSetup() {
   return r;
 }
 
+it('preserves admitted speech, skips new speech without synthesis, and permits explicit interruption',async()=>{
+ const {server,events}=await speechSetup();server.stage.config.voice!.busyPolicy='preserve';
+ const first=await server.call('avatar_voice',{action:'speak',text:'Finish this sentence.'},'preserve-first');
+ const skipped=await server.call('avatar_voice',{action:'speak',text:'Do not cut it off.'},'preserve-second');
+ expect(skipped).toMatchObject({accepted:false,status:'skipped',reason:'audio_busy'});
+ expect(server.stage.status().foreground).toBe(first.id);
+ expect(server.stage.ledger.history(20)).toHaveLength(1);
+ expect(events.filter(e=>e.type==='avatar.speech.submitted')).toHaveLength(1);
+ const duplicate=await server.call('avatar_voice',{action:'speak',text:'Finish this sentence.'},'preserve-first');
+ expect(duplicate).toMatchObject({id:first.id,reused:true});
+ await server.call('avatar_voice',{action:'interrupt'});
+ expect(server.stage.status().foreground).toBe(null);
+ const next=await server.call('avatar_voice',{action:'speak',text:'Now a fresh sentence.'},'preserve-third');
+ expect(next.accepted).toBe(true);
+});
+
+it('preserve also reserves audio across asynchronous admission',async()=>{
+ const {server,events}=await speechSetup();server.stage.config.voice!.busyPolicy='preserve';
+ const [a,b]=await Promise.all([
+  server.call('avatar_voice',{action:'speak',text:'First sentence.'},'concurrent-one'),
+  server.call('avatar_voice',{action:'speak',text:'Second sentence.'},'concurrent-two')]);
+ expect(a.accepted).toBe(true);expect(b).toMatchObject({accepted:false,reason:'audio_busy'});
+ expect(server.stage.status().foreground).toBe(a.id);
+ expect(events.filter(e=>e.type==='audio.cut')).toHaveLength(0);
+});
+
 it('submits speech and facial intent together, binds the cue once, and cancels it with speech', async () => {
   const {server, events} = await speechSetup();
   const args = {action: 'speak', text: 'One authored performance.', performance: {emotion: 'happy'}};

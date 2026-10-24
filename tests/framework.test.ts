@@ -132,3 +132,28 @@ it("a rejected configuration does not leave the World started",async()=>{
   reject=false;await world.start({pushEvent:async()=>{}} as never);
  }finally{await world.stop();await rm(dataDir,{recursive:true,force:true});}
 });
+
+it('keeps completed speech receipts without starting a narration feedback loop',async()=>{
+ const {createServer}=await import('node:http');
+ const {AvatarStageWorld}=await import('../src/index.ts');
+ const sockets=new Set<import('node:net').Socket>();
+ let stream:import('node:http').ServerResponse|undefined;
+ const server=createServer((req,res)=>{
+  if(req.url==='/api/state')res.end(JSON.stringify({protocol:PROTOCOL}));
+  else if(req.url==='/events'){stream=res;res.writeHead(200,{'Content-Type':'text/event-stream'});res.write(': ready\n\n');}
+  else res.writeHead(404).end();
+ });
+ server.on('connection',socket=>{sockets.add(socket);socket.on('close',()=>sockets.delete(socket));});
+ await new Promise<void>(ok=>server.listen(0,'127.0.0.1',ok));
+ const world=new AvatarStageWorld(()=>({enabled:true,remoteUrl:'http://127.0.0.1:'+(server.address() as import('node:net').AddressInfo).port,port:0,dataDir:'',avatars:[]}));
+ const pushed:{event:any;options:any}[]=[];
+ try{
+  await world.start({pushEvent:async(event:unknown,options:unknown)=>{pushed.push({event,options});}} as never);
+  await vi.waitFor(()=>expect(stream).toBeDefined());
+  const variants=[['speech','completed'],['speech','cancelled'],['presentation','completed'],['speech','failed'],['music-play','completed']];
+  for(const [kind,status] of variants)stream!.write('data: '+JSON.stringify({protocol:PROTOCOL,type:'avatar.action',at:Date.now(),data:{id:kind+status,kind,status}})+'\n\n');
+  await vi.waitFor(()=>expect(pushed).toHaveLength(5));
+  expect(pushed.map(r=>r.options.trigger)).toEqual(['piggyback','piggyback','piggyback','flush','flush']);
+  expect(pushed.map(r=>JSON.parse(r.event.text).status)).toEqual(variants.map(v=>v[1]));
+ }finally{await world.stop();for(const socket of sockets)socket.destroy();await new Promise<void>(ok=>server.close(()=>ok()));}
+});

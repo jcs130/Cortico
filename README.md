@@ -2,6 +2,8 @@
 
 # 3D 演出室 · Avatar Stage
 
+`voice.busyPolicy:"preserve"` 保留当前合成或播放中的一句，新台词返回 `accepted:false, reason:audio_busy`，不合成、不排队、不打断；下次只讲仍有价值的新内容。显式 `avatar_voice interrupt` 仍可打断。省略该配置时沿用 `replace` 行为。此能力适用于所有游戏和其他实时演出。
+
 ## 现场反应与桌面回复 / Scene reactions and desktop replies
 
 `director.reactionSources` 可选指定现场事件来源，系统一从去重后的已安装动作中选择无声反应。请求只含两条带来源的新事实和当前台词；手动操作、音频占用或版本变化会取消过期候选。形象词表的 `presentation:{key,auto,tags}` 保留作者允许自动选用的范围，手动动作仍完整可用。反应提交、首个渲染帧与动作结束分别留证。

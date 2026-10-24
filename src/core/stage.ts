@@ -31,6 +31,7 @@ export class AvatarStage {
   private owner: { sessionId: string; until: number } | null = null;
   private foreground: string | null = null;
   private audioRevision = 0;
+  private speechAdmissions = new Set<string>();
   private ownedMotions = new Map<
     string,
     { avatarId: string; status: string }
@@ -486,6 +487,8 @@ export class AvatarStage {
       return { ok: true, status: "interrupt-requested" };
     }
     if (args.action !== "speak") throw Error("Unknown voice action");
+    const busyPolicy=this.config.voice?.busyPolicy??'replace';
+    if(!['replace','preserve'].includes(busyPolicy))throw Error('Invalid speech busy policy');
     const active = this.ensureActive();
     const sessionId = this.ensureAudio();
     const requestedPerformance = speechPerformance(args.performance);
@@ -508,12 +511,22 @@ export class AvatarStage {
         status: "skipped",
         reason: "Audio foreground changed; draft was not submitted",
       };
-    const ticket = ++this.audioRevision;
-    const row = await this.ledger.submit(requestId, "speech", this.activeId, {
+    const command={
       text: args.text,
       voice: args.voice ?? this.voice.status().voice,
       ...(requestedPerformance ? {performance: requestedPerformance} : {}),
-    });
+    };
+    if([...this.ledger.actions.values()].some(a=>a.requestId===requestId)){
+      const old=await this.ledger.submit(requestId,'speech',this.activeId,command);
+      return {...old.record,reused:true};
+    }
+    if(busyPolicy==='preserve'&&(this.foreground||this.speechAdmissions.size))return {
+      accepted:false,status:'skipped',reason:'audio_busy',currentActionId:this.foreground,
+      instruction:'Current audio continues. This new line was not queued or synthesized; do not retry stale commentary.'};
+    this.speechAdmissions.add(requestId);
+    try {
+    const ticket = ++this.audioRevision;
+    const row = await this.ledger.submit(requestId, "speech", this.activeId, command);
     if (row.reused) return { ...row.record, reused: true };
     if (requestedPerformance) await this.ledger.note(row.record.id, {
       requestedPerformance, appliedPerformance: performance, presentationWarnings: resolved.warnings,
@@ -568,6 +581,7 @@ export class AvatarStage {
       await this.ledger.update(row.record.id, "failed", { error: String(e) });
       throw e;
     }
+    } finally {this.speechAdmissions.delete(requestId);}
   }
   async musicAction(
     args: Record<string, unknown>,

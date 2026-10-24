@@ -105,6 +105,8 @@ export interface VoiceConfig {
   synthesisTimeoutMs?: number;
   /** Explicit text contract of the configured synthesis backend. */
   textFormat?: "plain" | "drama-3";
+  /** preserve skips new speech while audio is admitted/playing; interrupt remains explicit. */
+  busyPolicy?: "replace" | "preserve";
 }
 export interface StageConfig {
   port: number;

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.2-dev.20261025.3
+
+- Deliver ordinary speech and its synchronized presentation completion/cancellation as piggyback receipts, so finishing a sentence does not itself wake another narration turn. Failures and other asynchronous results still notify promptly.
+
+## 0.1.2-dev.20261025.2
+
+- Add explicit preserve/replace speech admission policy. Preserve keeps current speech intact and skips new lines without synthesis or backlog, including concurrent admissions; explicit interrupt remains available.
+- Repeated speech request IDs do not replace active audio or increment its revision.
+
 ## 0.1.2-dev.20261025.1
 
 - Keep valid speech when optional expressions or body clips are unavailable; preserve requested intent and report omitted cues.
