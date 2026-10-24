@@ -38,7 +38,14 @@
     "kind": "world",
     "api": 6,
     "describe": "describe.json",
-    "displayName": "3D 演出室"
+    "displayName": "3D 演出室",
+    "tags": [
+      "streaming",
+      "voice",
+      "creative",
+      "external-setup",
+      "experimental"
+    ]
   },
   "keywords": [
     "cortico-world",
@@ -87,7 +94,8 @@
     "examples",
     "README.md",
     "LICENSE",
-    "THIRD_PARTY_NOTICES.md"
+    "THIRD_PARTY_NOTICES.md",
+    "AGENTS.md"
   ],
   "packageManager": "pnpm@11.28.6"
 }
