@@ -48,12 +48,14 @@ it('does not attach a late gesture after its displayed line has ended', async ()
   expect(await bridge.attach({ audioActionId: 'old-caption', bodyClip: 'wave' })).toMatchObject({ accepted: false });
   expect(commands).toHaveLength(0);
 });
-it('routes a single authored text performance and rejects unknown cues before sending', async () => {
+it('routes authored text while reporting unavailable optional cues', async () => {
   const {bridge, commands} = await endpoint();
   await bridge.speak({action:'speak', text:'Hello.', performance:{emotion:'pleased',expression:'happy',bodyClip:'wave'}}, 'one-performance');
   expect(commands[0]).toMatchObject({action:'say',text:'Hello.',actions:['happy','wave']});
-  await expect(bridge.speak({action:'speak',text:'Invalid.',performance:{bodyClip:'unknown'}}, 'bad')).rejects.toThrow('unavailable');
-  expect(commands).toHaveLength(1);
+  const receipt = await bridge.speak({action:'speak',text:'Still valid.',performance:{bodyClip:'unknown'}}, 'missing');
+  expect(receipt).toMatchObject({accepted:true,requestedPerformance:{bodyClip:'unknown'},presentationWarnings:[expect.any(String)]});
+  expect(commands[1]).toMatchObject({action:'say',text:'Still valid.'});
+  expect(commands[1].actions).toBeUndefined();
 });
 it('rejects public endpoints instead of falling back to TTS', async () => {
   const bridge = new DesktopPresentation(() => ({ mode: 'desktop-text', url: 'https://example.com' }), new AbortController().signal);

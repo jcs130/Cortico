@@ -13,7 +13,7 @@ import { DesktopAudioRenderer } from '../src/desktop-audio.ts';
 import { animationFixture } from "./fixtures/vrma.ts";
 const cleanup: Array<() => Promise<unknown>> = [];
 
-it.each([false, true])('routes speech and song to desktop with explicit performance=%s and reconciles playback', async (explicit) => {
+it.each([false, true, 'missing', 'rejected'])('routes speech and song to desktop with explicit performance=%s and reconciles playback', async (explicit) => {
   const bytes = Buffer.alloc(4844); bytes.write('RIFF'); bytes.writeUInt32LE(bytes.length - 8, 4); bytes.write('WAVEfmt ', 8);
   bytes.writeUInt32LE(16,16); bytes.writeUInt16LE(1,20); bytes.writeUInt16LE(1,22); bytes.writeUInt32LE(24000,24);
   bytes.writeUInt32LE(48000,28); bytes.writeUInt16LE(2,32); bytes.writeUInt16LE(16,34); bytes.write('data',36); bytes.writeUInt32LE(bytes.length-44,40);
@@ -30,7 +30,7 @@ it.each([false, true])('routes speech and song to desktop with explicit performa
     const command = JSON.parse(body.toString()); commands.push(command);
     if (command.action === 'play-audio') { const row = { ...command, id: 'device-' + commands.length, state: 'queued' };
       state.media.recent.push(row); state.media.foreground = row.id; res.end(JSON.stringify({ accepted: true, ...row }));
-    } else { res.end(JSON.stringify({ accepted: true, id: command.id })); }
+    } else { res.end(JSON.stringify({ accepted: !(command.action === 'act' && explicit === 'rejected'), id: command.id, reason: 'Fixture cue rejected' })); }
   });
   await new Promise<void>(done => desktop.listen(0, '127.0.0.1', done));
   cleanup.push(async () => { desktop.closeAllConnections(); await new Promise<void>(done => desktop.close(() => done())); });
@@ -42,18 +42,24 @@ it.each([false, true])('routes speech and song to desktop with explicit performa
     admitted: (...args) => admitted.push(args), log: error => errors.push(error) });
   await renderer.start(); cleanup.push(() => renderer.stop());
   const voice = await server.call('avatar_voice', { action: 'speak', text: 'A short spoken line.',
-    ...(explicit ? {performance: {emotion: 'happy', bodyClip: 'wave'}} : {}) }, 'desktop-voice');
-  await vi.waitFor(() => { expect(errors).toEqual([]); expect(commands.some(c => c.action === (explicit ? 'act' : 'play-audio'))).toBe(true); }, { timeout: 2500 });
+    ...(explicit ? {performance: explicit === 'missing' ? {emotion: 'unavailable'} : {emotion: 'happy', bodyClip: 'wave'}} : {}) }, 'desktop-voice');
+  await vi.waitFor(() => { expect(errors).toEqual([]); expect(commands.some(c => c.action === (explicit && explicit !== 'missing' ? 'act' : 'play-audio'))).toBe(true); }, { timeout: 2500 });
   expect(admitted).toHaveLength(explicit ? 0 : 1); // Explicit cues never call the optional decision model.
-  if (explicit) expect(commands.find(c => c.action === 'act')).toMatchObject({id: state.media.recent[0].id, actions: ['happy', 'wave']});
+  if (explicit && explicit !== 'missing') expect(commands.find(c => c.action === 'act')).toMatchObject({id: state.media.recent[0].id, actions: ['happy', 'wave']});
   expect(uploads[0]).toEqual(bytes);
   expect(commands.find(c => c.action === 'play-audio')).toMatchObject({ kind: 'speech', text: 'A short spoken line.' });
   expect(server.stage.ledger.result(String(voice.id)).status).toBe('queued');
   const spoken = state.media.recent[0]; spoken.state = 'playing'; spoken.startedAt = Date.now();
   await vi.waitFor(() => expect(server.stage.ledger.result(String(voice.id)).status).toBe('playing'), { timeout: 2500 });
-  expect(await renderer.attach({ audioActionId: voice.id, bodyClip: 'wave', expressionWeights: { happy: .5 } })).toMatchObject({ accepted: true });
+  expect(await renderer.attach({ audioActionId: voice.id, bodyClip: 'wave', expressionWeights: { happy: .5 } })).toMatchObject({ accepted: explicit !== 'rejected' });
   spoken.state = 'completed'; spoken.audioTimeMs = 100;
   await vi.waitFor(() => expect(server.stage.ledger.result(String(voice.id)).status).toBe('completed'), { timeout: 2500 });
+  if (explicit === 'missing' || explicit === 'rejected') {
+    expect(server.stage.ledger.result(String(voice.id)).evidence).toMatchObject({performanceCue: {
+      accepted: false, renderingConfirmed: false, warnings: [expect.any(String)],
+    }});
+    expect(commands.filter(c => c.action === 'cancel-audio' && c.requestId === voice.id)).toHaveLength(0);
+  }
   const imported = await server.importMusic(bytes, { title: 'Fixture song', instrumental: true });
   await server.call('avatar_music', { action: 'approve', jobId: imported.jobId });
   const song = await server.call('avatar_music', { action: 'play', trackId: imported.trackId }, 'desktop-song');
@@ -105,12 +111,22 @@ it('submits speech and facial intent together, binds the cue once, and cancels i
   await vi.waitFor(() => expect(server.stage.ledger.result(cues[0].id).status).toBe('cancelled'));
 });
 
-it('rejects unknown performance before replacing current speech', async () => {
-  const {server} = await speechSetup();
+it('keeps valid speech when an optional cue is unavailable and does not repeat a retry', async () => {
+  const {server, events} = await speechSetup();
   const first = await server.call('avatar_voice', {action: 'speak', text: 'Existing speech.'}, 'before-invalid');
-  await expect(server.call('avatar_voice', {action: 'speak', text: 'Invalid.', performance: {bodyClip: 'invented'}}, 'bad-cue')).rejects.toThrow('unavailable');
-  expect(server.stage.status().foreground).toBe(first.id);
-  expect(server.stage.ledger.history().some(r => r.requestId === 'bad-cue')).toBe(false);
+  const args = {action: 'speak', text: 'Valid dialogue.', performance: {emotion: 'curious', bodyClip: 'invented'}};
+  const second = await server.call('avatar_voice', args, 'missing-cue');
+  expect(second).toMatchObject({accepted: true, presentationWarnings: [expect.any(String), expect.any(String)]});
+  expect(server.stage.status().foreground).toBe(second.id);
+  expect(server.stage.ledger.result(String(first.id)).status).toBe('cancelled');
+  expect(server.stage.ledger.history().filter(r => r.kind === 'presentation')).toHaveLength(0);
+  const submitted = events.filter(e => e.type === 'avatar.speech.submitted' && e.data.actionId === second.id);
+  expect(submitted).toHaveLength(1);
+  expect(submitted[0].data.performance).toEqual(args.performance);
+  expect(await server.call('avatar_voice', args, 'missing-cue')).toMatchObject({id:second.id,reused:true});
+  expect(events.filter(e => e.type === 'command' && e.data.eventId === second.id)).toHaveLength(1);
+  await expect(server.call('avatar_voice', {...args,performance:{emotion:42}}, 'malformed')).rejects.toThrow();
+  expect(server.stage.status().foreground).toBe(second.id);
 });
 
 it("releases the audio foreground after provider failure so idle commentary can resume", async () => {

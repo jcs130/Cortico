@@ -17,7 +17,7 @@ export const TOOL_DEFINITIONS = [
         voice: text,
         performance: {
           type: 'object', additionalProperties: false,
-          description: 'Optional cues authored in this same inference. Bound to this utterance locally; no audioActionId or extra model turn is needed. Read status.performance for current expression/bodyClip ids. Emotion is facial intent, not a TTS style control. Emit this call alongside game tools when both are appropriate.',
+          description: 'Optional cues authored in this same inference. Bound to this utterance locally; no audioActionId or extra model turn is needed. Read status.performance for current expression/bodyClip ids. Unavailable cues are omitted and reported in presentationWarnings; speech continues. Emotion is authored intent, not a TTS style control. Emit this call alongside game tools when both are appropriate.',
           properties: {
             emotion: { type: 'string', minLength: 1, maxLength: 100, description: 'Emotional intent. Without expression, use an exact installed expression id.' },
             expression: { type: 'string', minLength: 1, maxLength: 100, description: 'Exact facial expression id; overrides the emotion default.' },

@@ -103,3 +103,11 @@
 - Initial independent avatar World: rigged VRM presets, semantic poses, reusable motion library and optional local UniMate.
 - Single TTS/music output owner, streaming WAV, interruption, original action ledger and renderer execution receipts.
 - Independent SDK/server and clean production build without Cortico.
+# Changelog
+
+## 0.1.2-dev.20261025.1
+
+- Keep valid speech when optional expressions or body clips are unavailable; preserve requested intent and report omitted cues.
+- Share capability resolution across stage, desktop audio and desktop text. Desktop cue rejection no longer cancels admitted audio.
+- Export the cue resolver from the framework-independent core entry point.
+

@@ -25,3 +25,39 @@ export function performanceActions(cue: SpeechPerformance | undefined, expressio
   if (cue.bodyClip && !clips.includes(cue.bodyClip)) throw Error('Speech performance bodyClip is unavailable: ' + cue.bodyClip);
   return [...(expression ? [expression] : []), ...(cue.bodyClip ? [cue.bodyClip] : [])];
 }
+
+export interface ResolvedSpeechPerformance {
+  requested?: SpeechPerformance;
+  applied?: SpeechPerformance;
+  actions: string[];
+  warnings: string[];
+}
+
+/** Unavailable optional cues do not invalidate speech. No substitute cue is inferred. */
+export function resolveSpeechPerformance(
+  cue: SpeechPerformance | undefined,
+  expressions: readonly string[],
+  clips: readonly string[],
+): ResolvedSpeechPerformance {
+  if (!cue) return { actions: [], warnings: [] };
+  const applied: SpeechPerformance = {}, warnings: string[] = [];
+  const expression = cue.expression ?? cue.emotion;
+  if (expression && expressions.includes(expression)) {
+    if (cue.expression) applied.expression = cue.expression;
+    if (cue.emotion) applied.emotion = cue.emotion;
+  } else if (expression) {
+    warnings.push(cue.expression
+      ? `Unavailable expression omitted: ${cue.expression}`
+      : `Emotion retained as intent only: ${cue.emotion}`);
+  }
+  if (cue.bodyClip) {
+    if (clips.includes(cue.bodyClip)) applied.bodyClip = cue.bodyClip;
+    else warnings.push(`Unavailable body clip omitted: ${cue.bodyClip}`);
+  }
+  return {
+    requested: { ...cue },
+    applied: Object.keys(applied).length ? applied : undefined,
+    actions: performanceActions(applied, expressions, clips),
+    warnings,
+  };
+}

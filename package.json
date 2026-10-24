@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-avatar-stage",
-  "version": "0.1.2-dev.20261024.4",
+  "version": "0.1.2-dev.20261025.1",
   "description": "Independent LLM-controlled 3D avatar, motion library and singing World",
   "type": "module",
   "license": "AGPL-3.0-only",

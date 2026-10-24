@@ -4,7 +4,7 @@ import { ActionLedger } from "./ledger.ts";
 import { MotionProvider } from "./motion.ts";
 import { MusicService } from "./music.ts";
 import { VoiceService } from "./voice.ts";
-import { speechPerformance, performanceActions } from './speech-performance.ts';
+import { speechPerformance, resolveSpeechPerformance } from './speech-performance.ts';
 import {
   HUMAN_BONES,
   PROTOCOL,
@@ -488,9 +488,11 @@ export class AvatarStage {
     if (args.action !== "speak") throw Error("Unknown voice action");
     const active = this.ensureActive();
     const sessionId = this.ensureAudio();
-    const performance = speechPerformance(args.performance);
+    const requestedPerformance = speechPerformance(args.performance);
     const desktop = this.sessions.get(sessionId)?.receipt.renderer === 'audio-only';
-    if (!desktop) performanceActions(performance, active.capabilities.expressions as string[], active.capabilities.clips as string[]);
+    const resolved = desktop ? { applied: requestedPerformance, warnings: [] as string[] }
+      : resolveSpeechPerformance(requestedPerformance, active.capabilities.expressions as string[], active.capabilities.clips as string[]);
+    const performance = resolved.applied;
     if (
       args.ifIdleRevision !== undefined &&
       (!Number.isSafeInteger(args.ifIdleRevision) ||
@@ -510,9 +512,12 @@ export class AvatarStage {
     const row = await this.ledger.submit(requestId, "speech", this.activeId, {
       text: args.text,
       voice: args.voice ?? this.voice.status().voice,
-      ...(performance ? {performance} : {}),
+      ...(requestedPerformance ? {performance: requestedPerformance} : {}),
     });
     if (row.reused) return { ...row.record, reused: true };
+    if (requestedPerformance) await this.ledger.note(row.record.id, {
+      requestedPerformance, appliedPerformance: performance, presentationWarnings: resolved.warnings,
+    });
     if (
       this.stopped ||
       ticket !== this.audioRevision ||
@@ -529,9 +534,14 @@ export class AvatarStage {
       this.foreground = row.record.id;
       if (performance && !desktop) {
         const expression = performance.expression ?? performance.emotion;
-        await this.control({action: 'direct', audioActionId: row.record.id,
-          expressionWeights: expression ? {[expression]: 1} : {},
-          ...(performance.bodyClip ? {bodyClip: performance.bodyClip} : {})}, row.record.id + ':performance');
+        try {
+          await this.control({action: 'direct', audioActionId: row.record.id,
+            expressionWeights: expression ? {[expression]: 1} : {},
+            ...(performance.bodyClip ? {bodyClip: performance.bodyClip} : {})}, row.record.id + ':performance');
+        } catch (error) {
+          resolved.warnings.push('Presentation was not admitted: ' + String(error));
+          await this.ledger.update(row.record.id, 'queued', { presentationWarnings: resolved.warnings });
+        }
         if (this.foreground !== row.record.id || this.stopped) return {...this.ledger.result(row.record.id), accepted: false};
       }
       this.emit("avatar.speech.submitted", {
@@ -539,7 +549,8 @@ export class AvatarStage {
         requestId,
         text: args.text,
         voice: args.voice ?? this.voice.status().voice,
-        ...(performance ? {performance} : {}),
+        ...(requestedPerformance ? {performance: requestedPerformance, appliedPerformance: performance,
+          presentationWarnings: resolved.warnings} : {}),
       });
       this.emit("command", {
         kind: "speech",
@@ -550,7 +561,8 @@ export class AvatarStage {
         expiresAt: Date.now() + 10000,
         ...(performance ? {performance} : {}),
       });
-      return { ...row.record, accepted: true, prebufferMs: 480 };
+      return { ...row.record, accepted: true, prebufferMs: 480, appliedPerformance: performance,
+        presentationWarnings: resolved.warnings };
     } catch (e) {
       if (this.foreground === row.record.id) this.cutAudio('speech-admission-failed');
       await this.ledger.update(row.record.id, "failed", { error: String(e) });

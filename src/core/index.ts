@@ -11,3 +11,4 @@ export * from "./commentary.ts";
 export * from "./commentary-runtime.ts";
 export * from "./animation-index.ts";
 export * from "./performance-director.ts";
+export * from "./speech-performance.ts";

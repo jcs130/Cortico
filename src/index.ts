@@ -19,6 +19,7 @@ import { DesktopReplySpeech, REPLY_SPEECH_DEFAULTS } from './desktop-reply-speec
 import { DesktopAudioRenderer } from './desktop-audio.ts';
 import { randomUUID } from 'node:crypto';
 import { checkSpeechFreshness } from './speech-freshness.ts';
+import { speechPerformance } from './core/speech-performance.ts';
 import {
   PerformanceDirector,
   DIRECTOR_DEFAULTS,
@@ -42,7 +43,7 @@ export class AvatarStageWorld implements World {
     args = { ...args }; delete args.observed_at;
     if (this.presentation?.enabled() && (args.action === 'status' || args.performance !== undefined)) {
       await this.presentation.refresh();
-      if (args.performance !== undefined) this.presentation.performanceActions(args.performance);
+      if (args.performance !== undefined) speechPerformance(args.performance);
     }
     if (this.presentation?.textOnly()) {
       if (args.action === 'speak' && !requestId.startsWith('avatar-commentary-')) this.commentary?.event({

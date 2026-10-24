@@ -103,7 +103,9 @@ export class DesktopAudioRenderer {
     try {
       // Resolve the current output vocabulary before opening the TTS stream.
       if (command.performance !== undefined) await this.ports.display.refresh();
-      const actions = this.ports.display.performanceActions(command.performance);
+      const {actions, warnings, requested} = this.ports.display.resolvePerformance(command.performance);
+      if (requested) current.performanceCue = {accepted: false, actions, requestedPerformance: requested,
+        warnings, renderingConfirmed: false};
       const audioUrl = new URL(String(command.url), this.ports.stageUrl());
       if (audioUrl.origin !== new URL(this.ports.stageUrl()).origin || !/^\/audio\/(speech|music)\/[^/]+$/.test(audioUrl.pathname)) throw Error('Unexpected stage audio URL');
       audioUrl.searchParams.set('sessionId', this.sessionId);
@@ -131,10 +133,14 @@ export class DesktopAudioRenderer {
       if (!result.accepted) throw Error(String(result.reason ?? 'Desktop audio was rejected'));
       current.desktopId = String(result.id);
       if (actions.length) {
-        const cue = await this.ports.display.request({action: 'act', id: current.desktopId, actions});
+        try {
+          const cue = await this.ports.display.request({action: 'act', id: current.desktopId, actions});
+          if (!cue.accepted) throw Error(String(cue.reason ?? 'Desktop performance cue was rejected'));
+          current.performanceCue = {...current.performanceCue, accepted: true};
+        } catch (error) {
+          warnings.push('Presentation was not admitted: ' + String(error));
+        }
         signal.throwIfAborted();
-        if (!cue.accepted) throw Error(String(cue.reason ?? 'Desktop performance cue was rejected'));
-        current.performanceCue = {accepted: true, actions, renderingConfirmed: false};
       }
       if (command.performance === undefined)
         this.ports.admitted(current.stageId, String(command.title ?? this.texts.get(current.stageId) ?? ''), command.kind === 'music' ? 'singing' : 'speaking');

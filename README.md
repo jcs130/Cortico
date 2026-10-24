@@ -1,3 +1,5 @@
+<!-- Owner: src/index.ts, src/core/stage.ts, src/desktop-audio.ts, src/core/speech-performance.ts -->
+
 # 3D 演出室 · Avatar Stage
 
 ## 现场反应与桌面回复 / Scene reactions and desktop replies
@@ -186,7 +188,9 @@ SDK 的 `stop()` 只断开这个 SDK；不停止独立舞台。`wait()` 取消�
 
 Use `avatar_voice` action `status` to read the current output's `performance.expressions` and `performance.bodyClips`. Emotion is retained as authored intent; expression selects the face, or defaults to the exact emotion id if no expression is supplied. These fields are never inserted into synthesis text and do not promise emotional voice synthesis. Omit performance when no cue is needed. The optional director is not invoked for explicitly authored cues.
 
-The stage records speech and its cues together, binds their playback ids locally, and rejects unsupported cues before replacing current speech. Desktop audio resolves its own vocabulary and attaches cues to the admitted audio job; the desktop starts queued cues when audio begins. Manual desktop body activity may take priority. `performanceCue.accepted` records delivery, not verified visual rendering. Desktop text also accepts the same cue fields. A repeated speech request id does not repeat the performance.
+The stage records speech and its requested cues together and binds their playback ids locally. Unavailable optional cues are omitted with `presentationWarnings`; valid speech continues. The original emotion remains authored intent. No substitute expression is inferred, and an explicit cue does not trigger a second model call when unavailable. Malformed cue fields still reject the request before replacing speech.
+
+Desktop audio resolves its own vocabulary and attaches cues to the admitted audio job; the desktop starts queued cues when audio begins. A rejected cue is recorded separately and does not cancel the audio. Manual desktop body activity may take priority. `performanceCue.accepted` records delivery, not verified visual rendering. Desktop text uses the same cue resolver. A repeated speech request id does not repeat the performance. The resolver is exported from `cortico-world-avatar-stage/core` for other adapters.
 
 Independent game tools can be emitted alongside speech in one model response; concurrency depends on the host dispatcher. This version does not implement incremental model-output parsing or streaming desktop audio: the desktop path still downloads the finished WAV before playing it.
 

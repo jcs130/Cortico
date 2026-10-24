@@ -1,6 +1,6 @@
 import type { PresentationScene } from './core/performance-director.ts';
 import { commentarySpeechText } from './core/commentary.ts';
-import { performanceActions, speechPerformance } from './core/speech-performance.ts';
+import { resolveSpeechPerformance, speechPerformance } from './core/speech-performance.ts';
 
 const PROTOCOL = 'desktop-presentation/v1';
 export interface DesktopPresentationConfig { mode: 'stage' | 'desktop-text' | 'desktop-audio'; url: string }
@@ -26,9 +26,9 @@ export class DesktopPresentation {
       bodyClips: this.state?.vocabulary.filter(w => w.kind === 'motion').map(w => w.id) ?? [],
       synchronizedTo: this.audioEnabled() ? 'audio-playback' : 'caption', voiceEmotionControl: false };
   }
-  performanceActions(raw: unknown) {
+  resolvePerformance(raw: unknown) {
     const catalog = this.performanceCatalog();
-    return performanceActions(speechPerformance(raw), catalog.expressions, catalog.bodyClips);
+    return resolveSpeechPerformance(speechPerformance(raw), catalog.expressions, catalog.bodyClips);
   }
   private endpoint() {
     const url = new URL(this.config().url);
@@ -96,7 +96,7 @@ export class DesktopPresentation {
     if (args.action !== 'speak') return { accepted: false, reason: 'Text presentation does not select or start a speech service' };
     const text = typeof args.text === 'string' ? commentarySpeechText(args.text) : '';
     if (args.performance !== undefined) await this.refresh();
-    const actions = this.performanceActions(args.performance);
+    const {actions, warnings, requested} = this.resolvePerformance(args.performance);
     const result = await this.request({ action: 'say', source: 'avatar-stage', requestId, text,
       ...(actions.length ? {actions} : {}),
       ...(args.ifIdleRevision !== undefined ? { ifIdleRevision: args.ifIdleRevision } : {}),
@@ -104,7 +104,7 @@ export class DesktopPresentation {
     if (result.accepted === true && typeof result.id === 'string') this.ownedIds.add(result.id);
     while (this.ownedIds.size > 64) this.ownedIds.delete(this.ownedIds.values().next().value!);
     await this.refresh();
-    return result;
+    return {...result, requestedPerformance: requested, presentationWarnings: warnings};
   }
   async attach(args: Record<string, unknown>) {
     await this.refresh();
