@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>3D 演出室</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "/vendor/three/three.module.js",
+          "three/addons/": "/vendor/addons/",
+          "@pixiv/three-vrm": "/vendor/vrm/three-vrm.module.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <main id="viewport"></main>
+    <div id="streamCredit" aria-label="模型署名"></div>
+    <aside>
+      <header>
+        <span class="eyebrow">AVATAR STAGE</span>
+        <h1>3D 演出室</h1>
+        <p id="status">正在连接</p>
+        <div class="audio-notice" role="status">
+          <button id="enableAudio" disabled>开启声音</button>
+          <p id="audioStatus">点击开启本页声音</p>
+        </div>
+      </header>
+      <section>
+        <h2>人物</h2>
+        <select id="avatars" aria-label="选择人物"></select>
+        <p id="credit"></p>
+        <div class="row">
+          <button id="full">全身</button><button id="portrait">半身</button
+          ><a href="/?obs=1" target="_blank">透明播出 ↗</a>
+        </div>
+      </section>
+      <section>
+        <h2>动作与表情</h2>
+        <div class="row" id="gestures"></div>
+        <div class="row" id="expressions"></div>
+        <select id="installedClips" aria-label="现成动作"></select>
+        <button id="playInstalledClip">预览现成动作</button>
+        <p id="clipCredit" class="hint"></p>
+        <label
+          >强度
+          <input
+            id="intensity"
+            type="range"
+            min="0"
+            max="1"
+            step=".05"
+            value=".75"
+        /></label>
+        <p class="hint">由 Agent 选择动作，平滑过渡在本地执行。</p>
+      </section>
+      <section>
+        <h2>声音</h2>
+        <p class="hint">音频开关在页面顶部，同一时间只有一个页面播放声音。</p>
+        <select id="voices" aria-label="选择音色"></select
+        ><textarea
+          id="speechText"
+          rows="2"
+          placeholder="输入试听文字"
+        ></textarea>
+        <div class="row">
+          <button id="speak">朗读</button><button id="interrupt">打断</button>
+        </div>
+      </section>
+      <section>
+        <h2>动作创作</h2>
+        <textarea
+          id="motionText"
+          rows="2"
+          placeholder="An object stands and waves its right hand."
+        ></textarea
+        ><button id="generateMotion">生成 2 秒动作</button>
+        <div id="motionJobs"></div>
+      </section>
+      <section>
+        <h2>唱歌与音乐</h2>
+        <select id="tracks" aria-label="曲库"></select>
+        <div class="row">
+          <button id="playMusic">播放</button
+          ><button id="stopMusic">停止</button>
+        </div>
+        <p id="lyric"></p>
+        <p>想创作新歌，可以直接告诉可米；完成后可在这里试听和播放。</p>
+        <div id="songJobs"></div>
+      </section>
+      <footer><span id="fps"></span><span id="protocol"></span></footer>
+    </aside>
+    <script type="application/json" id="avatar-renderer-profiles">{}</script>
+    <script type="application/json" id="avatar-motion-presets">{}</script>
+    <script type="module" src="/viewer.js"></script>
+  </body>
+</html>

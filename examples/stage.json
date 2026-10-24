@@ -1,0 +1,6 @@
+{
+  "port": 0,
+  "dataDir": "../data/stage",
+  "avatars": [],
+  "music": { "directory": "", "generationUrl": "" }
+}

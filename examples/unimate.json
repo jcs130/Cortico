@@ -1,0 +1,23 @@
+{
+  "port": 18432,
+  "dataDir": "/absolute/data/motions/avatar-one",
+  "provider": "unimate-local",
+  "model": "UniMate-uniml3d-f60-v3",
+  "avatarSha256": "REPLACE_WITH_AVATAR_SHA256",
+  "unimate": {
+    "sourceDir": "/absolute/UniMate",
+    "sourceRevision": "b78c7807df7cf4231d4e67f8d0ece29c5e11025b",
+    "expDir": "/absolute/models/unimate_uniml3d_f60_v3",
+    "checkpointSha256": "f991ddd87262c251f4681d18297a6163ab4f139daa28c86d5ef0a66771df7bc6",
+    "hfCache": "/absolute/models/hf-hub",
+    "assetDir": "/absolute/rig/asset",
+    "mappingFile": "/absolute/rig/control/mapping.json",
+    "avatar": "/absolute/avatar.vrm",
+    "device": "cuda",
+    "cpuThreads": 8,
+    "guidanceScale": 3,
+    "solver": { "method": "euler", "steps": 32 },
+    "precision": "float32",
+    "batchedGuidance": true
+  }
+}

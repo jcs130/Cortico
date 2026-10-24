@@ -1,0 +1,158 @@
+:root {
+  font:
+    14px/1.6 system-ui,
+    "Microsoft YaHei",
+    sans-serif;
+  color: #3b3028;
+  background: #eee8de;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 330px;
+  height: 100vh;
+  overflow: hidden;
+}
+#viewport {
+  min-width: 0;
+  height: 100vh;
+  position: relative;
+  background: radial-gradient(ellipse at 50% 40%, #faf6ec, #e2d9cb);
+}
+canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+aside {
+  overflow: auto;
+  padding: 26px;
+  background: #fffcf6;
+  border-left: 1px solid #ded0be;
+}
+header {
+  margin-bottom: 24px;
+}
+.audio-notice { margin-top: 14px; padding: 12px; border-radius: 10px; background: #fff0d8; }
+.audio-notice p { margin: 5px 0 0; font-size: 12px; }
+body[data-audio-enabled="true"] .audio-notice { background: #e6f0e6; }
+#enableAudio { font-weight: 600; }
+.eyebrow {
+  font-size: 10px;
+  letter-spacing: 3px;
+  color: #996329;
+}
+h1 {
+  font-size: 25px;
+  margin: 5px 0;
+}
+h2 {
+  font-size: 15px;
+  margin: 0 0 12px;
+}
+section {
+  border-top: 1px solid #e7dccb;
+  padding: 20px 0;
+}
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0;
+}
+button,
+select,
+input,
+textarea {
+  font: inherit;
+  border: 1px solid #d8c4a7;
+  border-radius: 9px;
+  padding: 8px 10px;
+  color: inherit;
+  background: #fff;
+}
+button {
+  cursor: pointer;
+}
+button:hover {
+  background: #f7e9d4;
+}
+select,
+textarea {
+  width: 100%;
+  margin: 5px 0;
+}
+input:not([type="range"]):not([type="checkbox"]) {
+  width: 100%;
+  margin: 5px 0;
+}
+textarea {
+  resize: vertical;
+}
+.hint,
+#credit {
+  font-size: 12px;
+  color: #8b7966;
+}
+a {
+  color: #8b5920;
+}
+footer {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: #9c876e;
+}
+:root:has(body.obs),
+.obs,
+.obs #viewport {
+  background: transparent !important;
+}
+.obs {
+  display: block;
+}
+.obs aside {
+  display: none;
+}
+#streamCredit {
+  display: none;
+}
+.obs #streamCredit {
+  display: block;
+  position: fixed;
+  bottom: 8px;
+  left: 12px;
+  color: #fff;
+  text-shadow: 0 1px 3px #000;
+  font-size: 11px;
+  pointer-events: none;
+  opacity: 0.8;
+}
+.candidate {
+  font-size: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid #efe7d9;
+}
+.candidate .row {
+  margin: 4px 0;
+}
+.candidate button {
+  font-size: 11px;
+  padding: 4px 8px;
+}
+#lyric {
+  font-size: 14px;
+  min-height: 1.5em;
+  color: #9a622b;
+}
+@media (max-width: 700px) {
+  body {
+    grid-template-columns: 1fr 250px;
+  }
+  aside {
+    padding: 16px;
+  }
+}

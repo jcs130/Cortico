@@ -1,0 +1,134 @@
+import { expect, it, vi } from "vitest";
+import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import definition from "../src/index.ts";
+import { normalizeConfig } from "../src/core/config.ts";
+import { PROTOCOL } from "../src/core/types.ts";
+import { parseExtensionManifest } from "cortico/extensions/manifest.ts";
+import { dryMountWorld } from "cortico/extensions/dry-mount.ts";
+import { checkDescribe } from "cortico/extensions/describe-export.ts";
+it("returns a failed tool outcome when conditional speech was not admitted", async () => {
+  const { createServer } = await import("node:http");
+  const { AvatarStageWorld } = await import("../src/index.ts");
+  const sockets = new Set<import("node:net").Socket>();
+  const server = createServer((req, res) => {
+    if (req.url === "/api/state") res.end(JSON.stringify({ protocol: PROTOCOL }));
+    else if (req.url === "/events") { res.writeHead(200, { "Content-Type": "text/event-stream" }); res.write(": ready\n\n"); }
+    else if (req.url === "/api/call") { res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify({ protocol: PROTOCOL, result: { accepted: false, status: "skipped", reason: "Foreground changed" } })); }
+    else res.writeHead(404).end();
+  });
+  server.on("connection", socket => { sockets.add(socket); socket.on("close", () => sockets.delete(socket)); });
+  await new Promise<void>(ok => server.listen(0, "127.0.0.1", ok));
+  const url = "http://127.0.0.1:" + (server.address() as import("node:net").AddressInfo).port;
+  const world = new AvatarStageWorld(() => ({ enabled: true, remoteUrl: url, port: 0, dataDir: "", avatars: [] }));
+  try {
+    await world.start({ pushEvent: async () => {} } as never);
+    // Match the live Persona's coverage consumer; absent coverage used to throw.
+    expect(world.requestFacts()?.snapshotTypes.map(type => ({ source: world.id, type }))).toEqual([]);
+    const result = await world.tools().find(tool => tool.name === "avatar_voice")!.handler({ action: "speak", text: "旧稿。", ifIdleRevision: 1 }, { callId: "declined" } as never);
+    expect(result).toEqual({ text: JSON.stringify({ accepted: false, status: "skipped", reason: "Foreground changed" }), failed: true });
+  } finally { await world.stop(); for (const socket of sockets) socket.destroy(); await new Promise<void>(ok => server.close(() => ok())); }
+});
+it("passes Cortico 0.2.4 published manifest, dry-mount and self-description checks without network or services", async () => {
+  const root = fileURLToPath(new URL("..", import.meta.url)),
+    scratchDir = await mkdtemp(join(tmpdir(), "avatar-framework-"));
+  const fetch = vi
+    .spyOn(globalThis, "fetch")
+    .mockRejectedValue(Error("Network forbidden during offline inspection"));
+  try {
+    const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+    const manifest = parseExtensionManifest(pkg);
+    expect(manifest.ok).toBe(true);
+    const options = { scratchDir, packageDir: root };
+    const mount = await dryMountWorld(definition, options);
+    expect(mount.failures).toEqual([]);
+    const describe = await checkDescribe(
+      "world",
+      definition,
+      pkg.cortico.describe,
+      options,
+    );
+    expect(describe.failures).toEqual([]);
+    const world = definition.create({
+      cfg: definition.defaults(),
+      dataDir: scratchDir,
+      botDir: scratchDir,
+    } as any);
+    expect(world.envPromptVars()).toEqual({});
+    const voiceConfig = world.webUi?.().config?.find(group => group.id === "avatar-voice");
+    expect(voiceConfig?.schema.properties?.["worlds.avatar-stage.voice.textFormat"]).toMatchObject({
+      enum: ["plain", "drama-3"], "x-hot": false,
+    });
+    expect(JSON.stringify(world.webUi?.().promptDocs)).not.toContain(
+      "stageFacts",
+    );
+    expect(await readFile(join(root, "src/prompt.md"), "utf8")).not.toContain(
+      "{{stageFacts}}",
+    );
+    expect(() =>
+      normalizeConfig(
+        {
+          port: 0,
+          dataDir: scratchDir,
+          avatars: [],
+          music: {
+            directory: "",
+            generationUrl: "https://old.invalid",
+            cloud: {
+              provider: "fal",
+              queueUrl: "https://archive.invalid",
+              downloadHosts: [],
+            },
+          },
+        },
+        scratchDir,
+      ),
+    ).not.toThrow();
+    expect(fetch).not.toHaveBeenCalled();
+  } finally {
+    fetch.mockRestore();
+    await rm(scratchDir, { recursive: true, force: true });
+  }
+});
+
+it("propagates tool cancellation and fences events when a remote stage stops", async () => {
+  const {createServer}=await import('node:http');
+  const {AvatarStageWorld}=await import('../src/index.ts');
+  const sockets=new Set<import('node:net').Socket>();let stream:import('node:http').ServerResponse|undefined;
+  let requested!:()=>void;const called=new Promise<void>(r=>requested=r);
+  const server=createServer((req,res)=>{
+    if(req.url==='/api/state')res.end(JSON.stringify({protocol:PROTOCOL,connected:true}));
+    else if(req.url==='/events'){stream=res;res.writeHead(200,{'Content-Type':'text/event-stream'});res.write(': connected\n\n');}
+    else if(req.url==='/api/call'){requested();/* delayed response remains pending until cancellation */}
+    else res.writeHead(404).end();
+  });
+  server.on('connection',socket=>{sockets.add(socket);socket.on('close',()=>sockets.delete(socket));});
+  await new Promise<void>(ok=>server.listen(0,'127.0.0.1',ok));
+  const url='http://127.0.0.1:'+(server.address() as import('node:net').AddressInfo).port;
+  const world=new AvatarStageWorld(()=>({enabled:true,remoteUrl:url,port:0,dataDir:'',avatars:[]}));
+  const events:unknown[]=[];
+  try {
+    await world.start({pushEvent:async (event:unknown)=>{events.push(event);}} as never);
+    const abort=new AbortController();
+    const action=world.tools().find(tool=>tool.name==='avatar_control')!.handler({action:'status'},{signal:abort.signal,callId:'fixture-cancel'} as never);
+    await called;abort.abort(new Error('fixture cancellation'));
+    const result=await action;expect(typeof result==='object'&&result.failed).toBe(true);
+    await world.stop();
+    const count=events.length;stream?.write('data: '+JSON.stringify({protocol:PROTOCOL,type:'avatar.action',at:Date.now(),data:{status:'completed'}})+'\n\n');
+    await new Promise(ok=>setTimeout(ok,25));expect(events).toHaveLength(count);
+    const stopped=await world.tools()[0].handler({action:'status'},{} as never);
+    expect(typeof stopped==='object'&&stopped.failed).toBe(true);
+  }finally{await world.stop();for(const socket of sockets)socket.destroy();await new Promise<void>(ok=>server.close(()=>ok()));}
+});
+
+it("a rejected configuration does not leave the World started",async()=>{
+ const {AvatarStageWorld}=await import('../src/index.ts');let reject=true;
+ const dataDir=await mkdtemp(join(tmpdir(),'stage-retry-'));
+ const world=new AvatarStageWorld(()=>{if(reject)throw Error('invalid fixture configuration');return {enabled:true,port:0,dataDir,avatars:[]};});
+ try {
+  await expect(world.start({} as never)).rejects.toThrow('invalid fixture');
+  reject=false;await world.start({pushEvent:async()=>{}} as never);
+ }finally{await world.stop();await rm(dataDir,{recursive:true,force:true});}
+});

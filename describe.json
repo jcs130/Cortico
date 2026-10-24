@@ -1,0 +1,906 @@
+{
+  "tools": [
+    {
+      "name": "avatar_voice",
+      "tags": [
+        "act",
+        "speak"
+      ],
+      "description": "Present dialogue using this World's explicitly configured output. Read status first: desktop-text sends literal bubbles to the desktop pet with audio=false; no TTS is started and actual shown/completed receipts are separate from queued. Use pet_act and the current desktop vocabulary for manual desktop expressions/actions. The default stage mode speaks through its single configured TTS path with synchronized avatar mouth: plain requires natural text; drama-3 permits optional vocal directions. Physical gestures are not spoken stage directions. No hidden rewriting or TTS fallback. interrupt cancels this output's pending dialogue. In stage mode TTS and singing share one foreground audio owner.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "status",
+              "speak",
+              "interrupt",
+              "select"
+            ]
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "voice": {
+            "type": "string"
+          },
+          "performance": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Optional cues authored in this same inference. Bound to this utterance locally; no audioActionId or extra model turn is needed. Read status.performance for current expression/bodyClip ids. Emotion is facial intent, not a TTS style control. Emit this call alongside game tools when both are appropriate.",
+            "properties": {
+              "emotion": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "description": "Emotional intent. Without expression, use an exact installed expression id."
+              },
+              "expression": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "description": "Exact facial expression id; overrides the emotion default."
+              },
+              "bodyClip": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "description": "Exact installed motion id for the current output."
+              }
+            }
+          },
+          "observed_at": {
+            "type": "number",
+            "description": "For live scene commentary, the actual Unix seconds captured_at of the image or sample time of the action evidence being described. Never invent the current time. The host can reject missing or stale observation evidence before speech is submitted."
+          },
+          "ifIdleRevision": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Optional background admission guard: speak only if audio is still idle and status.audioRevision matches. A changed foreground cancels the draft without interrupting it."
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "avatar_control",
+      "tags": [
+        "act"
+      ],
+      "description": "Control this independent 3D stage. status lists actual rig/expression capabilities, installed animationCatalog, action evidence and generators. select changes the avatar. perform selects a real expression, humanoid rotation in degrees, exact bodyClip (including standard vrma: names), or wave/nod/bow/cheer/idle. direct attaches expressionWeights and an optional installed bodyClip to a current speech/song audioActionId; it starts with actual playback, yields to manual body controls and ends with that audio. Queued is not rendered. Query the original actionId for playing/ended evidence. Body controls never synthesize speech. Optional automatic presentation uses the host's saved decision connection, not another chat or hidden generation service.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "status",
+              "select",
+              "perform",
+              "direct",
+              "cancel",
+              "result",
+              "history"
+            ]
+          },
+          "avatarId": {
+            "type": "string"
+          },
+          "expression": {
+            "type": "string"
+          },
+          "bodyClip": {
+            "type": "string"
+          },
+          "audioActionId": {
+            "type": "string",
+            "description": "For direct: original currently queued/playing speech or song action id. Cue is cancelled with that audio."
+          },
+          "expressionWeights": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          "intensity": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "gesture": {
+            "type": "string",
+            "enum": [
+              "wave",
+              "nod",
+              "bow",
+              "cheer",
+              "idle"
+            ]
+          },
+          "durationMs": {
+            "type": "integer",
+            "minimum": 200,
+            "maximum": 10000
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "preview",
+              "broadcast"
+            ]
+          },
+          "bones": {
+            "type": "object",
+            "properties": {
+              "hips": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "spine": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "chest": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "upperChest": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "neck": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "head": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftShoulder": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftUpperArm": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftLowerArm": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftHand": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightShoulder": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightUpperArm": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightLowerArm": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightHand": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftUpperLeg": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftLowerLeg": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftFoot": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftToes": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightUpperLeg": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightLowerLeg": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightFoot": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightToes": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftEye": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightEye": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "jaw": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftThumbMetacarpal": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftThumbProximal": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftThumbDistal": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftIndexProximal": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftIndexIntermediate": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftIndexDistal": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftMiddleProximal": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftMiddleIntermediate": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftMiddleDistal": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftRingProximal": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftRingIntermediate": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftRingDistal": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftLittleProximal": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftLittleIntermediate": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "leftLittleDistal": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightThumbMetacarpal": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightThumbProximal": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightThumbDistal": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightIndexProximal": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightIndexIntermediate": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightIndexDistal": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightMiddleProximal": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightMiddleIntermediate": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightMiddleDistal": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightRingProximal": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightRingIntermediate": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightRingDistal": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightLittleProximal": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightLittleIntermediate": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rightLittleDistal": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -75,
+                  "maximum": 75
+                },
+                "minItems": 3,
+                "maxItems": 3
+              }
+            },
+            "additionalProperties": false
+          },
+          "actionId": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "avatar_motion",
+      "tags": [
+        "act"
+      ],
+      "description": "Search and reuse suitable approved body motion for the current avatar before generating with the explicitly configured provider such as UniMate. Search results include review state and retained playback evidence. If no existing action fits, generate asynchronously and keep the returned jobId; acceptance is not completion or playback. Start with simple 2-second gestures. result/search reconcile the original job. cancel never retries. Preview generated candidates and approve acceptable motion before play. Numerical checks do not certify clothing collision or gesture meaning. No configured model means use direct gestures/pose controls and installed clips; there is no hidden cloud fallback.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "status",
+              "generate",
+              "result",
+              "search",
+              "cancel",
+              "preview",
+              "approve",
+              "reject",
+              "play",
+              "stop"
+            ]
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 5,
+            "maxLength": 1200
+          },
+          "durationSec": {
+            "type": "number",
+            "minimum": 2,
+            "maximum": 12
+          },
+          "seed": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647
+          },
+          "jobId": {
+            "type": "string"
+          },
+          "clipId": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "avatar_music",
+      "tags": [
+        "act"
+      ],
+      "description": "Import finished WAV artifacts by reference_handle, preview/adopt them, and play installed tracks through the single-owner stage. Generation is provided by cortico-world-aigc; legacy generate returns capability_moved. Imported audio is a review candidate and never auto-plays. Explicit approve/reject follows actual review. One renderer owns audio. Songs and TTS share one output. Singing mouth follows vocal envelope or timed lyrics, not accompaniment. Import does not verify lyrics or singer identity.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "status",
+              "list",
+              "generate",
+              "import",
+              "result",
+              "cancel",
+              "play",
+              "stop",
+              "preview",
+              "approve",
+              "reject"
+            ]
+          },
+          "trackId": {
+            "type": "string"
+          },
+          "jobId": {
+            "type": "string"
+          },
+          "reference_handle": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "requestText": {
+            "type": "string"
+          },
+          "lyrics": {
+            "type": "string"
+          },
+          "style": {
+            "type": "string"
+          },
+          "instrumental": {
+            "type": "boolean"
+          },
+          "durationSec": {
+            "type": "integer",
+            "minimum": 30,
+            "maximum": 120
+          },
+          "volume": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "avatar_query",
+      "tags": [
+        "read"
+      ],
+      "description": "Read this stage's current snapshot or retained action history, voice configuration and local song catalog. These reads do not speak, move, generate, cancel, adopt or play. Dynamic facts are queried here and through events; they are not inserted into the system prefix.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "status",
+              "action",
+              "history",
+              "music",
+              "voice"
+            ]
+          },
+          "actionId": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        }
+      }
+    }
+  ],
+  "events": [
+    {
+      "type": "avatar.speech.submitted",
+      "description": "Accepted speech text and original request/action identifiers; submission is not playback."
+    },
+    {
+      "type": "avatar.action",
+      "description": "Individual action state and actual renderer evidence; not a host turn boundary"
+    },
+    {
+      "type": "avatar.motion",
+      "description": "Motion generation terminal evidence; ready is a candidate, not playback"
+    },
+    {
+      "type": "avatar.music",
+      "description": "Song generation or actual audio execution evidence"
+    },
+    {
+      "type": "avatar.voice",
+      "description": "TTS transport, trace ids and actual audio completion/interruption evidence"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "worlds.avatar-stage.env",
+      "title": "3D 演出能力",
+      "role": "envPrompt",
+      "content": "You control an independent 3D performance World. Choose concrete actions yourself using avatar_control, avatar_motion, avatar_voice and avatar_music. This component has no hidden planning or persona model. Read actual capabilities before selecting expressions, bones, motion models or voices. Direct gestures and semantic humanoid rotations work without a motion model.\n\nAuthor speech and its presentation together with avatar_voice speak: text plus optional performance={emotion,expression,bodyClip}. Read avatar_voice status.performance for the current output vocabulary. Expression overrides emotion's facial default; without an override emotion must be an installed expression id. BodyClip must be an exact installed motion id. These cues are parsed locally and start when this utterance plays, without waiting for an audioActionId or another model call. Emotion does not change TTS voice style. When an independent game action and speech are both appropriate, emit both tool calls in the same response. Speech can describe the intended action; report success only after actual evidence. Choose when to speak or stay silent.\n\nUse a few meaningful gestures alongside speech, not a tool loop for every animation frame. Body interpolation, breathing, blinking and spring motion are deterministic rendering. Before generating, check installed clips and search the motion library for the intended action. Reuse a suitable approved clip for the current avatar; ready candidates still require preview and review. When no suitable existing action is available, generate a reusable new body clip with a simple description using the configured provider. Preview it, judge its meaning and visible result, then approve acceptable motion before broadcast playback. Retain rejected candidates and their failure reasons when revising. Motion generation creates body animation, not speech, fingers, facial expression, or cloth physics.\n\nInstalled standard VRMA clips appear in capabilities.animationCatalog; use their exact bodyClip values. Mapped speaking/singing activities follow real audio playback. Optional host-owned quick direction may choose a fitting installed motion and expression concurrently with TTS. Explicit choices retain priority. It cannot create missing motions; search or generate a candidate when needed. A song body loop is not song-specific choreography.\n\nSpeak through avatar_voice using the configured text contract from avatar_query action:voice or avatar_voice action:status. Default plain text excludes performance directions. With textFormat:drama-3, short square-bracket vocal directions are allowed, for example \"大家晚上好！[warm, cheerful] 我是可米。\" Use the on-demand speech-writing guide for syntax and local backend limits. Keep names and game terms understandable in the host language. Physical gestures and facial expression belong in performance alongside speech; use avatar_control for standalone stage body controls. One foreground audio output owns speech and songs. Do not also call another World's voice output for the same utterance.\n\n\nQueued means accepted. Ready motion or music means a reusable candidate. Actual renderer playing/ended evidence establishes individual execution. None of these marks an entire host decision turn or user goal complete. On interruption cancel the original action and close its stream; never repeat an unknown or cancelled request automatically. Initial connection snapshots and old receipts are historical facts, not new events. Use result/history for original action text and evidence.\n\nRead current capabilities and retained execution evidence with avatar_query. Runtime changes arrive through avatar events and tool results. The host may replace these facts by key in the request tail; the system prefix contains no changing stage snapshot.\n\nMusic creation belongs to the independent AIGC World. Use aigc_create kind:music when it is installed and configured. This stage imports a finished audio/wav artifact via avatar_music action:import and reference_handle, then supports preview, explicit adoption and playback. Imported is not adopted or playing. Persona supplies identity and voice references explicitly; generation does not establish singer identity.\n"
+    }
+  ]
+}
