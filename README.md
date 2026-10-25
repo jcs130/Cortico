@@ -2,7 +2,7 @@
 
 # 3D 演出室 · Avatar Stage
 
-启用 `speechObservationMaxAgeSeconds` 时，`avatar_voice speak` 必须附真实来源的 `observed_at` 与 `text`。直接复制来源事件或采样的 ISO 8601 时间（含时区），也兼容来源已有的 Unix 秒数；无需让模型计算纪元秒数。过期、未来、无时区或无效日期仍被拒绝，不会自动换成当前时间。查询状态、打断和选音色无需观察时间。默认策略保持兼容。
+普通对话、问候与创作口播不要求观察时间。描述当前现场事实时，`avatar_voice speak` 的 `observed_at` 直接复制来源事件或采样的 ISO 8601 时间（含时区），也兼容来源已有的 Unix 秒数。显式提供的过期、未来、无时区或无效日期仍被拒绝，不会自动换成当前时间。`speechObservationMaxAgeSeconds` 控制这类来源时间的有效期；0 使用 15 秒。空闲解说继续携带所引用事件的最早原始时间。
 
 `voice.busyPolicy:"preserve"` 保留当前合成或播放中的一句，新台词返回 `accepted:false, reason:audio_busy`，不合成、不排队、不打断；下次只讲仍有价值的新内容。显式 `avatar_voice interrupt` 仍可打断。省略该配置时沿用 `replace` 行为。此能力适用于所有游戏和其他实时演出。
 
@@ -202,5 +202,5 @@ Independent game tools can be emitted alongside speech in one model response; co
 
 `commentary.enabled` enables task-only host cognition for an idle speech output. Set `commentary.sources` to the explicit World IDs whose new events may be used. The controller does not execute game tools or maintain a second conversation history. Existing foreground speech takes priority, and unchanged material can be skipped instead of producing repeated narration.
 
-When `speechObservationMaxAgeSeconds` is configured, the controller reads each cited event from the host event store and forwards the oldest original timestamp as `observed_at`. It never substitutes the draft-completion clock or invents evidence for an uncited thought. The commentary evidence and generation window are bounded by the same speech policy. This fixes internal commentary callers that previously omitted required observation time; it does not relax the freshness requirement for ordinary speech calls.
+When `speechObservationMaxAgeSeconds` is configured, the controller reads each cited event from the host event store and forwards the oldest original timestamp as `observed_at`. It never substitutes the draft-completion clock or invents evidence for an uncited thought. The commentary evidence and generation window are bounded by the same speech policy. Ordinary conversation does not require a scene observation; explicitly supplied observation times retain freshness validation.
 

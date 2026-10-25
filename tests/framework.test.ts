@@ -10,16 +10,15 @@ import { parseExtensionManifest } from "cortico/extensions/manifest.ts";
 import { dryMountWorld } from "cortico/extensions/dry-mount.ts";
 import { checkDescribe } from "cortico/extensions/describe-export.ts";
 
-it('advertises required observation evidence only for speech under a live freshness policy',async()=>{
+it('keeps conversation usable while advertising the configured observation policy',async()=>{
  const {AvatarStageWorld}=await import('../src/index.ts');
  const cfg={enabled:true,port:0,dataDir:'',avatars:[],speechObservationMaxAgeSeconds:15};
  const world=new AvatarStageWorld(()=>cfg);
  const voice=world.tools().find(t=>t.name==='avatar_voice')!;
- expect(voice.parameters).toMatchObject({anyOf:[
-  {properties:{action:{enum:['speak']}},required:['observed_at','text']},
-  {properties:{action:{enum:['status','interrupt','select']}}},
- ]});
+ expect(voice.parameters).not.toHaveProperty('anyOf');
+ expect(voice.parameters.required).not.toContain('observed_at');
  expect(voice.description).toContain('at most 15 seconds old');
+ expect(voice.description).toContain('Ordinary conversation');
  cfg.speechObservationMaxAgeSeconds=0;
  expect(world.tools().find(t=>t.name==='avatar_voice')!.parameters).not.toHaveProperty('anyOf');
  expect(world.tools().find(t=>t.name==='avatar_control')!.parameters).not.toHaveProperty('anyOf');
@@ -70,8 +69,11 @@ it('passes a copied ISO observation through the real World once and keeps stale 
     const result=await voice.handler(original,{callId:'fresh-iso'} as never);
     expect(result).toBe(JSON.stringify({accepted:true,id:'fixture-speech'}));expect(calls).toHaveLength(1);
     expect(JSON.stringify(calls[0])).not.toContain('observed_at');expect(original.observed_at).toBeTruthy();
+    const reply=await voice.handler({action:'speak',text:'Hello, I can read your message.'},{callId:'conversation'} as never);
+    expect(reply).toBe(JSON.stringify({accepted:true,id:'fixture-speech'}));expect(calls).toHaveLength(2);
+    expect(JSON.stringify(calls[1])).not.toContain('observed_at');
     const stale=await voice.handler({...original,observed_at:new Date(Date.now()-60_000).toISOString()},{callId:'stale-iso'} as never);
-    expect(stale).toMatchObject({failed:true});expect(JSON.stringify(stale)).toContain('stale_speech_observation');expect(calls).toHaveLength(1);
+    expect(stale).toMatchObject({failed:true});expect(JSON.stringify(stale)).toContain('stale_speech_observation');expect(calls).toHaveLength(2);
   } finally {await world.stop();for(const socket of sockets)socket.destroy();await new Promise<void>(ok=>server.close(()=>ok()));}
 });
 it("passes Cortico 0.2.4 published manifest, dry-mount and self-description checks without network or services", async () => {

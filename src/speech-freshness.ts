@@ -13,17 +13,10 @@ function observationSeconds(value: unknown): number {
 export function checkSpeechFreshness(args: Record<string, unknown>, maxAgeSeconds = 0, now = Date.now()/1000) {
   if (args.action !== 'speak') return;
   if (!Number.isFinite(maxAgeSeconds) || maxAgeSeconds < 0) throw Error('Invalid speech observation age policy');
-  if (!maxAgeSeconds && args.observed_at === undefined) return;
+  // Dialogue and creative speech need no observation clock. A supplied source
+  // clock remains authoritative and is never replaced with the submission time.
+  if (args.observed_at === undefined) return;
   const at = observationSeconds(args.observed_at);
   if (!Number.isFinite(at) || at > now+1 || now-at > (maxAgeSeconds || 15))
-    throw Error('stale_speech_observation: speech was not submitted. Copy captured_at or the source event/sample timestamp verbatim as an ISO 8601 string including timezone, or use its existing Unix seconds. Do not calculate the epoch, guess the year, replace old evidence with the current time, or retry the unchanged statement. Read fresh evidence and update the statement if it is still useful.');
-}
-
-/** Advertise the configured admission rule before a model submits a speech call. */
-export function speechObservationContract(maxAgeSeconds=0) {
-  if(!Number.isFinite(maxAgeSeconds)||maxAgeSeconds<=0)return {};
-  return {anyOf:[
-    {properties:{action:{enum:['speak']}},required:['observed_at','text']},
-    {properties:{action:{enum:['status','interrupt','select']}}},
-  ]};
+    throw Error('stale_speech_observation: the supplied observation time is invalid or expired; speech was not submitted. Copy captured_at or the source event/sample timestamp verbatim as an ISO 8601 string including timezone, or use its existing Unix seconds. Do not replace old evidence with the current time or remove a stale timestamp to repeat the same claim. Read fresh evidence, describe it as history, or reply without making that live observation claim.');
 }

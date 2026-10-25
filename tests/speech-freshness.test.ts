@@ -18,11 +18,18 @@ it('accepts copied source timestamps without requiring model epoch arithmetic', 
 it('preserves stale/future rejection and never repairs fabricated or ambiguous timestamps', () => {
   for (const observed_at of [1761401105, 1792965048, now * 1000, now - 16, now + 2,
     '2025-10-25T22:05:16+08:00', '2026-10-25T22:05:16', '22:05:16', '2026-10-25',
-    '2026-02-30T14:05:16Z', '2026-10-25T24:00:00Z', String(now), undefined, null]) {
+    '2026-02-30T14:05:16Z', '2026-10-25T24:00:00Z', String(now), null]) {
     const args = { action: 'speak', observed_at };
     expect(() => checkSpeechFreshness(args, 15, now)).toThrow('stale_speech_observation');
     expect(args.observed_at).toBe(observed_at);
   }
   expect(() => checkSpeechFreshness({ action: 'status' }, 15, now)).not.toThrow();
   expect(() => checkSpeechFreshness({ action: 'speak' }, 0, now)).not.toThrow();
+});
+it('admits conversation without requiring an unrelated live observation', () => {
+  for (const text of ['Hello, I can read your message.', 'Thanks for joining.', 'Let me tell you a story.']) {
+    const args = { action: 'speak', text };
+    expect(() => checkSpeechFreshness(args, 15, now)).not.toThrow();
+    expect(args).not.toHaveProperty('observed_at');
+  }
 });

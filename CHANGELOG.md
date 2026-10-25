@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2-dev.20261026.2
+
+- Allow dialogue, greetings and creative speech without a live observation timestamp. Explicit observation timestamps still reject stale, invalid and future evidence; commentary continues to forward original source times.
+- Declare the observation age setting in the World configuration schema and distinguish conversation from live observation claims in the speech contract.
+
 ## 0.1.2-dev.20261026.1
 
 - Keep server telemetry and outgoing chat echoes from interrupting an independent commentary draft; real new conversation still takes priority.

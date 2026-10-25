@@ -62,7 +62,7 @@
                 "type": "number"
               }
             ],
-            "description": "Copy the actual source event/sample timestamp or captured_at of the evidence being described. Prefer its original ISO 8601 string with timezone; existing Unix seconds also work. Do not compute epoch seconds, invent a time, or replace stale evidence with the current time. Missing/stale evidence can be rejected before speech is submitted."
+            "description": "For a claim about a current observation, copy the actual source event/sample timestamp or captured_at. Prefer its original ISO 8601 string with timezone; existing Unix seconds also work. Ordinary conversation, greetings and creative speech need no observation timestamp. Supplied invalid or stale times are rejected. Never invent a time or remove a stale timestamp to repeat the same live claim."
           },
           "ifIdleRevision": {
             "type": "integer",

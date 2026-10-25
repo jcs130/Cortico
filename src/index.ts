@@ -18,7 +18,7 @@ import { DesktopPresentation } from "./desktop-presentation.ts";
 import { DesktopReplySpeech, REPLY_SPEECH_DEFAULTS } from './desktop-reply-speech.ts';
 import { DesktopAudioRenderer } from './desktop-audio.ts';
 import { randomUUID } from 'node:crypto';
-import { checkSpeechFreshness, speechObservationContract } from './speech-freshness.ts';
+import { checkSpeechFreshness } from './speech-freshness.ts';
 import { speechPerformance } from './core/speech-performance.ts';
 import {
   PerformanceDirector,
@@ -131,9 +131,8 @@ export class AvatarStageWorld implements World {
     return TOOL_DEFINITIONS.map((decl) => ({
       ...decl,
       ...(decl.name === 'avatar_voice' ? {dispatchLane:'avatar.voice',
-        parameters:{...decl.parameters,...speechObservationContract(this.cfg().speechObservationMaxAgeSeconds??0)},
         description:decl.description+((this.cfg().speechObservationMaxAgeSeconds??0)>0
-          ?` Live speech requires observed_at copied from actual source evidence, at most ${this.cfg().speechObservationMaxAgeSeconds} seconds old. Prefer the original ISO timestamp including timezone; no epoch conversion is needed. If evidence is missing, continue the task or read current state; do not invent a timestamp.`:'')} : {}),
+          ?` For claims about a current observation, provide observed_at copied from actual source evidence, at most ${this.cfg().speechObservationMaxAgeSeconds} seconds old. Ordinary conversation, greetings and creative speech do not require an observation timestamp. A supplied invalid or stale timestamp is rejected; do not remove it to repeat the same claim.`:'')} : {}),
       tags: [...decl.tags],
       handler: async (args, ctx) => {
         try {
@@ -351,6 +350,10 @@ export class AvatarStageWorld implements World {
               "worlds.avatar-stage.voice.busyPolicy": {
                 type:'string',enum:['replace','preserve'],'x-hot':false,title:'新台词遇到正在播放的音频',
                 description:'preserve 保留当前一句，跳过新台词且不合成；replace 用新台词打断。显式 interrupt 始终可打断。',
+              },
+              "worlds.avatar-stage.speechObservationMaxAgeSeconds": {
+                type: 'number', minimum: 0, title: '带来源时间的口播有效期（秒）',
+                description: '校验显式提供的 observed_at；0 沿用 15 秒。普通聊天无需观察时间。空闲解说仍使用所引用事件的原始时间。',
               },
             },
           },
