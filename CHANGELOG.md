@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2-dev.20261025.6
+
+- Forward the oldest original timestamp among the draft's cited event envelopes into speech admission. Optional commentary no longer fails a configured observation-time requirement solely because its internal caller omitted the field. Missing or stale sources are not replaced with the current time.
+- Bound commentary's evidence and generation window by the configured speech observation policy, so an otherwise longer commentary window does not repeatedly draft lines that speech cannot admit. Commentary remains opt-in and uses task-only host cognition without owning game actions.
+
 ## 0.1.2-dev.20261025.5
 
 - Accept original ISO 8601 source observation timestamps including timezone for live speech, while retaining numeric Unix seconds compatibility. Models need not calculate epoch seconds. Stale, future, invalid and timezone-ambiguous evidence is still rejected before output; timestamps are never refreshed or repaired automatically.

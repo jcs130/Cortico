@@ -198,3 +198,9 @@ Desktop audio resolves its own vocabulary and attaches cues to the admitted audi
 
 Independent game tools can be emitted alongside speech in one model response; concurrency depends on the host dispatcher. This version does not implement incremental model-output parsing or streaming desktop audio: the desktop path still downloads the finished WAV before playing it.
 
+### Optional commentary during game actions
+
+`commentary.enabled` enables task-only host cognition for an idle speech output. Set `commentary.sources` to the explicit World IDs whose new events may be used. The controller does not execute game tools or maintain a second conversation history. Existing foreground speech takes priority, and unchanged material can be skipped instead of producing repeated narration.
+
+When `speechObservationMaxAgeSeconds` is configured, the controller reads each cited event from the host event store and forwards the oldest original timestamp as `observed_at`. It never substitutes the draft-completion clock or invents evidence for an uncited thought. The commentary evidence and generation window are bounded by the same speech policy. This fixes internal commentary callers that previously omitted required observation time; it does not relax the freshness requirement for ordinary speech calls.
+

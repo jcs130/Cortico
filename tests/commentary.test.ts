@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CommentaryLane, COMMENTARY_DEFAULTS, parseCommentary, type SpeechAvailability } from "../src/core/commentary.ts";
 import { CommentaryRuntimeGate } from "../src/core/commentary-runtime.ts";
 import { CommentaryController, SPEECH_DRAFT_HEADER } from "../src/commentary-controller.ts";
+import { checkSpeechFreshness } from "../src/speech-freshness.ts";
 
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 const settle = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
@@ -112,20 +113,84 @@ it.each(["plain", "drama-3"] as const)("the World controller carries %s from the
   vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ loop: { running: true, paused: false } })));
   const events = new Map<number, any>(); let latest = 50;
   const get = vi.fn((cursor: number) => events.get(cursor)), request = vi.fn(async (_req: { brief: string; tools: unknown[]; hint?: unknown }) => ({ text: JSON.stringify({ script: "[轻快] 刚才走过了一段路。", evidence: [51], kind: "observation" }) }));
-  const speak = vi.fn(async () => ({ accepted: true, status: "queued", id: "real-ledger-action" }));
+  const speak = vi.fn(async (args: Record<string, unknown>) => {
+    checkSpeechFreshness(args, 15);
+    return { accepted: true, status: "queued", id: "real-ledger-action" };
+  });
   const stage = { audioOwner: "browser", audioRevision: 3, voice: { configured: true, textFormat }, foreground: null };
-  const controller = new CommentaryController({ config: () => ({ enabled: true, port: 0, dataDir: "", avatars: [], commentary: {
+  const controller = new CommentaryController({ config: () => ({ enabled: true, port: 0, dataDir: "", avatars: [], speechObservationMaxAgeSeconds: 15, commentary: {
     enabled: true, sources: "game", hostStatusUrl: "http://127.0.0.1/status", idleSec: 1, retrySec: 1, factAgeSec: 30 } }),
     state: async () => stage, speak });
   try {
     controller.start({ store: { latestCursor: () => latest, get }, cognition: { request }, log: { emit: vi.fn(), warn: vi.fn() } } as never);
     events.set(51, { cursor: 51, source: "game", type: "game.result", origin: "external", ts: new Date().toISOString(), text: "任务 a 终态完成，位移 4 格。" }); latest = 51;
     await vi.advanceTimersByTimeAsync(2100);
-    expect(get.mock.calls.map(([cursor]) => cursor)).toEqual([51]);
+    expect(get.mock.calls.map(([cursor]) => cursor)).toEqual([51, 51]);
     expect(request).toHaveBeenCalledTimes(1);
     expect(request.mock.calls[0][0]).toMatchObject({ tools: [], hint: { rounds: 1 } });
     expect(request.mock.calls[0][0].brief.startsWith(SPEECH_DRAFT_HEADER + "\n")).toBe(true);
     expect(request.mock.calls[0][0].brief).toContain('当前语音契约 ' + textFormat);
-    expect(speak).toHaveBeenCalledWith({ action: "speak", text: textFormat === "drama-3" ? "[轻快] 刚才走过了一段路。" : "刚才走过了一段路。", ifIdleRevision: 3 }, expect.stringMatching(/^avatar-commentary-/));
+    expect(speak).toHaveBeenCalledWith({ action: "speak", text: textFormat === "drama-3" ? "[轻快] 刚才走过了一段路。" : "刚才走过了一段路。", ifIdleRevision: 3, observed_at: new Date(100_000).toISOString() }, expect.stringMatching(/^avatar-commentary-/));
   } finally { controller.stop(); }
+});
+
+function controllerRig() {
+  vi.useFakeTimers(); vi.setSystemTime(100_000);
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({loop:{running:true,paused:false}})));
+  let latest = 50;
+  const events = new Map<number, any>(), log = vi.fn();
+  const response = pending<{text:string}>(), request = vi.fn(() => response.promise);
+  const speak = vi.fn(async (args:Record<string,unknown>) => {
+    checkSpeechFreshness(args,15);
+    return {accepted:true,status:'queued',id:'speech-with-evidence'};
+  });
+  const controller = new CommentaryController({config:()=>({enabled:true,port:0,dataDir:'',avatars:[],speechObservationMaxAgeSeconds:15,
+    commentary:{enabled:true,sources:'game',idleSec:1,retrySec:1,factAgeSec:30,hostStatusUrl:'http://127.0.0.1/status'}}),
+    state:async()=>({audioOwner:'desktop',audioRevision:3,voice:{configured:true},foreground:null}),speak});
+  controller.start({store:{latestCursor:()=>latest,get:(cursor:number)=>events.get(cursor)},cognition:{request},log:{emit:log,warn:vi.fn()}} as never);
+  return {controller,events,request,speak,log,
+    event(cursor:number,ts:string,type='game.result'){latest=cursor;events.set(cursor,{cursor,ts,type,source:'game',origin:'external',text:'任务实际发生了变化。'});},
+    answer(evidence:number[],kind='observation'){response.resolve({text:JSON.stringify({script:'刚才看到了新的变化。',evidence,kind})});}};
+}
+
+it('uses the oldest original cited event time, independent of draft completion time',async()=>{
+  const r=controllerRig();
+  try{
+    r.event(51,'1970-01-01T00:01:31.000Z','game.result');
+    r.event(52,'1970-01-01T00:01:38.000Z','game.snapshot');
+    await vi.advanceTimersByTimeAsync(2100);
+    r.answer([52,51]);await vi.advanceTimersByTimeAsync(0);
+    expect(r.speak).toHaveBeenCalledWith(expect.objectContaining({observed_at:'1970-01-01T00:01:31.000Z'}),expect.any(String));
+  }finally{r.controller.stop();}
+});
+
+it('does not draft from evidence already outside the active speech policy',async()=>{
+  const r=controllerRig();
+  try{
+    r.event(51,'1970-01-01T00:01:20.000Z');
+    await vi.advanceTimersByTimeAsync(2100);
+    expect(r.request).not.toHaveBeenCalled();expect(r.speak).not.toHaveBeenCalled();
+  }finally{r.controller.stop();}
+});
+
+it('discards a draft that outlives the speech window even when commentary allows longer',async()=>{
+  const r=controllerRig();
+  try{
+    r.event(51,new Date().toISOString());await vi.advanceTimersByTimeAsync(2100);
+    expect(r.request).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(16000);r.answer([51]);await vi.advanceTimersByTimeAsync(0);
+    expect(r.speak).not.toHaveBeenCalled();expect(r.log.mock.calls.some(([,event])=>event==='commentary-stale')).toBe(true);
+  }finally{r.controller.stop();}
+});
+
+it.each(['missing-cited-event','uncited-thought'])('does not synthesize a clock for %s under a source-time policy',async reason=>{
+  const r=controllerRig();
+  try{
+    r.event(51,new Date().toISOString());await vi.advanceTimersByTimeAsync(2100);
+    if(reason==='missing-cited-event')r.events.delete(51);
+    r.answer(reason==='missing-cited-event'?[51]:[],reason==='uncited-thought'?'thought':'observation');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(r.speak).not.toHaveBeenCalled();
+    expect(r.log.mock.calls.some(([,event])=>event==='commentary-stale')).toBe(true);
+  }finally{r.controller.stop();}
 });

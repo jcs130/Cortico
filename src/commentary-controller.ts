@@ -43,8 +43,19 @@ export class CommentaryController {
       perform: async (text, serial, evidence) => {
         if (!this.host || !this.runtime.active(false) || !this.state || this.state.foreground)
           return { accepted: false, reason: "Output is not idle" };
+        // The draft returns identifiers, never a replacement source clock. Resolve
+        // the cited envelopes and carry their oldest original timestamp through
+        // the same admission contract used by foreground speech.
+        const cited = evidence.map(cursor => this.host!.store.get(cursor));
+        if (cited.some(event => !event || !Number.isFinite(Date.parse(event.ts))))
+          return { accepted: false, reason: "Cited speech evidence is unavailable" };
+        const oldest = cited.reduce<(typeof cited)[number] | undefined>((at, event) =>
+          !at || Date.parse(event!.ts) < Date.parse(at.ts) ? event : at, undefined);
+        if (!oldest && (this.ports.config().speechObservationMaxAgeSeconds ?? 0) > 0)
+          return { accepted: false, reason: "Speech requires source observation evidence" };
         const requestId = "avatar-commentary-" + randomUUID();
         const result = await this.ports.speak({ action: "speak", text, ifIdleRevision: this.state.audioRevision,
+          ...(oldest ? { observed_at: oldest.ts } : {}),
           ...(this.state.textReady ? { evidence } : {}) }, requestId);
         const accepted = result.accepted === true && ["queued", "playing", "completed"].includes(String(result.status));
         this.host?.log.emit("info", "解说播出提交", { event: "commentary-admission", data: { serial, evidence,
@@ -54,7 +65,14 @@ export class CommentaryController {
       log: (event, data) => this.host?.log.emit("info", event, { event, data }),
     });
   }
-  private config(): CommentaryConfig { return { ...COMMENTARY_DEFAULTS, ...this.ports.config().commentary }; }
+  private config(): CommentaryConfig {
+    const world = this.ports.config(), config = { ...COMMENTARY_DEFAULTS, ...world.commentary };
+    const maxAge = world.speechObservationMaxAgeSeconds ?? 0;
+    // Reject stale drafting material before spending a model request, using the
+    // effective speech policy rather than a separate, longer commentary window.
+    if (Number.isFinite(maxAge) && maxAge > 0) config.factAgeSec = Math.min(config.factAgeSec, maxAge);
+    return config;
+  }
   start(host: WorldHost): void {
     this.host = host; this.cursor = host.store?.latestCursor() ?? 0;
     this.runtime.resume(); this.lane.resume();
