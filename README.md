@@ -2,6 +2,8 @@
 
 # 3D 演出室 · Avatar Stage
 
+启用 `speechObservationMaxAgeSeconds` 时，当前 `avatar_voice` 参数会提前声明 `speak` 必须附真实来源的 `observed_at` 与 `text`；查询状态、打断和选音色无需观察时间。默认策略保持兼容，运行时仍拒绝过期台词。0.1.2-dev.20261025.4 已通过108项测试及官方装载检查。
+
 `voice.busyPolicy:"preserve"` 保留当前合成或播放中的一句，新台词返回 `accepted:false, reason:audio_busy`，不合成、不排队、不打断；下次只讲仍有价值的新内容。显式 `avatar_voice interrupt` 仍可打断。省略该配置时沿用 `replace` 行为。此能力适用于所有游戏和其他实时演出。
 
 ## 现场反应与桌面回复 / Scene reactions and desktop replies
