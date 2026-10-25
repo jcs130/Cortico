@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2-dev.20261025.4
+
+- When live speech requires source observation evidence, expose that condition in the active tool schema and description before submission. Status, interrupt and voice selection remain usable without observation timestamps; the default contract remains compatible.
+
 ## 0.1.2-dev.20261025.3
 
 - Deliver ordinary speech and its synchronized presentation completion/cancellation as piggyback receipts, so finishing a sentence does not itself wake another narration turn. Failures and other asynchronous results still notify promptly.

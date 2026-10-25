@@ -9,6 +9,21 @@ import { PROTOCOL } from "../src/core/types.ts";
 import { parseExtensionManifest } from "cortico/extensions/manifest.ts";
 import { dryMountWorld } from "cortico/extensions/dry-mount.ts";
 import { checkDescribe } from "cortico/extensions/describe-export.ts";
+
+it('advertises required observation evidence only for speech under a live freshness policy',async()=>{
+ const {AvatarStageWorld}=await import('../src/index.ts');
+ const cfg={enabled:true,port:0,dataDir:'',avatars:[],speechObservationMaxAgeSeconds:15};
+ const world=new AvatarStageWorld(()=>cfg);
+ const voice=world.tools().find(t=>t.name==='avatar_voice')!;
+ expect(voice.parameters).toMatchObject({anyOf:[
+  {properties:{action:{enum:['speak']}},required:['observed_at','text']},
+  {properties:{action:{enum:['status','interrupt','select']}}},
+ ]});
+ expect(voice.description).toContain('at most 15 seconds old');
+ cfg.speechObservationMaxAgeSeconds=0;
+ expect(world.tools().find(t=>t.name==='avatar_voice')!.parameters).not.toHaveProperty('anyOf');
+ expect(world.tools().find(t=>t.name==='avatar_control')!.parameters).not.toHaveProperty('anyOf');
+});
 it("returns a failed tool outcome when conditional speech was not admitted", async () => {
   const { createServer } = await import("node:http");
   const { AvatarStageWorld } = await import("../src/index.ts");

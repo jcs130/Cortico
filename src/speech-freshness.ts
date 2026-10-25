@@ -7,3 +7,12 @@ export function checkSpeechFreshness(args: Record<string, unknown>, maxAgeSecond
   if (typeof at !== 'number' || !Number.isFinite(at) || at > now+1 || now-at > (maxAgeSeconds || 15))
     throw Error('stale_speech_observation: speech was not submitted. Use captured_at/sample time from a fresh observation, update the statement, and do not invent a timestamp.');
 }
+
+/** Advertise the configured admission rule before a model submits a speech call. */
+export function speechObservationContract(maxAgeSeconds=0) {
+  if(!Number.isFinite(maxAgeSeconds)||maxAgeSeconds<=0)return {};
+  return {anyOf:[
+    {properties:{action:{enum:['speak']}},required:['observed_at','text']},
+    {properties:{action:{enum:['status','interrupt','select']}}},
+  ]};
+}

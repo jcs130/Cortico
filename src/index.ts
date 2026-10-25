@@ -18,7 +18,7 @@ import { DesktopPresentation } from "./desktop-presentation.ts";
 import { DesktopReplySpeech, REPLY_SPEECH_DEFAULTS } from './desktop-reply-speech.ts';
 import { DesktopAudioRenderer } from './desktop-audio.ts';
 import { randomUUID } from 'node:crypto';
-import { checkSpeechFreshness } from './speech-freshness.ts';
+import { checkSpeechFreshness, speechObservationContract } from './speech-freshness.ts';
 import { speechPerformance } from './core/speech-performance.ts';
 import {
   PerformanceDirector,
@@ -130,7 +130,10 @@ export class AvatarStageWorld implements World {
   tools(): ToolDef[] {
     return TOOL_DEFINITIONS.map((decl) => ({
       ...decl,
-      ...(decl.name === 'avatar_voice' ? {dispatchLane:'avatar.voice'} : {}),
+      ...(decl.name === 'avatar_voice' ? {dispatchLane:'avatar.voice',
+        parameters:{...decl.parameters,...speechObservationContract(this.cfg().speechObservationMaxAgeSeconds??0)},
+        description:decl.description+((this.cfg().speechObservationMaxAgeSeconds??0)>0
+          ?` Live speech requires observed_at from actual source evidence, at most ${this.cfg().speechObservationMaxAgeSeconds} seconds old. If evidence is missing, continue the task or read current state; do not invent a timestamp.`:'')} : {}),
       tags: [...decl.tags],
       handler: async (args, ctx) => {
         try {
