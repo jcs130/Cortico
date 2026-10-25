@@ -46,6 +46,34 @@ it("returns a failed tool outcome when conditional speech was not admitted", asy
     expect(result).toEqual({ text: JSON.stringify({ accepted: false, status: "skipped", reason: "Foreground changed" }), failed: true });
   } finally { await world.stop(); for (const socket of sockets) socket.destroy(); await new Promise<void>(ok => server.close(() => ok())); }
 });
+it('passes a copied ISO observation through the real World once and keeps stale speech out of its output', async () => {
+  const { createServer } = await import('node:http');
+  const { AvatarStageWorld } = await import('../src/index.ts');
+  const calls: unknown[] = [], sockets = new Set<import('node:net').Socket>();
+  const server = createServer(async (req, res) => {
+    if (req.url === '/api/state') res.end(JSON.stringify({protocol:PROTOCOL}));
+    else if (req.url === '/events') { res.writeHead(200, {'Content-Type':'text/event-stream'}); res.write(': ready\n\n'); }
+    else if (req.url === '/api/call') {
+      const chunks: Buffer[]=[]; for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      calls.push(JSON.parse(Buffer.concat(chunks).toString()));
+      res.setHeader('Content-Type','application/json');res.end(JSON.stringify({protocol:PROTOCOL,result:{accepted:true,id:'fixture-speech'}}));
+    } else res.writeHead(404).end();
+  });
+  server.on('connection', socket=>{sockets.add(socket);socket.on('close',()=>sockets.delete(socket));});
+  await new Promise<void>(ok=>server.listen(0,'127.0.0.1',ok));
+  const url='http://127.0.0.1:'+(server.address() as import('node:net').AddressInfo).port;
+  const world=new AvatarStageWorld(()=>({enabled:true,remoteUrl:url,port:0,dataDir:'',avatars:[],speechObservationMaxAgeSeconds:15}));
+  try {
+    await world.start({pushEvent:async()=>{}} as never);
+    const voice=world.tools().find(t=>t.name==='avatar_voice')!;
+    const original={action:'speak',text:'刚刚到达入口。',observed_at:new Date(Date.now()-1000).toISOString()};
+    const result=await voice.handler(original,{callId:'fresh-iso'} as never);
+    expect(result).toBe(JSON.stringify({accepted:true,id:'fixture-speech'}));expect(calls).toHaveLength(1);
+    expect(JSON.stringify(calls[0])).not.toContain('observed_at');expect(original.observed_at).toBeTruthy();
+    const stale=await voice.handler({...original,observed_at:new Date(Date.now()-60_000).toISOString()},{callId:'stale-iso'} as never);
+    expect(stale).toMatchObject({failed:true});expect(JSON.stringify(stale)).toContain('stale_speech_observation');expect(calls).toHaveLength(1);
+  } finally {await world.stop();for(const socket of sockets)socket.destroy();await new Promise<void>(ok=>server.close(()=>ok()));}
+});
 it("passes Cortico 0.2.4 published manifest, dry-mount and self-description checks without network or services", async () => {
   const root = fileURLToPath(new URL("..", import.meta.url)),
     scratchDir = await mkdtemp(join(tmpdir(), "avatar-framework-"));

@@ -24,7 +24,7 @@ export const TOOL_DEFINITIONS = [
             bodyClip: { type: 'string', minLength: 1, maxLength: 100, description: 'Exact installed motion id for the current output.' },
           },
         },
-        observed_at: { type: 'number', description: 'For live scene commentary, the actual Unix seconds captured_at of the image or sample time of the action evidence being described. Never invent the current time. The host can reject missing or stale observation evidence before speech is submitted.' },
+        observed_at: { anyOf: [{ type: 'string', format: 'date-time' }, { type: 'number' }], description: 'Copy the actual source event/sample timestamp or captured_at of the evidence being described. Prefer its original ISO 8601 string with timezone; existing Unix seconds also work. Do not compute epoch seconds, invent a time, or replace stale evidence with the current time. Missing/stale evidence can be rejected before speech is submitted.' },
         ifIdleRevision: {
           type: "integer",
           minimum: 0,

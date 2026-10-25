@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2-dev.20261025.5
+
+- Accept original ISO 8601 source observation timestamps including timezone for live speech, while retaining numeric Unix seconds compatibility. Models need not calculate epoch seconds. Stale, future, invalid and timezone-ambiguous evidence is still rejected before output; timestamps are never refreshed or repaired automatically.
+
 ## 0.1.2-dev.20261025.4
 
 - When live speech requires source observation evidence, expose that condition in the active tool schema and description before submission. Status, interrupt and voice selection remain usable without observation timestamps; the default contract remains compatible.

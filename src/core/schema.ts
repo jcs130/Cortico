@@ -1,5 +1,6 @@
 type Schema = {
   type?: string;
+  anyOf?: readonly Schema[];
   enum?: readonly unknown[];
   properties?: Record<string, Schema>;
   required?: readonly string[];
@@ -20,6 +21,10 @@ export function validateToolInput(
   depth = 0,
 ): void {
   if (depth > 12) throw Error("Tool arguments are too deeply nested");
+  if (schema.anyOf && !schema.anyOf.some(candidate => {
+    try { validateToolInput(candidate, value, path, depth + 1); return true; }
+    catch { return false; }
+  })) throw Error('No matching argument format at ' + path);
   if (schema.enum && !schema.enum.includes(value))
     throw Error("Invalid " + path);
   if (schema.type === "object") {
