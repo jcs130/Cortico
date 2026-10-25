@@ -36,9 +36,17 @@ export interface CommentaryEvent {
   type: string;
   origin?: string;
   text: string;
+  meta?: Record<string, unknown>;
 }
 
 interface Evidence extends CommentaryEvent { truncated: boolean }
+function conversation(e: CommentaryEvent): boolean {
+  return /chat|danmaku|message/.test(e.type) && e.meta?.channel !== 'system'
+    && e.meta?.outgoing !== true && e.meta?.direction !== 'outgoing';
+}
+function sameObservation(a: CommentaryEvent, b: CommentaryEvent): boolean {
+  return a.source === b.source && a.type === b.type && a.origin === b.origin && a.text === b.text;
+}
 interface Submission { at: string; script: string }
 export type CommentaryState = 'disabled' | 'waiting' | 'drafting' | 'submitted' | 'skipped' | 'stale' | 'failed';
 
@@ -134,10 +142,10 @@ export class CommentaryLane {
     const text = cleanEvidence(e.text);
     if (text === null) return;
     // Latest complete state per source/type; distinct chat messages retain identity.
-    const key = /chat|danmaku|message/.test(e.type) ? `${e.source}:${e.cursor}` : `${e.source}:${e.type}`;
+    const key = conversation(e) ? `${e.source}:${e.cursor}` : `${e.source}:${e.type}`;
     // New conversation has priority. Unrelated telemetry may keep arriving while
     // drafting; only facts actually cited by the result must stay fresh.
-    if (this.inFlight && /chat|danmaku|message/.test(e.type)) this.epoch++;
+    if (this.inFlight && conversation(e)) this.epoch++;
     this.evidence.delete(key);
     this.evidence.set(key, { ...e, text: text.slice(0, 600), truncated: text.length > 600 });
     while (this.evidence.size > 24) this.evidence.delete(this.evidence.keys().next().value!);
@@ -205,9 +213,15 @@ export class CommentaryLane {
       if (!draft || this.recent.some(r => r.script === commentarySpeechText(draft.script))) {
         this.state = 'skipped'; this.ports.log('commentary-skipped', { requestId: serial }); return;
       }
-      const current = new Set([...this.evidence.values()].filter(e => this.now() - Date.parse(e.ts)
-        <= Math.max(1, this.ports.config().factAgeSec) * 1000).map(e => e.cursor));
-      if (draft.evidence.some(cursor => !current.has(cursor))) {
+      const fresh = (e: CommentaryEvent) => this.now() - Date.parse(e.ts) <= Math.max(1, this.ports.config().factAgeSec) * 1000;
+      const current = [...this.evidence.values()].filter(fresh);
+      if (draft.evidence.some(cursor => {
+        const cited = facts.find(e => e.cursor === cursor);
+        // A repeated, byte-identical telemetry preview must not invalidate an
+        // in-flight draft. Keep the ORIGINAL cursor/time for speech admission;
+        // a later poll never extends the observation's freshness window.
+        return !cited || !fresh(cited) || !current.some(e => e.cursor === cursor || sameObservation(cited, e));
+      })) {
         this.state = 'stale'; this.ports.log('commentary-stale', { requestId: serial, reason: 'cited-evidence-changed' }); return;
       }
       const receipt = await this.ports.perform(draft.script, serial, draft.evidence);

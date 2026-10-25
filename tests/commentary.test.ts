@@ -56,10 +56,27 @@ describe("optional evidence-based game commentary", () => {
     if (reason === "foreground") r.lane.foregroundSpeech("主线程先接话。");
     if (reason === "pause") r.available.active = false;
     if (reason === "stop") r.lane.stop();
-    if (reason === "cited-replaced") r.observe(2);
+    if (reason === "cited-replaced") r.observe(2, 'game.result', '刚才那条读数已经发生变化。');
     if (reason === "old-result") r.advance(31_000);
     r.answer(); await settle(); expect(r.perform).not.toHaveBeenCalled();
     expect(r.lane.facts()).toContain("stale");
+  });
+  it('does not cancel a pending draft for system chat transport or outgoing echoes', async () => {
+    const r = rig(); r.observe(); r.lane.tick();
+    r.lane.observe({ cursor: 2, ts: new Date(100000).toISOString(), source: 'game', type: 'game.chat',
+      origin: 'external', text: 'Room state: five enemies.', meta: { channel: 'system' } });
+    r.lane.observe({ cursor: 3, ts: new Date(100000).toISOString(), source: 'game', type: 'game.chat',
+      origin: 'external', text: 'Our sent message echo.', meta: { outgoing: true } });
+    r.answer(); await settle();
+    expect(r.perform).toHaveBeenCalledTimes(1);
+  });
+  it('keeps unchanged telemetry eligible while preserving the original cited clock', async () => {
+    const r = rig(); r.observe(); r.lane.tick(); r.advance(3000); r.observe(2);
+    r.answer(); await settle();
+    expect(r.perform).toHaveBeenCalledWith('刚才 Jojo 提到了村口的马。', 1, [1]);
+    const expired = rig(); expired.observe(); expired.lane.tick(); expired.advance(31000); expired.observe(2);
+    expired.answer(); await settle();
+    expect(expired.perform).not.toHaveBeenCalled();
   });
   it("keeps a hanging cognition slot and treats admission refusal as no submission", async () => {
     const r = rig(); r.observe(); r.lane.tick(); r.advance(3000); r.lane.tick();

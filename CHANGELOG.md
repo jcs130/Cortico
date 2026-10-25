@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2-dev.20261026.1
+
+- Keep server telemetry and outgoing chat echoes from interrupting an independent commentary draft; real new conversation still takes priority.
+- A byte-identical refreshed observation no longer invalidates its in-flight draft. Original event cursors and timestamps remain required; freshness, changed facts and pause/stop guards are unchanged.
+
 ## 0.1.2-dev.20261025.6
 
 - Forward the oldest original timestamp among the draft's cited event envelopes into speech admission. Optional commentary no longer fails a configured observation-time requirement solely because its internal caller omitted the field. Missing or stale sources are not replaced with the current time.
