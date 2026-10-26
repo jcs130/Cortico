@@ -33,3 +33,13 @@ it('admits conversation without requiring an unrelated live observation', () => 
     expect(args).not.toHaveProperty('observed_at');
   }
 });
+it('separates dated events from current claims while preserving their source clock', () => {
+  const args = { action: 'speak', observed_at: now - 105, evidence_mode: 'recent' };
+  expect(() => checkSpeechFreshness(args, 15, now)).not.toThrow();
+  expect(args.observed_at).toBe(now - 105);
+  expect(() => checkSpeechFreshness({ ...args, evidence_mode: 'current' }, 15, now)).toThrow('stale_speech');
+  for (const observed_at of [now - 301, now + 2])
+    expect(() => checkSpeechFreshness({ ...args, observed_at }, 15, now)).toThrow('stale_speech');
+  expect(() => checkSpeechFreshness({ action: 'speak', evidence_mode: 'recent' }, 15, now)).toThrow('original observation');
+  expect(() => checkSpeechFreshness({ ...args, evidence_mode: 'ignore' }, 15, now)).toThrow('Invalid speech evidence');
+});

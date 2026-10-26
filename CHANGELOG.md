@@ -166,3 +166,8 @@
 - Initial independent avatar World: rigged VRM presets, semantic poses, reusable motion library and optional local UniMate.
 - Single TTS/music output owner, streaming WAV, interruption, original action ledger and renderer execution receipts.
 - Independent SDK/server and clean production build without Cortico.
+## 0.1.2-dev.20261027.1
+
+- Reserve bounded scene and observed-outcome slots across telemetry floods. Later cleanup receipts retain the earlier dated outcome; they do not overwrite the reason an activity ended.
+- Separate current-state speech freshness from explicitly retrospective speech. Preserve original evidence timestamps through draft admission and deferred playback; output ownership, pause, deduplication and foreground priority remain enforced.
+- Preserve body progress at the end of long snapshots within the existing preview budget. Allow short reactions to difficulties and discoveries without waiting for a successful task result.

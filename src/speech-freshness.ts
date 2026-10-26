@@ -10,13 +10,20 @@ function observationSeconds(value: unknown): number {
   return Date.parse(value) / 1000;
 }
 
+export const RECENT_SPEECH_MAX_AGE_SECONDS = 300;
 export function checkSpeechFreshness(args: Record<string, unknown>, maxAgeSeconds = 0, now = Date.now()/1000) {
   if (args.action !== 'speak') return;
   if (!Number.isFinite(maxAgeSeconds) || maxAgeSeconds < 0) throw Error('Invalid speech observation age policy');
+  if (args.evidence_mode !== undefined && args.evidence_mode !== 'current' && args.evidence_mode !== 'recent')
+    throw Error('Invalid speech evidence mode');
   // Dialogue and creative speech need no observation clock. A supplied source
   // clock remains authoritative and is never replaced with the submission time.
-  if (args.observed_at === undefined) return;
+  if (args.observed_at === undefined) {
+    if (args.evidence_mode === 'recent') throw Error('Recent event speech requires the original observation timestamp');
+    return;
+  }
   const at = observationSeconds(args.observed_at);
-  if (!Number.isFinite(at) || at > now+1 || now-at > (maxAgeSeconds || 15))
+  const limit = args.evidence_mode === 'recent' ? RECENT_SPEECH_MAX_AGE_SECONDS : (maxAgeSeconds || 15);
+  if (!Number.isFinite(at) || at > now+1 || now-at > limit)
     throw Error('stale_speech_observation: the supplied observation time is invalid or expired; speech was not submitted. Copy captured_at or the source event/sample timestamp verbatim as an ISO 8601 string including timezone, or use its existing Unix seconds. Do not replace old evidence with the current time or remove a stale timestamp to repeat the same claim. Read fresh evidence, describe it as history, or reply without making that live observation claim.');
 }

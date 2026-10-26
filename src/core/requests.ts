@@ -21,7 +21,8 @@ export type ControlRequest =
 export type VoiceRequest =
   | { action: "status" | "interrupt" }
   | { action: "select"; voice: string }
-  | { action: "speak"; text: string; voice?: string; ifIdleRevision?: number; performance?: SpeechPerformance };
+  | { action: "speak"; text: string; voice?: string; ifIdleRevision?: number; performance?: SpeechPerformance;
+      observed_at?: string | number; evidence_mode?: 'current' | 'recent' };
 export type MotionRequest =
   | { action: "status" | "stop" }
   | { action: "generate"; prompt: string; durationSec?: number; seed?: number }

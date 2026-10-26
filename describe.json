@@ -64,6 +64,14 @@
             ],
             "description": "For a claim about a current observation, copy the actual source event/sample timestamp or captured_at. Prefer its original ISO 8601 string with timezone; existing Unix seconds also work. Ordinary conversation, greetings and creative speech need no observation timestamp. Supplied invalid or stale times are rejected. Never invent a time or remove a stale timestamp to repeat the same live claim."
           },
+          "evidence_mode": {
+            "type": "string",
+            "enum": [
+              "current",
+              "recent"
+            ],
+            "description": "Default current uses the configured live-state age limit. recent is a dated account of an event within 300 seconds and requires its original observed_at: describe what happened, never imply its location, health, danger or result remains current."
+          },
           "ifIdleRevision": {
             "type": "integer",
             "minimum": 0,

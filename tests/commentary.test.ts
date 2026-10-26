@@ -21,6 +21,32 @@ function rig() {
     advance(ms: number) { now += ms; speech.observedAtMs = now; } };
 }
 describe("optional evidence-based game commentary", () => {
+  it('keeps a scene and its body progress despite a flood of status receipts', () => {
+    const r = rig(); r.observe(1, 'game.snapshot', '当前位置\n'+ '可见方块'.repeat(400) + '\n身体任务仍在向南走');
+    for(let i=2;i<40;i++)r.observe(i,'game.result','命令已受理 '+i);
+    r.lane.tick(); const brief=r.request.mock.calls[0][0];
+    expect(brief).toContain('当前位置'); expect(brief).toContain('身体任务仍在向南走');
+    expect(brief).not.toContain('可见方块'.repeat(400));
+    expect(r.log).toHaveBeenCalledWith('commentary-request',expect.objectContaining({evidence:expect.arrayContaining([1])}));
+  });
+  it('keeps an observed outcome beside later cleanup without turning it into current state', async () => {
+    const r=rig();
+    r.lane.observe({cursor:1,ts:new Date(100_000).toISOString(),source:'game',type:'game.event',origin:'external',
+      text:'角色因箭伤死亡',execution:{kind:'observation',id:'episode-52',terminal:true,evidence:{outcome:'death'}}});
+    r.advance(105_000);
+    for(let i=2;i<40;i++)r.observe(i,'game.result','已结束登记，退出队伍 '+i);
+    r.lane.tick(); expect(r.request.mock.calls[0][0]).toContain('角色因箭伤死亡');
+    r.answer('现在主动退出了',[1]);await settle();
+    expect(r.perform).not.toHaveBeenCalled(); // old outcome cannot support a current claim
+  });
+  it('admits a dated outcome after newer telemetry while retaining its original cursor', async () => {
+    const r=rig();
+    r.lane.observe({cursor:1,ts:new Date(100_000).toISOString(),source:'game',type:'game.event',origin:'external',text:'因箭伤死亡',
+      execution:{kind:'observation',id:'episode-52',terminal:true,evidence:{outcome:'death'}}});
+    r.advance(105_000);r.observe(2,'game.result','退出登记完成');
+    r.request.mockResolvedValue({text:JSON.stringify({script:'刚才倒下了，后来才清理了登记。',kind:'observation',timeframe:'recent',evidence:[1,2]})});
+    r.lane.tick();await settle();expect(r.perform).toHaveBeenCalledWith(expect.any(String),1,[1,2],'recent');
+  });
   it.each([
     ['{"skip":"No new scene result."}', 'model-skip'],
     ['not JSON', 'invalid-json'],
@@ -282,7 +308,7 @@ function controllerRig() {
   controller.start({store:{latestCursor:()=>latest,get:(cursor:number)=>events.get(cursor)},cognition:{request},log:{emit:log,warn:vi.fn()}} as never);
   return {controller,events,request,speak,log,
     event(cursor:number,ts:string,type='game.result'){latest=cursor;events.set(cursor,{cursor,ts,type,source:'game',origin:'external',text:'任务实际发生了变化。'});},
-    answer(evidence:number[],kind='observation'){response.resolve({text:JSON.stringify({script:'刚才看到了新的变化。',evidence,kind})});}};
+    answer(evidence:number[],kind='observation',timeframe?:string){response.resolve({text:JSON.stringify({script:'刚才看到了新的变化。',evidence,kind,...(timeframe?{timeframe}:{})})});}};
 }
 
 it('uses the oldest original cited event time, independent of draft completion time',async()=>{
@@ -296,12 +322,14 @@ it('uses the oldest original cited event time, independent of draft completion t
   }finally{r.controller.stop();}
 });
 
-it('does not draft from evidence already outside the active speech policy',async()=>{
+it('can recount a dated event beyond the live-state window without replacing its clock',async()=>{
   const r=controllerRig();
   try{
     r.event(51,'1970-01-01T00:01:20.000Z');
     await vi.advanceTimersByTimeAsync(2100);
-    expect(r.request).not.toHaveBeenCalled();expect(r.speak).not.toHaveBeenCalled();
+    expect(r.request).toHaveBeenCalledTimes(1);
+    r.answer([51],'observation','recent');await vi.advanceTimersByTimeAsync(0);
+    expect(r.speak).toHaveBeenCalledWith(expect.objectContaining({observed_at:'1970-01-01T00:01:20.000Z',evidence_mode:'recent'}),expect.any(String));
   }finally{r.controller.stop();}
 });
 

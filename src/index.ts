@@ -376,7 +376,7 @@ export class AvatarStageWorld implements World {
               },
               "worlds.avatar-stage.speechObservationMaxAgeSeconds": {
                 type: 'number', minimum: 0, title: '带来源时间的口播有效期（秒）',
-                description: '校验显式提供的 observed_at；0 沿用 15 秒。普通聊天无需观察时间。空闲解说仍使用所引用事件的原始时间。',
+                description: '仅限制 current 当前状态的观察年龄；0 沿用 15 秒。recent 回顾事件使用原时间戳，最长 300 秒，不声称旧位置或血量仍是现状。普通聊天无需观察时间。',
               },
             },
           },
