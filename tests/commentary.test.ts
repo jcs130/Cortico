@@ -15,7 +15,7 @@ function rig() {
   const draft = pending<{ text: string }>();
   const request = vi.fn((_brief: string) => draft.promise), perform = vi.fn(async (_script: string, _serial: number, _evidence: number[]) => ({ accepted: true })), log = vi.fn();
   const lane = new CommentaryLane({ config: () => config, availability: () => available, request, perform, log, now: () => now });
-  const observe = (cursor = 1, type = "game.result", text = "玩家 Jojo：我刚在村口看到了马。", source = "game") => lane.observe({ cursor, source, type, origin: "external", ts: new Date(now).toISOString(), text });
+  const observe = (cursor = 1, type = "game.snapshot", text = "玩家 Jojo：我刚在村口看到了马。", source = "game") => lane.observe({ cursor, source, type, origin: "external", ts: new Date(now).toISOString(), text });
   const answer = (text = "刚才 Jojo 提到了村口的马。", evidence: number[] = [1]) => draft.resolve({ text: JSON.stringify({ script: text, evidence, kind: "observation" }) });
   return { config, speech, available, lane, observe, request, perform, answer, log,
     advance(ms: number) { now += ms; speech.observedAtMs = now; } };
@@ -56,7 +56,7 @@ describe("optional evidence-based game commentary", () => {
     if (reason === "foreground") r.lane.foregroundSpeech("主线程先接话。");
     if (reason === "pause") r.available.active = false;
     if (reason === "stop") r.lane.stop();
-    if (reason === "cited-replaced") r.observe(2, 'game.result', '刚才那条读数已经发生变化。');
+    if (reason === "cited-replaced") r.observe(2, 'game.snapshot', '刚才那条读数已经发生变化。');
     if (reason === "old-result") r.advance(31_000);
     r.answer(); await settle(); expect(r.perform).not.toHaveBeenCalled();
     expect(r.lane.facts()).toContain("stale");
@@ -77,6 +77,25 @@ describe("optional evidence-based game commentary", () => {
     const expired = rig(); expired.observe(); expired.lane.tick(); expired.advance(31000); expired.observe(2);
     expired.answer(); await settle();
     expect(expired.perform).not.toHaveBeenCalled();
+  });
+  it('retains distinct server outcomes while drafting without refreshing their original clock', async () => {
+    const r = rig(); r.observe(1, 'game.event', 'Task A completed.'); r.lane.tick();
+    r.advance(3000); r.observe(2, 'game.event', 'Task B started.');
+    r.answer('刚才完成了任务 A。'); await settle();
+    expect(r.perform).toHaveBeenCalledWith('刚才完成了任务 A。', 1, [1]);
+    const expired = rig(); expired.observe(1, 'game.event', 'Task A completed.'); expired.lane.tick();
+    expired.advance(31000); expired.observe(2, 'game.event', 'Task B started.'); expired.answer(); await settle();
+    expect(expired.perform).not.toHaveBeenCalled();
+  });
+  it('bounds the evidence task and excludes hidden receipt/config metadata while retaining attribution', () => {
+    const r = rig();
+    r.lane.observe({cursor:1, ts:new Date(100000).toISOString(),source:'game',type:'game.event',origin:'external',
+      senderKey:'server',text:'Task A completed.', meta:{channel:'system',outgoing:false,
+        receipt:'x'.repeat(100000), config:{password:'private-fixture'}, arbitrary:'hidden'}});
+    r.lane.tick(); const brief = r.request.mock.calls[0][0];
+    expect(brief.length).toBeLessThan(4000); expect(brief).toContain('"senderKey":"server"');
+    expect(brief).toContain('"channel":"system"'); expect(brief).toContain('"truncated":true');
+    expect(brief).not.toContain('private-fixture'); expect(brief).not.toContain('"receipt"');
   });
   it("keeps a hanging cognition slot and treats admission refusal as no submission", async () => {
     const r = rig(); r.observe(); r.lane.tick(); r.advance(3000); r.lane.tick();

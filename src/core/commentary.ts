@@ -35,6 +35,7 @@ export interface CommentaryEvent {
   source: string;
   type: string;
   origin?: string;
+  senderKey?: string;
   text: string;
   meta?: Record<string, unknown>;
 }
@@ -45,7 +46,23 @@ function conversation(e: CommentaryEvent): boolean {
     && e.meta?.outgoing !== true && e.meta?.direction !== 'outgoing';
 }
 function sameObservation(a: CommentaryEvent, b: CommentaryEvent): boolean {
-  return a.source === b.source && a.type === b.type && a.origin === b.origin && a.text === b.text;
+  return a.source === b.source && a.type === b.type && a.origin === b.origin && a.senderKey === b.senderKey && a.text === b.text;
+}
+const snapshot = (e: CommentaryEvent) => /(?:^|\.)snapshot$/.test(e.type);
+
+/** The event text is an attributed preview. Do not silently append entire tool
+ * receipts, snapshots or credential-bearing metadata to this small task. */
+function preview(e: CommentaryEvent, text: string): Evidence {
+  const meta: Record<string, unknown> = {};
+  for (const key of ['channel', 'direction', 'outgoing']) {
+    const value = e.meta?.[key];
+    if (typeof value === 'boolean') meta[key] = value;
+    else if (typeof value === 'string' && value.length <= 80 && cleanEvidence(value) !== null) meta[key] = value;
+  }
+  return { cursor: e.cursor, ts: e.ts, source: e.source, type: e.type, origin: e.origin,
+    ...(e.senderKey ? { senderKey: e.senderKey.slice(0, 160) } : {}),
+    text: text.slice(0, 600), ...(Object.keys(meta).length ? { meta } : {}),
+    truncated: text.length > 600 || Object.keys(e.meta ?? {}).length > Object.keys(meta).length };
 }
 interface Submission { at: string; script: string }
 export type CommentaryState = 'disabled' | 'waiting' | 'drafting' | 'submitted' | 'skipped' | 'stale' | 'failed';
@@ -141,13 +158,14 @@ export class CommentaryLane {
     if (e.origin !== 'external' && e.source !== 'terminal') return;
     const text = cleanEvidence(e.text);
     if (text === null) return;
-    // Latest complete state per source/type; distinct chat messages retain identity.
-    const key = conversation(e) ? `${e.source}:${e.cursor}` : `${e.source}:${e.type}`;
+    // Only snapshots replace a previous complete state. Two independent task
+    // results/system events of the same type are separate historical evidence.
+    const key = snapshot(e) ? `${e.source}:${e.type}` : `${e.source}:${e.cursor}`;
     // New conversation has priority. Unrelated telemetry may keep arriving while
     // drafting; only facts actually cited by the result must stay fresh.
     if (this.inFlight && conversation(e)) this.epoch++;
     this.evidence.delete(key);
-    this.evidence.set(key, { ...e, text: text.slice(0, 600), truncated: text.length > 600 });
+    this.evidence.set(key, preview(e, text));
     while (this.evidence.size > 24) this.evidence.delete(this.evidence.keys().next().value!);
   }
 

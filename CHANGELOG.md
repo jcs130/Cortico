@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2-dev.20261026.4
+
+- Preserve separate outcome events during commentary drafting; only complete snapshots supersede prior state. Keep original evidence timestamps and all foreground/pause/stale checks.
+- Bound commentary material to attributed text previews and minimal transport metadata. Do not append entire tool receipts or arbitrary nested metadata to speech requests.
+
 ## 0.1.2-dev.20261026.3
 
 - Add an optional host-authored public progress card for the stage and a bounded SDK/HTTP presentation port.
