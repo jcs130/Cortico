@@ -99,10 +99,18 @@ export class CommentaryController {
       this.state = state;
       const now = Date.now(), busy = !!state.foreground;
       const revision = typeof state.audioRevision === "number" ? state.audioRevision : null;
+      const action = Array.isArray(state.actions) ? state.actions.find(row => row.id === state.foreground) : null;
+      const playing = action?.kind === 'speech' && action.status === 'playing';
+      const duration = action?.evidence?.durationMs, position = action?.evidence?.audioTimeMs ?? 0;
+      const backlogMs = playing && Number.isFinite(duration) && duration > 0 && Number.isFinite(position)
+        && Number.isFinite(action.updatedAt)
+        ? Math.max(0, duration - position - Math.max(0, now - action.updatedAt)) : undefined;
       const idleSince = busy ? null : this.speech?.idleSinceMs !== null && revision === this.lastRevision
         ? this.speech?.idleSinceMs ?? now : now;
       this.speech = { observedAtMs: now, idleSinceMs: idleSince, busy, ttsReady: state.voice?.configured === true, textReady: state.textReady === true,
-        textFormat: state.voice?.textFormat === "drama-3" ? "drama-3" : "plain" };
+        textFormat: state.voice?.textFormat === "drama-3" ? "drama-3" : "plain",
+        playing, musicPlaying: action?.kind === 'music-play', backlogMs,
+        ...(revision !== null ? { queueRevision: revision } : {}) };
       this.lastRevision = revision;
       const latest = host.store.latestCursor();
       // Progress through newly appended envelopes; never scan old run history.

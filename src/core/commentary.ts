@@ -22,7 +22,7 @@ export interface SpeechAvailability {
   /** Explicit text renderer availability; independent of speech synthesis. */
   textReady?: boolean;
   textFormat?: "plain" | "drama-3";
-  /** Optional for older engines. Remaining audio includes estimated unsynthesized pieces. */
+  /** Optional measured remaining playback, advanced from the renderer receipt clock. */
   backlogMs?: number;
   queueRevision?: number;
   playing?: boolean;
@@ -65,7 +65,13 @@ function preview(e: CommentaryEvent, text: string): Evidence {
     truncated: text.length > 600 || Object.keys(e.meta ?? {}).length > Object.keys(meta).length };
 }
 interface Submission { at: string; script: string }
-export type CommentaryState = 'disabled' | 'waiting' | 'drafting' | 'submitted' | 'skipped' | 'stale' | 'failed';
+export type CommentaryState = 'disabled' | 'waiting' | 'drafting' | 'ready' | 'submitted' | 'skipped' | 'stale' | 'failed';
+interface Draft {
+  script: string; evidence: number[]; facts: Evidence[];
+  epoch: number; serial: number; startedAt: number; readyAt: number;
+  sources: string; style: string; textFormat: "plain" | "drama-3";
+  revision: number | undefined; idleSince: number | null; duringPlayback: boolean;
+}
 
 export interface CommentaryPorts {
   config(): CommentaryConfig;
@@ -136,7 +142,8 @@ export function parseCommentary(text: string, allowed: ReadonlySet<number>, text
   return { script, evidence: [...new Set(evidence)] };
 }
 
-/** No queue: stale or late drafts are discarded, and a hung request retains its slot. */
+/** One draft ahead, never an audio queue. Cognition may overlap confirmed speech
+ * playback; submission still requires an idle output and fresh original facts. */
 export class CommentaryLane {
   private epoch = 0;
   private serial = 0;
@@ -147,6 +154,9 @@ export class CommentaryLane {
   private recent: Submission[] = [];
   private lastEvaluated = '';
   private state: CommentaryState = 'disabled';
+  private ready: Draft | null = null;
+  private prefetchedRevision: number | undefined;
+  private draftMs = 5000;
 
   constructor(private readonly ports: CommentaryPorts) {}
   private now(): number { return this.ports.now?.() ?? Date.now(); }
@@ -163,7 +173,7 @@ export class CommentaryLane {
     const key = snapshot(e) ? `${e.source}:${e.type}` : `${e.source}:${e.cursor}`;
     // New conversation has priority. Unrelated telemetry may keep arriving while
     // drafting; only facts actually cited by the result must stay fresh.
-    if (this.inFlight && conversation(e)) this.epoch++;
+    if ((this.inFlight || this.ready) && conversation(e)) this.epoch++;
     this.evidence.delete(key);
     this.evidence.set(key, preview(e, text));
     while (this.evidence.size > 24) this.evidence.delete(this.evidence.keys().next().value!);
@@ -171,6 +181,8 @@ export class CommentaryLane {
 
   foregroundSpeech(script?: string): void {
     this.epoch++;
+    if (this.ready) this.state = 'waiting';
+    this.ready = null;
     if (script?.trim()) this.submitted(script);
   }
 
@@ -181,19 +193,69 @@ export class CommentaryLane {
 
   facts(): string {
     return `[解说通道] ${this.state}${this.inFlight ? '；起草中，游戏继续' : ''}`
+      + (this.ready ? '；候选等待音频空隙，尚未提交播出' : '')
       + (this.recent.length ? `\n最近提交台词（不是待播稿，不证明观众端播放）：${JSON.stringify(this.recent.slice(-4))}` : '');
   }
 
-  private eligible(): boolean {
+  private healthy(): boolean {
     const c = this.ports.config(), a = this.ports.availability(), now = this.now(), s = a.speech;
-    return !this.stopped && c.enabled && a.live && a.active && !!s && !s.busy && (s.ttsReady || s.textReady === true)
-      && now - s.observedAtMs <= 5000 && s.idleSinceMs !== null && now - s.idleSinceMs >= Math.max(1, c.idleSec) * 1000;
+    return !this.stopped && c.enabled && a.live && a.active && !!s && (s.ttsReady || s.textReady === true)
+      && now - s.observedAtMs <= 5000 && !s.musicPlaying;
+  }
+  private eligible(): boolean {
+    const s = this.ports.availability().speech;
+    return this.healthy() && !!s && !s.busy && s.idleSinceMs !== null
+      && this.now() - s.idleSinceMs >= Math.max(1, this.ports.config().idleSec) * 1000;
+  }
+  private canPrefetch(): boolean {
+    const s = this.ports.availability().speech;
+    if (!this.healthy() || !s?.busy || !s.playing || !s.ttsReady
+      || !Number.isSafeInteger(s.queueRevision) || s.queueRevision === this.prefetchedRevision) return false;
+    // Measured remaining audio, when available, avoids spending a request far
+    // ahead of a long utterance. Older renderers may omit playback duration.
+    const lead = Math.min(Math.max(1, this.ports.config().factAgeSec) * 500, this.draftMs + 2000);
+    return s.backlogMs === undefined || (Number.isFinite(s.backlogMs) && s.backlogMs <= lead);
+  }
+  private valid(draft: Draft): boolean {
+    const c = this.ports.config(), s = this.ports.availability().speech;
+    if (!this.healthy() || !s || draft.epoch !== this.epoch || draft.sources !== c.sources || draft.style !== c.style
+      || (s.textFormat ?? 'plain') !== draft.textFormat || s.queueRevision !== draft.revision
+      || this.now() - draft.startedAt > Math.max(1, c.factAgeSec) * 1000) return false;
+    if (draft.duringPlayback ? s.busy && !s.playing : s.busy || s.idleSinceMs !== draft.idleSince) return false;
+    const fresh = (e: CommentaryEvent) => this.now() - Date.parse(e.ts) <= Math.max(1, c.factAgeSec) * 1000;
+    const current = [...this.evidence.values()].filter(fresh);
+    return draft.evidence.every(cursor => {
+      const cited = draft.facts.find(e => e.cursor === cursor);
+      // Matching telemetry does not refresh the ORIGINAL source clock.
+      return !!cited && fresh(cited) && current.some(e => e.cursor === cursor || sameObservation(cited, e));
+    });
+  }
+  private stale(serial: number, reason: string): void {
+    this.state = 'stale';
+    this.ports.log('commentary-stale', { requestId: serial, reason });
+  }
+  private finish(): void {
+    this.inFlight = false;
+    this.nextAt = this.now() + Math.max(1, this.ports.config().retrySec) * 1000;
   }
 
   tick(): void {
-    if (!this.ports.config().enabled) { this.state = 'disabled'; return; }
+    if (!this.ports.config().enabled) {
+      if (this.ready || this.inFlight) this.epoch++;
+      this.ready = null; this.state = 'disabled'; return;
+    }
     if (this.state === 'disabled') this.state = 'waiting';
-    if (!this.eligible() || this.inFlight || this.now() < this.nextAt) return;
+    if (this.inFlight) return;
+    if (this.ready) {
+      const draft = this.ready;
+      if (!this.valid(draft)) { this.ready = null; this.stale(draft.serial, 'candidate-invalidated'); return; }
+      if (!this.eligible()) return;
+      this.ready = null; this.inFlight = true;
+      void this.submit(draft).finally(() => this.finish());
+      return;
+    }
+    const duringPlayback = this.canPrefetch();
+    if (!duringPlayback && (!this.eligible() || this.now() < this.nextAt)) return;
     const epoch = this.epoch, idleSince = this.ports.availability().speech!.idleSinceMs;
     const c = this.ports.config(), now = this.now(), serial = ++this.serial;
     const sources = new Set(c.sources.split(/[\s,]+/).filter(Boolean));
@@ -206,55 +268,61 @@ export class CommentaryLane {
     const inputKey = JSON.stringify([c.sources, c.style, textFormat, facts.map(({ source, type, origin, text }) => ({ source, type, origin, text }))]);
     if (inputKey === this.lastEvaluated) return;
     this.inFlight = true;
+    const revision = this.ports.availability().speech!.queueRevision;
+    if (duringPlayback) this.prefetchedRevision = revision;
     this.state = 'drafting';
     const brief = commentaryBrief(facts, this.recent, c.style, textFormat);
-    this.ports.log('commentary-request', { requestId: serial, idleSinceMs: idleSince, taskChars: brief.length, evidence: facts.map(e => e.cursor), context: 'task', tools: [] });
-    void this.run(brief, facts, epoch, idleSince, serial, now, c.sources, inputKey, textFormat).finally(() => {
-      this.inFlight = false;
-      this.nextAt = this.now() + Math.max(1, this.ports.config().retrySec) * 1000;
-    });
+    this.ports.log('commentary-request', { requestId: serial, idleSinceMs: idleSince, duringPlayback,
+      queueRevision: revision, taskChars: brief.length, evidence: facts.map(e => e.cursor), context: 'task', tools: [] });
+    const draft: Draft = { script: '', evidence: [], facts, epoch, idleSince, serial, startedAt: now, readyAt: now,
+      sources: c.sources, style: c.style, revision, duringPlayback, textFormat };
+    void this.run(brief, draft, inputKey).finally(() => this.finish());
   }
 
-  private async run(brief: string, facts: Evidence[], epoch: number, idleSince: number | null, serial: number, startedAt: number, sources: string, inputKey: string, textFormat: "plain" | "drama-3"): Promise<void> {
+  private async run(brief: string, candidate: Draft, inputKey: string): Promise<void> {
+    const { serial, facts, textFormat } = candidate;
     try {
       const result = await this.ports.request(brief);
-      // No stale draft can enter TTS after foreground speech, pause/stop, a
-      // drained/new queue episode, missing engine heartbeat or a long generation.
-      if (epoch !== this.epoch || sources !== this.ports.config().sources || !this.eligible() || this.ports.availability().speech!.idleSinceMs !== idleSince
-        || (this.ports.availability().speech?.textFormat ?? "plain") !== textFormat
-        || this.now() - startedAt > Math.max(1, this.ports.config().factAgeSec) * 1000) {
-        this.state = 'stale'; this.ports.log('commentary-stale', { requestId: serial }); return;
-      }
+      if (!this.valid(candidate)) { this.stale(serial, 'output-or-context-changed'); return; }
       if ('error' in result) throw new Error(result.error);
+      this.draftMs = Math.max(1000, Math.min(15000, this.now() - candidate.startedAt));
       this.lastEvaluated = inputKey;
       const draft = parseCommentary(result.text, new Set(facts.map(e => e.cursor)), textFormat);
       if (!draft || this.recent.some(r => r.script === commentarySpeechText(draft.script))) {
         this.state = 'skipped'; this.ports.log('commentary-skipped', { requestId: serial }); return;
       }
-      const fresh = (e: CommentaryEvent) => this.now() - Date.parse(e.ts) <= Math.max(1, this.ports.config().factAgeSec) * 1000;
-      const current = [...this.evidence.values()].filter(fresh);
-      if (draft.evidence.some(cursor => {
-        const cited = facts.find(e => e.cursor === cursor);
-        // A repeated, byte-identical telemetry preview must not invalidate an
-        // in-flight draft. Keep the ORIGINAL cursor/time for speech admission;
-        // a later poll never extends the observation's freshness window.
-        return !cited || !fresh(cited) || !current.some(e => e.cursor === cursor || sameObservation(cited, e));
-      })) {
-        this.state = 'stale'; this.ports.log('commentary-stale', { requestId: serial, reason: 'cited-evidence-changed' }); return;
+      Object.assign(candidate, draft, { readyAt: this.now() });
+      if (!this.valid(candidate)) { this.stale(serial, 'cited-evidence-changed'); return; }
+      if (this.eligible()) await this.submit(candidate);
+      else {
+        this.ready = candidate; this.state = 'ready';
+        this.ports.log('commentary-ready', { requestId: serial, duringPlayback: candidate.duringPlayback,
+          draftMs: this.now() - candidate.startedAt, evidence: draft.evidence });
       }
+    } catch (e) {
+      this.state = 'failed';
+      this.ports.log('commentary-failed', { requestId: serial, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+  private async submit(draft: Draft): Promise<void> {
+    const serial = draft.serial;
+    try {
+      if (!this.eligible() || !this.valid(draft)) { this.stale(serial, 'candidate-invalidated'); return; }
       const receipt = await this.ports.perform(draft.script, serial, draft.evidence);
       if (!receipt.accepted) {
         this.state = 'stale'; this.ports.log('commentary-stale', { requestId: serial, receipt }); return;
       }
       this.submitted(draft.script);
       this.state = 'submitted';
-      this.ports.log('commentary-submitted', { requestId: serial, script: draft.script, evidence: draft.evidence, receipt });
+      this.ports.log('commentary-submitted', { requestId: serial, script: draft.script, evidence: draft.evidence, receipt,
+        duringPlayback: draft.duringPlayback, draftMs: draft.readyAt - draft.startedAt,
+        heldMs: this.now() - draft.readyAt });
     } catch (e) {
       this.state = 'failed';
       this.ports.log('commentary-failed', { requestId: serial, error: e instanceof Error ? e.message : String(e) });
     }
   }
 
-  stop(): void { this.stopped = true; this.epoch++; this.evidence.clear(); this.lastEvaluated = ''; }
-  resume(): void { this.stopped = false; this.epoch++; this.nextAt = 0; }
+  stop(): void { this.stopped = true; this.epoch++; this.ready = null; this.evidence.clear(); this.lastEvaluated = ''; }
+  resume(): void { this.stopped = false; this.epoch++; this.ready = null; this.prefetchedRevision = undefined; this.nextAt = 0; }
 }

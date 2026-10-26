@@ -79,11 +79,13 @@ TTS 是这个 World 的能力。它使用显式配置的 LiteLLM/OpenAI 风格 W
 
 ### 可选游戏解说
 
-`commentary` 默认关闭。启用后，在音频空闲且有新鲜游戏或观众事件时，通过宿主 `WorldHost.cognition.request` 起草一两句候选；游戏主线程继续行动。没有新内容可以跳过。它不创建另一个角色、模型连接、身体任务或长期记忆库。
+`commentary` 默认关闭。启用后，有新鲜游戏或观众事件时，通过宿主 `WorldHost.cognition.request` 起草一两句候选；游戏主线程继续行动。确认语音正在播放时，可提前准备下一句，最多保留一个候选，等配置的空闲间隔再提交；不预先排队或合成多句音频。没有新内容可以跳过。它不创建另一个角色、模型连接、身体任务或长期记忆库。
 
 部署者显式配置 `commentary.enabled`、`sources`（World ID，以空格分隔）、`hostStatusUrl`（宿主只读运行状态接口）及可选口吻。`idleSec` 默认 20 秒，`retrySec` 默认 20 秒，`factAgeSec` 默认 120 秒；均可在扩展配置页修改。没有已启用音频的页面、宿主暂停、资料过期或当前正在播放时，不提交解说。状态接口需要返回 `{ "loop": { "running": true, "paused": false } }`；不可读时等待恢复，不推断仍在运行。
 
 起草只读取启用之后的新事件，以来源、时间、cursor 和截断标记提供最多六条预览。前台插话、新聊天、场景证据被替换、暂停或关闭会淘汰旧草稿。提交时再次检查音频版本，后台草稿不覆盖较新的语音或歌曲。最近台词用于去重；受理、合成、播放和结束仍分别记录。
+
+桌宠播放回执携带已解码音频时长，用于在上一句接近结束时提前起草，避免为长音频过早消耗请求。歌曲、等待 TTS 的 queued 状态和无法确认类型的 busy 状态不预起草。动作目录刷新与音频合成、播放并行；迟到的表情和动作只允许附着在原音频上。`commentary-request`、`commentary-ready` 与 `commentary-submitted` 分别保留是否在播放中起草、起草和持有候选的耗时；它们不等于真实开播。
 
 宿主可以识别来自已绑定播出 World 的 `[broadcast-speech-draft/v1]` 请求头，把该请求交给有限预算的单轮认知，附上宿主人格和近期台词。公共请求只使用 `brief`、`tools: []` 和 `hint.rounds: 1`，不要求非标准 Cognition 字段。人格、模型与记忆仍由宿主选择。`avatar_voice` 声明 `speak` 标签；主线程与后台解说都产生 `avatar.speech.submitted` 和原 action 的终态事件，宿主可按 `requestId` 合并台词记录。可选的 `requestFacts()` 仅供支持该只读表面的宿主采用，不是 API 6 的必需接口。
 
@@ -200,7 +202,7 @@ Independent game tools can be emitted alongside speech in one model response; co
 
 ### Optional commentary during game actions
 
-`commentary.enabled` enables task-only host cognition for an idle speech output. Set `commentary.sources` to the explicit World IDs whose new events may be used. The controller does not execute game tools or maintain a second conversation history. Existing foreground speech takes priority, and unchanged material can be skipped instead of producing repeated narration.
+`commentary.enabled` enables task-only host cognition from fresh events. During confirmed speech playback it may prepare one candidate, using remaining decoded audio duration when available, and submit only after the configured idle gap. No audio is queued or synthesized ahead; music and unconfirmed busy output do not trigger lookahead. Set `commentary.sources` to the explicit World IDs whose new events may be used. The controller does not execute game tools or maintain a second conversation history. Existing foreground speech takes priority, and unchanged material can be skipped instead of producing repeated narration.
 
 When `speechObservationMaxAgeSeconds` is configured, the controller reads each cited event from the host event store and forwards the oldest original timestamp as `observed_at`. It never substitutes the draft-completion clock or invents evidence for an uncited thought. The commentary evidence and generation window are bounded by the same speech policy. Ordinary conversation does not require a scene observation; explicitly supplied observation times retain freshness validation.
 

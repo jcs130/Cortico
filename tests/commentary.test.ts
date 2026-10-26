@@ -21,6 +21,65 @@ function rig() {
     advance(ms: number) { now += ms; speech.observedAtMs = now; } };
 }
 describe("optional evidence-based game commentary", () => {
+  it('drafts during confirmed playback, holds one candidate and submits at the next idle gap without another model call', async () => {
+    const r = rig(); r.config.retrySec = 10;
+    Object.assign(r.speech, { busy: true, playing: true, idleSinceMs: null, queueRevision: 7, backlogMs: 6000 });
+    r.observe(); r.lane.tick();
+    expect(r.request).toHaveBeenCalledTimes(1);
+    expect(r.log).toHaveBeenCalledWith('commentary-request', expect.objectContaining({ duringPlayback: true, queueRevision: 7 }));
+    r.advance(4000); r.answer(); await settle();
+    expect(r.perform).not.toHaveBeenCalled(); expect(r.lane.facts()).toContain('候选等待音频空隙');
+    r.observe(2, 'game.result', '另一个任务结束。'); r.lane.tick();
+    expect(r.request).toHaveBeenCalledTimes(1);
+    r.advance(1000); Object.assign(r.speech, { busy: false, playing: false, idleSinceMs: 105000 }); r.lane.tick();
+    expect(r.perform).not.toHaveBeenCalled();
+    r.advance(2000); r.lane.tick(); await settle();
+    expect(r.perform).toHaveBeenCalledWith('刚才 Jojo 提到了村口的马。', 1, [1]);
+    expect(r.request).toHaveBeenCalledTimes(1);
+    expect(r.log).toHaveBeenCalledWith('commentary-submitted', expect.objectContaining({ duringPlayback: true, draftMs: 4000, heldMs: 3000 }));
+  });
+  it.each(['queued', 'music', 'long-speech', 'missing-revision'])('does not prefetch for %s', kind => {
+    const r = rig();
+    Object.assign(r.speech, { busy: true, playing: true, idleSinceMs: null, queueRevision: 7, backlogMs: 5000 });
+    if (kind === 'queued') r.speech.playing = false;
+    if (kind === 'music') r.speech.musicPlaying = true;
+    if (kind === 'long-speech') r.speech.backlogMs = 60000;
+    if (kind === 'missing-revision') delete r.speech.queueRevision;
+    r.observe(); r.lane.tick(); expect(r.request).not.toHaveBeenCalled();
+    if (kind === 'long-speech') {
+      r.speech.backlogMs = 6000; r.lane.tick(); expect(r.request).toHaveBeenCalledTimes(1);
+    }
+  });
+  it.each(['foreground', 'new-chat', 'pause', 'stop', 'disabled', 'revision', 'expired', 'changed-fact', 'format', 'heartbeat'])(
+    'never submits a prefetched candidate after %s', async reason => {
+      const r = rig(); Object.assign(r.speech, { busy: true, playing: true, idleSinceMs: null, queueRevision: 7 });
+      r.observe(); r.lane.tick(); r.answer(); await settle();
+      expect(r.perform).not.toHaveBeenCalled();
+      if (reason === 'foreground') r.lane.foregroundSpeech('主线程已经接话。');
+      if (reason === 'new-chat') r.observe(2, 'game.chat', '有人向主播提问。');
+      if (reason === 'pause') r.available.active = false;
+      if (reason === 'stop') r.lane.stop();
+      if (reason === 'disabled') r.config.enabled = false;
+      if (reason === 'revision') r.speech.queueRevision = 8;
+      if (reason === 'expired') r.advance(31000);
+      if (reason === 'changed-fact') r.observe(2, 'game.snapshot', '现场发生变化。');
+      if (reason === 'format') r.speech.textFormat = 'drama-3';
+      Object.assign(r.speech, { busy: false, playing: false, idleSinceMs: 100000 });
+      r.advance(3000);
+      if (reason === 'heartbeat') r.speech.observedAtMs -= 6000;
+      r.lane.tick(); await settle(); expect(r.perform).not.toHaveBeenCalled();
+    });
+  it('finishes a playback-time draft after natural audio end and makes at most one prefetch request per revision', async () => {
+    const r = rig(); Object.assign(r.speech, { busy: true, playing: true, idleSinceMs: null, queueRevision: 7 });
+    r.observe(); r.lane.tick(); r.advance(2000);
+    Object.assign(r.speech, { busy: false, playing: false, idleSinceMs: 102000 });
+    r.advance(2000); r.answer(); await settle();
+    expect(r.perform).toHaveBeenCalledTimes(1);
+    Object.assign(r.speech, { busy: true, playing: true, idleSinceMs: null });
+    r.observe(2, 'game.result', '又有新材料。'); r.advance(3000); r.lane.tick();
+    expect(r.request).toHaveBeenCalledTimes(1);
+    r.speech.queueRevision = 8; r.lane.tick(); expect(r.request).toHaveBeenCalledTimes(2);
+  });
   it('can draft for an explicitly ready text renderer while TTS is disabled', async () => {
     const r = rig(); r.speech.ttsReady = false; r.speech.textReady = true;
     r.observe(); r.lane.tick(); r.answer(); await settle();
@@ -130,6 +189,29 @@ describe("optional evidence-based game commentary", () => {
     r.speech.textFormat = "plain"; r.answer('[warm] 刚才 Jojo 提到了村口的马。'); await settle();
     expect(r.perform).not.toHaveBeenCalled(); expect(r.lane.facts()).toContain('stale');
   });
+});
+
+it('the controller drafts during real speech playback and hands the ready line over only after the same audio revision drains', async () => {
+  vi.useFakeTimers(); vi.setSystemTime(100000);
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json({loop:{running:true,paused:false}}));
+  const response = pending<{text:string}>(), request = vi.fn(() => response.promise), speak = vi.fn(async () => ({accepted:true,status:'queued',id:'next-voice'}));
+  const event = {cursor:51,ts:new Date().toISOString(),source:'game',type:'game.result',origin:'external',text:'正在行走的任务通过了路口。'};
+  let latest = 50;
+  const stage:any = {audioOwner:'desktop',audioRevision:9,voice:{configured:true},foreground:'playing-voice',
+    actions:[{id:'playing-voice',kind:'speech',status:'playing',updatedAt:100000,evidence:{audioTimeMs:0,durationMs:11000}}]};
+  const controller = new CommentaryController({config:()=>({enabled:true,port:0,dataDir:'',avatars:[],speechObservationMaxAgeSeconds:15,
+    commentary:{enabled:true,sources:'game',idleSec:1,retrySec:10,factAgeSec:30,hostStatusUrl:'http://127.0.0.1/status'}}),
+    state:async()=>stage,speak});
+  controller.start({store:{latestCursor:()=>latest,get:(cursor:number)=>cursor===51?event:null},cognition:{request},log:{emit:vi.fn(),warn:vi.fn()}} as never);
+  try {
+    latest=51; await vi.advanceTimersByTimeAsync(2100); expect(request).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2000); expect(request).toHaveBeenCalledTimes(1);
+    response.resolve({text:JSON.stringify({script:'刚才经过了路口。',evidence:[51],kind:'observation'})});
+    await vi.advanceTimersByTimeAsync(0); expect(speak).not.toHaveBeenCalled();
+    stage.foreground=null; await vi.advanceTimersByTimeAsync(2000);
+    expect(speak).toHaveBeenCalledWith(expect.objectContaining({ifIdleRevision:9,observed_at:event.ts}),expect.any(String));
+    expect(request).toHaveBeenCalledTimes(1);
+  } finally {controller.stop();}
 });
 
 it("requires a fresh running, unpaused host status and fences late responses across stop", async () => {

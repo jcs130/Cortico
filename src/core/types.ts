@@ -156,6 +156,8 @@ export interface RendererReceipt {
   avatarSha256: string;
   error?: string;
   audioTimeMs?: number;
+  /** Decoded audio duration reported by the current output renderer. */
+  durationMs?: number;
   frames?: number;
 }
 export const id = (value: unknown, label = "id"): string => {

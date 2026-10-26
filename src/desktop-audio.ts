@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { DesktopPresentation } from './desktop-presentation.ts';
 import type { StageEvent } from './core/types.ts';
 import { AvatarStageClient } from './sdk.ts';
+import { wavInfo } from './core/wav.ts';
 
 /** Optional audio device adapter over the public stage and desktop HTTP protocols. */
 export class DesktopAudioRenderer {
@@ -9,7 +10,7 @@ export class DesktopAudioRenderer {
   private binding: { avatarId: string; avatarSha256: string } | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
-  private live: { stageId: string; desktopId?: string; abort: AbortController; reported?: string; performanceCue?: Record<string, unknown> } | null = null;
+  private live: { stageId: string; desktopId?: string; abort: AbortController; reported?: string; durationMs?: number; performanceCue?: Record<string, unknown> } | null = null;
   private texts = new Map<string, string>();
   private alreadyCaptioned = new Set<string>();
   private stopped = false;
@@ -61,7 +62,8 @@ export class DesktopAudioRenderer {
       const row = media.recent.find(r => r.id === current.desktopId);
       if (!row || row.state === 'queued' || row.state === current.reported) return;
       if (row.state === 'playing') {
-        await this.receipt('playing', current.stageId, { audioTimeMs: row.audioTimeMs ?? 0, desktopMediaId: row.id, desktopStartedAt: row.startedAt, ...(current.performanceCue ? {performanceCue: current.performanceCue} : {}) });
+        await this.receipt('playing', current.stageId, { audioTimeMs: row.audioTimeMs ?? 0, durationMs: current.durationMs,
+          desktopMediaId: row.id, desktopStartedAt: row.startedAt, ...(current.performanceCue ? {performanceCue: current.performanceCue} : {}) });
         current.reported = row.state;
       } else if (['completed', 'failed', 'cancelled'].includes(row.state)) {
         // A single sample can span a whole short clip. The desktop receipt retains its real start transition.
@@ -92,7 +94,7 @@ export class DesktopAudioRenderer {
   private async play(command: Record<string, unknown>) {
     if (this.stopped || this.ports.signal.aborted) return;
     const previous = this.live;
-    const current = { stageId: String(command.eventId), abort: new AbortController(), desktopId: undefined as string | undefined, reported: undefined as string | undefined, performanceCue: undefined as Record<string, unknown> | undefined };
+    const current = { stageId: String(command.eventId), abort: new AbortController(), desktopId: undefined as string | undefined, reported: undefined as string | undefined, durationMs: undefined as number | undefined, performanceCue: undefined as Record<string, unknown> | undefined };
     this.live = current;
     if (previous) {
       previous.abort.abort();
@@ -101,11 +103,12 @@ export class DesktopAudioRenderer {
     if (this.live !== current) return;
     const signal = AbortSignal.any([current.abort.signal, this.ports.signal, AbortSignal.timeout(180000)]);
     try {
-      // Resolve the current output vocabulary before opening the TTS stream.
-      if (command.performance !== undefined) await this.ports.display.refresh();
-      const {actions, warnings, requested} = this.ports.display.resolvePerformance(command.performance);
-      if (requested) current.performanceCue = {accepted: false, actions, requestedPerformance: requested,
-        warnings, renderingConfirmed: false};
+      // Optional gesture discovery must not delay TTS or audio playback. It is
+      // revision-fenced below and never owns the speech transport/body task.
+      const performance = (async () => {
+        if (command.performance !== undefined) await this.ports.display.refresh();
+        return this.ports.display.resolvePerformance(command.performance);
+      })().then(value => ({value}), error => ({error}));
       const audioUrl = new URL(String(command.url), this.ports.stageUrl());
       if (audioUrl.origin !== new URL(this.ports.stageUrl()).origin || !/^\/audio\/(speech|music)\/[^/]+$/.test(audioUrl.pathname)) throw Error('Unexpected stage audio URL');
       audioUrl.searchParams.set('sessionId', this.sessionId);
@@ -116,7 +119,9 @@ export class DesktopAudioRenderer {
         size += part.length; if (size > 256 * 1024 * 1024) throw Error('Stage audio exceeds desktop capacity'); parts.push(part);
       }
       signal.throwIfAborted();
-      const asset = await this.ports.display.upload(Buffer.concat(parts), signal);
+      const bytes = Buffer.concat(parts);
+      current.durationMs = wavInfo(bytes).durationMs;
+      const asset = await this.ports.display.upload(bytes, signal);
       let cues: unknown;
       if (command.kind === 'music') {
         const url = new URL(String(command.cues), this.ports.stageUrl());
@@ -132,16 +137,21 @@ export class DesktopAudioRenderer {
       signal.throwIfAborted();
       if (!result.accepted) throw Error(String(result.reason ?? 'Desktop audio was rejected'));
       current.desktopId = String(result.id);
-      if (actions.length) {
-        try {
-          const cue = await this.ports.display.request({action: 'act', id: current.desktopId, actions});
-          if (!cue.accepted) throw Error(String(cue.reason ?? 'Desktop performance cue was rejected'));
-          current.performanceCue = {...current.performanceCue, accepted: true};
-        } catch (error) {
-          warnings.push('Presentation was not admitted: ' + String(error));
+      void performance.then(async outcome => {
+        if (this.live !== current || signal.aborted) return;
+        if ('error' in outcome) {
+          current.performanceCue = {accepted:false,renderingConfirmed:false,warnings:['Presentation unavailable: '+String(outcome.error)]};
+          return;
         }
-        signal.throwIfAborted();
-      }
+        const {actions, warnings, requested} = outcome.value;
+        if (requested) current.performanceCue = {accepted:false,actions,requestedPerformance:requested,warnings,renderingConfirmed:false};
+        if (!actions.length) return;
+        try {
+          const cue = await this.ports.display.request({action:'act',id:current.desktopId,actions});
+          if (!cue.accepted) throw Error(String(cue.reason ?? 'Desktop performance cue was rejected'));
+          if (this.live === current && !signal.aborted) current.performanceCue = {...current.performanceCue,accepted:true};
+        } catch (error) { warnings.push('Presentation was not admitted: '+String(error)); }
+      });
       if (command.performance === undefined)
         this.ports.admitted(current.stageId, String(command.title ?? this.texts.get(current.stageId) ?? ''), command.kind === 'music' ? 'singing' : 'speaking');
     } catch (error) {

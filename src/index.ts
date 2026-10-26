@@ -51,9 +51,9 @@ export class AvatarStageWorld implements World {
   private async speak(args: Record<string, unknown>, requestId: string, signal?: AbortSignal) {
     checkSpeechFreshness(args, this.cfg().speechObservationMaxAgeSeconds ?? 0);
     args = { ...args }; delete args.observed_at;
-    if (this.presentation?.enabled() && (args.action === 'status' || args.performance !== undefined)) {
+    if (args.performance !== undefined) speechPerformance(args.performance);
+    if (this.presentation?.enabled() && args.action === 'status') {
       await this.presentation.refresh();
-      if (args.performance !== undefined) speechPerformance(args.performance);
     }
     if (this.presentation?.textOnly()) {
       if (args.action === 'speak' && !requestId.startsWith('avatar-commentary-')) this.commentary?.event({

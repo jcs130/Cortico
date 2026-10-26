@@ -45,6 +45,37 @@ it("returns a failed tool outcome when conditional speech was not admitted", asy
     expect(result).toEqual({ text: JSON.stringify({ accepted: false, status: "skipped", reason: "Foreground changed" }), failed: true });
   } finally { await world.stop(); for (const socket of sockets) socket.destroy(); await new Promise<void>(ok => server.close(() => ok())); }
 });
+it('admits explicitly cued audio through the public World tool even when optional desktop catalogue discovery fails', async () => {
+  const {createServer}=await import('node:http');
+  const {AvatarStageWorld}=await import('../src/index.ts');
+  const {DesktopAudioRenderer}=await import('../src/desktop-audio.ts');
+  const {DesktopPresentation}=await import('../src/desktop-presentation.ts');
+  const start=vi.spyOn(DesktopAudioRenderer.prototype,'start').mockResolvedValue(undefined);
+  const refresh=vi.spyOn(DesktopPresentation.prototype,'refresh').mockRejectedValue(Error('Optional catalogue is offline'));
+  const calls:any[]=[];
+  const server=createServer(async(req,res)=>{
+    if(req.url==='/api/state')res.end(JSON.stringify({protocol:PROTOCOL}));
+    else if(req.url==='/events'){res.writeHead(200,{'Content-Type':'text/event-stream'});res.write(': ready\n\n');}
+    else if(req.url==='/api/call'){
+      const parts=[];for await(const part of req)parts.push(part);calls.push(JSON.parse(Buffer.concat(parts).toString()));
+      res.setHeader('content-type','application/json');res.end(JSON.stringify({protocol:PROTOCOL,result:{accepted:true,status:'queued',id:'speech'}}));
+    }else res.writeHead(404).end();
+  });
+  await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));
+  const world=new AvatarStageWorld(()=>({enabled:true,port:0,dataDir:'',avatars:[],
+    remoteUrl:'http://127.0.0.1:'+(server.address() as import('node:net').AddressInfo).port,
+    presentation:{mode:'desktop-audio',url:'http://127.0.0.1:1'}}));
+  try{
+    await world.start({pushEvent:async()=>{}} as never);
+    const result=await world.tools().find(t=>t.name==='avatar_voice')!.handler({action:'speak',text:'边走边说。',
+      performance:{expression:'happy',bodyClip:'wave'}},{callId:'parallel-audio'} as never);
+    expect(result).toBe(JSON.stringify({accepted:true,status:'queued',id:'speech'}));
+    expect(calls).toHaveLength(1);expect(refresh).not.toHaveBeenCalled();
+  }finally{
+    await world.stop();server.closeAllConnections();await new Promise<void>(done=>server.close(()=>done()));
+    start.mockRestore();refresh.mockRestore();
+  }
+});
 it('passes a copied ISO observation through the real World once and keeps stale speech out of its output', async () => {
   const { createServer } = await import('node:http');
   const { AvatarStageWorld } = await import('../src/index.ts');

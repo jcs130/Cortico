@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2-dev.20261026.5
+
+- Draft at most one optional commentary candidate during confirmed speech playback, then submit at the next configured idle gap. Recheck the original evidence, output revision, foreground dialogue, runtime and freshness before submission; no audio backlog or game-body control is introduced.
+- Use decoded desktop audio duration to time lookahead near the end of an utterance. Music, synthesis waiting and unknown busy output do not trigger prefetch. Add draft/hold/submit timing for verification.
+- Remove optional gesture-catalogue refresh from speech admission and synthesis/playback's critical path. Slow or failed presentation discovery cannot hold audio; late gestures remain bound to their original audio action.
+
 ## 0.1.2-dev.20261026.4
 
 - Preserve separate outcome events during commentary drafting; only complete snapshots supersede prior state. Keep original evidence timestamps and all foreground/pause/stale checks.
