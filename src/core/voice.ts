@@ -162,7 +162,8 @@ export class VoiceService {
       rendererSince: s.transportFinishedAt,
     };
   }
-  queue(id: string, text: unknown, voice?: unknown) {
+  /** Validate without starting synthesis or interrupting the current audio. */
+  validate(text: unknown, voice?: unknown) {
     const c = this.config();
     if (!c?.url) throw Error("TTS is not configured");
     endpoint(c.url);
@@ -185,16 +186,20 @@ export class VoiceService {
       !this.availableVoices.includes(selected)
     )
       throw Error("Voice is not configured");
+    return { text: text.trim(), voice: selected, config: { ...c } };
+  }
+  queue(id: string, text: unknown, voice?: unknown) {
+    const validated = this.validate(text, voice);
     this.interrupt("superseded");
     this.current = {
       id,
-      text: text.trim(),
-      voice: selected,
+      text: validated.text,
+      voice: validated.voice,
       abort: new AbortController(),
       opened: false,
       finished: false,
       trace: { "x-litellm-session-id": this.sessionId },
-      config: { ...c },
+      config: validated.config,
     };
     return {
       id,

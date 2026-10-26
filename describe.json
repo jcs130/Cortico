@@ -883,6 +883,10 @@
   ],
   "events": [
     {
+      "type": "avatar.speech.waiting",
+      "description": "One foreground speech candidate waiting for automatic commentary to finish; expires after at most 15 seconds, not synthesized or played yet."
+    },
+    {
       "type": "avatar.speech.submitted",
       "description": "Accepted speech text and original request/action identifiers; submission is not playback."
     },

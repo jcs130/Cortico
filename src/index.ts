@@ -50,7 +50,7 @@ export class AvatarStageWorld implements World {
   private desktopAudio: DesktopAudioRenderer | null = null;
   private async speak(args: Record<string, unknown>, requestId: string, signal?: AbortSignal) {
     checkSpeechFreshness(args, this.cfg().speechObservationMaxAgeSeconds ?? 0);
-    args = { ...args }; delete args.observed_at;
+    args = { ...args };
     if (args.performance !== undefined) speechPerformance(args.performance);
     if (this.presentation?.enabled() && args.action === 'status') {
       await this.presentation.refresh();

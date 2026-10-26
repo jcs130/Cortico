@@ -105,7 +105,7 @@ export interface VoiceConfig {
   synthesisTimeoutMs?: number;
   /** Explicit text contract of the configured synthesis backend. */
   textFormat?: "plain" | "drama-3";
-  /** preserve skips new speech while audio is admitted/playing; interrupt remains explicit. */
+  /** preserve keeps admitted audio. One foreground line may wait up to 15s behind automatic commentary. */
   busyPolicy?: "replace" | "preserve";
 }
 export interface StageConfig {
@@ -115,11 +115,12 @@ export interface StageConfig {
   defaultAvatar?: string;
   music?: MusicConfig;
   voice?: VoiceConfig;
+  /** Rechecked before synthesis if a foreground line waited for automatic commentary. */
+  speechObservationMaxAgeSeconds?: number;
 }
 export interface WorldConfig extends StageConfig {
   audienceProgress?: Partial<import('./audience-progress.ts').AudienceProgressConfig>;
   enabled: boolean;
-  speechObservationMaxAgeSeconds?: number;
   presentation?: Partial<import('../desktop-presentation.ts').DesktopPresentationConfig>;
   remoteUrl?: string;
   commentary?: Partial<import("./commentary.ts").CommentaryConfig>;

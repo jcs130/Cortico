@@ -6,6 +6,7 @@ import { MotionProvider } from "./motion.ts";
 import { MusicService } from "./music.ts";
 import { VoiceService } from "./voice.ts";
 import { speechPerformance, resolveSpeechPerformance } from './speech-performance.ts';
+import { checkSpeechFreshness } from '../speech-freshness.ts';
 import {
   HUMAN_BONES,
   PROTOCOL,
@@ -41,6 +42,9 @@ export class AvatarStage {
   private foreground: string | null = null;
   private audioRevision = 0;
   private speechAdmissions = new Set<string>();
+  private automaticSpeech = new Set<string>();
+  private waitingSpeech: { id: string; requestId: string; args: Record<string, unknown>;
+    sessionId: string; expiresAt: number } | null = null;
   private ownedMotions = new Map<
     string,
     { avatarId: string; status: string }
@@ -145,6 +149,8 @@ export class AvatarStage {
       audioOwner: this.owner?.sessionId ?? null,
       foreground: this.foreground,
       audioRevision: this.audioRevision,
+      waitingSpeech: this.waitingSpeech ? { actionId: this.waitingSpeech.id, expiresAt: this.waitingSpeech.expiresAt,
+        state: 'waiting-for-audio', synthesisStarted: false } : null,
       voice: this.voice.status(),
       music: this.music.state(),
       actions: this.ledger.history(12),
@@ -273,6 +279,7 @@ export class AvatarStage {
         reason: "Explicit cancellation",
       });
       if (this.foreground === actionId) this.cutAudio("explicit-cancellation");
+      if (this.waitingSpeech?.id === actionId) this.waitingSpeech = null;
       this.emit("cancel", { eventId: actionId });
       return { ...result };
     }
@@ -462,6 +469,10 @@ export class AvatarStage {
   }
   private cutAudio(reason: string) {
     this.audioRevision++;
+    if (this.waitingSpeech) {
+      const waiting = this.waitingSpeech; this.waitingSpeech = null;
+      this.retainTransition(this.recordState(waiting.id, 'cancelled', { reason }));
+    }
     this.voice.interrupt(reason);
     if (this.foreground) {
       for (const row of this.ledger.actions.values())
@@ -479,6 +490,7 @@ export class AvatarStage {
         this.recordState(this.foreground, "cancelled", { reason }),
       );
       this.emit("audio.cut", { eventId: this.foreground });
+      this.automaticSpeech.delete(this.foreground);
       this.foreground = null;
     }
   }
@@ -497,6 +509,8 @@ export class AvatarStage {
       return { ok: true, status: "interrupt-requested" };
     }
     if (args.action !== "speak") throw Error("Unknown voice action");
+    checkSpeechFreshness(args, this.config.speechObservationMaxAgeSeconds ?? 0);
+    this.voice.validate(args.text, args.voice);
     const busyPolicy=this.config.voice?.busyPolicy??'replace';
     if(!['replace','preserve'].includes(busyPolicy))throw Error('Invalid speech busy policy');
     const active = this.ensureActive();
@@ -514,7 +528,7 @@ export class AvatarStage {
       throw Error("Invalid audio revision");
     if (
       args.ifIdleRevision !== undefined &&
-      (this.foreground || args.ifIdleRevision !== this.audioRevision)
+      (this.foreground || this.waitingSpeech || this.speechAdmissions.size || args.ifIdleRevision !== this.audioRevision)
     )
       return {
         accepted: false,
@@ -530,7 +544,28 @@ export class AvatarStage {
       const old=await this.ledger.submit(requestId,'speech',this.activeId,command);
       return {...old.record,reused:true};
     }
-    if(busyPolicy==='preserve'&&(this.foreground||this.speechAdmissions.size))return {
+    // Only a foreground line blocked by automatic commentary may reserve the
+    // next gap. This is one unsynthesized candidate, not another audio queue.
+    if (busyPolicy === 'preserve' && this.foreground && this.automaticSpeech.has(this.foreground)
+      && args.ifIdleRevision === undefined && !this.waitingSpeech && !this.speechAdmissions.size) {
+      const ticket = this.audioRevision, expiresAt = Date.now() + 15000;
+      this.speechAdmissions.add(requestId);
+      try {
+        const row = await this.ledger.submit(requestId, 'speech', this.activeId, command);
+        if (this.stopped || ticket !== this.audioRevision || this.owner?.sessionId !== sessionId) {
+          await this.recordState(row.record.id, 'cancelled', { reason: 'Output changed during speech reservation' });
+          return { ...this.ledger.result(row.record.id), accepted: false };
+        }
+        this.waitingSpeech = { id: row.record.id, requestId, args: { ...args, voice: command.voice }, sessionId, expiresAt };
+        await this.ledger.note(row.record.id, { state: 'waiting-for-audio', expiresAt, synthesisStarted: false });
+        this.emit('avatar.speech.waiting', { actionId: row.record.id, requestId, expiresAt, synthesisStarted: false });
+        return { ...row.record, accepted: true, deferred: true, expiresAt, synthesisStarted: false };
+      } finally {
+        this.speechAdmissions.delete(requestId);
+        if (!this.foreground) this.retainTransition(this.drainWaitingSpeech());
+      }
+    }
+    if(busyPolicy==='preserve'&&(this.foreground||this.waitingSpeech||this.speechAdmissions.size))return {
       accepted:false,status:'skipped',reason:'audio_busy',currentActionId:this.foreground,
       instruction:'Current audio continues. This new line was not queued or synthesized; do not retry stale commentary.'};
     this.speechAdmissions.add(requestId);
@@ -552,23 +587,33 @@ export class AvatarStage {
       return { ...record, accepted: false };
     }
     this.cutAudio("superseded");
+    return await this.startSpeech(row.record.id, args, requestId, sessionId);
+    } finally {this.speechAdmissions.delete(requestId);}
+  }
+  private async startSpeech(actionId: string, args: Record<string, unknown>, requestId: string, sessionId: string) {
+    const active = this.ensureActive(), desktop = this.sessions.get(sessionId)?.receipt.renderer === 'audio-only';
+    const requestedPerformance = speechPerformance(args.performance);
+    const resolved = desktop ? { applied: requestedPerformance, warnings: [] as string[] }
+      : resolveSpeechPerformance(requestedPerformance, active.capabilities.expressions as string[], active.capabilities.clips as string[]);
+    const performance = resolved.applied;
     try {
-      const stream = this.voice.queue(row.record.id, args.text, args.voice);
-      this.foreground = row.record.id;
+      const stream = this.voice.queue(actionId, args.text, args.voice);
+      this.foreground = actionId;
+      if (args.ifIdleRevision !== undefined) this.automaticSpeech.add(actionId);
       if (performance && !desktop) {
         const expression = performance.expression ?? performance.emotion;
         try {
-          await this.control({action: 'direct', audioActionId: row.record.id,
+          await this.control({action: 'direct', audioActionId: actionId,
             expressionWeights: expression ? {[expression]: 1} : {},
-            ...(performance.bodyClip ? {bodyClip: performance.bodyClip} : {})}, row.record.id + ':performance');
+            ...(performance.bodyClip ? {bodyClip: performance.bodyClip} : {})}, actionId + ':performance');
         } catch (error) {
           resolved.warnings.push('Presentation was not admitted: ' + String(error));
-          await this.ledger.update(row.record.id, 'queued', { presentationWarnings: resolved.warnings });
+          await this.ledger.update(actionId, 'queued', { presentationWarnings: resolved.warnings });
         }
-        if (this.foreground !== row.record.id || this.stopped) return {...this.ledger.result(row.record.id), accepted: false};
+        if (this.foreground !== actionId || this.stopped) return {...this.ledger.result(actionId), accepted: false};
       }
       this.emit("avatar.speech.submitted", {
-        actionId: row.record.id,
+        actionId,
         requestId,
         text: args.text,
         voice: args.voice ?? this.voice.status().voice,
@@ -578,20 +623,38 @@ export class AvatarStage {
       this.emit("command", {
         kind: "speech",
         ...stream,
-        eventId: row.record.id,
+        eventId: actionId,
         targetSession: sessionId,
         scope: "broadcast",
         expiresAt: Date.now() + 10000,
         ...(performance ? {performance} : {}),
       });
-      return { ...row.record, accepted: true, prebufferMs: 480, appliedPerformance: performance,
+      return { ...this.ledger.result(actionId), accepted: true, prebufferMs: 480, appliedPerformance: performance,
         presentationWarnings: resolved.warnings };
     } catch (e) {
-      if (this.foreground === row.record.id) this.cutAudio('speech-admission-failed');
-      await this.ledger.update(row.record.id, "failed", { error: String(e) });
+      if (this.foreground === actionId) this.cutAudio('speech-admission-failed');
+      await this.recordState(actionId, "failed", { error: String(e) });
       throw e;
     }
-    } finally {this.speechAdmissions.delete(requestId);}
+  }
+  private async drainWaitingSpeech() {
+    const waiting = this.waitingSpeech;
+    if (!waiting || this.foreground || this.speechAdmissions.size) return;
+    this.waitingSpeech = null;
+    this.speechAdmissions.add(waiting.requestId);
+    try {
+      if (this.stopped || this.owner?.sessionId !== waiting.sessionId || !this.audioAllowed(waiting.sessionId)
+        || this.ledger.result(waiting.id).status !== 'queued')
+        throw Error('Output changed before deferred speech');
+      if (Date.now() >= waiting.expiresAt) throw Error('Deferred speech expired before output became idle');
+      checkSpeechFreshness(waiting.args, this.config.speechObservationMaxAgeSeconds ?? 0);
+      this.audioRevision++;
+      await this.startSpeech(waiting.id, waiting.args, waiting.requestId, waiting.sessionId);
+    } catch (error) {
+      // startSpeech records its own failure; retain that original terminal.
+      if (this.ledger.result(waiting.id).status === 'queued')
+        await this.recordState(waiting.id, 'cancelled', { reason: error instanceof Error ? error.message : String(error), synthesisStarted: false });
+    } finally { this.speechAdmissions.delete(waiting.requestId); }
   }
   async musicAction(
     args: Record<string, unknown>,
@@ -706,6 +769,7 @@ export class AvatarStage {
     if (this.owner?.sessionId === r.sessionId)
       this.owner.until = Date.now() + 10000;
     if (r.eventId) {
+      if (this.waitingSpeech?.id === r.eventId) throw Error('Speech is waiting for the audio output; no playback command was dispatched');
       const previous = this.ledger.result(id(r.eventId));
       if (r.renderer === 'audio-only' && (!['speech', 'music-play'].includes(previous.kind)
         || r.status === 'applied')) throw Error('An audio-only renderer cannot confirm avatar or body execution');
@@ -755,7 +819,9 @@ export class AvatarStage {
           this.foreground === r.eventId
         ) {
           this.voice.finish(r.eventId);
+          this.automaticSpeech.delete(r.eventId);
           this.foreground = null;
+          await this.drainWaitingSpeech();
         }
       }
     }
@@ -766,6 +832,10 @@ export class AvatarStage {
     this.checking = true;
     try {
       this.status();
+      if (this.waitingSpeech && Date.now() >= this.waitingSpeech.expiresAt) {
+        const expired = this.waitingSpeech; this.waitingSpeech = null;
+        await this.recordState(expired.id, 'cancelled', { reason: 'Deferred speech expired while audio remained busy', synthesisStarted: false });
+      }
       for (const action of this.ledger.actions.values()) {
         const audioId =
           action.kind === "speech"

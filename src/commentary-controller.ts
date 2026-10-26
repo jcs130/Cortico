@@ -79,6 +79,7 @@ export class CommentaryController {
     this.timer = setInterval(() => void this.sample(), 1000); this.timer.unref();
   }
   event(event: StageEvent): void {
+    if (event.type === 'avatar.speech.waiting') this.lane.foregroundSpeech();
     if (event.type === "avatar.speech.submitted" && typeof event.data.text === "string"
       && !String(event.data.requestId).startsWith("avatar-commentary-")) this.lane.foregroundSpeech(event.data.text);
   }

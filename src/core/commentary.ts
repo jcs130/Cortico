@@ -289,7 +289,19 @@ export class CommentaryLane {
       this.lastEvaluated = inputKey;
       const draft = parseCommentary(result.text, new Set(facts.map(e => e.cursor)), textFormat);
       if (!draft || this.recent.some(r => r.script === commentarySpeechText(draft.script))) {
-        this.state = 'skipped'; this.ports.log('commentary-skipped', { requestId: serial }); return;
+        let reason = draft ? 'duplicate-script' : 'invalid-output';
+        let skipReason: string | undefined;
+        if (!draft) try {
+          const parsed = JSON.parse(result.text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''));
+          if (parsed && typeof parsed === 'object' && typeof parsed.skip === 'string') {
+            reason = 'model-skip';
+            // A bounded reason is diagnostic data, not new World evidence. Never
+            // log a whole draft/prompt or authentication-bearing model output.
+            skipReason = cleanEvidence(parsed.skip)?.slice(0, 180) ?? '[redacted]';
+          }
+        } catch { reason = 'invalid-json'; }
+        this.state = 'skipped'; this.ports.log('commentary-skipped', { requestId: serial, reason,
+          ...(skipReason ? { skipReason } : {}) }); return;
       }
       Object.assign(candidate, draft, { readyAt: this.now() });
       if (!this.valid(candidate)) { this.stale(serial, 'cited-evidence-changed'); return; }

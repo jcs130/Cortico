@@ -99,7 +99,9 @@ it('passes a copied ISO observation through the real World once and keeps stale 
     const original={action:'speak',text:'刚刚到达入口。',observed_at:new Date(Date.now()-1000).toISOString()};
     const result=await voice.handler(original,{callId:'fresh-iso'} as never);
     expect(result).toBe(JSON.stringify({accepted:true,id:'fixture-speech'}));expect(calls).toHaveLength(1);
-    expect(JSON.stringify(calls[0])).not.toContain('observed_at');expect(original.observed_at).toBeTruthy();
+    // The remote stage must retain the original clock for a possible deferred
+    // foreground admission; the host must not replace it with receipt time.
+    expect(calls[0]).toMatchObject({args:{observed_at:original.observed_at}});expect(original.observed_at).toBeTruthy();
     const reply=await voice.handler({action:'speak',text:'Hello, I can read your message.'},{callId:'conversation'} as never);
     expect(reply).toBe(JSON.stringify({accepted:true,id:'fixture-speech'}));expect(calls).toHaveLength(2);
     expect(JSON.stringify(calls[1])).not.toContain('observed_at');

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2-dev.20261026.6
+
+- Preserve an active automatic commentary sentence while admitting at most one foreground line for the next audio gap. The waiting line returns immediately, is not synthesized ahead, and expires after 15 seconds; its original observation timestamp, renderer ownership and cancellation state are rechecked before dispatch.
+- Keep automatic lookahead from taking the reserved foreground gap. Interrupt, explicit cancellation, renderer release, avatar/music changes and shutdown cancel waiting speech; reconnect/restart does not replay it.
+- Distinguish model-requested silence, invalid JSON/contract output and duplicate text in bounded commentary diagnostics without recording raw prompts or full model output.
+
 ## 0.1.2-dev.20261026.5
 
 - Draft at most one optional commentary candidate during confirmed speech playback, then submit at the next configured idle gap. Recheck the original evidence, output revision, foreground dialogue, runtime and freshness before submission; no audio backlog or game-body control is introduced.

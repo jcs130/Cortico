@@ -21,6 +21,20 @@ function rig() {
     advance(ms: number) { now += ms; speech.observedAtMs = now; } };
 }
 describe("optional evidence-based game commentary", () => {
+  it.each([
+    ['{"skip":"No new scene result."}', 'model-skip'],
+    ['not JSON', 'invalid-json'],
+    ['{"script":"Hello","kind":"observation","evidence":[999]}', 'invalid-output'],
+  ])('separates skip from invalid output without storing the full response: %s', async (answer, reason) => {
+    const r=rig();r.request.mockResolvedValue({text:answer});r.observe();r.lane.tick();await settle();
+    expect(r.log).toHaveBeenCalledWith('commentary-skipped',expect.objectContaining({requestId:1,reason}));
+    expect(r.perform).not.toHaveBeenCalled();
+  });
+  it('bounds and redacts skip diagnostics instead of logging raw model material',async()=>{
+    const r=rig();r.request.mockResolvedValue({text:JSON.stringify({skip:'password=private-fixture '+ 'x'.repeat(2000)})});
+    r.observe();r.lane.tick();await settle();
+    expect(r.log).toHaveBeenCalledWith('commentary-skipped',{requestId:1,reason:'model-skip',skipReason:'[redacted]'});
+  });
   it('drafts during confirmed playback, holds one candidate and submits at the next idle gap without another model call', async () => {
     const r = rig(); r.config.retrySec = 10;
     Object.assign(r.speech, { busy: true, playing: true, idleSinceMs: null, queueRevision: 7, backlogMs: 6000 });

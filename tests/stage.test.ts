@@ -94,7 +94,7 @@ async function speechSetup() {
       url: "http://127.0.0.1:1/v1/audio/speech",
       model: "fixture",
       voice: "fixture",
-      voices: ["fixture"],
+      voices: ["fixture", "other"],
     },
   });
   await r.server.stage.receipt({
@@ -132,6 +132,95 @@ it('preserve also reserves audio across asynchronous admission',async()=>{
  expect(a.accepted).toBe(true);expect(b).toMatchObject({accepted:false,reason:'audio_busy'});
  expect(server.stage.status().foreground).toBe(a.id);
  expect(events.filter(e=>e.type==='audio.cut')).toHaveLength(0);
+});
+
+async function automaticSpeechWithWaitingForeground(observedAt?: string) {
+ const r=await speechSetup(); r.server.stage.config.voice!.busyPolicy='preserve';
+ r.server.stage.config.speechObservationMaxAgeSeconds=15;
+ const first=await r.server.call('avatar_voice',{action:'speak',text:'An automatic observation.',
+  ifIdleRevision:r.server.stage.status().audioRevision},'automatic-first');
+ const receipt={sessionId:'renderer',role:'broadcast',avatarId:r.preset.id,avatarSha256:r.preset.sha256,eventId:first.id};
+ await r.server.stage.receipt({...receipt,status:'playing',audioTimeMs:0});
+ const args={action:'speak',text:'A foreground line while moving.',...(observedAt?{observed_at:observedAt}:{})};
+ const waiting=await r.server.call('avatar_voice',args,'foreground-next');
+ return {...r,first,waiting,args,receipt};
+}
+it('reserves one foreground line nonblockingly, then dispatches exactly once after automatic audio really ends',async()=>{
+ const {server,events,first,waiting,args,receipt}=await automaticSpeechWithWaitingForeground();
+ expect(waiting).toMatchObject({accepted:true,status:'queued',deferred:true,synthesisStarted:false});
+ expect(server.stage.status().foreground).toBe(first.id);
+ expect(server.stage.voice.status().current?.id).toBe(first.id);
+ expect(events.filter(e=>e.type==='command'&&e.data.kind==='speech')).toHaveLength(1);
+ expect(await server.call('avatar_voice',args,'foreground-next')).toMatchObject({id:waiting.id,reused:true});
+ expect(await server.call('avatar_voice',{action:'speak',text:'Another foreground line.'},'third')).toMatchObject({accepted:false,reason:'audio_busy'});
+ expect(await server.call('avatar_voice',{action:'speak',text:'Automatic cannot steal the gap.',ifIdleRevision:server.stage.status().audioRevision},'automatic-second')).toMatchObject({accepted:false});
+ await expect(server.stage.receipt({...receipt,eventId:waiting.id,status:'ended'})).rejects.toThrow('waiting');
+ await server.stage.receipt({...receipt,status:'ended',audioTimeMs:10000});
+ expect(server.stage.status()).toMatchObject({foreground:waiting.id,waitingSpeech:null});
+ expect(server.stage.voice.status().current?.id).toBe(waiting.id);
+ expect(server.stage.ledger.result(String(first.id)).status).toBe('completed');
+ expect(events.filter(e=>e.type==='audio.cut')).toHaveLength(0);
+ expect(events.filter(e=>e.type==='command'&&e.data.kind==='speech')).toHaveLength(2);
+ await server.stage.receipt({...receipt,status:'ended',audioTimeMs:10000});
+ expect(events.filter(e=>e.type==='command'&&e.data.kind==='speech')).toHaveLength(2);
+});
+it.each(['ttl','source-age','interrupt','cancel','renderer-release','stop'])(
+ 'does not replay a deferred line after %s, and never refreshes its observation clock',async(reason)=>{
+  const now=Date.now(); const clock=vi.spyOn(Date,'now').mockReturnValue(now);
+  const r=await automaticSpeechWithWaitingForeground(reason==='source-age'?new Date(now-14000).toISOString():undefined);
+  if(reason==='ttl')clock.mockReturnValue(now+15001);
+  if(reason==='source-age')clock.mockReturnValue(now+1001);
+  if(reason==='interrupt')await r.server.call('avatar_voice',{action:'interrupt'});
+  if(reason==='cancel')await r.server.call('avatar_control',{action:'cancel',actionId:r.waiting.id});
+  if(reason==='renderer-release')r.server.stage.releaseAudio('renderer');
+  if(reason==='stop')await r.server.stop();
+  if(!['renderer-release','stop'].includes(reason))await r.server.stage.receipt({...r.receipt,status:'ended',audioTimeMs:10000});
+  else if(reason==='renderer-release'){
+    await r.server.stage.receipt({...r.receipt,eventId:undefined,status:'ready'});r.server.stage.claimAudio('renderer');
+  }
+  await vi.waitFor(()=>expect(r.server.stage.ledger.result(String(r.waiting.id)).status).toBe('cancelled'));
+  expect(r.events.filter(e=>e.type==='command'&&e.data.kind==='speech')).toHaveLength(1);
+  if(reason==='source-age')expect(r.server.stage.ledger.result(String(r.waiting.id)).evidence?.reason).toContain('stale_speech_observation');
+ });
+it('validates a foreground reservation before creating a waiting record or changing current audio',async()=>{
+ const r=await speechSetup();r.server.stage.config.voice!.busyPolicy='preserve';
+ const first=await r.server.call('avatar_voice',{action:'speak',text:'Auto.',ifIdleRevision:0},'auto');
+ await expect(r.server.call('avatar_voice',{action:'speak',text:'Invalid voice.',voice:'unconfigured'},'invalid-next')).rejects.toThrow('Voice is not configured');
+ expect(r.server.stage.status()).toMatchObject({foreground:first.id,waitingSpeech:null});
+ expect(r.server.stage.ledger.history()).toHaveLength(1);
+});
+it('drains once when automatic speech ends while foreground reservation is still being persisted',async()=>{
+ const r=await speechSetup();r.server.stage.config.voice!.busyPolicy='preserve';
+ const first=await r.server.call('avatar_voice',{action:'speak',text:'Auto.',ifIdleRevision:0},'auto');
+ let release!:()=>void, entered!:()=>void;
+ const gate=new Promise<void>(resolve=>{release=resolve;}),entry=new Promise<void>(resolve=>{entered=resolve;});
+ const submit=r.server.stage.ledger.submit.bind(r.server.stage.ledger);
+ vi.spyOn(r.server.stage.ledger,'submit').mockImplementation(async(...args)=>{
+   if(args[0]==='foreground-next'){entered();await gate;}return submit(...args);
+ });
+ const pending=r.server.call('avatar_voice',{action:'speak',text:'Foreground.'},'foreground-next');
+ await entry;
+ const receipt={sessionId:'renderer',role:'broadcast',avatarId:r.preset.id,avatarSha256:r.preset.sha256,eventId:first.id,status:'ended',audioTimeMs:10000};
+ await r.server.stage.receipt(receipt);
+ expect(r.server.stage.status()).toMatchObject({foreground:null,waitingSpeech:null});
+ release();const waiting=await pending;
+ await vi.waitFor(()=>expect(r.server.stage.status().foreground).toBe(waiting.id));
+ await r.server.stage.receipt(receipt);
+ expect(r.events.filter(e=>e.type==='command'&&e.data.kind==='speech')).toHaveLength(2);
+});
+it('keeps the admitted foreground voice when voice selection changes during its wait',async()=>{
+ const r=await automaticSpeechWithWaitingForeground();
+ await r.server.call('avatar_voice',{action:'select',voice:'other'});
+ await r.server.stage.receipt({...r.receipt,status:'ended',audioTimeMs:10000});
+ expect(r.server.stage.voice.status().current).toMatchObject({id:r.waiting.id,voice:'fixture'});
+ expect(r.server.stage.ledger.result(String(r.waiting.id)).command.voice).toBe('fixture');
+});
+it('keeps the actual dispatch failure terminal when a deferred candidate cannot start',async()=>{
+ const r=await automaticSpeechWithWaitingForeground();
+ vi.spyOn(r.server.stage.voice,'queue').mockImplementation(()=>{throw Error('fixture dispatch failure');});
+ await r.server.stage.receipt({...r.receipt,status:'ended',audioTimeMs:10000});
+ expect(r.server.stage.ledger.result(String(r.waiting.id))).toMatchObject({status:'failed',evidence:{error:'Error: fixture dispatch failure'}});
+ expect(r.events.filter(e=>e.type==='avatar.action'&&e.data.id===r.waiting.id).map(e=>e.data.status)).toEqual(['failed']);
 });
 
 it('submits speech and facial intent together, binds the cue once, and cancels it with speech', async () => {
