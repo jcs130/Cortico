@@ -1,0 +1,29 @@
+{
+  "base": "2c13db3e76ede19a4632925cb4aba6881afccebe",
+  "sourceHead": "3e891358b0cb6e38f3c25d14a838b70f166b9b9f",
+  "sourceTree": "7a0423027fdab4a53526580826f34f74382427c0",
+  "series": [
+    {
+      "commit": "a2ec1c4e4e61594e23fe455902b33ad602f80e2d",
+      "file": "1-a2ec1c4.patch",
+      "sha256": "a9cc68434f0a65b4991c324159d0a28ad110ac4ff760cf47b78c35d81e44cb4c"
+    },
+    {
+      "commit": "8dfdf132b22e8b1dca6fc94b4690e364eb0d7f8f",
+      "file": "2-8dfdf13.patch",
+      "sha256": "5194d3da6bbdb417a90ef15b4cb7da7fd7a7948b9a8b3750d635bc5fdf130390"
+    },
+    {
+      "commit": "3e891358b0cb6e38f3c25d14a838b70f166b9b9f",
+      "file": "3-3e89135.patch",
+      "sha256": "98e2ac602d70351a5bd306dcd011fdb9f2f8bd756a849680e9efca0b52439e1b"
+    }
+  ],
+  "validation": {
+    "reconstructedTree": "7a0423027fdab4a53526580826f34f74382427c0",
+    "testsPassed": 5071,
+    "testsSkipped": 3,
+    "typecheck": true
+  },
+  "appliedToForkMain": false
+}

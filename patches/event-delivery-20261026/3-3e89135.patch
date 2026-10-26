@@ -1,0 +1,81 @@
+From 3e891358b0cb6e38f3c25d14a838b70f166b9b9f Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Mon, 26 Oct 2026 08:34:08 +0800
+Subject: [PATCH] fix(bilibili): preserve interval audience event semantics
+
+---
+ src/worlds/bilibili/README.md       | 3 +++
+ src/worlds/bilibili/definition.ts   | 5 ++---
+ src/worlds/bilibili/world.ts        | 1 -
+ tests/worlds/bilibili/world.test.ts | 4 +++-
+ 4 files changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/src/worlds/bilibili/README.md b/src/worlds/bilibili/README.md
+index 0245ae1..fb75441 100644
+--- a/src/worlds/bilibili/README.md
++++ b/src/worlds/bilibili/README.md
+@@ -2,6 +2,9 @@
+ 
+ # worlds/bilibili
+ 
++`bilibili.audience` 描述发送前一个窗口的计数及收到的读数，渲染后计数清零。
++它是历史事件，不带 `snapshot` 标签；原始汇总仍归档，后续窗口不表示此前窗口的完整状态。
++
+ B 站直播间协议只读接入。观众的弹幕、礼物、醒目留言、上舰、进场与人流读数从这里进事件流；
+ 同一 World 提供本机透明 Overlay。两个工具只改本机 Overlay:`bilibili_set_announcement` 写 Agent 公告栏，
+ `bilibili_update_video_queue` 改视频排队列表；都不会向 B 站账号发送弹幕或执行平台操作。
+diff --git a/src/worlds/bilibili/definition.ts b/src/worlds/bilibili/definition.ts
+index acdfa0d..dedcc7f 100644
+--- a/src/worlds/bilibili/definition.ts
++++ b/src/worlds/bilibili/definition.ts
+@@ -121,11 +121,10 @@ export const BILIBILI: WorldDefinition<BilibiliConfigSection> = {
+       {
+         type: 'bilibili.audience',
+         description: {
+-          zh: '进场、点赞、免费礼物的计数与在线人数等读数的汇总,随下一批事件送达。',
+-          en: 'Counts of entries, likes and free gifts plus audience gauges, sent with the next batch.',
++          zh: '本次窗口内的进场、点赞、免费礼物计数及收到的人数读数；随下一批事件送达，发送后重新计数。',
++          en: 'Entry, like and free-gift counts plus received audience gauges for this interval; counters reset after delivery.',
+         },
+         trigger: 'piggyback',
+-        tags: ['snapshot'],
+       },
+     ],
+   },
+diff --git a/src/worlds/bilibili/world.ts b/src/worlds/bilibili/world.ts
+index 594807e..f0a56ae 100644
+--- a/src/worlds/bilibili/world.ts
++++ b/src/worlds/bilibili/world.ts
+@@ -1061,7 +1061,6 @@ export class BilibiliWorld implements World {
+     this.host.pushDeferred(
+       {
+         type: 'bilibili.audience',
+-        tags: ['snapshot'],
+         render: () => {
+           this.armedAt = null;
+           const line = renderAggregate(this.agg);
+diff --git a/tests/worlds/bilibili/world.test.ts b/tests/worlds/bilibili/world.test.ts
+index d61d1a7..703aece 100644
+--- a/tests/worlds/bilibili/world.test.ts
++++ b/tests/worlds/bilibili/world.test.ts
+@@ -21,7 +21,7 @@ import { PB_SMALL } from './gift-v2-frames.ts';
+ import { nullLogger } from '../../../src/core/util.ts';
+ 
+ type DeferredPush = {
+-  spec: Pick<DeferredEventSpec, 'type' | 'senderKey' | 'meta' | 'render'>;
++  spec: Pick<DeferredEventSpec, 'type' | 'senderKey' | 'meta' | 'render' | 'tags'>;
+   opts?: { trigger?: TriggerMode };
+ };
+ 
+@@ -727,6 +727,8 @@ describe('BilibiliWorld', () => {
+     expect(host.deferred[0].opts?.trigger).toBe('piggyback');
+     expect(host.deferred[0].spec.type).toBe('bilibili.audience');
+ 
++    expect(host.deferred[0].spec.tags ?? []).not.toContain('snapshot');
++
+     // 发车刻渲染:带的是这一刻的读数
+     const line = await host.deferred[0].spec.render();
+     expect(line).toBe('[直播间] 刚才 2 人进场、1 次点赞;看过 288429');
+-- 
+2.52.0.windows.1
+

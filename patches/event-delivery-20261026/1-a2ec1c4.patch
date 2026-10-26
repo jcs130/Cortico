@@ -1,0 +1,288 @@
+From a2ec1c4e4e61594e23fe455902b33ad602f80e2d Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Mon, 26 Oct 2026 01:31:51 +0800
+Subject: [PATCH] fix(worlds/bilibili): preserve audience interaction
+ identities
+
+Decode V2 protobuf entry, follow and share signals in the World. Preserve named entry events for Persona decisions while retaining entry aggregates. Malformed packets cannot invent arrivals. Verified with 5055 passing tests and TypeScript checks; actual captured V2 frame retains sender identity.
+---
+ src/worlds/bilibili/ENV_PROMPT.md             |  3 +-
+ src/worlds/bilibili/README.md                 |  6 ++--
+ src/worlds/bilibili/definition.ts             | 10 ++++++
+ src/worlds/bilibili/normalize.ts              | 25 +++++++++++++--
+ src/worlds/bilibili/world.ts                  |  4 +++
+ .../cortiv-eighth-rehearsal.test.ts           |  4 +--
+ tests/worlds/bilibili/normalize.test.ts       | 20 +++++++++++-
+ tests/worlds/bilibili/world.test.ts           | 32 +++++++++++++------
+ 8 files changed, 87 insertions(+), 17 deletions(-)
+
+diff --git a/src/worlds/bilibili/ENV_PROMPT.md b/src/worlds/bilibili/ENV_PROMPT.md
+index 174b0c1..fecee45 100644
+--- a/src/worlds/bilibili/ENV_PROMPT.md
++++ b/src/worlds/bilibili/ENV_PROMPT.md
+@@ -1,8 +1,9 @@
+ 你接入了一个 B 站直播间
+ 观众看到的画面比现场晚 5 到 8 秒，注意下延迟
++进场、关注和分享按平台报告区分。进场信号也可能来自刷新或重连，不证明首次到访；可以结合近期交流合批招呼，无需每条事件都发言。历史档案重现不是新进场。
+ 你可以用 `bilibili_set_announcement` 更新直播画面上的写字板，最多 {{bilibili.agentAnnouncementLimit}} 字
+ 当前写字板内容：{{bilibili.agentAnnouncement | （暂无内容）}}
+ 可以把你当前的目标/直播内容，或者别的你想写的更新在写字板。更新之前要通知外界。
+ 你还可以用 `bilibili_update_video_queue` 维护一份视频排队列表：加入、移除、调整顺序或清空，最多 {{bilibili.videoQueueLimit}} 个。Overlay 里放了视频排队组件时，这份列表会显示在直播画面上
+ 当前排队：
+-{{bilibili.videoQueue | （空）}}
+\ No newline at end of file
++{{bilibili.videoQueue | （空）}}
+diff --git a/src/worlds/bilibili/README.md b/src/worlds/bilibili/README.md
+index 27cba99..0245ae1 100644
+--- a/src/worlds/bilibili/README.md
++++ b/src/worlds/bilibili/README.md
+@@ -75,7 +75,9 @@ World 每 2 秒轮询登录状态，成功后取响应 `Set-Cookie` 里的 SESSD
+ | `bilibili.gift` | flush / debounce | 金额 ≥ `worlds.bilibili.giftFlushYuan` 走 flush,低于它先过短窗归并再排常规合批 |
+ | `bilibili.guard-renew` | debounce | 续费 |
+ | `bilibili.danmaku` | debounce | 弹幕 |
+-| `bilibili.enter-guard` | debounce | 舰长进场(普通进场只计数) |
++| `bilibili.enter` | debounce | 可识别的普通观众进场，保留昵称与可获得的 UID |
++| `bilibili.interaction` | debounce | 关注或分享，按平台类型区分 |
++| `bilibili.enter-guard` | debounce | 舰长进场特效 |
+ | `bilibili.block` | debounce | 观众被禁言 |
+ | `bilibili.room` | flush / debounce | 开播、下播、全员禁言走 flush;标题变更 debounce |
+ | `bilibili.feed` | flush / debounce | 弹幕接入中断超过 60 秒成文一次(flush),恢复时补一条带中断时长(debounce);60 秒内的抖动不推 |
+@@ -181,7 +183,7 @@ WebUI 提供直播间事件诊断和独立 Overlay 编辑器入口。样式、
+ 已用接收帧核对的 cmd 包括 `DANMU_MSG`、`USER_TOAST_MSG_V2`、`INTERACT_WORD_V2`、`LIKE_INFO_V3_*`、`WATCHED_CHANGE`、
+ `ONLINE_RANK_COUNT`、`ROOM_REAL_TIME_MESSAGE_UPDATE`、`STOP_LIVE_ROOM_LIST`。
+ 
+-`INTERACT_WORD_V2` 使用 protobuf；当前解析未区分进场、关注和分享，均计为进场。
++`INTERACT_WORD` 与 `INTERACT_WORD_V2` 分别读取 JSON 和 protobuf，区分进场、关注及分享。V2 的 UID、昵称、交互类型和原时间字段依据 [blivedm 的 InteractWordV2](https://github.com/xfgryujk/blivedm/blob/master/blivedm/models/pb.py) 核对；未知类型或损坏帧不计作进场。无可识别身份的真实进场仍只计数，其他进场同时保留带身份的原事件。刷新和重连也可能产生进场信号，World 不据此判定首次到访或自动欢迎。
+ 
+ ## 接入限制
+ 
+diff --git a/src/worlds/bilibili/definition.ts b/src/worlds/bilibili/definition.ts
+index b8847e4..acdfa0d 100644
+--- a/src/worlds/bilibili/definition.ts
++++ b/src/worlds/bilibili/definition.ts
+@@ -82,6 +82,16 @@ export const BILIBILI: WorldDefinition<BilibiliConfigSection> = {
+         description: { zh: '直播间横幅里的上舰或续费通知。', en: 'The room banner announcing a new or renewed guard membership.' },
+         trigger: 'debounce',
+       },
++      {
++        type: 'bilibili.enter',
++        description: { zh: '平台报告观众进场，保留可获得的昵称和账号；刷新或重连也可能触发。', en: 'A reported viewer entry with available name and identity; refreshes and reconnections may also trigger it.' },
++        trigger: 'debounce',
++      },
++      {
++        type: 'bilibili.interaction',
++        description: { zh: '观众关注主播或分享直播间，保留交互类型和可获得的身份。', en: 'A viewer followed or shared the room, retaining the interaction type and available identity.' },
++        trigger: 'debounce',
++      },
+       {
+         type: 'bilibili.enter-guard',
+         description: { zh: '舰长等大航海成员进入直播间。', en: 'A guard member entered the room.' },
+diff --git a/src/worlds/bilibili/normalize.ts b/src/worlds/bilibili/normalize.ts
+index 9bcab93..987b649 100644
+--- a/src/worlds/bilibili/normalize.ts
++++ b/src/worlds/bilibili/normalize.ts
+@@ -1,6 +1,7 @@
+ /** 将原始 cmd 转换为事件、累加计数或最新读数；不处理的命令返回 null。计数与读数由 World 聚合后随批次投递。 */
+ import type { TriggerMode } from '../../core/types.ts';
+ import { giftFrameData } from './gift-frame.ts';
++import { pbFromBase64, pbInt, pbText } from './protobuf.ts';
+ 
+ export interface LiveEvent {
+   kind: 'event';
+@@ -241,8 +242,7 @@ export function normalize(msg: Record<string, unknown>, opts: NormalizeOptions):
+ 
+     case 'INTERACT_WORD':
+     case 'INTERACT_WORD_V2':
+-      // V2 是 protobuf,分不出进场/关注/分享,一律按进场计数
+-      return { kind: 'count', field: 'enter', by: 1 };
++      return interaction(cmd, data, opts);
+ 
+     case 'LIKE_INFO_V3_CLICK':
+       return { kind: 'count', field: 'like', by: 1 };
+@@ -427,6 +427,27 @@ function num(v: unknown): number {
+   return typeof v === 'number' && Number.isFinite(v) ? v : 0;
+ }
+ 
++/** V2 field mapping: xfgryujk/blivedm, models/pb.py InteractWordV2 (not an official schema). */
++function interaction(cmd: string, data: Record<string, unknown>, opts: NormalizeOptions): Normalized | null {
++  const fields = cmd === 'INTERACT_WORD_V2' ? pbFromBase64(data.pb) : null;
++  if (cmd === 'INTERACT_WORD_V2' && !fields) {
++    opts.warn?.('INTERACT_WORD_V2 无法解析，不计作进场');
++    return null;
++  }
++  const uid = fields ? pbInt(fields, 1) ?? 0 : audienceUid(data);
++  const uname = fields ? pbText(fields, 2) : str(data.uname);
++  const msgType = fields ? pbInt(fields, 5) : num(data.msg_type);
++  const timestamp = fields ? pbInt(fields, 7) : num(data.timestamp);
++  if (msgType !== 1 && msgType !== 2 && msgType !== 3) return null;
++  if (msgType === 1 && !uname && !senderKeyOf(uid)) return { kind: 'count', field: 'enter', by: 1 };
++  const label = msgType === 1 ? '进场' : msgType === 2 ? '关注' : '分享';
++  const action = msgType === 1 ? '进入了直播间' : msgType === 2 ? '关注了主播' : '分享了直播间';
++  return { kind: 'event', type: msgType === 1 ? 'bilibili.enter' : 'bilibili.interaction', trigger: 'debounce',
++    text: `[${label}|${uname || '某位观众'}] ${action}`, senderKey: senderKeyOf(uid),
++    meta: { uid, uname, msgType, socialScope: 'live-room', sourceCommand: cmd,
++      ...(timestamp ? { sourceTimestamp: timestamp } : {}) } };
++}
++
+ function bool(v: unknown): boolean {
+   return v === true || v === 1;
+ }
+diff --git a/src/worlds/bilibili/world.ts b/src/worlds/bilibili/world.ts
+index f499e68..594807e 100644
+--- a/src/worlds/bilibili/world.ts
++++ b/src/worlds/bilibili/world.ts
+@@ -716,6 +716,10 @@ export class BilibiliWorld implements World {
+       return;
+     }
+ 
++    if (item.type === 'bilibili.enter') {
++      this.agg.enter++;
++      this.armAggregate();
++    }
+     if (item.type === 'bilibili.guard' || item.type === 'bilibili.guard-renew') {
+       if (this.suppressDuplicateGuard(item)) return;
+       if (overlayEvent) this.emitOverlayAudience(overlayEvent);
+diff --git a/tests/integration/cortiv-eighth-rehearsal.test.ts b/tests/integration/cortiv-eighth-rehearsal.test.ts
+index 2fcd79c..a394cf2 100644
+--- a/tests/integration/cortiv-eighth-rehearsal.test.ts
++++ b/tests/integration/cortiv-eighth-rehearsal.test.ts
+@@ -134,8 +134,8 @@ describe.sequential('CortiV 集成测试', () => {
+ 
+   it('把弹幕突发、人流读数和高价值礼物接进同一条真实投递链', async () => {
+     const callsBefore = llm.calls.length;
+-    feedBilibili({ cmd: 'INTERACT_WORD_V2', data: {} });
+-    feedBilibili({ cmd: 'INTERACT_WORD_V2', data: {} });
++    feedBilibili({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
++    feedBilibili({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
+     feedBilibili({ cmd: 'WATCHED_CHANGE', data: { num: 288429 } });
+     feedBilibili(danmaku(42, '阿明', '刷怪塔要记得照明外圈'));
+     feedBilibili(danmaku(84, '小羽', '农场旁边留红石检修道'));
+diff --git a/tests/worlds/bilibili/normalize.test.ts b/tests/worlds/bilibili/normalize.test.ts
+index 0b33b18..3c71bb5 100644
+--- a/tests/worlds/bilibili/normalize.test.ts
++++ b/tests/worlds/bilibili/normalize.test.ts
+@@ -202,7 +202,7 @@ describe('归一化', () => {
+   });
+ 
+   it('人流类只给计数与读数', () => {
+-    expect(normalize({ cmd: 'INTERACT_WORD_V2', data: {} }, OPTS)).toEqual({ kind: 'count', field: 'enter', by: 1 });
++    expect(normalize({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } }, OPTS)).toEqual({ kind: 'count', field: 'enter', by: 1 });
+     expect(normalize({ cmd: 'LIKE_INFO_V3_CLICK', data: {} }, OPTS)).toEqual({ kind: 'count', field: 'like', by: 1 });
+     expect(normalize({ cmd: 'WATCHED_CHANGE', data: { num: 288429 } }, OPTS)).toEqual({
+       kind: 'gauge',
+@@ -216,6 +216,24 @@ describe('归一化', () => {
+     });
+   });
+ 
++  it('V1/V2 distinguish entry, follow and share while retaining name and stable account', () => {
++    for (const msgType of [1, 2, 3]) {
++      const pb = Buffer.from([8, 7, 18, 4, 89, 117, 107, 111, 40, msgType]).toString('base64');
++      const v1 = normalize({ cmd:'INTERACT_WORD', data:{ uid:7, uname:'Yuko', msg_type:msgType } }, OPTS);
++      const v2 = normalize({ cmd:'INTERACT_WORD_V2', data:{ pb } }, OPTS);
++      const expected = { kind:'event', trigger:'debounce', senderKey:'7', meta:{uid:7,uname:'Yuko',msgType},
++        type:msgType===1?'bilibili.enter':'bilibili.interaction' };
++      expect(v1).toMatchObject(expected);expect(v2).toMatchObject(expected);
++      if(msgType!==1)expect(v2?.kind==='event'&&v2.text).not.toContain('进场');
++    }
++  });
++  it('does not invent entries or stable identities from malformed, anonymous or unknown interaction frames', () => {
++    for (const data of [{}, {pb:'!!!'}, {pb:Buffer.from([18,20,65]).toString('base64')}, {pb:Buffer.from([40,99]).toString('base64')}])
++      expect(normalize({cmd:'INTERACT_WORD_V2',data},OPTS)).toBeNull();
++    expect(normalize({cmd:'INTERACT_WORD',data:{uid:0,uname:'某***',msg_type:1}},OPTS)).toMatchObject({type:'bilibili.enter',senderKey:undefined});
++    expect(normalize({cmd:'INTERACT_WORD',data:{msg_type:3}},OPTS)).toMatchObject({type:'bilibili.interaction'});
++  });
++
+   it('运营挂件与她自己的语音转写不推;没见过的 cmd 也不推', () => {
+     for (const cmd of ['NOTICE_MSG', 'UNIVERSAL_ASR_TEXT', 'WIDGET_BANNER', 'SOME_NEW_CMD_2030']) {
+       expect(normalize({ cmd, data: {} }, OPTS), cmd).toBeNull();
+diff --git a/tests/worlds/bilibili/world.test.ts b/tests/worlds/bilibili/world.test.ts
+index 0d886ef..d61d1a7 100644
+--- a/tests/worlds/bilibili/world.test.ts
++++ b/tests/worlds/bilibili/world.test.ts
+@@ -241,6 +241,20 @@ describe('BilibiliWorld', () => {
+     vi.useRealTimers();
+   });
+ 
++  it('delivers identifiable visitors with batchable triggers and counts only actual entries', async () => {
++    const {module,host,feed}=await mount();
++    feed({cmd:'INTERACT_WORD_V2',data:{pb:Buffer.from([8,7,18,4,89,117,107,111,40,1]).toString('base64')}});
++    feed({cmd:'INTERACT_WORD',data:{uid:8,uname:'Kai',msg_type:2}});
++    feed({cmd:'INTERACT_WORD_V2',data:{pb:'invalid'}});
++    await vi.waitFor(()=>expect(host.events.filter(e=>e.type==='bilibili.enter'||e.type==='bilibili.interaction')).toHaveLength(2));
++    const entry=host.events.find(e=>e.type==='bilibili.enter')!;
++    expect(entry).toMatchObject({senderKey:'7',meta:{uname:'Yuko',msgType:1,socialScope:'live-room'}});
++    expect(host.pushOpts[host.events.indexOf(entry)]?.trigger).toBe('debounce');
++    expect(await host.deferred.find(d=>d.spec.type==='bilibili.audience')!.spec.render()).toContain('1 人进场');
++    expect(host.archivedEvents.find(e=>e.senderKey==='7')).toMatchObject({contextDelivery:'archive-only',meta:{sourceCommand:'INTERACT_WORD_V2'}});
++    await module.stop();
++  });
++
+   it('只提供本机 Agent 公告与视频排队工具，不向 B 站账号写入', async () => {
+     const { module } = await mount();
+     const tools = module.tools();
+@@ -703,8 +717,8 @@ describe('BilibiliWorld', () => {
+ 
+   it('人流读数不成事件:布置一条待成文的,发车刻才渲染,而且只布置一条', async () => {
+     const { module, host, feed } = await mount();
+-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
+-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
++    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
++    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
+     feed({ cmd: 'WATCHED_CHANGE', data: { num: 288429 } });
+     feed({ cmd: 'LIKE_INFO_V3_CLICK', data: {} });
+ 
+@@ -721,7 +735,7 @@ describe('BilibiliWorld', () => {
+     expect(await host.deferred[0].spec.render()).toBeNull();
+ 
+     // 清空后新来的读数会重新布置一条
+-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
++    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
+     expect(host.deferred).toHaveLength(2);
+     await module.stop();
+   });
+@@ -731,7 +745,7 @@ describe('BilibiliWorld', () => {
+     vi.setSystemTime(new Date('2026-08-22T15:37:00+08:00'));
+     const { module, host, feed } = await mount();
+ 
+-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
++    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
+     expect(host.deferred).toHaveLength(1);
+ 
+     // WebUI「清空待投递」把挂单抽走了,render 一次都没跑 —— 复位点随之消失
+@@ -739,7 +753,7 @@ describe('BilibiliWorld', () => {
+ 
+     // 窗口内不重挂:安静期不该堆一叠陈旧观察
+     vi.setSystemTime(Date.now() + 299_000);
+-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
++    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
+     expect(host.deferred).toHaveLength(0);
+ 
+     // 过了陈旧窗口视为失踪,允许重挂 —— 这一条在布尔闩版本里永远拿不到
+@@ -758,9 +772,9 @@ describe('BilibiliWorld', () => {
+     vi.setSystemTime(new Date('2026-08-22T15:37:00+08:00'));
+     const { module, host, feed } = await mount();
+ 
+-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
++    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
+     vi.setSystemTime(Date.now() + 301_000); // 一直没发车,窗口到期
+-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
++    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
+     expect(host.deferred).toHaveLength(2);
+ 
+     // 第一条把攒下的读数整个带走,第二条渲染出空正文 → 整条蒸发
+@@ -774,10 +788,10 @@ describe('BilibiliWorld', () => {
+     vi.setSystemTime(new Date('2026-08-22T15:37:00+08:00'));
+     const { module, host, feed } = await mount();
+ 
+-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
++    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
+     await host.deferred[0].spec.render();
+ 
+-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
++    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
+     expect(host.deferred).toHaveLength(2);
+     await module.stop();
+   });
+-- 
+2.52.0.windows.1
+

@@ -1,0 +1,546 @@
+From 8dfdf132b22e8b1dca6fc94b4690e364eb0d7f8f Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Mon, 26 Oct 2026 08:34:08 +0800
+Subject: [PATCH] fix(core): retain delivery origins and yield during console
+ history replay
+
+---
+ docs/runs.md                       |  7 ++-
+ docs/sessions.md                   |  4 ++
+ src/core/event-store.ts            | 60 ++++++++++++++++++-
+ src/core/loop.ts                   |  7 +--
+ src/core/types.ts                  |  2 +
+ src/worlds/console/world.ts        | 96 +++++++++++++++++++++---------
+ tests/core/event-store.test.ts     | 47 +++++++++++++++
+ tests/core/loop.test.ts            | 24 ++++++++
+ tests/web/io-console-webui.test.ts | 41 +++++++++++++
+ 9 files changed, 252 insertions(+), 36 deletions(-)
+
+diff --git a/docs/runs.md b/docs/runs.md
+index 909ab65..2257c57 100644
+--- a/docs/runs.md
++++ b/docs/runs.md
+@@ -1,7 +1,12 @@
+-<!-- Owner: src/core/run.ts, src/core/types.ts (LogRecord), scripts/logq.ts -->
++<!-- Owner: src/core/run.ts, src/core/event-store.ts, src/core/types.ts (LogRecord, EventStoreReader), scripts/logq.ts -->
+ 
+ # Run 与日志
+ 
++`JsonlEventStore.rangeAsync(query, signal)` 异步读取跨 run 历史，按游标升序返回筛选结果，
++`limit` 取区间末尾。查询使用开始时的游标上限，支持取消，并分批让出事件循环；历史文件不会整体进入同步查询缓存。
++`EventStoreReader` 上该方法为可选能力，兼容已有扩展的读取器。控制台历史回放和开场历史检查优先使用它；
++回放期间新消息继续归档，向该连接的显示按历史、实时消息排列。排队回执不表示已送达。
++
+ 一个 run 对应一次进程运行。暂停沿用当前 run，重启创建新 run。`data/runs/index.jsonl`
+ 每次启动与关机各记录一行，崩溃的 run 没有关机行。`data/runs/<run>/` 保存本次运行的记录，id 形如
+ `r-20260910-104402-c2ab`。
+diff --git a/docs/sessions.md b/docs/sessions.md
+index 4f18ee5..c7631cf 100644
+--- a/docs/sessions.md
++++ b/docs/sessions.md
+@@ -2,6 +2,10 @@
+ 
+ # Session
+ 
++投递记录的 `context.frame.events` 为内部与外部事件分别记录归档游标、类型、来源和正文偏移。
++`onDelivery` 执行期间注入的内部事件同样带索引；相同文字的不同事件仍保留各自游标。
++Persona 可据此在请求视图中替换已覆盖的状态，原始 session 和事件账本不变。
++
+ 一个 session 是一次独立的模型对话:常驻的那一个接收事件投递,其余是临时 fork。session 由
+ Persona 声明,Core 只把 `role` 当分类标签。
+ 
+diff --git a/src/core/event-store.ts b/src/core/event-store.ts
+index 1a24f82..54b5e49 100644
+--- a/src/core/event-store.ts
++++ b/src/core/event-store.ts
+@@ -4,7 +4,9 @@
+  * 分片按 cursor / ts 区间按需装载,只缓存最近一次查询读到的那些;range / around / grep
+  * 跨分片作答。
+  */
+-import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, rmSync } from 'node:fs';
++import { appendFileSync, closeSync, createReadStream, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, rmSync } from 'node:fs';
++import { createInterface } from 'node:readline';
++import { setImmediate as yieldEventLoop } from 'node:timers/promises';
+ import { join } from 'node:path';
+ import type {
+   EventEnvelope,
+@@ -255,6 +257,62 @@ export class JsonlEventStore implements EventStore {
+     return this.query(() => this.scanRange(q));
+   }
+ 
++  async rangeAsync(q: EventRangeQuery, signal?: AbortSignal): Promise<EventEnvelope[]> {
++    signal?.throwIfAborted();
++    const limit = q.limit !== undefined && q.limit >= 0 ? Math.floor(q.limit) : undefined;
++    if (limit === 0) return [];
++    const query = { ...q, toCursor: Math.min(q.toCursor ?? Infinity, this.latestCursor()) };
++    const { fromMs, toMs } = timeWindow(query, this.timezone);
++    let matched: EventEnvelope[] = [];
++    let visited = 0;
++    for (const segment of this.segmentsIn(query).reverse()) {
++      // 有限查询仅保留本分片末尾所需的条数，历史文件不进入同步查询缓存。
++      const capacity = limit === undefined ? Infinity : limit - matched.length;
++      const tail: EventEnvelope[] = [];
++      let next = 0;
++      let previous = 0;
++      const accept = (e: EventEnvelope | null): void => {
++        if (!e || e.cursor <= previous) return;
++        previous = e.cursor;
++        if (e.cursor > query.toCursor || (query.fromCursor !== undefined && e.cursor < query.fromCursor)
++          || outside(e, query, fromMs, toMs)
++          || (query.senderKey !== undefined && e.senderKey !== query.senderKey)
++          || (query.source !== undefined && e.source !== query.source)
++          || (query.origin !== undefined && e.origin !== query.origin)) return;
++        if (tail.length < capacity) tail.push(e);
++        else { tail[next] = e; next = (next + 1) % capacity; }
++      };
++      if (segment.events) {
++        const events = segment.events;
++        const end = events.length;
++        for (let i = 0; i < end; i++) {
++          if (++visited % 256 === 0) { await yieldEventLoop(); signal?.throwIfAborted(); }
++          accept(events[i]);
++        }
++      } else {
++        const stream = createReadStream(segment.file, { encoding: 'utf8', signal });
++        const lines = createInterface({ input: stream, crlfDelay: Infinity });
++        try {
++          for await (const line of lines) {
++            if (++visited % 256 === 0) { await yieldEventLoop(); signal?.throwIfAborted(); }
++            accept(parseLine(line));
++          }
++        } catch (error) {
++          signal?.throwIfAborted();
++          // 历史读取失败必须显式失败；部分历史不能冒充完整查询结果。
++          throw error;
++        } finally {
++          lines.close();
++          stream.destroy();
++        }
++      }
++      signal?.throwIfAborted();
++      matched = tail.slice(next).concat(tail.slice(0, next), matched);
++      if (limit !== undefined && matched.length >= limit) break;
++    }
++    return matched;
++  }
++
+   private scanRange(q: EventRangeQuery): EventEnvelope[] {
+     const limit = q.limit !== undefined && q.limit >= 0 ? q.limit : undefined;
+     const { fromMs, toMs } = timeWindow(q, this.timezone);
+diff --git a/src/core/loop.ts b/src/core/loop.ts
+index 8ac148a..bca92f1 100644
+--- a/src/core/loop.ts
++++ b/src/core/loop.ts
+@@ -690,11 +690,8 @@ export class MainLoop {
+     if (lines.length > 0) {
+       const msg: ContextRecord = message('user', lines.join('\n'));
+       if (ephemeral) msg.context.ephemeral = true;
+-      // user 模式下事件块接在内部行后面:sidecar 的位置从那一段之后起算
+-      if (events.length > 0 && inUser) {
+-        const base = lines.slice(0, -1).reduce((n, l) => n + l.length + 1, 0);
+-        msg.context.frame = { events: frameEventRefs(events, base) };
+-      }
++      // 每段正文都携带归档游标，包含 onDelivery 内即时注入的内部事件。
++      msg.context.frame = { events: frameEventRefs(inUser ? [...internals, ...events] : internals, 0) };
+       const blobs = eventBlobs(inUser ? [...internals, ...events] : internals);
+       if (blobs.length > 0) msg.context.blobs = blobs;
+       session.append(msg);
+diff --git a/src/core/types.ts b/src/core/types.ts
+index 32fe1a3..1e79ceb 100644
+--- a/src/core/types.ts
++++ b/src/core/types.ts
+@@ -168,6 +168,8 @@ export interface EventStoreReader {
+   get(cursor: number): EventEnvelope | undefined;
+   latestCursor(): number;
+   range(q: EventRangeQuery): EventEnvelope[];
++  /** 异步读取历史，保持 range 的排序与筛选；查询开始后的事件留给下一次查询。 */
++  rangeAsync?(q: EventRangeQuery, signal?: AbortSignal): Promise<EventEnvelope[]>;
+   /** 返回前 before 条、自身及后 after 条事件。 */
+   around(cursor: number, before: number, after: number): EventEnvelope[];
+   grep(q: EventGrepQuery): EventGrepHit[];
+diff --git a/src/worlds/console/world.ts b/src/worlds/console/world.ts
+index 3229d39..1fc984a 100644
+--- a/src/worlds/console/world.ts
++++ b/src/worlds/console/world.ts
+@@ -69,6 +69,7 @@ const PIN_SHAPE = /^\d{6}$/;
+  * 被引用的标签是这件事的事实内容,和口令标记里的数字同类。
+  */
+ const MODEL_TEXT = {
++  queuedForHistory: (count: number) => `Queued for ${count} connection(s) while their history loads; delivery is not confirmed.`,
+   pinMark: (pin: string) => `[console|PIN:${pin}]`,
+   selfLine: (time: string, text: string) => `[${time}] you: ${text}`,
+   inviteLine: (time: string, name: string, label: string, spokenBefore: boolean) =>
+@@ -150,6 +151,9 @@ interface ChatClient {
+   name: string | null;
+   /** 这条连接握手时的界面语言;流上给它的系统提示按此取。 */
+   language: Language;
++  lifetime: AbortController;
++  historyPending: boolean;
++  liveFrames: string[];
+ }
+ 
+ 
+@@ -295,6 +299,7 @@ export class ConsoleWorld implements World {
+     // 关闭连接前清除 host，禁止 close 回调继续投递 presence 事件。
+     this.host = null;
+     for (const c of [...this.clients]) {
++      c.lifetime.abort();
+       try { c.peer.close(text(c.language).botOffline); } catch { /* ignore */ }
+     }
+     this.clients.clear();
+@@ -303,13 +308,15 @@ export class ConsoleWorld implements World {
+   /**
+    * console_send 回执报告目标、当前连接者、距上次发送的时间及其后是否收到控制台发言。没有已读回执，不能判断消息是否被阅读；控制台 World 不推断其他 World 的直播状态，也不附加建议。
+    */
+-  private deliveryFacts(delivered: number): string {
++  private deliveryFacts(delivered: number, queued: number): string {
+     const t = MODEL_TEXT;
+     const facts: string[] = [];
+     const names = [...this.clients]
+       .filter((c) => c.peer.open && c.name !== null)
+       .map((c) => c.name as string);
+-    facts.push(delivered > 0 ? t.deliveredTo(delivered, names) : t.deliveredToNobody);
++    if (delivered > 0) facts.push(t.deliveredTo(delivered, names));
++    else if (!queued) facts.push(t.deliveredToNobody);
++    if (queued > 0) facts.push(t.queuedForHistory(queued));
+     if (this.lastSendAt !== null) {
+       const minutes = Math.round((Date.now() - this.lastSendAt) / 60_000);
+       const since = this.operatorMessages - this.operatorMessagesAtLastSend;
+@@ -338,7 +345,12 @@ export class ConsoleWorld implements World {
+   stream(panel: string, socket: WebUiStream, language: Language = 'zh'): void {
+     if (panel !== PANEL_CHAT) throw new Error(text(language).unknownPanel(panel));
+     const client = this.attach(streamPeer(socket), language);
+-    socket.onMessage((text) => this.onFrame(client, text));
++    socket.onMessage((raw) => { void this.onFrame(client, raw).catch((error) => {
++      if (!client.lifetime.signal.aborted) {
++        this.host?.log.warn('控制台请求失败', { err: String(error) });
++        this.reject(client, text(client.language).deliveryFailed(String(error)));
++      }
++    }); });
+     socket.onClose(() => this.detach(client));
+     this.greet(client);
+   }
+@@ -351,7 +363,7 @@ export class ConsoleWorld implements World {
+           const text = typeof args.text === 'string' ? args.text.trim() : '';
+           if (!text) return '[send failed] text must not be empty';
+           if (!this.host) return '[send failed] console module not started';
+-          const delivered = this.broadcast({
++          const { delivered, queued } = this.broadcast({
+             type: 'msg',
+             from: this.botName,
+             text,
+@@ -368,9 +380,11 @@ export class ConsoleWorld implements World {
+             },
+             { deliver: false },
+           ).catch((e) => this.host?.log.warn('自录事件落库失败', { err: String(e) }));
+-          const receipt = `[sent] ${this.deliveryFacts(delivered)}`;
+-          this.lastSendAt = Date.now();
+-          this.operatorMessagesAtLastSend = this.operatorMessages;
++          const receipt = `[${queued > 0 && delivered === 0 ? 'queued' : 'sent'}] ${this.deliveryFacts(delivered, queued)}`;
++          if (delivered > 0 || queued === 0) {
++            this.lastSendAt = Date.now();
++            this.operatorMessagesAtLastSend = this.operatorMessages;
++          }
+           return receipt;
+         },
+       },
+@@ -381,7 +395,7 @@ export class ConsoleWorld implements World {
+ 
+   /** 登记一条新连接。回调的挂接归各自入口,因为那是宿主 API 唯一不同的地方。 */
+   private attach(peer: ChatPeer, language: Language): ChatClient {
+-    const client: ChatClient = { peer, name: null, language };
++    const client: ChatClient = { peer, name: null, language, lifetime: new AbortController(), historyPending: false, liveFrames: [] };
+     this.clients.add(client);
+     return client;
+   }
+@@ -393,6 +407,8 @@ export class ConsoleWorld implements World {
+ 
+   /** 连接结束:出名单、给还在场的人一句提示。进出不打扰bot。 */
+   private detach(client: ChatClient): void {
++    client.lifetime.abort();
++    client.liveFrames.length = 0;
+     this.clients.delete(client);
+     if (client.name === null || !this.host) return;
+     const name = client.name;
+@@ -418,7 +434,7 @@ export class ConsoleWorld implements World {
+    * 收到一帧原始文本。**这是协议解析的唯一入口**——`/ws/chat` 的 `RawData` 与
+    * 流式通道的 `string` 在各自入口就已经归一成文本,到这里两条路完全同一份代码。
+    */
+-  private onFrame(client: ChatClient, raw: string): void {
++  private async onFrame(client: ChatClient, raw: string): Promise<void> {
+     const t = text(client.language);
+     let parsed: unknown;
+     try {
+@@ -442,7 +458,12 @@ export class ConsoleWorld implements World {
+       const firstHello = client.name === null;
+       client.name = name;
+       this.sendJson(client.peer, { type: 'sys', text: t.hello(name) });
+-      if (firstHello) this.replayHistory(client);
++      if (firstHello) void this.replayHistory(client).catch((error) => {
++        if (!client.lifetime.signal.aborted) {
++          this.host?.log.warn('控制台历史读取失败', { err: String(error) });
++          this.reject(client, t.deliveryFailed(String(error)));
++        }
++      });
+       // 给其他在场客户端一条提示;进出不打扰bot
+       if (firstHello) this.broadcastSys((tt) => tt.joined(name), client);
+       return;
+@@ -524,13 +545,15 @@ export class ConsoleWorld implements World {
+       const label = typeof msg.label === 'string' ? msg.label.replace(/\s+/g, ' ').trim().slice(0, LABEL_MAX) : '';
+       if (!label) return;
+       const host = this.host;
++      const spokenBefore = await this.spokenBefore(client.lifetime.signal);
++      if (this.host !== host || !client.peer.open) return;
+       host.pushEvent(
+         {
+           type: 'console.invite',
+           ts: nowIso(this.timezone),
+           source: this.id,
+           origin: 'internal',
+-          text: MODEL_TEXT.inviteLine(shortTime(this.timezone), client.name, label, this.spokenBefore()),
++          text: MODEL_TEXT.inviteLine(shortTime(this.timezone), client.name, label, spokenBefore),
+           senderKey: client.name,
+           meta: { from: client.name, label },
+         },
+@@ -546,13 +569,15 @@ export class ConsoleWorld implements World {
+   }
+ 
+   /** 已保存的控制台事件里有没有人说过话;从最新往前逐页读,读到一条发言即止。 */
+-  private spokenBefore(): boolean {
++  private async spokenBefore(signal: AbortSignal): Promise<boolean> {
+     if (!this.host) return false;
+     const store = this.host.store;
+     // 每页条数只决定往前读几次,不影响结果
+     const pageSize = 100;
+     for (let toCursor = store.latestCursor(); ;) {
+-      const page = store.range({ source: this.id, toCursor, limit: pageSize });
++      signal.throwIfAborted();
++      const query = { source: this.id, toCursor, limit: pageSize };
++      const page = store.rangeAsync ? await store.rangeAsync(query, signal) : store.range(query);
+       if (page.some((e) => e.type === 'console.message' || e.type === 'console.self')) return true;
+       if (page.length < pageSize) return false;
+       toCursor = page[0].cursor - 1;
+@@ -560,31 +585,44 @@ export class ConsoleWorld implements World {
+   }
+ 
+   /** hello 后回放最近的对话历史;发言人与正文读本 World 落库时写下的 meta.from/body。 */
+-  private replayHistory(client: ChatClient): void {
++  private async replayHistory(client: ChatClient): Promise<void> {
+     if (!this.host) return;
+-    const events = this.host.store
+-      .range({ source: this.id, limit: 60 })
+-      .filter((e) => e.type === 'console.message' || e.type === 'console.self')
+-      .slice(-30);
+-    for (const e of events) {
+-      const { from, body } = e.meta as { from: string; body: string };
+-      const images = wireImagesOf(e);
+-      this.sendJson(client.peer, {
+-        type: 'msg', from, text: body, ts: e.ts, history: true,
+-        ...(images.length ? { images } : {}),
+-      });
++    const store = this.host.store;
++    client.historyPending = true;
++    try {
++      const query = { source: this.id, toCursor: store.latestCursor(), limit: 60 };
++      const events = (store.rangeAsync ? await store.rangeAsync(query, client.lifetime.signal) : store.range(query))
++        .filter((e) => e.type === 'console.message' || e.type === 'console.self')
++        .slice(-30);
++      for (const e of events) {
++        if (!client.peer.open || client.lifetime.signal.aborted) return;
++        const { from, body } = e.meta as { from: string; body: string };
++        const images = wireImagesOf(e);
++        this.sendJson(client.peer, {
++          type: 'msg', from, text: body, ts: e.ts, history: true,
++          ...(images.length ? { images } : {}),
++        });
++      }
++    } finally {
++      client.historyPending = false;
++      const frames = client.liveFrames.splice(0);
++      for (const raw of frames) {
++        if (!client.peer.open || client.lifetime.signal.aborted) break;
++        try { client.peer.send(raw); } catch { this.detach(client); client.peer.drop(); break; }
++      }
+     }
+   }
+ 
+   /** 返回实际送达的客户端数，并移除已关闭的连接。 */
+-  private broadcast(payload: unknown): number {
++  private broadcast(payload: unknown): { delivered: number; queued: number } {
+     const raw = JSON.stringify(payload);
+     let n = 0;
++    let queued = 0;
+     for (const c of [...this.clients]) {
+       if (c.peer.open) {
+         try {
+-          c.peer.send(raw);
+-          n++;
++          if (c.historyPending) { c.liveFrames.push(raw); queued++; }
++          else { c.peer.send(raw); n++; }
+         } catch {
+           this.clients.delete(c);
+           c.peer.drop();
+@@ -594,7 +632,7 @@ export class ConsoleWorld implements World {
+         this.clients.delete(c);
+       }
+     }
+-    return n;
++    return { delivered: n, queued };
+   }
+ 
+   private sendJson(peer: ChatPeer, payload: unknown): void {
+diff --git a/tests/core/event-store.test.ts b/tests/core/event-store.test.ts
+index c96feb0..d0540bc 100644
+--- a/tests/core/event-store.test.ts
++++ b/tests/core/event-store.test.ts
+@@ -54,6 +54,53 @@ describe('JsonlEventStore', () => {
+   beforeEach(() => (tmp = makeTmpDir(), fsHooks.reads.length = 0));
+   afterEach(() => tmp.cleanup());
+ 
++  it('asynchronous ranges match synchronous filtering across cold and warm segments', async () => {
++    seed(open(RUN_A), 10);
++    seed(open(RUN_B), 10, 10);
++    const store = open(RUN_C);
++    seed(store, 5, 20);
++    for (const q of [
++      {}, { limit: 3 }, { source: 'qq', limit: 7 }, { senderKey: 'alice', limit: 4 },
++      { fromCursor: 4, toCursor: 19, limit: 5 }, { origin: 'internal' as const },
++      { fromTs: '2026-07-17T10:08:00', toTs: '2026-07-17T10:18:00', source: 'web', limit: 4 },
++    ]) {
++      const cold = open(RUN_C);
++      const result = await cold.rangeAsync(q);
++      expect(result).toEqual(store.range(q));
++      expect(await store.rangeAsync(q)).toEqual(result);
++    }
++    expect(await store.rangeAsync({ fromCursor: 1, limit: 0 })).toEqual([]);
++  });
++
++  it('large cold scans yield to other work, exclude later appends and do not sync-load history', async () => {
++    const rows = Array.from({ length: 20_000 }, (_, i) => ({ cursor: i + 1, ts: '2026-01-01T00:00:00Z',
++      type: 'test.event', source: i % 5000 === 0 ? 'console' : 'other', origin: 'external', text: `row ${i}` }));
++    mkdirSync(join(tmp.dir, 'runs', RUN_A), { recursive: true });
++    writeFileSync(fileOf(RUN_A), rows.map(e => JSON.stringify(e)).join('\n') + '\n');
++    const store = open(RUN_B);
++    fsHooks.reads.length = 0;
++    let settled = false, progressed = false;
++    const reading = store.rangeAsync({ source: 'console', limit: 3 }).then(result => { settled = true; return result; });
++    await new Promise<void>(resolve => setImmediate(() => {
++      progressed = !settled;
++      store.append({ type: 'test.event', source: 'console', origin: 'external', ts: '2026-01-01T00:01:00Z', text: 'new' });
++      resolve();
++    }));
++    expect((await reading).map(e => e.cursor)).toEqual([5001, 10001, 15001]);
++    expect(progressed).toBe(true);
++    expect(fsHooks.reads).toEqual([]);
++    expect(store.get(20001)?.text).toBe('new');
++  });
++
++  it('asynchronous history scans can be cancelled and a later query still completes', async () => {
++    seed(open(RUN_A), 8);
++    const store = open(RUN_B), controller = new AbortController();
++    const reading = store.rangeAsync({}, controller.signal);
++    controller.abort(new Error('reader closed'));
++    await expect(reading).rejects.toThrow('reader closed');
++    expect((await store.rangeAsync({ limit: 2 })).map(e => e.cursor)).toEqual([7, 8]);
++  });
++
+   it('append游标从1递增,get/latestCursor一致,记录带 run', () => {
+     const store = open();
+     expect(store.latestCursor()).toBe(0);
+diff --git a/tests/core/loop.test.ts b/tests/core/loop.test.ts
+index 24df153..a684649 100644
+--- a/tests/core/loop.test.ts
++++ b/tests/core/loop.test.ts
+@@ -3745,6 +3745,30 @@ describe('MainLoop 异步 onDelivery', () => {
+     if (rig) await rig.cleanup();
+   });
+ 
++  it.each(['user', 'tool'] as const)('%s delivery indexes hook injections and duplicate text by real cursor', async (eventDelivery) => {
++    rig = makeRig({ eventDelivery, hooks: { onDelivery: async ({ events }) => {
++      if (!events.some(e => e.origin === 'external')) return;
++      rig.loop.injectInternal('same text\nsecond line', 'state.one');
++      await Promise.resolve();
++      rig.loop.injectInternal('same text\nsecond line', 'state.two');
++    } } });
++    rig.start();
++    await until(() => rig.llm.calls.length >= 1);
++    rig.pushEvent('external message');
++    await until(() => rig.session.messages.some(m => m.frame?.events.some(e => e.type === 'state.two')));
++    const messages = rig.session.messages.filter(m => m.frame?.events.some(e => ['state.one', 'state.two'].includes(e.type)));
++    expect(messages).toHaveLength(1);
++    const refs = messages[0].frame!.events;
++    for (const ref of refs) {
++      const archived = rig.store.get(ref.cursor)!;
++      expect(messages[0].content.slice(ref.start, ref.start + ref.chars)).toBe(archived.text);
++      expect(ref).toMatchObject({ source: archived.source, ts: archived.ts, type: archived.type });
++    }
++    expect(refs.filter(e => e.source === 'persona').map(e => e.type)).toEqual(['state.one', 'state.two']);
++    expect(new Set(refs.map(e => e.cursor)).size).toBe(refs.length);
++    assertPairing(rig.session.messages);
++  });
++
+   /** 钩子开始等待时置位；调用 release() 后钩子继续。 */
+   function gatedHook(after: (api: { inject: (text: string) => void }) => void) {
+     const state = { started: false, release: () => {} };
+diff --git a/tests/web/io-console-webui.test.ts b/tests/web/io-console-webui.test.ts
+index 3eb893b..18a6aed 100644
+--- a/tests/web/io-console-webui.test.ts
++++ b/tests/web/io-console-webui.test.ts
+@@ -9,6 +9,8 @@ import type { WebUiStream } from '../../src/web/shared/webui-protocol.ts';
+ import type { ToolCallContext } from '../../src/core/types.ts';
+ import { nullLogger } from '../../src/core/util.ts';
+ import { FakeHost, type PushedRecord } from './fakes.ts';
++import { JsonlEventStore } from '../../src/core/event-store.ts';
++import { makeTmpDir } from '../core/helpers.ts';
+ 
+ const toolCtx: ToolCallContext = { role: 'main', log: nullLogger() };
+ /** 回显在 pushEvent 落库之后才广播(句柄那时才有);让微任务与一个宏任务跑完 */
+@@ -97,6 +99,45 @@ const SCRIPT = [
+ // ── 1. 流式通道 ────────────────────────────────────────────────────────
+ 
+ describe('ConsoleWorld 的流式通道', () => {
++  it('loads history asynchronously while accepting new messages, then preserves display order', async () => {
++    const tmp = makeTmpDir();
++    const host = new FakeHost(), store = new JsonlEventStore({ dataDir: tmp.dir, run: 'r-20260101-000000-aaaa' });
++    Object.defineProperty(host, 'store', { value: store });
++    for (let i = 0; i < 600; i++) store.append({ type: 'console.message', source: 'console', origin: 'internal',
++      text: `old ${i}`, ts: '2026-01-01T00:00:00Z', meta: { from: 'operator', body: `old ${i}` } });
++    const mod = new ConsoleWorld(), sock = new FakeStream();
++    try {
++      await mod.start(host); mod.stream('chat', sock);
++      sock.feed(JSON.stringify({ type: 'hello', name: 'operator' }));
++      sock.feed(JSON.stringify({ type: 'msg', text: 'new message' }));
++      const result = await mod.tools()[0].handler({ text: 'new response' }, toolCtx);
++      expect(String(result)).toContain('[queued]');
++      expect(String(result)).toContain('delivery is not confirmed');
++      expect(host.pushed.some(p => p.e.type === 'console.message' && p.e.text.includes('new message'))).toBe(true);
++      for (let i = 0; i < 30 && !sock.frames().some(f => f.text === 'new response'); i++) await settle();
++      const frames = sock.frames().filter(f => f.type === 'msg');
++      expect(frames.filter(f => f.history)).toHaveLength(30);
++      expect(frames.slice(0, 30).every(f => f.history)).toBe(true);
++      expect(frames.filter(f => !f.history).map(f => f.text).sort()).toEqual(['new message', 'new response']);
++    } finally { await mod.stop(); tmp.cleanup(); }
++  });
++
++  it('disconnecting during history loading cancels the query and drops queued frames', async () => {
++    const tmp = makeTmpDir();
++    const host = new FakeHost(), store = new JsonlEventStore({ dataDir: tmp.dir, run: 'r-20260101-000000-aaaa' });
++    Object.defineProperty(host, 'store', { value: store });
++    for (let i = 0; i < 600; i++) store.append({ type: 'other.event', source: 'other', origin: 'external', text: 'x', ts: '2026-01-01T00:00:00Z' });
++    const mod = new ConsoleWorld(), sock = new FakeStream();
++    try {
++      await mod.start(host); mod.stream('chat', sock);
++      sock.feed(JSON.stringify({ type: 'hello', name: 'operator' }));
++      await mod.tools()[0].handler({ text: 'queued response' }, toolCtx);
++      sock.hangup(); const count = sock.sent.length;
++      await settle(); await settle();
++      expect(sock.sent).toHaveLength(count);
++      expect(mod.onlineCount()).toBe(0);
++    } finally { await mod.stop(); tmp.cleanup(); }
++  });
+   it('连上就有开场白,hello+msg 走通:事件落库 + 回显推回', async () => {
+     const host = new FakeHost();
+     const mod = new ConsoleWorld({ timezone: 'Asia/Shanghai' });
+-- 
+2.52.0.windows.1
+
