@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { normalizeAudienceProgress, audienceProgressIsNewer, type AudienceProgress } from './audience-progress.ts';
 import { AvatarLibrary } from "./avatars.ts";
 import { ActionLedger } from "./ledger.ts";
 import { MotionProvider } from "./motion.ts";
@@ -16,6 +17,14 @@ import {
   type RendererReceipt,
 } from "./types.ts";
 export class AvatarStage {
+  private audienceProgress: AudienceProgress | null = null;
+  publishAudienceProgress(value: unknown): boolean {
+    const row = normalizeAudienceProgress(value);
+    if (this.stopped || !row || !audienceProgressIsNewer(row, this.audienceProgress)) return false;
+    this.audienceProgress = row;
+    this.emit('audience.progress', { ...row });
+    return true;
+  }
   readonly avatars = new AvatarLibrary();
   readonly ledger: ActionLedger;
   readonly motion: MotionProvider;
@@ -130,6 +139,7 @@ export class AvatarStage {
     return {
       protocol: PROTOCOL,
       activeAvatar: this.activeId ? this.avatars.public(this.activeId) : null,
+      audienceProgress: this.audienceProgress && Date.parse(this.audienceProgress.expiresAt) > now ? this.audienceProgress : null,
       avatars: this.avatars.list(),
       renderers: [...this.sessions.values()].map((s) => s.receipt),
       audioOwner: this.owner?.sessionId ?? null,
@@ -825,6 +835,7 @@ export class AvatarStage {
     }
   }
   async stop() {
+    this.audienceProgress = null;
     if (this.stopped) return;
     this.cutAudio("stage-stopped");
     this.voice.stop();

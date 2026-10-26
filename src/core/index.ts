@@ -8,6 +8,7 @@ export * from "./music.ts";
 export * from "./config.ts";
 export * from "./cloud-music.ts";
 export * from "./commentary.ts";
+export * from './audience-progress.ts';
 export * from "./commentary-runtime.ts";
 export * from "./animation-index.ts";
 export * from "./performance-director.ts";

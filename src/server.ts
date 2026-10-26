@@ -205,6 +205,10 @@ export class AvatarStageServer {
       this.json(res, 200, this.stage.status());
       return;
     }
+    if (path === '/api/audience-progress' && req.method === 'POST') {
+      this.json(res, 200, { protocol: PROTOCOL, accepted: this.stage.publishAudienceProgress(await this.body(req)) });
+      return;
+    }
     const motionIndex = /^\/assets\/avatars\/([^/]+)\/motions$/.exec(path);
     const legacyMotionIndex = /^\/assets\/motions\/([^/]+)$/.exec(path);
     const indexId =

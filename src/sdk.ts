@@ -20,6 +20,12 @@ export class AvatarStageClient {
   status() {
     return structuredClone(this.state);
   }
+  async publishAudienceProgress(value: unknown, signal?: AbortSignal) {
+    if (!this.abort) throw Error('Client is stopped');
+    return jsonRequest(this.url + '/api/audience-progress', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) },
+      AbortSignal.any([this.abort.signal, ...(signal ? [signal] : [])]));
+  }
   async importMusic(
     bytes: Uint8Array,
     metadata: { title: string; instrumental?: boolean },

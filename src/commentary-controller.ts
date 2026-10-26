@@ -83,6 +83,9 @@ export class CommentaryController {
       && !String(event.data.requestId).startsWith("avatar-commentary-")) this.lane.foregroundSpeech(event.data.text);
   }
   facts(): string { return this.lane.facts(); }
+  presentationState(): Record<string, any> | null {
+    return this.runtime.active(false) && this.speech && Date.now() - this.speech.observedAtMs <= 2500 ? this.state : null;
+  }
   async sample(): Promise<void> {
     const host = this.host;
     if (!host || this.sampling) return;

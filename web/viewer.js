@@ -1,4 +1,6 @@
 import * as THREE from "three";
+import { installAudienceProgress } from './audience-progress.js';
+const audienceProgressCard = installAudienceProgress({ document, window });
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
@@ -808,6 +810,7 @@ $("#stopMusic").onclick = () =>
   void safe(() => call("avatar_music", { action: "stop" }));
 async function refresh() {
   state = await (await fetch("/api/state")).json();
+  audienceProgressCard.update(state.audienceProgress);
   $("#protocol").textContent = state.protocol;
   $("#avatars").replaceChildren(
     ...state.avatars.map((a) => new Option(a.label, a.id)),
@@ -929,6 +932,7 @@ async function refresh() {
 const stream = new EventSource("/events");
 stream.onmessage = (event) => {
   const message = JSON.parse(event.data);
+  if (message.type === 'audience.progress') audienceProgressCard.update(message.data);
   if (
     message.type === "avatar.action" &&
     ["speech", "music-play"].includes(message.data.kind)
@@ -971,6 +975,7 @@ stream.onmessage = (event) => {
     audio.stop();
 };
 stream.onerror = () => {
+  audienceProgressCard.clear();
   audio.stop();
   notify("演出连接中断，等待恢复");
 };

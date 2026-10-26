@@ -14,6 +14,7 @@ import { TOOL_DEFINITIONS, WORLD_DESCRIPTION } from "./tools.ts";
 import type { WorldConfig, StageEvent } from "./core/types.ts";
 import { COMMENTARY_DEFAULTS } from "./core/commentary.ts";
 import { CommentaryController } from "./commentary-controller.ts";
+import { AudienceProgressSpeaker, AUDIENCE_PROGRESS_DEFAULTS, normalizeAudienceProgress } from './core/audience-progress.ts';
 import { DesktopPresentation } from "./desktop-presentation.ts";
 import { DesktopReplySpeech, REPLY_SPEECH_DEFAULTS } from './desktop-reply-speech.ts';
 import { DesktopAudioRenderer } from './desktop-audio.ts';
@@ -34,6 +35,15 @@ export class AvatarStageWorld implements World {
   private server: AvatarStageServer | null = null;
   private client: AvatarStageClient | null = null;
   private commentary: CommentaryController | null = null;
+  private audienceSpeaker: AudienceProgressSpeaker | null = null;
+  /** Optional host presentation port. Does not inspect model reasoning or perform game actions. */
+  async publishAudienceProgress(value: unknown): Promise<void> {
+    if (!this.lifetime || this.lifetime.signal.aborted || !this.cfg().audienceProgress?.enabled) return;
+    const row = normalizeAudienceProgress(value); if (!row) return;
+    if (this.server) this.server.stage.publishAudienceProgress(row);
+    else await this.client?.publishAudienceProgress(row, this.lifetime.signal);
+    this.audienceSpeaker?.observe(row);
+  }
   private director: PerformanceDirector | null = null;
   private presentation: DesktopPresentation | null = null;
   private replySpeech:DesktopReplySpeech|null=null;
@@ -50,6 +60,8 @@ export class AvatarStageWorld implements World {
         protocol: 'avatar-stage/1', type: 'avatar.speech.submitted', at: Date.now(), data: { text: args.text, requestId },
       });
       const result = await this.presentation.speak(args, requestId);
+      if (result.accepted && !result.duplicate && args.action === 'speak' && typeof args.text === 'string')
+        this.audienceSpeaker?.noteSpeech(args.text);
       if (result.accepted && !result.duplicate && typeof result.id === 'string' && args.action === 'speak' && args.performance === undefined)
         void this.director?.direct(result.id, String(result.text ?? args.text), 'speaking');
       return result;
@@ -62,6 +74,8 @@ export class AvatarStageWorld implements World {
   constructor(private readonly cfg: () => WorldConfig) {}
   private report(event: StageEvent, epoch: number) {
     if (epoch === this.epoch) this.commentary?.event(event);
+    if (epoch === this.epoch && event.type === 'avatar.speech.submitted' && typeof event.data.text === 'string')
+      this.audienceSpeaker?.noteSpeech(event.data.text, event.at);
     if (epoch === this.epoch && this.director && !this.presentation?.audioEnabled()) {
       if (
         event.type === "avatar.speech.submitted" &&
@@ -230,10 +244,18 @@ export class AvatarStageWorld implements World {
             : this.client!.call("avatar_query", { action: "status" }),
         speak: async (args, requestId) =>
           this.speak(args, requestId, lifetime.signal),
-        observe:event=>{this.replySpeech?.observe(event);this.director?.observe(event);},
-        tick:()=>this.director?.tick(),
+        observe:event=>{this.replySpeech?.observe(event);this.director?.observe(event);this.audienceSpeaker?.observeEvent(event);},
+        tick:()=>{ this.director?.tick(); this.audienceSpeaker?.tick(); },
       });
       this.commentary.start(host);
+      this.audienceSpeaker = new AudienceProgressSpeaker({
+        config: () => ({ ...AUDIENCE_PROGRESS_DEFAULTS, ...this.cfg().audienceProgress }),
+        decide: (host as WorldHost & { decisions?: DecisionPort }).decisions,
+        state: () => this.commentary?.presentationState() ?? null,
+        speak: (text, revision, requestId, at) => this.speak({ action: 'speak', text,
+          ifIdleRevision: revision, observed_at: at }, requestId, lifetime.signal),
+        log: data => this.host?.log.emit('info', '公开复盘动态播报', { event: 'audience-progress-speech', data }),
+      });
       this.director = new PerformanceDirector({
         config: () => ({ ...DIRECTOR_DEFAULTS, ...this.cfg().director }),
         decide: (host as WorldHost & { decisions?: DecisionPort }).decisions,
@@ -279,6 +301,7 @@ export class AvatarStageWorld implements World {
     }
   }
   async stop() {
+    this.audienceSpeaker?.stop(); this.audienceSpeaker = null;
     this.director?.stop();
     this.replySpeech?.stop();this.replySpeech=null;
     this.director = null;
@@ -369,6 +392,15 @@ export class AvatarStageWorld implements World {
                 type: "boolean",
                 title: "启用空闲游戏解说",
               },
+              'worlds.avatar-stage.audienceProgress.enabled': { type: 'boolean', title: '显示公开思考动态', 'x-hot': true,
+                description: '只接收宿主明确公开的主题和阶段，不读取内部推理或聊天历史。' },
+              'worlds.avatar-stage.audienceProgress.speechEnabled': { type: 'boolean', title: '简短播报思考动态', 'x-hot': true,
+                description: '系统一根据公开短摘要选择播报、仅显示或跳过；声音忙碌、过期或判断超时则不播报，不排队。' },
+              'worlds.avatar-stage.audienceProgress.minSpeechGapSec': { type: 'number', minimum: 0, title: '思考动态播报间隔（秒）', 'x-hot': true },
+              'worlds.avatar-stage.audienceProgress.provider': { type: 'string', title: '动态播报决策供应商', 'x-hot': true,
+                description: '留空使用宿主已配置的系统一，不启动额外聊天模型。' },
+              'worlds.avatar-stage.audienceProgress.timeoutMs': { type: 'number', minimum: 100, maximum: 5000,
+                title: '动态播报决策超时（毫秒）', 'x-hot': true },
               "worlds.avatar-stage.commentary.idleSec": {
                 type: "number",
                 title: "空闲后起草（秒）",
@@ -467,6 +499,7 @@ const definition: WorldDefinition<WorldConfig> = {
     voice: { url: "", model: "", voice: "", textFormat: "plain", busyPolicy:"replace" },
     presentation: { mode: 'stage', url: '' },
     commentary: { ...COMMENTARY_DEFAULTS },
+    audienceProgress: { ...AUDIENCE_PROGRESS_DEFAULTS },
     director: { ...DIRECTOR_DEFAULTS },
     replySpeech: { ...REPLY_SPEECH_DEFAULTS },
     music: { directory: "", generationUrl: "" },

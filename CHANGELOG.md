@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2-dev.20261026.3
+
+- Add an optional host-authored public progress card for the stage and a bounded SDK/HTTP presentation port.
+- Optional short progress speech reuses the current output, requires fresh active/idle observations and revision-checked admission, and drops stale/busy reports without queuing. A bounded, asynchronous System One choice decides speak/display/skip from compact public input; no generative call or full history is added.
+- Keep review completion separate from game success; never read raw reasoning or private conversation history for this channel.
+
 ## 0.1.2-dev.20261026.2
 
 - Allow dialogue, greetings and creative speech without a live observation timestamp. Explicit observation timestamps still reject stale, invalid and future evidence; commentary continues to forward original source times.

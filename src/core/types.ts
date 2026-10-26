@@ -117,6 +117,7 @@ export interface StageConfig {
   voice?: VoiceConfig;
 }
 export interface WorldConfig extends StageConfig {
+  audienceProgress?: Partial<import('./audience-progress.ts').AudienceProgressConfig>;
   enabled: boolean;
   speechObservationMaxAgeSeconds?: number;
   presentation?: Partial<import('../desktop-presentation.ts').DesktopPresentationConfig>;
