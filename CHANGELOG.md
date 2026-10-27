@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Include the rejected, validated speech candidate in the single stateless revision request. A rejection reason alone did not identify the wording that needed correction. Original evidence clocks, one-revision limit, foreground priority and all admission checks remain unchanged; raw provider output and rejected speech are not added to playback history.
+
 ## 0.1.2-dev.20261027.2
 
 - Return duplicate speech and outdated current-state claims to the host drafter for one bounded revision. The reply includes the original evidence clocks and which timeframes remain valid; all admission, foreground priority and freshness checks still apply. Rejected revisions never reach TTS.

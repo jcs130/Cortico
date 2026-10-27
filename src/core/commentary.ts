@@ -340,7 +340,12 @@ export class CommentaryLane {
             current: this.valid({ ...candidate, evidence: [e.cursor], timeframe: 'current' }),
             recent: this.valid({ ...candidate, evidence: [e.cursor], timeframe: 'recent' }),
           }));
-          brief += '\n候选未通过校验（不是新的世界事实）：' + JSON.stringify({ reason, evidence })
+          // Each cognition request is stateless. Return the bounded, parsed
+          // candidate as well as its rejection; never replay the raw response
+          // or promote a rejected line to submitted speech/history.
+          brief += '\n候选未通过校验（不是新的世界事实）：' + JSON.stringify({ reason, evidence,
+            rejectedCandidate: { script: draft.script, evidence: draft.evidence, timeframe: draft.timeframe ?? 'current' },
+          })
             + '\n请据原材料修订一次；重复台词需换成有依据的新内容，过去观察只能支持回顾，不能改写成现在。没有可用内容可返回 skip。';
           this.ports.log('commentary-revision-request', { requestId: serial, reason, evidence });
           continue;

@@ -29,6 +29,9 @@ describe("optional evidence-based game commentary", () => {
     r.lane.tick(); await settle();
     expect(r.request).toHaveBeenCalledTimes(2);
     expect(r.request.mock.calls[1][0]).toContain('duplicate-script');
+    expect(r.request.mock.calls[1][0]).toContain(JSON.stringify({
+      rejectedCandidate: { script: '刚才经过了路口。', evidence: [1], timeframe: 'current' },
+    }).slice(1, -1));
     expect(r.perform).toHaveBeenCalledTimes(1);
     expect(r.perform).toHaveBeenCalledWith('刚才路边还看到了一道瀑布。',1,[1],'recent');
   });
@@ -43,6 +46,11 @@ describe("optional evidence-based game commentary", () => {
     r.lane.tick(); await settle();
     expect(r.request).toHaveBeenCalledTimes(2);
     expect(r.request.mock.calls[1][0]).toContain('cited-evidence-changed');
+    // The task cognition port has no conversation state: a rejection reason
+    // alone cannot tell the next request which wording needs revision.
+    expect(r.request.mock.calls[1][0]).toContain(JSON.stringify({
+      rejectedCandidate: { script: '现在还连接不上。', evidence: [1], timeframe: 'current' },
+    }).slice(1, -1));
     expect(r.request.mock.calls[1][0]).toContain('1970-01-01T00:01:40.000Z');
     expect(r.perform).toHaveBeenCalledWith('刚才连接没成功。',1,[1],'recent');
   });
