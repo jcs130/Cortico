@@ -20,7 +20,7 @@ export function createMediaPlayer({ send, onMouth, onText, onActions, onEnd, con
   }
   function cancel(id) {
     const job = current; if (!job || (id && job.id !== id)) return;
-    job.abort.abort(); job.source?.stop(); job.source?.disconnect(); job.gain?.disconnect();
+    job.abort.abort(); job.audioSource?.stop(); job.audioSource?.disconnect(); job.gain?.disconnect();
     terminal(job, 'cancelled', 'Playback cancelled');
   }
   return {
@@ -43,7 +43,7 @@ export function createMediaPlayer({ send, onMouth, onText, onActions, onEnd, con
           const buffer = await c.decodeAudioData(await response.arrayBuffer());
           if (job.abort.signal.aborted) return;
           const source = c.createBufferSource(), gain = c.createGain();
-          job.source = source; job.gain = gain; source.buffer = buffer; source.connect(gain); gain.gain.value = job.volume ?? 1; gain.connect(c.destination);
+          job.audioSource = source; job.gain = gain; source.buffer = buffer; source.connect(gain); gain.gain.value = job.volume ?? 1; gain.connect(c.destination);
           source.onended = () => { source.disconnect(); gain.disconnect(); if (!job.abort.signal.aborted) terminal(job, 'completed'); };
           source.start(); started(job);
         }

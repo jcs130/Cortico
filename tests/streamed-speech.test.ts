@@ -39,7 +39,7 @@ it('starts the stage-owned desktop player before the last PCM bytes and cancels 
     createBufferSource:()=>{const n={connect(){},disconnect(){},start(){},stop:vi.fn()};nodes.push(n);return n;}};
   const player=createMediaPlayer({send:(r:any)=>receipts.push(r),onMouth:()=>{},onText:()=>{},onActions:()=>{},onEnd:()=>{},context:()=>context,
     fetchAudio:async()=>new Response(stream,{headers:{'content-type':'audio/wav'}})});
-  const playing=player.play({id:'one',kind:'speech',url:'/audio',text:'你好。'});
+  const playing=player.play({id:'one',source:'avatar-stage',kind:'speech',url:'/audio',text:'你好。'});
   producer.enqueue(bytes);await vi.waitFor(()=>expect(nodes.length).toBeGreaterThan(0));
   context.currentTime=.1;await vi.waitFor(()=>expect(receipts.some(r=>r.state==='playing')).toBe(true));
   expect(receipts.some(r=>r.state==='completed')).toBe(false);
