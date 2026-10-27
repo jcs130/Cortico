@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.1.2-rc.1
 
 - Include the rejected, validated speech candidate in the single stateless revision request. A rejection reason alone did not identify the wording that needed correction. Original evidence clocks, one-revision limit, foreground priority and all admission checks remain unchanged; raw provider output and rejected speech are not added to playback history.
+- First public preview. Ship reusable source, browser modules and configuration examples; exclude deployment-specific validation reports and use neutral character examples in the public speech guide and page.
 
 ## 0.1.2-dev.20261027.2
 
