@@ -21,6 +21,46 @@ function rig() {
     advance(ms: number) { now += ms; speech.observedAtMs = now; } };
 }
 describe("optional evidence-based game commentary", () => {
+  it('revises a duplicate once with its rejection reason before submitting fresh speech', async () => {
+    const r = rig(); r.lane.foregroundSpeech('刚才经过了路口。');
+    r.observe(1, 'game.event', '路旁看到了瀑布。');
+    r.request.mockResolvedValueOnce({text:JSON.stringify({script:'刚才经过了路口。',kind:'observation',evidence:[1]})})
+      .mockResolvedValueOnce({text:JSON.stringify({script:'刚才路边还看到了一道瀑布。',kind:'observation',timeframe:'recent',evidence:[1]})});
+    r.lane.tick(); await settle();
+    expect(r.request).toHaveBeenCalledTimes(2);
+    expect(r.request.mock.calls[1][0]).toContain('duplicate-script');
+    expect(r.perform).toHaveBeenCalledTimes(1);
+    expect(r.perform).toHaveBeenCalledWith('刚才路边还看到了一道瀑布。',1,[1],'recent');
+  });
+  it('returns current-claim rejection to the drafter without refreshing the observed clock', async () => {
+    const r = rig(); Object.assign(r.config,{liveFactAgeSec:2});
+    r.observe(1,'game.event','连接尝试被拒。');
+    let n = 0;
+    r.request.mockImplementation(async () => {
+      if (++n === 1) { r.advance(3000); return {text:JSON.stringify({script:'现在还连接不上。',kind:'observation',timeframe:'current',evidence:[1]})}; }
+      return {text:JSON.stringify({script:'刚才连接没成功。',kind:'observation',timeframe:'recent',evidence:[1]})};
+    });
+    r.lane.tick(); await settle();
+    expect(r.request).toHaveBeenCalledTimes(2);
+    expect(r.request.mock.calls[1][0]).toContain('cited-evidence-changed');
+    expect(r.request.mock.calls[1][0]).toContain('1970-01-01T00:01:40.000Z');
+    expect(r.perform).toHaveBeenCalledWith('刚才连接没成功。',1,[1],'recent');
+  });
+  it('bounds duplicate correction and does not call TTS when both drafts repeat', async () => {
+    const r=rig();r.lane.foregroundSpeech('已经说过。');r.observe();
+    r.request.mockResolvedValue({text:JSON.stringify({script:'已经说过。',kind:'thought',evidence:[]})});
+    r.lane.tick();await settle();r.advance(3000);r.lane.tick();await settle();
+    expect(r.request).toHaveBeenCalledTimes(2);expect(r.perform).not.toHaveBeenCalled();
+  });
+  it('discards a corrected draft if foreground speech arrives during revision', async () => {
+    const r=rig();r.lane.foregroundSpeech('已经说过。');r.observe();
+    const revised=pending<{text:string}>();
+    r.request.mockResolvedValueOnce({text:JSON.stringify({script:'已经说过。',kind:'thought',evidence:[]})}).mockReturnValueOnce(revised.promise);
+    r.lane.tick();await settle();expect(r.request).toHaveBeenCalledTimes(2);
+    r.lane.foregroundSpeech('主意识正在回答。');
+    revised.resolve({text:JSON.stringify({script:'另一句。',kind:'thought',evidence:[]})});await settle();
+    expect(r.perform).not.toHaveBeenCalled();
+  });
   it('keeps a scene and its body progress despite a flood of status receipts', () => {
     const r = rig(); r.observe(1, 'game.snapshot', '当前位置\n'+ '可见方块'.repeat(400) + '\n身体任务仍在向南走');
     for(let i=2;i<40;i++)r.observe(i,'game.result','命令已受理 '+i);

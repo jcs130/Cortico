@@ -322,34 +322,54 @@ export class CommentaryLane {
   private async run(brief: string, candidate: Draft, inputKey: string): Promise<void> {
     const { serial, facts, textFormat } = candidate;
     try {
-      const result = await this.ports.request(brief);
-      if (!this.valid(candidate)) { this.stale(serial, 'output-or-context-changed'); return; }
-      if ('error' in result) throw new Error(result.error);
-      this.draftMs = Math.max(1000, Math.min(15000, this.now() - candidate.startedAt));
-      this.lastEvaluated = inputKey;
-      const draft = parseCommentary(result.text, new Set(facts.map(e => e.cursor)), textFormat);
-      if (!draft || this.recent.some(r => r.script === commentarySpeechText(draft.script))) {
-        let reason = draft ? 'duplicate-script' : 'invalid-output';
-        let skipReason: string | undefined;
-        if (!draft) try {
-          const parsed = JSON.parse(result.text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''));
-          if (parsed && typeof parsed === 'object' && typeof parsed.skip === 'string') {
-            reason = 'model-skip';
-            // A bounded reason is diagnostic data, not new World evidence. Never
-            // log a whole draft/prompt or authentication-bearing model output.
-            skipReason = cleanEvidence(parsed.skip)?.slice(0, 180) ?? '[redacted]';
-          }
-        } catch { reason = 'invalid-json'; }
-        this.state = 'skipped'; this.ports.log('commentary-skipped', { requestId: serial, reason,
-          ...(skipReason ? { skipReason } : {}) }); return;
-      }
-      Object.assign(candidate, draft, { readyAt: this.now() });
-      if (!this.valid(candidate)) { this.stale(serial, 'cited-evidence-changed'); return; }
-      if (this.eligible()) await this.submit(candidate);
-      else {
-        this.ready = candidate; this.state = 'ready';
-        this.ports.log('commentary-ready', { requestId: serial, duringPlayback: candidate.duringPlayback,
-          draftMs: this.now() - candidate.startedAt, evidence: draft.evidence });
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const result = await this.ports.request(brief);
+        if (!this.valid(candidate)) { this.stale(serial, 'output-or-context-changed'); return; }
+        if ('error' in result) throw new Error(result.error);
+        this.draftMs = Math.max(1000, Math.min(15000, this.now() - candidate.startedAt));
+        this.lastEvaluated = inputKey;
+        const draft = parseCommentary(result.text, new Set(facts.map(e => e.cursor)), textFormat);
+        const duplicate = draft && this.recent.some(r => r.script === commentarySpeechText(draft.script));
+        const stale = draft && !this.valid({ ...candidate, ...draft });
+        // Return a rejected candidate to the same task once. Keep its original
+        // evidence clocks and lifecycle; revision never admits an invalid claim.
+        const revisable = draft && (duplicate || (stale && this.valid({ ...candidate, ...draft, timeframe: 'recent' })));
+        if (attempt === 0 && revisable) {
+          const reason = duplicate ? 'duplicate-script' : 'cited-evidence-changed';
+          const evidence = facts.map(e => ({ cursor: e.cursor, observedAt: e.ts,
+            current: this.valid({ ...candidate, evidence: [e.cursor], timeframe: 'current' }),
+            recent: this.valid({ ...candidate, evidence: [e.cursor], timeframe: 'recent' }),
+          }));
+          brief += '\n候选未通过校验（不是新的世界事实）：' + JSON.stringify({ reason, evidence })
+            + '\n请据原材料修订一次；重复台词需换成有依据的新内容，过去观察只能支持回顾，不能改写成现在。没有可用内容可返回 skip。';
+          this.ports.log('commentary-revision-request', { requestId: serial, reason, evidence });
+          continue;
+        }
+        if (!draft || duplicate) {
+          let reason = duplicate ? 'duplicate-script' : 'invalid-output';
+          let skipReason: string | undefined;
+          if (!draft) try {
+            const parsed = JSON.parse(result.text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''));
+            if (parsed && typeof parsed === 'object' && typeof parsed.skip === 'string') {
+              reason = 'model-skip';
+              // A bounded reason is diagnostic data, not new World evidence. Never
+              // log a whole draft/prompt or authentication-bearing model output.
+              skipReason = cleanEvidence(parsed.skip)?.slice(0, 180) ?? '[redacted]';
+            }
+          } catch { reason = 'invalid-json'; }
+          this.state = 'skipped'; this.ports.log('commentary-skipped', { requestId: serial, reason,
+            ...(skipReason ? { skipReason } : {}) }); return;
+        }
+        if (stale) { this.stale(serial, 'cited-evidence-changed'); return; }
+        Object.assign(candidate, draft, { readyAt: this.now() });
+        if (!this.valid(candidate)) { this.stale(serial, 'cited-evidence-changed'); return; }
+        if (this.eligible()) await this.submit(candidate);
+        else {
+          this.ready = candidate; this.state = 'ready';
+          this.ports.log('commentary-ready', { requestId: serial, duringPlayback: candidate.duringPlayback,
+            draftMs: this.now() - candidate.startedAt, evidence: draft.evidence });
+        }
+        return;
       }
     } catch (e) {
       this.state = 'failed';

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2-dev.20261027.2
+
+- Return duplicate speech and outdated current-state claims to the host drafter for one bounded revision. The reply includes the original evidence clocks and which timeframes remain valid; all admission, foreground priority and freshness checks still apply. Rejected revisions never reach TTS.
+
+
 ## 0.1.2-dev.20261026.6
 
 - Preserve an active automatic commentary sentence while admitting at most one foreground line for the next audio gap. The waiting line returns immediately, is not synthesized ahead, and expires after 15 seconds; its original observation timestamp, renderer ownership and cancellation state are rechecked before dispatch.
