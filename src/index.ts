@@ -160,6 +160,19 @@ export class AvatarStageWorld implements World {
             const result = await this.speak(args, ctx.callId ?? randomUUID(), signal);
             return result.accepted === false ? { text: JSON.stringify(result), failed: true } : JSON.stringify(result);
           }
+          if (decl.name === 'avatar_control' && this.presentation?.enabled()) {
+            const result = args.action === 'direct' && this.desktopAudio
+              ? await this.desktopAudio.attach(args)
+              : await this.presentation.control(args, ctx.callId ?? randomUUID());
+            return result.accepted === false ? {text:JSON.stringify(result),failed:true} : JSON.stringify(result);
+          }
+          if (decl.name === 'avatar_query' && this.presentation?.enabled() && args.action === 'action'
+            && /^(caption-|display-move)/.test(String(args.actionId))) {
+            return JSON.stringify(await this.presentation.control({...args,action:'result'},ctx.callId??randomUUID()));
+          }
+          if (decl.name === 'avatar_motion' && this.presentation?.enabled() && args.action === 'play') {
+            return {failed:true,text:JSON.stringify({accepted:false,reason:'Generated motion must be installed in the displayed figure before desktop playback. Use avatar_control status for installed clips; preview remains in the stage preview page.'})};
+          }
           if (decl.name === "avatar_music" && args.action === "import") {
             const artifact = this.host?.blob(String(args.reference_handle));
             if (!artifact || artifact.mime !== "audio/wav")
@@ -194,7 +207,10 @@ export class AvatarStageWorld implements World {
                 )
               : null;
           if (!result) throw Error("3D stage is not started");
-          const text = JSON.stringify(result);
+          const text = JSON.stringify(decl.name === 'avatar_query' && this.presentation?.enabled()
+            && ['status','history'].includes(String(args.action))
+            ? {...result, presentation:await this.presentation.control({action:args.action},ctx.callId??randomUUID())}
+            : result);
           return result.accepted === false ? { text, failed: true } : text;
         } catch (e) {
           return {
@@ -327,7 +343,7 @@ export class AvatarStageWorld implements World {
   /** Optional current-fact surface used by supporting Personas. */
   requestFacts() {
     if (this.presentation?.textOnly()) return { snapshotTypes: [], text:
-      `[桌宠文字演出] avatar_voice 现在只显示文字气泡，不合成语音。手动动作使用 pet_act 和桌宠当前动作词表；自动快选择只采用实际安装的动作。\n${this.commentary?.facts() ?? ''}` };
+      `[桌宠文字演出] avatar_voice 现在只显示文字气泡，不合成语音。avatar_control 查询并控制当前显示形象的动作、表情与移动；自动快选择只采用实际安装的动作。\n${this.commentary?.facts() ?? ''}` };
     const state = this.server?.stage.status() ?? this.client?.status();
     if (!state) return null;
     const textFormat = (state.voice as { textFormat?: string } | undefined)?.textFormat ?? "plain";
@@ -337,10 +353,10 @@ export class AvatarStageWorld implements World {
       text:
         `[演出现场] ${state.audioOwner ? "音频输出已连接" : "没有已启用的音频输出"}；` +
         `${state.foreground ? "音频队列忙碌" : "音频队列空闲"}。已连接不等于台词已播放。\n${this.commentary?.facts() ?? ""}` +
-        ((state.voice as any)?.busyPolicy==='preserve'?'\n[连续发言] 当前一句播完前，新台词会跳过，不排队也不打断；忙碌时继续其他行动，不循环重试旧台词。只有明确需要打断时才interrupt。':'') +
+        ((state.voice as any)?.busyPolicy==='preserve'?'\n[连续发言] 当前一句继续播放，最多保留一句等待中的前台台词；自动解说只在空隙提交。等待有独立到期回执，不阻塞游戏行动，不重复提交同一台词。只有明确需要打断时才interrupt。':'') +
         `\n[语音文本契约] ${textFormat}；按语音状态的 writingGuide 和按需编写指南起草。` +
         '\n[联合演出] avatar_voice speak 可同时传 performance={emotion,expression,bodyClip}，与你这句音频同步，无需再推理或等待 actionId；可与游戏工具同一回复输出。status.performance 给出当前可用名称。emotion 不代表语音服务支持情绪控制。' +
-        (this.presentation?.audioEnabled() ? '\n[桌宠音频] avatar_voice 的 performance 使用桌宠词表；avatar_control 骨骼指令属于演出室。' : '') +
+        (this.presentation?.audioEnabled() ? '\n[桌面演出] avatar_voice 与 avatar_control 统一使用当前显示形象；先查 status 获取实际支持的表情、动作和移动。' : '') +
         (this.director?.status().enabled
           ? `\n[演出快选择] ${this.director.status().hostDecisionAvailable ? "可用，随台词并行选择已安装的表情和动作" : "宿主未提供决策接口，仍可显式选动作"}。`
           : ""),
@@ -374,6 +390,10 @@ export class AvatarStageWorld implements World {
                 type:'string',enum:['replace','preserve'],'x-hot':false,title:'新台词遇到正在播放的音频',
                 description:'preserve 保留当前一句，跳过新台词且不合成；replace 用新台词打断。显式 interrupt 始终可打断。',
               },
+              'worlds.avatar-stage.voice.pendingTimeoutMs': { type: 'integer', minimum: 1000, maximum: 300000,
+                title: '台词待播超时（毫秒）', description: '默认 60000。仅延长排队等待；事实观察时间仍按原来源校验。' },
+              'worlds.avatar-stage.voice.synthesisTimeoutMs': { type: 'integer', minimum: 1000, maximum: 300000,
+                title: '语音合成超时（毫秒）', description: '默认 90000。与台词待播时间、事实有效期分别计算。' },
               "worlds.avatar-stage.speechObservationMaxAgeSeconds": {
                 type: 'number', minimum: 0, title: '带来源时间的口播有效期（秒）',
                 description: '仅限制 current 当前状态的观察年龄；0 沿用 15 秒。recent 回顾事件使用原时间戳，最长 300 秒，不声称旧位置或血量仍是现状。普通聊天无需观察时间。',
@@ -496,7 +516,7 @@ const definition: WorldDefinition<WorldConfig> = {
     port: 0,
     dataDir: "",
     avatars: [],
-    voice: { url: "", model: "", voice: "", textFormat: "plain", busyPolicy:"replace" },
+    voice: { url: "", model: "", voice: "", textFormat: "plain", busyPolicy:"replace", pendingTimeoutMs:60000, synthesisTimeoutMs:90000 },
     presentation: { mode: 'stage', url: '' },
     commentary: { ...COMMENTARY_DEFAULTS },
     audienceProgress: { ...AUDIENCE_PROGRESS_DEFAULTS },

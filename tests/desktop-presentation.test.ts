@@ -63,3 +63,11 @@ it('rejects public endpoints instead of falling back to TTS', async () => {
   const { bridge: running } = await endpoint();
   expect(running.enabled()).toBe(true);
 });
+it('routes manual avatar controls through the same displayed figure vocabulary',async()=>{
+  const {bridge,commands}=await endpoint();
+  expect(await bridge.control({action:'perform',expression:'happy',bodyClip:'wave'},'manual')).toMatchObject({accepted:true});
+  expect(commands[0]).toMatchObject({action:'perform',source:'avatar-stage',actions:['happy','wave']});
+  expect(await bridge.control({action:'perform',bodyClip:'absent'},'bad')).toMatchObject({accepted:false});
+  expect(await bridge.control({action:'perform',bones:{head:[0,10,0]}},'raw')).toMatchObject({accepted:false});
+  expect(commands).toHaveLength(1);
+});

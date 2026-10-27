@@ -548,7 +548,9 @@ export class AvatarStage {
     // next gap. This is one unsynthesized candidate, not another audio queue.
     if (busyPolicy === 'preserve' && this.foreground && this.automaticSpeech.has(this.foreground)
       && args.ifIdleRevision === undefined && !this.waitingSpeech && !this.speechAdmissions.size) {
-      const ticket = this.audioRevision, expiresAt = Date.now() + 15000;
+      const timeout = this.config.voice?.pendingTimeoutMs ?? 60000;
+      if (!Number.isSafeInteger(timeout) || timeout < 1000 || timeout > 300000) throw Error('Invalid pending speech timeout');
+      const ticket = this.audioRevision, expiresAt = Date.now() + timeout;
       this.speechAdmissions.add(requestId);
       try {
         const row = await this.ledger.submit(requestId, 'speech', this.activeId, command);

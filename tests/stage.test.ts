@@ -168,7 +168,7 @@ it.each(['ttl','source-age','interrupt','cancel','renderer-release','stop'])(
  'does not replay a deferred line after %s, and never refreshes its observation clock',async(reason)=>{
   const now=Date.now(); const clock=vi.spyOn(Date,'now').mockReturnValue(now);
   const r=await automaticSpeechWithWaitingForeground(reason==='source-age'?new Date(now-14000).toISOString():undefined);
-  if(reason==='ttl')clock.mockReturnValue(now+15001);
+  if(reason==='ttl')clock.mockReturnValue(Number(r.waiting.expiresAt)+1);
   if(reason==='source-age')clock.mockReturnValue(now+1001);
   if(reason==='interrupt')await r.server.call('avatar_voice',{action:'interrupt'});
   if(reason==='cancel')await r.server.call('avatar_control',{action:'cancel',actionId:r.waiting.id});

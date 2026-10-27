@@ -9,7 +9,8 @@ type Word = { id: string; kind: 'motion' | 'expression'; about: Record<string, s
 export type DesktopState = {
   protocol: string; ready: boolean; revision: number; busy: boolean; foreground: string | null;
   vocabulary: Word[]; recent: Array<Record<string, unknown>>;
-  media?: { protocol: string; enabled: boolean; ready: boolean; foreground: string | null; recent: Record<string, any>[] };
+  moves?: unknown[]; movement?: Array<Record<string, unknown>>;
+  media?: { protocol: string; enabled: boolean; ready: boolean; streaming?: boolean; foreground: string | null; recent: Record<string, any>[] };
 };
 /** Explicit optional display transport. Never calls a speech backend or another World/Persona object. */
 export class DesktopPresentation {
@@ -53,6 +54,19 @@ export class DesktopPresentation {
     if (!r.ok) throw Error('Desktop audio upload HTTP ' + r.status);
     return await r.json() as { assetId: string; sha256: string };
   }
+  async reserveStream(signal: AbortSignal) {
+    const url = this.endpoint(); url.pathname += '/audio-stream';
+    const r = await this.fetchImpl(url, { method: 'POST', signal: AbortSignal.any([this.signal, signal, AbortSignal.timeout(2000)]), redirect: 'error' });
+    if (!r.ok) throw Error('Desktop stream reservation HTTP ' + r.status);
+    return await r.json() as { assetId: string; streaming: true };
+  }
+  async uploadStream(assetId: string, body: ReadableStream<Uint8Array>, signal: AbortSignal) {
+    const url = this.endpoint(); url.pathname += '/audio-stream/' + encodeURIComponent(assetId);
+    const options = { method: 'POST', headers: { 'content-type': 'audio/wav' }, body, duplex: 'half',
+      signal: AbortSignal.any([this.signal, signal]), redirect: 'error' as const };
+    const r = await this.fetchImpl(url, options);
+    if (!r.ok) throw Error('Desktop stream upload HTTP ' + r.status);
+  }
   async refresh(): Promise<Record<string, any>> {
     const s = await this.request();
     if (s.protocol !== PROTOCOL || !Array.isArray(s.vocabulary) || !Array.isArray(s.recent)
@@ -71,6 +85,22 @@ export class DesktopPresentation {
           auto: w.presentation?.auto ?? true, tags:w.presentation?.tags ?? [],
         })) } } : null };
   }
+  async control(args: Record<string, unknown>, requestId: string) {
+    await this.refresh();
+    const state = this.state!;
+    if (args.action === 'status') return { output:'desktop', ...this.performanceCatalog(),
+      controls:['perform','direct','move','cancel','result','history'], rawBones:false, generatedMotionPlayback:false,
+      defaultMoves:['left','center','right','cursor'], moves:state.moves ?? [], recent:state.recent, movement:state.movement ?? [] };
+    if (args.action === 'history') return { actions:[...state.recent,...(state.movement??[])] };
+    if (args.action === 'result') return [...state.recent,...(state.movement??[])].find(r=>r.id===args.actionId) ?? {accepted:false,reason:'Unknown desktop action'};
+    if (args.action === 'cancel') return this.request({action:String(args.actionId).startsWith('display-move')?'cancel-move':'cancel',id:args.actionId});
+    if (args.action === 'move') return this.request({action:'move',source:'avatar-stage',requestId,to:args.to,run:args.run,params:args.params});
+    if (args.action !== 'perform') return {accepted:false,reason:'Use desktop status for supported presentation controls'};
+    if (args.bones !== undefined || args.scope === 'preview') return {accepted:false,reason:'Desktop presentation accepts installed motion/expression ids; raw bones and preview are unavailable'};
+    const actions = [args.expression, args.bodyClip ?? args.gesture].filter((v):v is string=>typeof v==='string');
+    if (!actions.length || actions.some(id=>!state.vocabulary.some(w=>w.id===id))) return {accepted:false,reason:'Use exact installed desktop expression and motion ids from status'};
+    return this.request({action:'perform',source:'avatar-stage',requestId,actions});
+  }
   async react(args: Record<string, unknown>, requestId: string) {
     await this.refresh();
     const actions = [...Object.keys((args.expressionWeights ?? {}) as object),
@@ -83,7 +113,7 @@ export class DesktopPresentation {
     if (args.action === 'status') {
       await this.refresh();
       return { output: 'desktop-text', audio: false, presentation: this.state, performance: this.performanceCatalog(), textFormat: 'plain',
-        writingGuide: 'Write literal natural dialogue. No vocal tags. Bubble receipt is separate from display completion. Use pet_act with the current desktop figure vocabulary for manual gestures.' };
+        writingGuide: 'Write literal natural dialogue. No vocal tags. Bubble receipt is separate from display completion. Use avatar_control status, then installed expression/motion ids or a declared move for manual performance.' };
     }
     if (args.action === 'interrupt') {
       await this.refresh();

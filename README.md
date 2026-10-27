@@ -16,9 +16,9 @@ The optional source list drives silent, source-bound reactions through the host 
 
 ## 桌宠音频输出 / Desktop audio output
 
-`presentation: {mode:"desktop-audio",url:"http://127.0.0.1:18446"}` 复用现有 `avatar_voice` 和 `avatar_music`，通过桌宠的 `desktop-media/v1` 播放成品 WAV。桌宠需开启 `media.enabled` 和声音。TTS 地址、音色、凭据、曲库、试听采用和 AIGC 成品句柄仍使用本 World 的原配置；该接入不包含人物或服务商默认配置。桌宠收齐音频后连续播放，口型和歌词跟随真实音频时钟。只使用人声包络或时间戳歌词作为演唱口型；没有这些证据时不驱动嘴巴。
+`presentation: {mode:"desktop-audio",url:"http://127.0.0.1:18446"}` 复用现有 `avatar_voice` 和 `avatar_music`，通过桌宠的 `desktop-media/v1` 播放分块语音和成品歌曲。桌宠需开启 `media.enabled` 和声音。TTS 地址、音色、凭据、曲库、试听采用和 AIGC 成品句柄仍使用本 World 的原配置；该接入不包含人物或服务商默认配置。桌宠配置 media.rendererDir 指向本包 renderer/desktop-player.js 所在目录后，语音边接收 PCM 边播放，口型和歌词跟随真实音频时钟。media.presentationOnly:true 让声音和手动形象控制统一由本扩展负责，桌宠保留输入、显示和移动执行。只使用人声包络或时间戳歌词作为演唱口型；没有这些证据时不驱动嘴巴。
 
-The optional desktop audio device uses the existing stage queue, song library, speech backend and single output lease. It uploads a finished WAV to the desktop, then reconciles actual playing/ended receipts against the original stage action ID. It registers as `audio-only`: these receipts cannot confirm body or avatar rendering. The host decision port chooses expressions and gestures from the current desktop vocabulary. `pet_act` remains the desktop's manual control. Bilibili audience events continue through the separate Bilibili World and the host Persona.
+The optional desktop audio device uses the existing stage queue, song library, speech backend and single output lease. It streams PCM WAV speech to the Stage-owned desktop player; songs remain finished assets. It reconciles actual playing/ended receipts against the original stage action ID. It registers as `audio-only`: these receipts cannot confirm body or avatar rendering. The host decision port chooses expressions and gestures from the current desktop vocabulary. `avatar_control` reads the displayed figure's actual vocabulary and handles expressions, motions, movement and cancellation through that same surface. Bilibili audience events continue through the separate Bilibili World and the host Persona.
 
 Text-only `desktop-text` remains available. Explicit audio mode requires both extensions to support the media protocol; an unavailable or muted device does not claim playback. A cancelled upload cannot begin later. Stage/desktop stop and disconnect release the current output. No paid fallback service or synthesis model is started by mounting the adapter.
 
@@ -200,7 +200,7 @@ The stage records speech and its requested cues together and binds their playbac
 
 Desktop audio resolves its own vocabulary and attaches cues to the admitted audio job; the desktop starts queued cues when audio begins. A rejected cue is recorded separately and does not cancel the audio. Manual desktop body activity may take priority. `performanceCue.accepted` records delivery, not verified visual rendering. Desktop text uses the same cue resolver. A repeated speech request id does not repeat the performance. The resolver is exported from `cortico-world-avatar-stage/core` for other adapters.
 
-Independent game tools can be emitted alongside speech in one model response; concurrency depends on the host dispatcher. This version does not implement incremental model-output parsing or streaming desktop audio: the desktop path still downloads the finished WAV before playing it.
+Independent game tools can be emitted alongside speech; concurrency depends on the host dispatcher. Optional host cognition onText snapshots let commentary validate a complete sentence before model completion. At most one continuation is retained; input, foreground speech, revision changes and original evidence clocks still fence it. Incomplete objects, reasoning and restarted prefixes are never spoken. Hosts without streaming callbacks retain full-result compatibility. Desktop speech uses the same progressive PCM player as the stage page, with bounded transport and cancellation.
 
 ### Optional commentary during game actions
 
@@ -212,3 +212,5 @@ With `voice.busyPolicy: "preserve"`, a foreground line arriving during automatic
 
 Commentary diagnostics distinguish `model-skip`, `invalid-json`, `invalid-output`, and `duplicate-script`. A model's explicit skip reason is limited to 180 characters and redacted if it contains authentication material; it is not World evidence. These diagnostics do not force filler speech.
 
+
+`voice.pendingTimeoutMs` defaults to 60000 (range 1000–300000) for one waiting foreground line; `voice.synthesisTimeoutMs` defaults to 90000. These are separate from observed-at freshness and the Persona-owned cognition deadline. Extending a queue timeout does not turn stale observations into current facts. Read `avatar_control status` for desktop support: installed expressions/motions and declared moves are available; raw bone control and uninstalled generated clips return an explicit unsupported result. Generated candidates can still be reviewed on the stage preview page.

@@ -114,14 +114,26 @@ export class DesktopAudioRenderer {
       audioUrl.searchParams.set('sessionId', this.sessionId);
       const response = await fetch(audioUrl, { signal, redirect: 'error' });
       if (!response.ok || !response.body) throw Error('Stage audio download HTTP ' + response.status);
-      const parts: Uint8Array[] = []; let size = 0;
-      for await (const part of response.body as unknown as AsyncIterable<Uint8Array>) {
-        size += part.length; if (size > 256 * 1024 * 1024) throw Error('Stage audio exceeds desktop capacity'); parts.push(part);
+      let asset: { assetId: string };
+      if (command.kind === 'speech' && this.ports.display.media()?.streaming) {
+        asset = await this.ports.display.reserveStream(signal);
+        // Upload and playback share one bounded stream. The renderer can start
+        // as soon as PCM arrives; completion below is transport, not playback.
+        void this.ports.display.uploadStream(asset.assetId, response.body, signal).catch(async error => {
+          if (this.live === current && !signal.aborted) {
+            await this.receipt('failed', current.stageId, { error: String(error).slice(0, 240) }).catch(() => {});
+            await this.cancel();
+          }
+        });
+      } else {
+        const parts: Uint8Array[] = []; let size = 0;
+        for await (const part of response.body as unknown as AsyncIterable<Uint8Array>) {
+          size += part.length; if (size > 256 * 1024 * 1024) throw Error('Stage audio exceeds desktop capacity'); parts.push(part);
+        }
+        signal.throwIfAborted();
+        const bytes = Buffer.concat(parts); current.durationMs = wavInfo(bytes).durationMs;
+        asset = await this.ports.display.upload(bytes, signal);
       }
-      signal.throwIfAborted();
-      const bytes = Buffer.concat(parts);
-      current.durationMs = wavInfo(bytes).durationMs;
-      const asset = await this.ports.display.upload(bytes, signal);
       let cues: unknown;
       if (command.kind === 'music') {
         const url = new URL(String(command.cues), this.ports.stageUrl());
@@ -159,6 +171,7 @@ export class DesktopAudioRenderer {
         await this.receipt('failed', current.stageId, { error: String(error).slice(0, 240) }).catch(() => {});
         this.ports.log(String(error));
       }
+      current.abort.abort();
       if (this.live === current) this.live = null;
       await this.ports.display.request({ action: 'cancel-audio', source: 'avatar-stage', requestId: current.stageId }).catch(() => {});
     }

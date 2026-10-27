@@ -7,9 +7,11 @@ export async function playSpeech({
   onEnd,
   onLevel,
   onStats,
+  fetchAudio = fetch,
+  volume = 1,
 }) {
   const startClock = performance.now();
-  const response = await fetch(url, { signal });
+  const response = await fetchAudio(url, { signal });
   if (!response.ok || !response.body)
     throw Error("Speech stream HTTP " + response.status);
   const reader = response.body.getReader();
@@ -27,6 +29,7 @@ export async function playSpeech({
     totalSamples = 0,
     underruns = 0;
   const nodes = new Set();
+  const gain = context.createGain?.(); if (gain) { gain.gain.value = volume; gain.connect(context.destination); }
   let killed = false,
     ended = false,
     firstLatencyMs = null,
@@ -98,7 +101,7 @@ export async function playSpeech({
       buffer.copyToChannel(samples, 0);
       const node = context.createBufferSource();
       node.buffer = buffer;
-      node.connect(context.destination);
+      node.connect(gain ?? context.destination);
       if (nextAt < context.currentTime) {
         underruns++;
         nextAt = context.currentTime + 0.02;
@@ -215,6 +218,7 @@ export async function playSpeech({
     stop();
     if (!signal.aborted) throw e;
   } finally {
+    gain?.disconnect();
     signal.removeEventListener("abort", stop);
   }
 }

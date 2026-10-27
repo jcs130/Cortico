@@ -38,8 +38,10 @@ export class CommentaryController {
       config: () => this.config(),
       availability: () => ({ live: !!this.host && !!(this.state?.audioOwner || this.state?.presentationReady) && !this.state.stopped,
         active: this.runtime.active(false), speech: this.speech }),
-      request: (brief) => this.host?.cognition?.request({ brief: SPEECH_DRAFT_HEADER + "\n" + brief,
-        tools: [], hint: { rounds: 1 } }) ?? Promise.resolve({ error: "Host speech cognition is unavailable" }),
+      request: (brief, onText) => {
+        const request = { brief: SPEECH_DRAFT_HEADER + "\n" + brief, onText, tools: [], hint: { rounds: 1 } };
+        return this.host?.cognition?.request(request) ?? Promise.resolve({ error: "Host speech cognition is unavailable" });
+      },
       perform: async (text, serial, evidence, timeframe) => {
         if (!this.host || !this.runtime.active(false) || !this.state || this.state.foreground)
           return { accepted: false, reason: "Output is not idle" };
@@ -114,7 +116,7 @@ export class CommentaryController {
         ? this.speech?.idleSinceMs ?? now : now;
       this.speech = { observedAtMs: now, idleSinceMs: idleSince, busy, ttsReady: state.voice?.configured === true, textReady: state.textReady === true,
         textFormat: state.voice?.textFormat === "drama-3" ? "drama-3" : "plain",
-        playing, musicPlaying: action?.kind === 'music-play', backlogMs,
+        playing, musicPlaying: action?.kind === 'music-play', backlogMs, foregroundActionId: state.foreground ?? undefined,
         ...(revision !== null ? { queueRevision: revision } : {}) };
       this.lastRevision = revision;
       const latest = host.store.latestCursor();

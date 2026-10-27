@@ -1,3 +1,10 @@
+## 0.1.2-rc.2
+
+- Validate complete streamed commentary records before model completion, retain at most one continuation, and fence interruptions/provider resets without replay.
+- Forward bounded PCM to the Stage-owned desktop audio player before synthesis completes; cancellation closes transport and playback.
+- Route manual controls and queries to the actual desktop figure. Add explicit supported movement and unsupported-capability receipts.
+- Make one-line pending timeout configurable (60 seconds by default); keep observation freshness independent.
+
 # Changelog
 
 ## 0.1.2-rc.1

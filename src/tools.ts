@@ -8,7 +8,7 @@ export const TOOL_DEFINITIONS = [
     name: "avatar_voice",
     tags: ["act", "speak"],
     description:
-      "Present dialogue using this World's explicitly configured output. Read status first: desktop-text sends literal bubbles to the desktop pet with audio=false; no TTS is started and actual shown/completed receipts are separate from queued. Use pet_act and the current desktop vocabulary for manual desktop expressions/actions. The default stage mode speaks through its single configured TTS path with synchronized avatar mouth: plain requires natural text; drama-3 permits optional vocal directions. Physical gestures are not spoken stage directions. No hidden rewriting or TTS fallback. interrupt cancels this output's pending dialogue. In stage mode TTS and singing share one foreground audio owner.",
+      "Present dialogue using this World's explicitly configured output. Read status first: desktop-text sends literal bubbles to the desktop pet with audio=false; no TTS is started and actual shown/completed receipts are separate from queued. Use avatar_control status and the displayed figure vocabulary for manual expressions, motions and movement. The default stage mode speaks through its single configured TTS path with synchronized avatar mouth: plain requires natural text; drama-3 permits optional vocal directions. Physical gestures are not spoken stage directions. No hidden rewriting or TTS fallback. interrupt cancels this output's pending dialogue. In stage mode TTS and singing share one foreground audio owner.",
     parameters: {
       type: "object",
       properties: {
@@ -53,8 +53,12 @@ export const TOOL_DEFINITIONS = [
           "cancel",
           "result",
           "history",
+          "move",
         ]),
         avatarId: text,
+        to: { anyOf: [{type:'string'},{type:'number',minimum:0,maximum:1}], description: 'Desktop movement target from avatar_control status: left/center/right/cursor, screen fraction 0–1, or an installed figure target.' },
+        run: { type: 'boolean' },
+        params: { type: 'object', additionalProperties: {type:'number'} },
         expression: text,
         bodyClip: text,
         audioActionId: {
@@ -181,7 +185,7 @@ export const TOOL_DEFINITIONS = [
 export const EVENT_DEFINITIONS = [
   {
     type: 'avatar.speech.waiting',
-    description: 'One foreground speech candidate waiting for automatic commentary to finish; expires after at most 15 seconds, not synthesized or played yet.',
+    description: 'One foreground speech candidate waiting for automatic commentary to finish; bounded by voice.pendingTimeoutMs (default 60 seconds), not synthesized or played yet. Original observation age remains independently validated.',
   },
   {
     type: "avatar.speech.submitted",

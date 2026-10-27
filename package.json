@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-avatar-stage",
-  "version": "0.1.2-rc.1",
+  "version": "0.1.2-rc.2",
   "description": "Independent LLM-controlled 3D avatar, motion library and singing World",
   "type": "module",
   "license": "AGPL-3.0-only",
@@ -28,6 +28,8 @@
     },
     "./renderer/vrm-motion.js": "./web/vrm-motion.js",
     "./renderer/vrm-body.js": "./web/vrm-body.js",
+    "./renderer/desktop-player.js": "./web/desktop-player.js",
+    "./renderer/speech.js": "./web/speech.js",
     "./renderer/expression-weights.js": "./web/expression-weights.js",
     "./tools": {
       "types": "./dist/tools.d.ts",
