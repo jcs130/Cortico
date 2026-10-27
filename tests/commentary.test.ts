@@ -16,58 +16,45 @@ function rig() {
   const request = vi.fn((_brief: string) => draft.promise), perform = vi.fn(async (_script: string, _serial: number, _evidence: number[]) => ({ accepted: true })), log = vi.fn();
   const lane = new CommentaryLane({ config: () => config, availability: () => available, request, perform, log, now: () => now });
   const observe = (cursor = 1, type = "game.snapshot", text = "玩家 Jojo：我刚在村口看到了马。", source = "game") => lane.observe({ cursor, source, type, origin: "external", ts: new Date(now).toISOString(), text });
-  const answer = (text = "刚才 Jojo 提到了村口的马。", evidence: number[] = [1]) => draft.resolve({ text: JSON.stringify({ script: text, evidence, kind: "observation" }) });
+  const answer = (text = "刚才 Jojo 提到了村口的马。", evidence: number[] = [1], kind = "observation", timeframe: string | null = "current") => draft.resolve({ text: JSON.stringify({ script: text, evidence, kind, ...(timeframe ? {timeframe} : {}) }) });
   return { config, speech, available, lane, observe, request, perform, answer, log,
     advance(ms: number) { now += ms; speech.observedAtMs = now; } };
 }
 describe("optional evidence-based game commentary", () => {
-  it('revises a duplicate once with its rejection reason before submitting fresh speech', async () => {
-    const r = rig(); r.lane.foregroundSpeech('刚才经过了路口。');
-    r.observe(1, 'game.event', '路旁看到了瀑布。');
-    r.request.mockResolvedValueOnce({text:JSON.stringify({script:'刚才经过了路口。',kind:'observation',evidence:[1]})})
-      .mockResolvedValueOnce({text:JSON.stringify({script:'刚才路边还看到了一道瀑布。',kind:'observation',timeframe:'recent',evidence:[1]})});
-    r.lane.tick(); await settle();
-    expect(r.request).toHaveBeenCalledTimes(2);
-    expect(r.request.mock.calls[1][0]).toContain('duplicate-script');
-    expect(r.request.mock.calls[1][0]).toContain(JSON.stringify({
-      rejectedCandidate: { script: '刚才经过了路口。', evidence: [1], timeframe: 'current' },
-    }).slice(1, -1));
-    expect(r.perform).toHaveBeenCalledTimes(1);
-    expect(r.perform).toHaveBeenCalledWith('刚才路边还看到了一道瀑布。',1,[1],'recent');
-  });
-  it('returns current-claim rejection to the drafter without refreshing the observed clock', async () => {
-    const r = rig(); Object.assign(r.config,{liveFactAgeSec:2});
-    r.observe(1,'game.event','连接尝试被拒。');
-    let n = 0;
-    r.request.mockImplementation(async () => {
-      if (++n === 1) { r.advance(3000); return {text:JSON.stringify({script:'现在还连接不上。',kind:'observation',timeframe:'current',evidence:[1]})}; }
-      return {text:JSON.stringify({script:'刚才连接没成功。',kind:'observation',timeframe:'recent',evidence:[1]})};
-    });
-    r.lane.tick(); await settle();
-    expect(r.request).toHaveBeenCalledTimes(2);
-    expect(r.request.mock.calls[1][0]).toContain('cited-evidence-changed');
-    // The task cognition port has no conversation state: a rejection reason
-    // alone cannot tell the next request which wording needs revision.
-    expect(r.request.mock.calls[1][0]).toContain(JSON.stringify({
-      rejectedCandidate: { script: '现在还连接不上。', evidence: [1], timeframe: 'current' },
-    }).slice(1, -1));
-    expect(r.request.mock.calls[1][0]).toContain('1970-01-01T00:01:40.000Z');
-    expect(r.perform).toHaveBeenCalledWith('刚才连接没成功。',1,[1],'recent');
-  });
-  it('bounds duplicate correction and does not call TTS when both drafts repeat', async () => {
-    const r=rig();r.lane.foregroundSpeech('已经说过。');r.observe();
+  it('skips an already spoken line without spending another generation to rewrite it', async () => {
+    const r=rig(); r.lane.foregroundSpeech('已经说过。'); r.observe();
     r.request.mockResolvedValue({text:JSON.stringify({script:'已经说过。',kind:'thought',evidence:[]})});
-    r.lane.tick();await settle();r.advance(3000);r.lane.tick();await settle();
-    expect(r.request).toHaveBeenCalledTimes(2);expect(r.perform).not.toHaveBeenCalled();
+    r.lane.tick(); await settle(); r.advance(3000); r.lane.tick(); await settle();
+    expect(r.request).toHaveBeenCalledTimes(1); expect(r.perform).not.toHaveBeenCalled();
+    expect(r.log).toHaveBeenCalledWith('commentary-skipped',expect.objectContaining({reason:'duplicate-script'}));
   });
-  it('discards a corrected draft if foreground speech arrives during revision', async () => {
-    const r=rig();r.lane.foregroundSpeech('已经说过。');r.observe();
-    const revised=pending<{text:string}>();
-    r.request.mockResolvedValueOnce({text:JSON.stringify({script:'已经说过。',kind:'thought',evidence:[]})}).mockReturnValueOnce(revised.promise);
-    r.lane.tick();await settle();expect(r.request).toHaveBeenCalledTimes(2);
-    r.lane.foregroundSpeech('主意识正在回答。');
-    revised.resolve({text:JSON.stringify({script:'另一句。',kind:'thought',evidence:[]})});await settle();
-    expect(r.perform).not.toHaveBeenCalled();
+  it('does not rewrite a stale current claim and permits a new input without a retry cooldown', async () => {
+    const r=rig(); Object.assign(r.config,{liveFactAgeSec:2,retrySec:10}); r.observe(1,'game.event','连接尝试被拒。');
+    r.request.mockImplementationOnce(async()=>{r.advance(3000);return{text:JSON.stringify({script:'现在还连接不上。',kind:'observation',timeframe:'current',evidence:[1]})}})
+      .mockResolvedValueOnce({text:JSON.stringify({script:'刚才读到了新的结果。',kind:'observation',timeframe:'recent',evidence:[2]})});
+    r.lane.tick(); await settle(); expect(r.request).toHaveBeenCalledTimes(1); expect(r.perform).not.toHaveBeenCalled();
+    r.advance(1000); r.observe(2,'game.event','新的结果到了。'); r.lane.tick(); await settle();
+    expect(r.request).toHaveBeenCalledTimes(2); expect(r.perform).toHaveBeenCalledWith('刚才读到了新的结果。',2,[2],'recent');
+    expect(r.log.mock.calls.some(([event])=>event==='commentary-revision-request')).toBe(false);
+  });
+  it('retains dated speech across telemetry and chat without rewriting the model output', async () => {
+    const r=rig(); r.observe(); r.lane.tick(); r.advance(3000);
+    r.observe(2,'game.snapshot','现在的位置已经不同。'); r.observe(3,'game.chat','有人又说了一句。');
+    r.answer('刚才 Jojo 提到了村口的马。',[1],'observation','recent'); await settle();
+    expect(r.perform).toHaveBeenCalledWith('刚才 Jojo 提到了村口的马。',1,[1],'recent'); expect(r.request).toHaveBeenCalledTimes(1);
+  });
+  it('cancels an actual reply when newer conversation arrives in its source World', async () => {
+    const r=rig(); r.observe(); r.lane.tick(); r.observe(2,'game.chat','等等，先别过去。');
+    r.answer('好，我听到了。',[1],'reply','recent'); await settle(); expect(r.perform).not.toHaveBeenCalled();
+  });
+  it('does not cancel a reply for conversation arriving from a different World', async () => {
+    const r=rig(); r.config.sources='game other'; r.observe(); r.lane.tick(); r.observe(2,'other.chat','另一边的聊天。','other');
+    r.answer('好，我听到了。',[1],'reply','recent'); await settle(); expect(r.perform).toHaveBeenCalledWith('好，我听到了。',1,[1],'recent');
+  });
+  it('uses retrospective admission when a legacy public line omits its timeframe', async () => {
+    const r=rig(); r.config.liveFactAgeSec=2; r.observe(); r.lane.tick(); r.advance(5000); r.observe(2,'game.snapshot','新的位置');
+    r.answer('刚才 Jojo 提到了村口的马。',[1],'observation',null); await settle();
+    expect(r.perform).toHaveBeenCalledWith('刚才 Jojo 提到了村口的马。',1,[1],'recent');
   });
   it('keeps a scene and its body progress despite a flood of status receipts', () => {
     const r = rig(); r.observe(1, 'game.snapshot', '当前位置\n'+ '可见方块'.repeat(400) + '\n身体任务仍在向南走');
@@ -141,7 +128,7 @@ describe("optional evidence-based game commentary", () => {
   it.each(['foreground', 'new-chat', 'pause', 'stop', 'disabled', 'revision', 'expired', 'changed-fact', 'format', 'heartbeat'])(
     'never submits a prefetched candidate after %s', async reason => {
       const r = rig(); Object.assign(r.speech, { busy: true, playing: true, idleSinceMs: null, queueRevision: 7 });
-      r.observe(); r.lane.tick(); r.answer(); await settle();
+      r.observe(); r.lane.tick(); r.answer(undefined, [1], reason === 'new-chat' ? 'reply' : 'observation'); await settle();
       expect(r.perform).not.toHaveBeenCalled();
       if (reason === 'foreground') r.lane.foregroundSpeech('主线程已经接话。');
       if (reason === 'new-chat') r.observe(2, 'game.chat', '有人向主播提问。');
@@ -205,7 +192,7 @@ describe("optional evidence-based game commentary", () => {
     if (reason === "stop") r.lane.stop();
     if (reason === "cited-replaced") r.observe(2, 'game.snapshot', '刚才那条读数已经发生变化。');
     if (reason === "old-result") r.advance(31_000);
-    r.answer(); await settle(); expect(r.perform).not.toHaveBeenCalled();
+    r.answer(undefined, [1], reason === 'new-chat' ? 'reply' : 'observation'); await settle(); expect(r.perform).not.toHaveBeenCalled();
     expect(r.lane.facts()).toContain("stale");
   });
   it('does not cancel a pending draft for system chat transport or outgoing echoes', async () => {
@@ -336,7 +323,7 @@ it.each(["plain", "drama-3"] as const)("the World controller carries %s from the
     expect(request.mock.calls[0][0]).toMatchObject({ tools: [], hint: { rounds: 1 } });
     expect(request.mock.calls[0][0].brief.startsWith(SPEECH_DRAFT_HEADER + "\n")).toBe(true);
     expect(request.mock.calls[0][0].brief).toContain('当前语音契约 ' + textFormat);
-    expect(speak).toHaveBeenCalledWith({ action: "speak", text: textFormat === "drama-3" ? "[轻快] 刚才走过了一段路。" : "刚才走过了一段路。", ifIdleRevision: 3, observed_at: new Date(100_000).toISOString() }, expect.stringMatching(/^avatar-commentary-/));
+    expect(speak).toHaveBeenCalledWith({ action: "speak", text: textFormat === "drama-3" ? "[轻快] 刚才走过了一段路。" : "刚才走过了一段路。", ifIdleRevision: 3, observed_at: new Date(100_000).toISOString(), evidence_mode: 'recent' }, expect.stringMatching(/^avatar-commentary-/));
   } finally { controller.stop(); }
 });
 
@@ -356,7 +343,7 @@ function controllerRig() {
   controller.start({store:{latestCursor:()=>latest,get:(cursor:number)=>events.get(cursor)},cognition:{request},log:{emit:log,warn:vi.fn()}} as never);
   return {controller,events,request,speak,log,
     event(cursor:number,ts:string,type='game.result'){latest=cursor;events.set(cursor,{cursor,ts,type,source:'game',origin:'external',text:'任务实际发生了变化。'});},
-    answer(evidence:number[],kind='observation',timeframe?:string){response.resolve({text:JSON.stringify({script:'刚才看到了新的变化。',evidence,kind,...(timeframe?{timeframe}:{})})});}};
+    answer(evidence:number[],kind='observation',timeframe='current'){response.resolve({text:JSON.stringify({script:'刚才看到了新的变化。',evidence,kind,...(timeframe?{timeframe}:{})})});}};
 }
 
 it('uses the oldest original cited event time, independent of draft completion time',async()=>{

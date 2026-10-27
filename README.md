@@ -81,11 +81,11 @@ TTS 是这个 World 的能力。它使用显式配置的 LiteLLM/OpenAI 风格 W
 
 `commentary` 默认关闭。启用后，有新鲜游戏或观众事件时，通过宿主 `WorldHost.cognition.request` 起草一两句候选；游戏主线程继续行动。确认语音正在播放时，可提前准备下一句，最多保留一个候选，等配置的空闲间隔再提交；不预先排队或合成多句音频。没有新内容可以跳过。它不创建另一个角色、模型连接、身体任务或长期记忆库。
 
-重复台词或已过时的当前状态陈述会把校验原因交回原起草任务，最多修订一次。回执保留原观察时间，并区分仍可引用的当前状态和近期事件；修订仍需通过全部校验，失败后不进入 TTS。`commentary-revision-request` 记录原因与证据有效性。
+公开台词的完整流式记录通过校验后原样送往演出，不再为重复或过时台词追加模型重写。重复台词跳过；失效台词保留诊断，材料改变后下一次正常调度可以重新选择，材料未变不会反复生成。自动解说默认回顾带时间的观察；明确声明 `current` 的台词仍须通过当前状态校验，不延长原始证据有效期。
 
 部署者显式配置 `commentary.enabled`、`sources`（World ID，以空格分隔）、`hostStatusUrl`（宿主只读运行状态接口）及可选口吻。`idleSec` 默认 20 秒，`retrySec` 默认 20 秒，`factAgeSec` 默认 120 秒；均可在扩展配置页修改。没有已启用音频的页面、宿主暂停、资料过期或当前正在播放时，不提交解说。状态接口需要返回 `{ "loop": { "running": true, "paused": false } }`；不可读时等待恢复，不推断仍在运行。
 
-起草只读取启用之后的新事件，以来源、时间、cursor 和截断标记提供最多六条预览。前台插话、新聊天、场景证据被替换、暂停或关闭会淘汰旧草稿。提交时再次检查音频版本，后台草稿不覆盖较新的语音或歌曲。最近台词用于去重；受理、合成、播放和结束仍分别记录。
+起草只读取启用之后的新事件，以来源、时间、cursor 和截断标记提供最多六条预览。前台插话、暂停或关闭会淘汰待播台词；新聊天只使其来源 World 的待回复台词失效，不抹除已经发生的带时间观察。场景改变后不再播报过时的当前状态。提交时再次检查音频版本，后台台词不覆盖较新的语音或歌曲。最近台词用于去重；受理、合成、播放和结束仍分别记录。
 
 桌宠播放回执携带已解码音频时长，用于在上一句接近结束时提前起草，避免为长音频过早消耗请求。歌曲、等待 TTS 的 queued 状态和无法确认类型的 busy 状态不预起草。动作目录刷新与音频合成、播放并行；迟到的表情和动作只允许附着在原音频上。`commentary-request`、`commentary-ready` 与 `commentary-submitted` 分别保留是否在播放中起草、起草和持有候选的耗时；它们不等于真实开播。
 
@@ -208,7 +208,7 @@ Independent game tools can be emitted alongside speech; concurrency depends on t
 
 When `speechObservationMaxAgeSeconds` is configured, the controller reads each cited event from the host event store and forwards the oldest original timestamp as `observed_at`. It never substitutes the draft-completion clock or invents evidence for an uncited thought. The commentary evidence and generation window are bounded by the same speech policy. Ordinary conversation does not require a scene observation; explicitly supplied observation times retain freshness validation.
 
-With `voice.busyPolicy: "preserve"`, a foreground line arriving during automatic commentary can reserve one upcoming audio gap. The immediate receipt says `queued`, `deferred: true`, `synthesisStarted: false` and supplies `expiresAt`; it does not mean playback. No second waiting line is admitted. Real playback completion releases the slot, then the stage rechecks the original `observed_at`, renderer and cancellation state before synthesis. The candidate expires after at most 15 seconds and is cancelled by interrupt, explicit action cancellation, output release/change or shutdown. Ordinary foreground speech does not gain an unbounded audio queue. `avatar.speech.waiting` exposes this state; automatic drafting cannot take its slot.
+With `voice.busyPolicy: "preserve"`, a foreground line arriving during automatic commentary can reserve one upcoming audio gap. The immediate receipt says `queued`, `deferred: true`, `synthesisStarted: false` and supplies `expiresAt`; it does not mean playback. No second waiting line is admitted. Real playback completion releases the slot, then the stage rechecks the original `observed_at`, renderer and cancellation state before synthesis. The waiting timeout is `voice.pendingTimeoutMs` (60,000 ms by default, configurable from 1,000 to 300,000 ms), independent of evidence freshness. Interrupt, explicit cancellation, output release/change or shutdown cancels it. Ordinary foreground speech does not gain an unbounded audio queue. `avatar.speech.waiting` exposes this state; automatic drafting cannot take its slot.
 
 Commentary diagnostics distinguish `model-skip`, `invalid-json`, `invalid-output`, and `duplicate-script`. A model's explicit skip reason is limited to 180 characters and redacted if it contains authentication material; it is not World evidence. These diagnostics do not force filler speech.
 

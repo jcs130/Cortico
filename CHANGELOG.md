@@ -1,3 +1,9 @@
+## 0.1.2-rc.3
+
+- Speak a valid public commentary sentence unchanged as soon as its complete streamed record is available; remove the second generative rewrite for duplicate or stale lines.
+- Preserve dated observations when telemetry or unrelated chat changes. Replies remain fenced by new chat in their cited World; explicit current-state claims, foreground speech, cancellation and original evidence clocks retain validation.
+- Reconsider changed input on the next normal tick after a stale candidate; unchanged input is not regenerated and transient failures retain their retry delay.
+
 ## 0.1.2-rc.2
 
 - Validate complete streamed commentary records before model completion, retain at most one continuation, and fence interruptions/provider resets without replay.
