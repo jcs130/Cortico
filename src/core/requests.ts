@@ -15,6 +15,7 @@ export type ControlRequest =
   | { action: "status" }
   | { action: "select"; avatarId: string; scope?: Scope }
   | PerformRequest
+  | { action: "move"; to: string | number; run?: boolean; params?: Record<string, number> }
   | { action: "direct"; audioActionId: string; expressionWeights?: Record<string, number>; bodyClip?: string }
   | { action: "cancel" | "result"; actionId: string }
   | { action: "history"; limit?: number };
