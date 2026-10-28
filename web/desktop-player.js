@@ -33,7 +33,7 @@ export function createMediaPlayer({ send, onMouth, onText, onActions, onEnd, con
         if (c.state !== 'running') throw Error('Enable page audio before playback');
         if (job.abort.signal.aborted) return;
         if (job.kind === 'speech') {
-          await playSpeech({ url: job.url, context: c, signal: job.abort.signal, fetchAudio, volume: job.volume ?? 1, prebufferMs: job.prebufferMs,
+          await playSpeech({ url: job.url, context: c, signal: job.abort.signal, fetchAudio, volume: job.volume ?? 1,
             onStart: () => started(job), onEnd: () => terminal(job, 'completed'),
             onLevel: level => { if (current === job) onMouth(level, true, 'speech'); },
             onStats: stats => { job.stats = stats; } });

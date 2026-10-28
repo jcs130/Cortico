@@ -631,7 +631,7 @@ export class AvatarStage {
         expiresAt: Date.now() + 10000,
         ...(performance ? {performance} : {}),
       });
-      return { ...this.ledger.result(actionId), accepted: true, prebufferMs: stream.prebufferMs, appliedPerformance: performance,
+      return { ...this.ledger.result(actionId), accepted: true, prebufferMs: 480, appliedPerformance: performance,
         presentationWarnings: resolved.warnings };
     } catch (e) {
       if (this.foreground === actionId) this.cutAudio('speech-admission-failed');

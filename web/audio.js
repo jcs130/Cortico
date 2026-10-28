@@ -80,7 +80,6 @@ export class AudioOutput {
         url: url.href,
         context: this.context,
         signal: this.abort.signal,
-        prebufferMs: command.prebufferMs,
         onStart: () => {
           if (epoch === this.epoch) {
             this.speechPlaying = true;
