@@ -39,3 +39,13 @@
 从 Core 收到成品 audio/wav 句柄后，调用 avatar_music action:import，提供 reference_handle、title 与 instrumental。导入返回 review 候选，不自动加入播出库或播放；用 preview 实际试听，然后 approve/reject，再显式 play。import 的 hash、采用状态与文件持久保存。没有人声轨或时间戳的新增混音仍不假装具有可用口型。
 
 独立 SDK 使用 client.importMusic(bytes, metadata)；服务端提供有界 audio/wav 二进制入口，普通 JSON 限额不变，Host/Origin 校验保留。不会通过用户提供的 URL、磁盘路径或其他 World 的私有接口拉取成品。
+
+## 按需发现与自主选择
+
+宿主可把本页接入自己的按需资料目录，保留一个简短音乐入口。曲目和歌词由查询展开，不把整套曲库常驻在系统提示中。已有音乐活动已经结束不代表能力被撤销，也不需要复活旧日程或固定间隔强制唱歌。
+
+演唱现有作品先 `avatar_query {"action":"music"}`，从最新返回的真实 ID 选择曲目，再 `avatar_music {"action":"play","trackId":"<id>"}`。`instrumental:false` 表示有人声；播放器可用和曲库已配置仍须分别核实。点歌、休息、庆祝是否合适由人格结合当前活动选择，普通 TTS 念歌词不等于唱歌。
+
+创作新歌先读 `aigc_query {"action":"capabilities"}` 与 `aigc_help {}`。当前生成契约为 `aigc_create` 的 `action:"generate"`、`kind:"music"`、`prompt` 与稳定 `request_id`；只使用服务声明过的 parameters。结果未知时查询原任务，不重复生成。完成后通过宿主 WAV 句柄导入、试听、采用，再显式播放。
+
+记录原 action 的真实播放起止及失败原因。音频设备的成功不能证明三维动作已经显示；新歌曲生成也不能自动证明歌唱音色与当前口播相同。检索到指南不代表人格已经采用它或学会了新的演出方法。
