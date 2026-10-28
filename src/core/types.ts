@@ -105,6 +105,8 @@ export interface VoiceConfig {
   extraBody?: Record<string, unknown>;
   /** Opt-in sentence synthesis, forwarded as one PCM WAV stream. Zero disables it. */
   segmentMaxChars?: number;
+  /** Explicit plain spoken forms for proper names; applied only at the TTS request boundary. */
+  pronunciations?: import("./speech-text.ts").SpeechPronunciations;
   /** Per-voice backend writing contracts, exposed on demand by voice status. */
   writingGuides?: Record<string, string>;
   /** Whole upstream synthesis budget, separate from renderer acknowledgement. Default 90 seconds. */

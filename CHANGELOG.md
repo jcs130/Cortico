@@ -1,3 +1,9 @@
+## 0.1.2-rc.5
+
+- Replace fixed-character speech cuts with clause/word boundaries, pack tiny sentences, and protect configured proper names. Do not replay point sounds or delivery cues in continuation requests.
+- Add an opt-in plain spoken-name dictionary at the TTS boundary; keep original dialogue, chat, voice selection and playback receipts unchanged. Do not inject unverified phoneme or speaker tags.
+- Retain bounded actual synthesis inputs with per-segment timing for on-demand diagnosis.
+
 ## 0.1.2-rc.4
 
 - Add opt-in short-sentence TTS with backend extra parameters and per-voice writing guides. Preserve speaker tokens across sentence continuations and keep identity fields authoritative.

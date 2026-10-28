@@ -1,35 +1,55 @@
 import { randomUUID } from "node:crypto";
 import { wavInfo } from "./wav.ts";
+import { SPEECH_MARKUP, termPattern } from "./speech-text.ts";
 
-/** Split speakable text without cutting speaker/delivery tokens or Unicode characters. */
-export function splitSynthesisText(text: string, maxChars: number): string[] {
+/** Pack short sentences; prefer clause boundaries, then whole words, never a character offset. */
+export function splitSynthesisText(text: string, maxChars: number, protectedTerms: readonly string[] = []): string[] {
   if (!Number.isSafeInteger(maxChars) || maxChars < 8 || maxChars > 160)
     throw Error("Speech segment size must be 8–160 characters");
-  const tokens = text.match(/<\|speaker:\d+\|>|\[[^\]\r\n]{1,120}\]|[\s\S]/gu) ?? [];
-  const segments: string[] = [];
-  let speaker = "", delivery = "", current = "", count = 0;
-  const flush = () => {
-    if (count) segments.push(current.trim());
-    current = ""; count = 0;
+  type Unit = { text: string; size: number; boundary: number; cue?: boolean };
+  const words = new Intl.Segmenter("zh", { granularity: "word" });
+  const units: Unit[] = [];
+  const size = (value: string) => [...value].filter(c => /[\p{L}\p{N}\p{Extended_Pictographic}]/u.test(c)).length;
+  const plain = (value: string) => {
+    for (const word of words.segment(value)) units.push({ text: word.segment, size: size(word.segment),
+      boundary: /[。！？!?；;\n]/u.test(word.segment) || word.segment === "." ? 2 : /[，,：:]|\s/u.test(word.segment) ? 1 : 0 });
   };
-  for (let index = 0; index < tokens.length; index++) {
-    const token = tokens[index];
-    if (/^<\|speaker:\d+\|>$/.test(token)) {
-      flush(); speaker = token; delivery = ""; current = token; continue;
-    }
-    if (/^\[[^\]\r\n]+\]$/.test(token)) {
-      if (!count) { delivery = token; current = speaker + token; }
-      else current += token;
-      continue;
-    }
-    if (count >= maxChars) flush();
-    if (!current) current = speaker + delivery;
-    current += token;
-    if (!/\s/u.test(token)) count++;
-    const period = token === "." && !(/\d/.test(tokens[index - 1] ?? "") && /\d/.test(tokens[index + 1] ?? ""));
-    if (/[。！？!?；;\n]/u.test(token) || period) flush();
+  const expression = SPEECH_MARKUP + (protectedTerms.length ? "|" + [...protectedTerms].sort((a,b)=>b.length-a.length).map(termPattern).join("|") : "");
+  let offset = 0;
+  for (const match of text.matchAll(new RegExp(expression, "gu"))) {
+    plain(text.slice(offset, match.index));
+    const token = match[0], cue = /^\[/.test(token) || /^<\|speaker:/.test(token);
+    const phoneme = token.startsWith("<|phoneme_start|>");
+    units.push({ text: token, size: cue ? 0 : phoneme ? Math.max(1, (token.match(/<\|phoneme_start\|>/g) ?? []).length) : size(token.replace(/<[^>]*>/g,"")), boundary: 0, cue });
+    offset = match.index! + token.length;
   }
-  flush();
+  plain(text.slice(offset));
+  const segments: string[] = [];
+  let speaker = "", current: Unit[] = [];
+  const count = (values: Unit[]) => values.reduce((sum, u) => sum + u.size, 0);
+  const emit = (cut: number) => {
+    const part = current.splice(0, cut);
+    if (count(part)) segments.push(speaker + part.map(x => x.text).join("").trim());
+  };
+  for (const unit of units) {
+    if (/^<\|speaker:\d+\|>$/.test(unit.text)) {
+      emit(current.length); current = []; speaker = unit.text; continue;
+    }
+    if (unit.size > maxChars) throw Error("A speech word or markup span exceeds the segment budget; increase segmentMaxChars or use a shorter spoken form");
+    while (count(current) + unit.size > maxChars) {
+      let cut = current.length, best = 0, used = 0;
+      for (const [i, item] of current.entries()) {
+        used += item.size;
+        if (used >= Math.floor(maxChars / 2) && item.boundary >= best && item.boundary) { cut = i + 1; best = item.boundary; }
+      }
+      // A sound/delivery cue belongs to the words that follow it, not the previous HTTP request.
+      while (cut && current[cut - 1].cue) cut--;
+      if (!cut || !count(current.slice(0, cut))) throw Error("Speech segment has no word boundary");
+      emit(cut);
+    }
+    current.push(unit);
+  }
+  emit(current.length);
   if (!segments.length) throw Error("Speech contains no speakable text");
   return segments;
 }
@@ -47,13 +67,14 @@ function streamingHeader(sampleRate: number): Buffer {
 /** One WAV envelope, PCM payload only between sentences; the next request starts after EOF. */
 export async function streamSpeechSegments(options: {
   text: string; maxChars: number; signal: AbortSignal;
+  protectedTerms?: readonly string[];
   request(text: string, requestId: string): Promise<Response>;
   failure(response: Response): Promise<Error>;
   begin(response: Response): void;
   write(bytes: Uint8Array): Promise<void>;
   segment?(value: Record<string, unknown>): void;
 }): Promise<number> {
-  const parts = splitSynthesisText(options.text, options.maxChars);
+  const parts = splitSynthesisText(options.text, options.maxChars, options.protectedTerms);
   let rate: number | null = null, bytes = 0;
   for (const [index, text] of parts.entries()) {
     options.signal.throwIfAborted();
@@ -86,7 +107,7 @@ export async function streamSpeechSegments(options: {
     bytes += pcm.length;
     if (bytes > 128 * 1024 * 1024) throw Error("Speech exceeded stream limit");
     await options.write(pcm);
-    options.segment?.({ index, total: parts.length, requestId, startedAt, endedAt: Date.now(),
+    options.segment?.({ index, total: parts.length, requestId, input: text, startedAt, endedAt: Date.now(),
       status: response.status, bytes: pcm.length, durationMs: info.durationMs,
       serverRequestId: response.headers.get("x-tts-request-id") });
   }

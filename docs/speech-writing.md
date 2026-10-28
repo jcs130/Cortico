@@ -6,6 +6,12 @@
 
 ## Drama3
 
+### 分句与名字
+
+短句合成按自然分句、完整词和配置的名字分段。不要让 LLM 自行数字符，也不要在名字后附“读作……”等会被念出的说明。多个很短的句子可在一个请求内合成，避免每个句号都重新生成音色和语气。`voice.pronunciations` 可配置名字到自然口语读法的映射；仅在 TTS 出口使用，显示、聊天和记忆保留原名。相同映射可只保护名字完整。先试听实际音色，不把 HTTP 200 当作发音正确。
+
+Fish 官方 Drama3 支持 `<|phoneme_start|>…<|phoneme_end|>`：英文采用 CMU Arpabet，中文采用逐音节带声调数字的拼音。这是官方能力说明，不能据此认定任意 audio.cpp 网关都正确实现。未验证的服务使用自然口语，不自动塞音素、角色前缀、语言切换或情绪标记。音色身份由所选 voice 及其参考音频决定，说话人切换不能用来修复名字读音。
+
 当 `textFormat` 为 `drama-3`：正文就是给观众说的话；可在需要改变说法的地方放简短方括号指令，例如 `[warm, cheerful]`、`[轻声，带一点惊喜]`。指令描述声音、情绪、语速或说话对象。指令可与台词用不同语言，并非固定枚举。自然标点优先；无需每句都加标签。
 
 示例：`大家晚上好！[warm, cheerful] 我是小晴，今天继续沿着这条小路旅行。`
@@ -23,6 +29,8 @@
 模型需先预热再接直播；冷启动时间不当作正常首声延迟。禁止靠重复说话、编造游戏进度或不停报状态填补冷场。
 
 官方资料：
+- https://docs.fish.audio/developer-guide/core-features/fine-grained-control/english
+- https://docs.fish.audio/developer-guide/core-features/fine-grained-control/chinese
 - https://docs.fish.audio/features/text-to-speech/drama-3
 - https://github.com/JarodMica/audio.cpp/blob/drama-3-native/docs/models/fish_drama3.md
 - https://sgl-project.github.io/sglang-omni/cookbook/fishaudio_drama3.html

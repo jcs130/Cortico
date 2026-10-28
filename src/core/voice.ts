@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { bearer, endpoint, jsonRequest } from "./http.ts";
 import type { VoiceConfig } from "./types.ts";
 import { splitSynthesisText, streamSpeechSegments } from "./speech-segments.ts";
+import { spokenText, validatePronunciations } from "./speech-text.ts";
 type Session = {
   id: string;
   text: string;
@@ -136,6 +137,7 @@ export class VoiceService {
       textFormat: c?.textFormat ?? "plain",
       busyPolicy: c?.busyPolicy ?? 'replace',
       segmentMaxChars: c?.segmentMaxChars ?? null,
+      pronunciations: c?.pronunciations ?? {},
       writingGuides: c?.writingGuides ?? null,
       writingGuide:
         c?.writingGuides?.[this.selectedVoice ?? c?.voice ?? ""] ?? (c?.textFormat === "drama-3"
@@ -174,8 +176,9 @@ export class VoiceService {
     endpoint(c.url);
     if (c.extraBody !== undefined && (!c.extraBody || typeof c.extraBody !== "object" || Array.isArray(c.extraBody)))
       throw Error("TTS extraBody must be an object");
+    const protectedTerms = validatePronunciations(c.pronunciations);
     if (c.segmentMaxChars !== undefined && c.segmentMaxChars !== 0 && typeof text === "string")
-      splitSynthesisText(text, c.segmentMaxChars);
+      splitSynthesisText(spokenText(text, c.pronunciations), c.segmentMaxChars, [...protectedTerms, ...Object.values(c.pronunciations ?? {})]);
     if (
       !Number.isSafeInteger(c.synthesisTimeoutMs ?? 90000) ||
       (c.synthesisTimeoutMs ?? 90000) < 1 ||
@@ -258,7 +261,8 @@ export class VoiceService {
       if (c.segmentMaxChars !== undefined && c.segmentMaxChars !== 0) {
         s.segments = [];
         bytes = await streamSpeechSegments({
-          text: s.text, maxChars: c.segmentMaxChars, signal, failure,
+          text: spokenText(s.text, c.pronunciations), maxChars: c.segmentMaxChars,
+          protectedTerms: [...Object.keys(c.pronunciations ?? {}), ...Object.values(c.pronunciations ?? {})], signal, failure,
           request: (text, requestId) => fetch(endpoint(c.url), {
             method: "POST", redirect: "error", signal,
             headers: { "Content-Type": "application/json", ...auth,
@@ -286,7 +290,7 @@ export class VoiceService {
         body: JSON.stringify({
           ...c.extraBody,
           model: c.model,
-          input: s.text,
+          input: spokenText(s.text, c.pronunciations),
           voice: s.voice,
           speed: 1,
           response_format: "wav",
