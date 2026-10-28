@@ -6,6 +6,14 @@
 
 `voice.busyPolicy:"preserve"` 保留当前合成或播放中的一句，新台词返回 `accepted:false, reason:audio_busy`，不合成、不排队、不打断；下次只讲仍有价值的新内容。显式 `avatar_voice interrupt` 仍可打断。省略该配置时沿用 `replace` 行为。此能力适用于所有游戏和其他实时演出。
 
+## 短句合成 / Sentence synthesis
+
+`voice.segmentMaxChars` 可选启用短句合成（8–160 个可发音字符）。句末或达到上限时分段，保留说话人和发声指令标记。每次仅有一个合成 HTTP 请求；取消旧请求后等待它结束，再发送下一条。服务必须返回采样率一致的单声道 PCM16 WAV。每句返回后立即转发 PCM，使用一个 WAV 流封装，不把多个 RIFF 文件直接串起来，也不等待整段台词合成完毕。
+
+`voice.extraBody` 传入后端实际支持的 JSON 参数，例如服务支持时使用 `{max_seconds:10,top_k:4097}`。模型、台词、音色和 WAV 格式由当前配置决定，附加参数不能覆盖。`voice.writingGuides` 按音色 ID 提供实际文本契约，通过语音状态按需读取。未配置分句时保留原有单次合成行为。
+
+一条台词仍只有原来的 actionId；合成结束不产生播放完成证据，继续采用客户端 playing/ended 回执。说话人音色必须在后端真实注册，不会自动替换为其他音色。
+
 ## 现场反应与桌面回复 / Scene reactions and desktop replies
 
 `director.reactionSources` 可选指定现场事件来源，系统一从去重后的已安装动作中选择无声反应。请求只含两条带来源的新事实和当前台词；手动操作、音频占用或版本变化会取消过期候选。形象词表的 `presentation:{key,auto,tags}` 保留作者允许自动选用的范围，手动动作仍完整可用。反应提交、首个渲染帧与动作结束分别留证。

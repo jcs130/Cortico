@@ -101,6 +101,12 @@ export interface VoiceConfig {
   sessionId?: string;
   metricsUrl?: string;
   instructions?: string;
+  /** Backend-specific JSON fields; model, input, voice and WAV format remain authoritative. */
+  extraBody?: Record<string, unknown>;
+  /** Opt-in sentence synthesis, forwarded as one PCM WAV stream. Zero disables it. */
+  segmentMaxChars?: number;
+  /** Per-voice backend writing contracts, exposed on demand by voice status. */
+  writingGuides?: Record<string, string>;
   /** Whole upstream synthesis budget, separate from renderer acknowledgement. Default 90 seconds. */
   synthesisTimeoutMs?: number;
   /** Explicit text contract of the configured synthesis backend. */

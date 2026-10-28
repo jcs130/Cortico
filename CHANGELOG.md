@@ -1,3 +1,9 @@
+## 0.1.2-rc.4
+
+- Add opt-in short-sentence TTS with backend extra parameters and per-voice writing guides. Preserve speaker tokens across sentence continuations and keep identity fields authoritative.
+- Serialize synthesis across utterances and cancellation. Forward each finished sentence as PCM under one WAV envelope; do not wait for the complete utterance before forwarding its first sentence.
+- Preserve the original action ID, cancellation and renderer playback receipts. Synthesis completion remains separate from actual playing/ended evidence.
+
 ## 0.1.2-rc.3
 
 - Speak a valid public commentary sentence unchanged as soon as its complete streamed record is available; remove the second generative rewrite for duplicate or stale lines.

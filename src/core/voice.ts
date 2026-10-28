@@ -5,6 +5,7 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { bearer, endpoint, jsonRequest } from "./http.ts";
 import type { VoiceConfig } from "./types.ts";
+import { splitSynthesisText, streamSpeechSegments } from "./speech-segments.ts";
 type Session = {
   id: string;
   text: string;
@@ -17,6 +18,7 @@ type Session = {
   trace: Record<string, string | null>;
   config: VoiceConfig;
   response?: ServerResponse;
+  segments?: Record<string, unknown>[];
 };
 /** Forward typed recovery identifiers, never raw provider error text. */
 async function failure(response: Response): Promise<Error> {
@@ -50,6 +52,7 @@ export class VoiceService {
   private selectedVoice: string | null = null;
   private catalogError: string | null = null;
   private metadataAbort = new AbortController();
+  private synthesisTail: Promise<void> = Promise.resolve();
   constructor(
     private readonly config: () => VoiceConfig | undefined,
     private readonly directory: string,
@@ -132,10 +135,12 @@ export class VoiceService {
       transport: "chunked-wav",
       textFormat: c?.textFormat ?? "plain",
       busyPolicy: c?.busyPolicy ?? 'replace',
+      segmentMaxChars: c?.segmentMaxChars ?? null,
+      writingGuides: c?.writingGuides ?? null,
       writingGuide:
-        c?.textFormat === "drama-3"
+        c?.writingGuides?.[this.selectedVoice ?? c?.voice ?? ""] ?? (c?.textFormat === "drama-3"
           ? "Use short speakable sentences. Optional square-bracket voice directions, e.g. [warm, cheerful], are TTS delivery cues. Body/expression actions go through avatar_control. No narrator/character prefix or speaker switching for a single configured voice. See the World speech-writing guide for local backend limits."
-          : "Natural speakable text; do not include stage directions or phonetic annotations unless this backend explicitly supports them.",
+          : "Natural speakable text; do not include stage directions or phonetic annotations unless this backend explicitly supports them."),
       current: this.current
         ? {
             id: this.current.id,
@@ -167,6 +172,10 @@ export class VoiceService {
     const c = this.config();
     if (!c?.url) throw Error("TTS is not configured");
     endpoint(c.url);
+    if (c.extraBody !== undefined && (!c.extraBody || typeof c.extraBody !== "object" || Array.isArray(c.extraBody)))
+      throw Error("TTS extraBody must be an object");
+    if (c.segmentMaxChars !== undefined && c.segmentMaxChars !== 0 && typeof text === "string")
+      splitSynthesisText(text, c.segmentMaxChars);
     if (
       !Number.isSafeInteger(c.synthesisTimeoutMs ?? 90000) ||
       (c.synthesisTimeoutMs ?? 90000) < 1 ||
@@ -186,7 +195,7 @@ export class VoiceService {
       !this.availableVoices.includes(selected)
     )
       throw Error("Voice is not configured");
-    return { text: text.trim(), voice: selected, config: { ...c } };
+    return { text: text.trim(), voice: selected, config: structuredClone(c) };
   }
   queue(id: string, text: unknown, voice?: unknown) {
     const validated = this.validate(text, voice);
@@ -230,6 +239,7 @@ export class VoiceService {
       if (!s.finished && !s.abort.signal.aborted)
         this.interrupt("playback-connection-closed");
     });
+    let release: (() => void) | undefined;
     try {
       const signal = AbortSignal.any([
         s.abort.signal,
@@ -240,6 +250,32 @@ export class VoiceService {
         timeoutMs: s.config.synthesisTimeoutMs ?? 90000,
       });
       const auth = await bearer(c);
+      const previous = this.synthesisTail;
+      this.synthesisTail = new Promise<void>(resolve => { release = resolve; });
+      await previous;
+      signal.throwIfAborted();
+      let bytes = 0;
+      if (c.segmentMaxChars !== undefined && c.segmentMaxChars !== 0) {
+        s.segments = [];
+        bytes = await streamSpeechSegments({
+          text: s.text, maxChars: c.segmentMaxChars, signal, failure,
+          request: (text, requestId) => fetch(endpoint(c.url), {
+            method: "POST", redirect: "error", signal,
+            headers: { "Content-Type": "application/json", ...auth,
+              "x-litellm-session-id": this.sessionId, "x-client-request-id": requestId },
+            body: JSON.stringify({ ...c.extraBody, model: c.model, input: text, voice: s.voice,
+              response_format: "wav", ...(c.instructions ? { instructions: c.instructions } : {}) }),
+          }),
+          begin: response => {
+            for (const key of ["x-litellm-call-id", "x-litellm-session-id", "x-tts-request-id"])
+              s.trace[key] = response.headers.get(key) ?? s.trace[key] ?? null;
+            res.writeHead(200, { "Content-Type": "audio/wav", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
+            this.report(s.id, "streaming", { trace: s.trace });
+          },
+          write: async value => { if (!res.write(value)) await once(res, "drain", { signal }); },
+          segment: value => { s.segments!.push(value); if (s.segments!.length > 16) s.segments!.shift(); },
+        });
+      } else {
       const response = await fetch(endpoint(c.url), {
         method: "POST",
         headers: {
@@ -248,6 +284,7 @@ export class VoiceService {
           "x-litellm-session-id": this.sessionId,
         },
         body: JSON.stringify({
+          ...c.extraBody,
           model: c.model,
           input: s.text,
           voice: s.voice,
@@ -284,13 +321,13 @@ export class VoiceService {
         ),
       });
       this.report(s.id, "streaming", { trace: s.trace });
-      let bytes = 0;
       for await (const value of response.body as unknown as AsyncIterable<Uint8Array>) {
         if (s.abort.signal.aborted) break;
         bytes += value.byteLength;
         if (bytes > 128 * 1024 * 1024)
           throw Error("Speech exceeded stream limit");
         if (!res.write(value)) await once(res, "drain", { signal });
+      }
       }
       if (!s.abort.signal.aborted) {
         s.finished = true;
@@ -301,6 +338,7 @@ export class VoiceService {
           status: "transport-complete",
           trace: s.trace,
           bytes,
+          ...(s.segments ? { segments: s.segments } : {}),
         };
         this.report(s.id, "transport-complete", { trace: s.trace, bytes });
         void this.recordMetadata(s);
@@ -318,6 +356,8 @@ export class VoiceService {
         if (!res.headersSent) res.writeHead(502);
         res.end();
       }
+    } finally {
+      release?.();
     }
   }
   finish(id: string) {
