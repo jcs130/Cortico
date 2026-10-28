@@ -1,3 +1,8 @@
+## 0.1.2-rc.9
+
+- Increase streamed PCM startup headroom to three seconds of audio to absorb bursty engine chunks without changing samples, speed or voice. Short completed clips play immediately; long clips still start before synthesis finishes.
+- Keep renderer playback, command and status buffer values consistent. Add a measured native-PCM arrival replay that reproduces the old starvation and verifies continuous scheduling, cancellation and unchanged sample order.
+
 ## 0.1.2-rc.8
 
 - Separate successful synthesis from a connected renderer waiting for its physical audio turn. Configure `voice.rendererStartTimeoutMs` against the real playback queue, without fabricating playing/ended or extending source freshness.

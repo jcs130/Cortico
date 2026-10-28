@@ -136,7 +136,7 @@ export class VoiceService {
       voices: this.availableVoices,
       catalogError: this.catalogError,
       sessionId: this.sessionId,
-      prebufferMs: 480,
+      prebufferMs: 3000,
       transport: "chunked-wav",
       synthesisTransport: c?.synthesisTransport ?? "wav",
       pcmSampleRate: c?.pcmSampleRate ?? null,
@@ -235,7 +235,7 @@ export class VoiceService {
     return {
       id,
       url: "/audio/speech/" + encodeURIComponent(id),
-      prebufferMs: 480,
+      prebufferMs: 3000,
     };
   }
   interrupt(reason = "interrupted") {

@@ -31,8 +31,10 @@ it('never speaks incomplete objects and bounds output while respecting escaped b
   expect(()=>speechRecords('x'.repeat(8193))).toThrow('budget');
 });
 it('starts the stage-owned desktop player before the last PCM bytes and cancels queued samples',async()=>{
-  const bytes=Buffer.alloc(44+24000);bytes.write('RIFF');bytes.writeUInt32LE(24036,4);bytes.write('WAVEfmt ',8);bytes.writeUInt32LE(16,16);
-  bytes.writeUInt16LE(1,20);bytes.writeUInt16LE(1,22);bytes.writeUInt32LE(24000,24);bytes.writeUInt32LE(48000,28);bytes.writeUInt16LE(2,32);bytes.writeUInt16LE(16,34);bytes.write('data',36);bytes.writeUInt32LE(24000,40);
+  // Provide 3.5s of a 4s stream: playback may start after its startup headroom,
+  // while the remaining PCM and provider completion are still unavailable.
+  const bytes=Buffer.alloc(44+168000);bytes.write('RIFF');bytes.writeUInt32LE(192036,4);bytes.write('WAVEfmt ',8);bytes.writeUInt32LE(16,16);
+  bytes.writeUInt16LE(1,20);bytes.writeUInt16LE(1,22);bytes.writeUInt32LE(24000,24);bytes.writeUInt32LE(48000,28);bytes.writeUInt16LE(2,32);bytes.writeUInt16LE(16,34);bytes.write('data',36);bytes.writeUInt32LE(192000,40);
   let producer!:ReadableStreamDefaultController<Uint8Array>;
   const stream=new ReadableStream<Uint8Array>({start(c){producer=c;}}), nodes:any[]=[], receipts:any[]=[];
   const context={state:'running',currentTime:0,destination:{},resume:async()=>{},createBuffer:()=>({copyToChannel(){}}),

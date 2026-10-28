@@ -1,0 +1,87 @@
+{
+  "sampleRate": 44100,
+  "doneAtMs": 36159,
+  "source": "Isolated native PCM SSE trace measured 2026-10-28; no private text/audio embedded",
+  "frames": [
+    {
+      "atMs": 532,
+      "samples": 8192
+    },
+    {
+      "atMs": 842,
+      "samples": 16384
+    },
+    {
+      "atMs": 1450,
+      "samples": 32768
+    },
+    {
+      "atMs": 2706,
+      "samples": 65536
+    },
+    {
+      "atMs": 5134,
+      "samples": 131072
+    },
+    {
+      "atMs": 10265,
+      "samples": 262144
+    },
+    {
+      "atMs": 13042,
+      "samples": 147456
+    },
+    {
+      "atMs": 13813,
+      "samples": 8192
+    },
+    {
+      "atMs": 14109,
+      "samples": 16384
+    },
+    {
+      "atMs": 14713,
+      "samples": 32768
+    },
+    {
+      "atMs": 15940,
+      "samples": 65536
+    },
+    {
+      "atMs": 18495,
+      "samples": 131072
+    },
+    {
+      "atMs": 23578,
+      "samples": 262144
+    },
+    {
+      "atMs": 25679,
+      "samples": 112640
+    },
+    {
+      "atMs": 26939,
+      "samples": 8192
+    },
+    {
+      "atMs": 27239,
+      "samples": 16384
+    },
+    {
+      "atMs": 27856,
+      "samples": 32768
+    },
+    {
+      "atMs": 29071,
+      "samples": 65536
+    },
+    {
+      "atMs": 31593,
+      "samples": 131072
+    },
+    {
+      "atMs": 36147,
+      "samples": 229376
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-/** Chunked WAV -> scheduled PCM; no SSE audio, no full-utterance wait. */
+/** Chunked WAV -> scheduled PCM. Bounded startup headroom absorbs bursty native engine chunks. */
 export async function playSpeech({
   url,
   context,
@@ -9,7 +9,10 @@ export async function playSpeech({
   onStats,
   fetchAudio = fetch,
   volume = 1,
+  prebufferMs = 3000,
 }) {
+  if (!Number.isFinite(prebufferMs) || prebufferMs < 0 || prebufferMs > 10000)
+    throw Error("Speech prebuffer must be 0–10000ms");
   const startClock = performance.now();
   const response = await fetchAudio(url, { signal });
   if (!response.ok || !response.body)
@@ -38,7 +41,7 @@ export async function playSpeech({
     complete = resolve;
   });
   const stats = () => ({
-    prebufferMs: 480,
+    prebufferMs,
     firstPlaybackMs: firstLatencyMs,
     samples: totalSamples,
     sampleRate,
@@ -75,7 +78,7 @@ export async function playSpeech({
   signal.addEventListener("abort", stop, { once: true });
   const drain = () => {
     if (killed) return;
-    if (!started && pendingSamples < Math.round(sampleRate * 0.48) && !finished)
+    if (!started && pendingSamples < Math.round(sampleRate * prebufferMs / 1000) && !finished)
       return;
     if (!started && pendingSamples) {
       started = true;

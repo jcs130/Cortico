@@ -170,7 +170,7 @@ it("stops queued PCM and never completes playback after an upstream stream failu
     createBufferSource:()=>{const source={connect(){},start(){},stop:vi.fn()};sources.push(source);return source;}};
   const result=playSpeech({url:'http://fixture.invalid/partial',context,signal:new AbortController().signal,onEnd:ended});
   const failed=expect(result).rejects.toThrow('provider disconnected');
-  producer.enqueue(wav(2,44100));await vi.waitFor(()=>expect(sources.length).toBeGreaterThan(0));
+  producer.enqueue(wav(4,44100));await vi.waitFor(()=>expect(sources.length).toBeGreaterThan(0));
   producer.error(Error('provider disconnected'));await failed;
   expect(sources.every(n=>n.stop.mock.calls.length===1)).toBe(true);expect(ended).not.toHaveBeenCalled();
 });
