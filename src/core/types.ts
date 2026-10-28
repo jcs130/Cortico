@@ -117,6 +117,8 @@ export interface VoiceConfig {
   writingGuides?: Record<string, string>;
   /** Whole upstream synthesis budget, separate from renderer acknowledgement. Default 90 seconds. */
   synthesisTimeoutMs?: number;
+  /** Wait for an actual playback-start receipt after synthesis; connected renderer only. */
+  rendererStartTimeoutMs?: number;
   /** Explicit text contract of the configured synthesis backend. */
   textFormat?: "plain" | "drama-3";
   /** preserve keeps admitted audio. One foreground line may wait behind automatic commentary. */

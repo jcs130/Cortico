@@ -1,3 +1,8 @@
+## 0.1.2-rc.8
+
+- Separate successful synthesis from a connected renderer waiting for its physical audio turn. Configure `voice.rendererStartTimeoutMs` against the real playback queue, without fabricating playing/ended or extending source freshness.
+- Retain the short failure window for unconsumed commands/disconnected renderers and a bounded start deadline for connected queues.
+
 ## 0.1.2-rc.7
 
 - Verify WAV completion headers when present, with an opt-in requirement for services declaring X-Speech-Stop. Do not send an unsolicited speed parameter.

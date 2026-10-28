@@ -141,6 +141,7 @@ export class VoiceService {
       synthesisTransport: c?.synthesisTransport ?? "wav",
       pcmSampleRate: c?.pcmSampleRate ?? null,
       requireWavCompletion: c?.requireWavCompletion ?? false,
+      rendererStartTimeoutMs: c?.rendererStartTimeoutMs ?? 15000,
       configuredSeed: typeof c?.extraBody?.seed === "number" ? c.extraBody.seed : null,
       textFormat: c?.textFormat ?? "plain",
       busyPolicy: c?.busyPolicy ?? 'replace',
@@ -175,6 +176,7 @@ export class VoiceService {
       synthesizing: !s.finished,
       deadline: s.openedAt! + (s.config.synthesisTimeoutMs ?? 90000),
       rendererSince: s.transportFinishedAt,
+      rendererStartTimeoutMs: s.config.rendererStartTimeoutMs ?? 15000,
     };
   }
   /** Validate without starting synthesis or interrupting the current audio. */
@@ -199,6 +201,9 @@ export class VoiceService {
       (c.synthesisTimeoutMs ?? 90000) > 2147483647
     )
       throw Error("Invalid synthesis timeout");
+    if (!Number.isSafeInteger(c.rendererStartTimeoutMs ?? 15000)
+      || (c.rendererStartTimeoutMs ?? 15000) < 1000 || (c.rendererStartTimeoutMs ?? 15000) > 300000)
+      throw Error("Invalid renderer playback-start timeout");
     if (
       typeof text !== "string" ||
       !text.trim() ||

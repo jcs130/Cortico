@@ -16,6 +16,8 @@
 
 `voice.extraBody` 传入后端实际支持的 JSON 参数，例如原生 Drama 3 连续生成服务使用 `{max_seconds:30,top_k:4097}`。此服务的 `max_seconds` 是每个引擎内部块的预算，整条语音可以超过 30 秒；客户端不发送 `options.text_chunk_size`、`text_chunk_mode` 或 `single_chunk`。模型、台词、音色和所选音频传输由当前配置决定，附加参数不能覆盖。`voice.writingGuides` 按音色 ID 提供实际文本契约，通过语音状态按需读取。未配置分句时保留原有单次合成行为。
 
+合成完成后，持续连接的播放设备可能仍在共享队列中等待。`voice.rendererStartTimeoutMs` 单独设置真实起声回执的等待时间，默认 15000 毫秒，可按实际队列设为 120000；不会把 queued 标成 playing，也不会刷新事实有效期。未消费合成流或设备失联仍采用原短超时；连接正常但超过配置期限也会失败。
+
 一条台词仍只有原来的 actionId；合成结束不产生播放完成证据，继续采用客户端 playing/ended 回执。说话人音色必须在后端真实注册，不会自动替换为其他音色。
 
 ## 现场反应与桌面回复 / Scene reactions and desktop replies

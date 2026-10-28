@@ -847,15 +847,21 @@ export class AvatarStage {
               ? action.command.audioActionId
               : null;
         const wait = audioId ? this.voice.playbackWait(audioId) : null;
+        const rendererConnected = !!this.owner && this.sessions.has(this.owner.sessionId);
         const synthesizing =
           wait?.synthesizing &&
           Date.now() < wait.deadline &&
-          !!this.owner &&
-          this.sessions.has(this.owner.sessionId);
+          rendererConnected;
+        // A fast synthesis may finish while its connected playback device is
+        // legitimately queued behind other audio. This grace is independent of
+        // generation time, source freshness and actual playing/ended receipts.
+        // Unconsumed commands or disconnected renderers keep the short fallback.
+        const rendererStartTimeout = rendererConnected && wait?.rendererSince !== undefined
+          ? wait.rendererStartTimeoutMs : 15000;
         if (
           (action.status === "queued" &&
             !synthesizing &&
-            Date.now() - (wait?.rendererSince ?? action.createdAt) > 15000) ||
+            Date.now() - (wait?.rendererSince ?? action.createdAt) > rendererStartTimeout) ||
           (action.status === "playing" &&
             typeof action.evidence?.sessionId === "string" &&
             !this.sessions.has(action.evidence.sessionId))

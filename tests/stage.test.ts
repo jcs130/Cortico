@@ -424,6 +424,33 @@ it("keeps slow synthesis separate from renderer acknowledgement and starts the p
   }
 });
 
+it.each(['real-receipts','deadline','disconnected'])("keeps a connected physical playback queue separate from synthesis: %s",async mode=>{
+  const r=await speechSetup();r.server.stage.config.voice!.rendererStartTimeoutMs=120000;
+  const original=globalThis.fetch;
+  vi.spyOn(globalThis,'fetch').mockImplementation(async(target,init)=>String(target)==='http://127.0.0.1:1/v1/audio/speech'
+    ?new Response(Buffer.alloc(64),{headers:{'content-type':'audio/wav'}}):original(target,init));
+  const speech=await r.server.call('avatar_voice',{action:'speak',text:'One complete utterance waiting for its physical audio turn.'},'external-queue-'+mode);
+  const consumed=await fetch(r.server.url+'/audio/speech/'+speech.id+'?sessionId=renderer');expect((await consumed.arrayBuffer()).byteLength).toBe(64);
+  const now=Date.now(),clock=vi.spyOn(Date,'now').mockReturnValue(now+40000);
+  const receipt=(status:string,eventId?:string)=>r.server.stage.receipt({sessionId:'renderer',role:'broadcast',avatarId:r.preset.id,avatarSha256:r.preset.sha256,status,eventId});
+  try{
+    if(mode!=='disconnected')await receipt('heartbeat');
+    await (r.server.stage as unknown as {check():Promise<void>}).check();
+    if(mode==='disconnected'){
+      expect(r.server.stage.ledger.result(String(speech.id)).status).toBe('failed');return;
+    }
+    // A heartbeat proves the renderer is connected, never that sound started.
+    expect(r.server.stage.ledger.result(String(speech.id)).status).toBe('queued');
+    if(mode==='deadline'){
+      clock.mockReturnValue(now+120001);await receipt('heartbeat');await (r.server.stage as unknown as {check():Promise<void>}).check();
+      expect(r.server.stage.ledger.result(String(speech.id)).status).toBe('failed');
+    }else{
+      await receipt('playing',String(speech.id));expect(r.server.stage.ledger.result(String(speech.id)).status).toBe('playing');
+      await receipt('ended',String(speech.id));expect(r.server.stage.ledger.result(String(speech.id)).status).toBe('completed');
+    }
+  }finally{clock.mockRestore();}
+});
+
 it("binds presentation to current speech without cutting it, validates expression maps and requires the audio owner", async () => {
   const { server, events, preset } = await speechSetup();
   const speech = await server.call(
