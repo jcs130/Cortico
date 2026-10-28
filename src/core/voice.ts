@@ -9,6 +9,7 @@ import { splitSynthesisText, streamSpeechSegments } from "./speech-segments.ts";
 import { spokenText, validatePronunciations } from "./speech-text.ts";
 import { streamPcmSse } from "./pcm-sse.ts";
 import { assertWavComplete } from "./wav.ts";
+import { dramaRsBody, dramaRsEndpoints, dramaRsVoices, streamDramaRs } from "./drama-rs.ts";
 type Session = {
   id: string;
   text: string;
@@ -82,12 +83,26 @@ export class VoiceService {
     if (!/^[\w:.-]{1,150}$/.test(this.sessionId))
       throw Error("Invalid stable TTS session id");
     const c = this.config();
+    this.catalogError = null;
+    this.selectedVoice = null;
     this.availableVoices = [
       ...new Set(
         [c?.voice, ...(c?.voices ?? [])].filter((v): v is string => !!v),
       ),
     ];
-    if (c?.voicesUrl) {
+    if (c?.synthesisTransport === "drama-rs-wav") {
+      // Unlike generic catalogs, only a verified server entry enables this voice.
+      this.availableVoices = [];
+      try {
+        const remoteVoices = await dramaRsVoices(c.url, AbortSignal.any([
+          this.metadataAbort.signal, AbortSignal.timeout(10000),
+        ]));
+        this.availableVoices = c.voices?.length
+          ? remoteVoices.filter(v => v === c.voice || c.voices!.includes(v))
+          : remoteVoices;
+        if (!this.availableVoices.includes(c.voice)) throw Error("Configured voice is absent from drama-rs: " + c.voice);
+      } catch (error) { this.catalogError = error instanceof Error ? error.message : String(error); }
+    } else if (c?.voicesUrl) {
       try {
         const catalog = await jsonRequest(endpoint(c.voicesUrl), {
           headers: await bearer(c),
@@ -111,7 +126,7 @@ export class VoiceService {
       const saved = JSON.parse(
         await readFile(join(this.directory, "voice-selection.json"), "utf8"),
       );
-      if (this.availableVoices.includes(saved.voice))
+      if (this.availableVoices.includes(saved.voice) || (c?.synthesisTransport === "drama-rs-wav" && typeof saved.voice === "string"))
         this.selectedVoice = saved.voice;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
@@ -129,16 +144,21 @@ export class VoiceService {
   }
   status() {
     const c = this.config();
+    const native = c?.synthesisTransport === "drama-rs-wav";
+    const selected = this.selectedVoice ?? c?.voice ?? null;
+    const nativeVoiceAvailable = selected !== null && this.availableVoices.includes(selected);
     return {
-      configured: !!c?.url,
+      configured: !!c?.url && !(native && (this.catalogError || !nativeVoiceAvailable)),
       model: c?.model ?? null,
       voice: this.selectedVoice ?? c?.voice ?? null,
       voices: this.availableVoices,
-      catalogError: this.catalogError,
+      catalogError: this.catalogError ?? (native && !nativeVoiceAvailable ? "Selected drama-rs voice is unavailable" : null),
       sessionId: this.sessionId,
       prebufferMs: 480,
       transport: "chunked-wav",
       synthesisTransport: c?.synthesisTransport ?? "wav",
+      ...(c?.synthesisTransport === "drama-rs-wav" ? { generationComplete: null,
+        completionEvidence: "not-provided-by-native-api", capture: "native-wav" } : {}),
       pcmSampleRate: c?.pcmSampleRate ?? null,
       requireWavCompletion: c?.requireWavCompletion ?? false,
       rendererStartTimeoutMs: c?.rendererStartTimeoutMs ?? 15000,
@@ -180,13 +200,20 @@ export class VoiceService {
     };
   }
   /** Validate without starting synthesis or interrupting the current audio. */
-  validate(text: unknown, voice?: unknown) {
+  validate(text: unknown, voice?: unknown, seed?: unknown) {
     const c = this.config();
     if (!c?.url) throw Error("TTS is not configured");
     endpoint(c.url);
     if (c.extraBody !== undefined && (!c.extraBody || typeof c.extraBody !== "object" || Array.isArray(c.extraBody)))
       throw Error("TTS extraBody must be an object");
-    if (![undefined, "wav", "pcm-sse"].includes(c.synthesisTransport)) throw Error("Unsupported synthesis transport");
+    if (![undefined, "wav", "pcm-sse", "drama-rs-wav"].includes(c.synthesisTransport)) throw Error("Unsupported synthesis transport");
+    if (c.synthesisTransport === "drama-rs-wav") {
+      if (this.catalogError) throw Error("drama-rs is unavailable: " + this.catalogError);
+      dramaRsEndpoints(c.url);
+      dramaRsBody("", c.voice, c.extraBody);
+      if (c.segmentMaxChars) throw Error("drama-rs requires one complete utterance; disable client segmentation");
+      if (c.requireWavCompletion) throw Error("drama-rs has no reliable full-text completion marker");
+    }
     if (c.synthesisTransport === "pcm-sse") {
       if (!Number.isSafeInteger(c.pcmSampleRate) || c.pcmSampleRate! < 8000 || c.pcmSampleRate! > 192000)
         throw Error("Native PCM streaming requires the backend's verified sample rate");
@@ -217,10 +244,13 @@ export class VoiceService {
       !this.availableVoices.includes(selected)
     )
       throw Error("Voice is not configured");
-    return { text: text.trim(), voice: selected, config: structuredClone(c) };
+    if (seed !== undefined && (!Number.isSafeInteger(seed) || Number(seed) < 0)) throw Error("Invalid explicit synthesis seed");
+    const config = structuredClone(c);
+    if (seed !== undefined) config.extraBody = { ...config.extraBody, seed };
+    return { text: text.trim(), voice: selected, config };
   }
-  queue(id: string, text: unknown, voice?: unknown) {
-    const validated = this.validate(text, voice);
+  queue(id: string, text: unknown, voice?: unknown, seed?: unknown) {
+    const validated = this.validate(text, voice, seed);
     this.interrupt("superseded");
     this.current = {
       id,
@@ -244,7 +274,8 @@ export class VoiceService {
     this.current = null;
     s.abort.abort();
     s.response?.destroy();
-    this.last = { id: s.id, status: reason, trace: s.trace };
+    this.last = { id: s.id, status: reason, trace: s.trace,
+      ...(s.nativeStream ? { nativeStream: s.nativeStream } : {}) };
     this.report(s.id, "cancelled", { reason, trace: s.trace });
     if (s.opened && !s.finished) void this.recordMetadata(s);
     return this.last;
@@ -271,13 +302,26 @@ export class VoiceService {
         trace: s.trace,
         timeoutMs: s.config.synthesisTimeoutMs ?? 90000,
       });
-      const auth = await bearer(c);
+      const auth = c.synthesisTransport === "drama-rs-wav" ? {} : await bearer(c);
       const previous = this.synthesisTail;
       this.synthesisTail = new Promise<void>(resolve => { release = resolve; });
       await previous;
       signal.throwIfAborted();
       let bytes = 0;
-      if (c.synthesisTransport === "pcm-sse") {
+      if (c.synthesisTransport === "drama-rs-wav") {
+        const result = await streamDramaRs({
+          url: c.url, text: spokenText(s.text, c.pronunciations), voice: s.voice, extraBody: c.extraBody,
+          directory: this.directory, actionId: s.id, sessionId: this.sessionId, signal, failure,
+          evidence: value => { s.nativeStream = { ...value };
+            if (this.last?.id === s.id) this.last.nativeStream = s.nativeStream; },
+          begin: () => {
+            res.writeHead(200, { "Content-Type": "audio/wav", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
+            this.report(s.id, "streaming", { trace: s.trace, generationComplete: null });
+          },
+          write: async value => { if (!res.write(value)) await once(res, "drain", { signal }); },
+        });
+        bytes = result.bytes;
+      } else if (c.synthesisTransport === "pcm-sse") {
         const requestId = randomUUID(), input = spokenText(s.text, c.pronunciations), startedAt = Date.now();
         s.nativeStream = { input, requestId, startedAt, stop: null };
         const response = await fetch(endpoint(c.url), {
@@ -390,7 +434,8 @@ export class VoiceService {
           ...(s.nativeStream ? { nativeStream: s.nativeStream } : {}),
           ...(s.wavStop !== undefined ? { wavStop: s.wavStop } : {}),
         };
-        this.report(s.id, "transport-complete", { trace: s.trace, bytes });
+        this.report(s.id, "transport-complete", { trace: s.trace, bytes,
+          ...this.generationEvidence(s.id) });
         void this.recordMetadata(s);
       }
     } catch (e) {
@@ -419,6 +464,12 @@ export class VoiceService {
   }
   finish(id: string) {
     if (this.current?.id === id) this.current = null;
+  }
+  generationEvidence(id: string): Record<string, unknown> {
+    const s = this.current;
+    if (!s || s.id !== id || s.config.synthesisTransport !== "drama-rs-wav") return {};
+    return { generationComplete: null, generationStop: null,
+      completionEvidence: "not-provided-by-native-api", transportEnded: s.finished && !!s.transportFinishedAt };
   }
   private async recordMetadata(s: Session) {
     if (!s.config.metricsUrl) return;

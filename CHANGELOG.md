@@ -1,3 +1,9 @@
+## 0.1.2-rc.10
+
+- Add the native drama-rs `/v1/speak` protocol, verified health/remote voice discovery and one unsplit streaming WAV request per utterance. Unknown voices never fall back.
+- Preserve exact WAV bytes, request JSON and transport evidence for each native request, including cancellation/failure. Native EOF and HTTP 200 leave full-text generation completion unknown.
+- Keep incremental PCM playback, native 44.1 kHz timing, physical playback receipts and upstream cancellation. An optional explicit synthesis seed is forwarded without a daily default.
+
 ## 0.1.2-rc.8
 
 - Separate successful synthesis from a connected renderer waiting for its physical audio turn. Configure `voice.rendererStartTimeoutMs` against the real playback queue, without fabricating playing/ended or extending source freshness.

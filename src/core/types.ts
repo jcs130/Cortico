@@ -104,7 +104,7 @@ export interface VoiceConfig {
   /** Backend-specific JSON fields; model, input, voice and the selected transport remain authoritative. */
   extraBody?: Record<string, unknown>;
   /** Native PCM SSE keeps one provider generation context; the renderer still receives WAV. */
-  synthesisTransport?: "wav" | "pcm-sse";
+  synthesisTransport?: "wav" | "pcm-sse" | "drama-rs-wav";
   /** Explicit verified mono PCM16 output rate, required by native PCM SSE. */
   pcmSampleRate?: number;
   /** Require an explicit successful X-Speech-Stop header on WAV responses. */

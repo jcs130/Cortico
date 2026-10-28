@@ -6,7 +6,17 @@
 
 ## Drama3
 
-### 分句与名字
+### drama-rs 原生接口
+
+配置 `voice.synthesisTransport="drama-rs-wav"`，`voice.url="http://服务地址/v1/speak"`，`voice.voice` 为已注册音色，`segmentMaxChars:0`、`requireWavCompletion:false`。启动先检查同一服务的 `/health` 和 `/v1/voices`；原生音色列表是唯一有效目录，配置或已保存选择中的未知音色直接报错，不回退。不要重新注册既有参考音色。
+
+每条完整台词只发送一次 `{text,voice,stream:true,split:false,top_k:4097,max_new:2048}`。`extraBody` 可设置 `top_k`、`max_new`、服务文档支持的 `top_p`／`temperature` 和明确的实验 `seed`；也可在单次 `avatar_voice speak` 显式传 `seed`，零值同样保留。日常合成不固定种子，不沿用兼容接口的 `model`、`input`、`max_seconds`、SSE 或其他控制字段。
+
+上游返回 44,100 Hz、单声道、PCM16 WAV。客户端按收到的 WAV 头和 PCM 增量播放，不等待整条下载；AudioBuffer 保持真实的 44.1 kHz，输出设备为 48 kHz 时由 Web Audio 转换，不改采样率标签冒充调速。播放中断会关闭上游 HTTP 和已经排队的声音。
+
+当前原生 API 没有可靠的 complete／截断终态。即使 HTTP 200、WAV 字节结构有效并读到 EOF，`generationComplete` 和 `generationStop` 仍为 `null`；`transport-complete` 仅表示传输结束，实际 `playing`／`ended` 只证明播放。原始 WAV、完整请求 JSON、SHA256 与传输／失败记录保存在演出数据目录的 `native-wav`。短句、204 字长句、名字与负数坐标须试听，不能用字节数或 HTTP 成功代替全文与音色验收。
+
+### PCM SSE 兼容接口与名字
 
 服务支持原生 PCM SSE 时，优先使用 `voice.synthesisTransport="pcm-sse"`，并配置实测的 `pcmSampleRate`、将客户端 `segmentMaxChars` 设为 `0`。一条完整台词只发一次请求，PCM 随到随播，不用多次独立克隆拼接。当前原生 Drama 3 服务输出 44,100 Hz、PCM16、小端、单声道，使用 `response_format:"pcm",stream_format:"sse"`。`extraBody` 配置 `{max_seconds:30,top_k:4097}`：`max_seconds` 是每个引擎内部块的预算，整句可以超过 30 秒。不要传 `options.text_chunk_size`、`text_chunk_mode` 或 `single_chunk`。
 

@@ -510,7 +510,7 @@ export class AvatarStage {
     }
     if (args.action !== "speak") throw Error("Unknown voice action");
     checkSpeechFreshness(args, this.config.speechObservationMaxAgeSeconds ?? 0);
-    this.voice.validate(args.text, args.voice);
+    this.voice.validate(args.text, args.voice, args.seed);
     const busyPolicy=this.config.voice?.busyPolicy??'replace';
     if(!['replace','preserve'].includes(busyPolicy))throw Error('Invalid speech busy policy');
     const active = this.ensureActive();
@@ -538,6 +538,7 @@ export class AvatarStage {
     const command={
       text: args.text,
       voice: args.voice ?? this.voice.status().voice,
+      ...(args.seed !== undefined ? {seed: args.seed} : {}),
       ...(requestedPerformance ? {performance: requestedPerformance} : {}),
     };
     if([...this.ledger.actions.values()].some(a=>a.requestId===requestId)){
@@ -599,7 +600,7 @@ export class AvatarStage {
       : resolveSpeechPerformance(requestedPerformance, active.capabilities.expressions as string[], active.capabilities.clips as string[]);
     const performance = resolved.applied;
     try {
-      const stream = this.voice.queue(actionId, args.text, args.voice);
+      const stream = this.voice.queue(actionId, args.text, args.voice, args.seed);
       this.foreground = actionId;
       if (args.ifIdleRevision !== undefined) this.automaticSpeech.add(actionId);
       if (performance && !desktop) {
@@ -802,7 +803,8 @@ export class AvatarStage {
               ? "completed"
               : null;
       if (status) {
-        await this.recordState(r.eventId, status, { ...input });
+        await this.recordState(r.eventId, status, { ...input,
+          ...(previous.kind === "speech" ? this.voice.generationEvidence(r.eventId) : {}) });
         if (
           status === "playing" &&
           previous.kind === "motion-play" &&

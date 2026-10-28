@@ -15,6 +15,8 @@ export const TOOL_DEFINITIONS = [
         action: action(["status", "speak", "interrupt", "select"]),
         text: { type: "string", minLength: 1, maxLength: 2000 },
         voice: text,
+        seed: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER,
+          description: "Optional explicit synthesis seed for an experiment; omitted during normal speech." },
         performance: {
           type: 'object', additionalProperties: false,
           description: 'Optional cues authored in this same inference. Bound to this utterance locally; no audioActionId or extra model turn is needed. Read status.performance for current expression/bodyClip ids. Unavailable cues are omitted and reported in presentationWarnings; speech continues. Emotion is authored intent, not a TTS style control. Emit this call alongside game tools when both are appropriate.',

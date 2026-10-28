@@ -108,6 +108,38 @@ async function speechSetup() {
   return r;
 }
 
+it('keeps native drama-rs generation unknown after genuine playback receipts and includes an explicit seed in action identity', async () => {
+  const bytes=Buffer.alloc(444);bytes.write('RIFF');bytes.writeUInt32LE(0xffffffff,4);bytes.write('WAVEfmt ',8);
+  bytes.writeUInt32LE(16,16);bytes.writeUInt16LE(1,20);bytes.writeUInt16LE(1,22);bytes.writeUInt32LE(44100,24);
+  bytes.writeUInt32LE(88200,28);bytes.writeUInt16LE(2,32);bytes.writeUInt16LE(16,34);bytes.write('data',36);bytes.writeUInt32LE(0xffffffff,40);
+  const bodies:unknown[]=[];
+  const upstream=createServer(async(req,res)=>{
+    if(req.url==='/health'){res.end('ok\n');return;}
+    if(req.url==='/v1/voices'){res.end(JSON.stringify(['cormy']));return;}
+    let raw='';for await(const part of req)raw+=part;bodies.push(JSON.parse(raw));
+    res.writeHead(200,{'content-type':'audio/wav'});res.end(bytes);
+  });
+  await new Promise<void>(done=>upstream.listen(0,'127.0.0.1',done));
+  cleanup.push(async()=>{upstream.closeAllConnections();await new Promise<void>(done=>upstream.close(()=>done()));});
+  const {server,preset}=await setup({voice:{url:`http://127.0.0.1:${(upstream.address() as {port:number}).port}/v1/speak`,
+    model:'drama-3',voice:'cormy',synthesisTransport:'drama-rs-wav'}});
+  const receipt={sessionId:'native-renderer',role:'broadcast',avatarId:preset.id,avatarSha256:preset.sha256};
+  await server.stage.receipt({...receipt,status:'ready'});server.stage.claimAudio('native-renderer');
+  const args={action:'speak',text:'原生协议，全文完成情况未知。',seed:0};
+  const speech=await server.call('avatar_voice',args,'native-identity');
+  expect(await server.call('avatar_voice',args,'native-identity')).toMatchObject({id:speech.id,reused:true});
+  await expect(server.call('avatar_voice',{...args,seed:1},'native-identity')).rejects.toThrow('another action');
+  const response=await fetch(`${server.url}/audio/speech/${speech.id}?sessionId=native-renderer`);
+  expect(Buffer.from(await response.arrayBuffer())).toEqual(bytes);
+  expect(bodies).toEqual([{text:args.text,voice:'cormy',stream:true,split:false,top_k:4097,max_new:2048,seed:0}]);
+  expect(server.stage.ledger.result(String(speech.id)).status).toBe('queued');
+  await server.stage.receipt({...receipt,eventId:speech.id,status:'playing'});
+  expect(server.stage.ledger.result(String(speech.id))).toMatchObject({status:'playing',evidence:{generationComplete:null}});
+  await server.stage.receipt({...receipt,eventId:speech.id,status:'ended',audioTimeMs:5});
+  expect(server.stage.ledger.result(String(speech.id))).toMatchObject({status:'completed',evidence:{
+    status:'ended',transportEnded:true,generationComplete:null,generationStop:null,completionEvidence:'not-provided-by-native-api'}});
+});
+
 it('preserves admitted speech, skips new speech without synthesis, and permits explicit interruption',async()=>{
  const {server,events}=await speechSetup();server.stage.config.voice!.busyPolicy='preserve';
  const first=await server.call('avatar_voice',{action:'speak',text:'Finish this sentence.'},'preserve-first');
