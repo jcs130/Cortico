@@ -1,5 +1,7 @@
 # 语音文本编写
 
+Drama 3 的可复用技能入口为 [drama3-voice/SKILL.md](../skills/drama3-voice/SKILL.md)：短入口包含台词与发声决策，写作、原生接口与资料按需展开。普通输出不需要载入全部参考。
+
 先读 `avatar_query {"action":"voice"}` 或 `avatar_voice {"action":"status"}` 的 `textFormat` 和 `writingGuide`。语音格式属于所选服务，不根据角色或模型名称猜测。`plain` 只写自然口语。
 
 在 World 配置的“语音文本”中选择后端实际采用的格式。该值在服务启动时读取；重启后核对语音状态，不以配置文件保存作为已生效证据。自动解说的起草与解析采用同一个当前契约；Drama3 的方括号声音指令保留到合成输入，近期台词与重复判断使用去除指令的正文。
