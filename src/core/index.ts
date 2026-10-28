@@ -6,6 +6,7 @@ export * from "./requests.ts";
 export * from "./voice.ts";
 export * from "./speech-text.ts";
 export * from "./speech-segments.ts";
+export * from "./pcm-sse.ts";
 export * from "./music.ts";
 export * from "./config.ts";
 export * from "./cloud-music.ts";

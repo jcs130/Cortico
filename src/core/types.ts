@@ -101,8 +101,12 @@ export interface VoiceConfig {
   sessionId?: string;
   metricsUrl?: string;
   instructions?: string;
-  /** Backend-specific JSON fields; model, input, voice and WAV format remain authoritative. */
+  /** Backend-specific JSON fields; model, input, voice and the selected transport remain authoritative. */
   extraBody?: Record<string, unknown>;
+  /** Native PCM SSE keeps one provider generation context; the renderer still receives WAV. */
+  synthesisTransport?: "wav" | "pcm-sse";
+  /** Explicit verified mono PCM16 output rate, required by native PCM SSE. */
+  pcmSampleRate?: number;
   /** Opt-in sentence synthesis, forwarded as one PCM WAV stream. Zero disables it. */
   segmentMaxChars?: number;
   /** Explicit plain spoken forms for proper names; applied only at the TTS request boundary. */

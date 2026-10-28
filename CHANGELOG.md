@@ -1,3 +1,9 @@
+## 0.1.2-rc.6
+
+- Add opt-in native PCM SSE synthesis: one backend generation context per utterance, immediate PCM forwarding under one WAV envelope, and no independent client chunks.
+- Check the provider's completion stop and sample count. Preserve generation-limit failures instead of reporting a truncated response as complete.
+- Expose configured transport, verified PCM rate, seed and actual provider completion metadata on demand. Keep renderer playback receipts and voice selection separate.
+
 ## 0.1.2-rc.5
 
 - Replace fixed-character speech cuts with clause/word boundaries, pack tiny sentences, and protect configured proper names. Do not replay point sounds or delivery cues in continuation requests.

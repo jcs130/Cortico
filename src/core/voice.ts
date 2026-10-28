@@ -7,6 +7,7 @@ import { bearer, endpoint, jsonRequest } from "./http.ts";
 import type { VoiceConfig } from "./types.ts";
 import { splitSynthesisText, streamSpeechSegments } from "./speech-segments.ts";
 import { spokenText, validatePronunciations } from "./speech-text.ts";
+import { streamPcmSse } from "./pcm-sse.ts";
 type Session = {
   id: string;
   text: string;
@@ -20,6 +21,7 @@ type Session = {
   config: VoiceConfig;
   response?: ServerResponse;
   segments?: Record<string, unknown>[];
+  nativeStream?: Record<string, unknown>;
 };
 /** Forward typed recovery identifiers, never raw provider error text. */
 async function failure(response: Response): Promise<Error> {
@@ -134,6 +136,9 @@ export class VoiceService {
       sessionId: this.sessionId,
       prebufferMs: 480,
       transport: "chunked-wav",
+      synthesisTransport: c?.synthesisTransport ?? "wav",
+      pcmSampleRate: c?.pcmSampleRate ?? null,
+      configuredSeed: typeof c?.extraBody?.seed === "number" ? c.extraBody.seed : null,
       textFormat: c?.textFormat ?? "plain",
       busyPolicy: c?.busyPolicy ?? 'replace',
       segmentMaxChars: c?.segmentMaxChars ?? null,
@@ -176,6 +181,12 @@ export class VoiceService {
     endpoint(c.url);
     if (c.extraBody !== undefined && (!c.extraBody || typeof c.extraBody !== "object" || Array.isArray(c.extraBody)))
       throw Error("TTS extraBody must be an object");
+    if (![undefined, "wav", "pcm-sse"].includes(c.synthesisTransport)) throw Error("Unsupported synthesis transport");
+    if (c.synthesisTransport === "pcm-sse") {
+      if (!Number.isSafeInteger(c.pcmSampleRate) || c.pcmSampleRate! < 8000 || c.pcmSampleRate! > 192000)
+        throw Error("Native PCM streaming requires the backend's verified sample rate");
+      if (c.segmentMaxChars) throw Error("Native PCM streaming must use one synthesis context; disable client segmentation");
+    }
     const protectedTerms = validatePronunciations(c.pronunciations);
     if (c.segmentMaxChars !== undefined && c.segmentMaxChars !== 0 && typeof text === "string")
       splitSynthesisText(spokenText(text, c.pronunciations), c.segmentMaxChars, [...protectedTerms, ...Object.values(c.pronunciations ?? {})]);
@@ -258,7 +269,29 @@ export class VoiceService {
       await previous;
       signal.throwIfAborted();
       let bytes = 0;
-      if (c.segmentMaxChars !== undefined && c.segmentMaxChars !== 0) {
+      if (c.synthesisTransport === "pcm-sse") {
+        const requestId = randomUUID(), input = spokenText(s.text, c.pronunciations), startedAt = Date.now();
+        const response = await fetch(endpoint(c.url), {
+          method: "POST", redirect: "error", signal,
+          headers: { "Content-Type": "application/json", ...auth,
+            "x-litellm-session-id": this.sessionId, "x-client-request-id": requestId },
+          body: JSON.stringify({ ...c.extraBody, model: c.model, input, voice: s.voice,
+            response_format: "pcm", stream_format: "sse", ...(c.instructions ? { instructions: c.instructions } : {}) }),
+        });
+        if (!response.ok) throw await failure(response);
+        for (const key of ["x-litellm-call-id", "x-litellm-session-id", "x-tts-request-id"])
+          s.trace[key] = response.headers.get(key) ?? s.trace[key] ?? null;
+        const result = await streamPcmSse({ response, sampleRate: c.pcmSampleRate!, signal,
+          terminal: value => { s.nativeStream = { input, requestId, startedAt, ...value }; },
+          begin: () => {
+            res.writeHead(200, { "Content-Type": "audio/wav", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
+            this.report(s.id, "streaming", { trace: s.trace });
+          },
+          write: async value => { if (!res.write(value)) await once(res, "drain", { signal }); },
+        });
+        s.nativeStream = { input, requestId, startedAt, ...result };
+        bytes = result.bytes;
+      } else if (c.segmentMaxChars !== undefined && c.segmentMaxChars !== 0) {
         s.segments = [];
         bytes = await streamSpeechSegments({
           text: spokenText(s.text, c.pronunciations), maxChars: c.segmentMaxChars,
@@ -343,6 +376,7 @@ export class VoiceService {
           trace: s.trace,
           bytes,
           ...(s.segments ? { segments: s.segments } : {}),
+          ...(s.nativeStream ? { nativeStream: s.nativeStream } : {}),
         };
         this.report(s.id, "transport-complete", { trace: s.trace, bytes });
         void this.recordMetadata(s);
@@ -351,7 +385,8 @@ export class VoiceService {
       if (!s.abort.signal.aborted) {
         s.finished = true;
         this.current = null;
-        this.last = { id: s.id, status: "failed", trace: s.trace };
+        this.last = { id: s.id, status: "failed", trace: s.trace,
+          ...(s.nativeStream ? { nativeStream: s.nativeStream } : {}) };
         this.report(s.id, "failed", {
           error: e instanceof Error ? e.message : String(e),
           trace: s.trace,

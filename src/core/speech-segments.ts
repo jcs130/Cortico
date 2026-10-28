@@ -54,7 +54,7 @@ export function splitSynthesisText(text: string, maxChars: number, protectedTerm
   return segments;
 }
 
-function streamingHeader(sampleRate: number): Buffer {
+export function streamingHeader(sampleRate: number): Buffer {
   const b = Buffer.alloc(44);
   b.write("RIFF"); b.writeUInt32LE(0xffffffff, 4); b.write("WAVEfmt ", 8);
   b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22);
