@@ -8,6 +8,7 @@ import type { VoiceConfig } from "./types.ts";
 import { splitSynthesisText, streamSpeechSegments } from "./speech-segments.ts";
 import { spokenText, validatePronunciations } from "./speech-text.ts";
 import { streamPcmSse } from "./pcm-sse.ts";
+import { assertWavComplete } from "./wav.ts";
 type Session = {
   id: string;
   text: string;
@@ -22,6 +23,7 @@ type Session = {
   response?: ServerResponse;
   segments?: Record<string, unknown>[];
   nativeStream?: Record<string, unknown>;
+  wavStop?: string | null;
 };
 /** Forward typed recovery identifiers, never raw provider error text. */
 async function failure(response: Response): Promise<Error> {
@@ -138,6 +140,7 @@ export class VoiceService {
       transport: "chunked-wav",
       synthesisTransport: c?.synthesisTransport ?? "wav",
       pcmSampleRate: c?.pcmSampleRate ?? null,
+      requireWavCompletion: c?.requireWavCompletion ?? false,
       configuredSeed: typeof c?.extraBody?.seed === "number" ? c.extraBody.seed : null,
       textFormat: c?.textFormat ?? "plain",
       busyPolicy: c?.busyPolicy ?? 'replace',
@@ -271,6 +274,7 @@ export class VoiceService {
       let bytes = 0;
       if (c.synthesisTransport === "pcm-sse") {
         const requestId = randomUUID(), input = spokenText(s.text, c.pronunciations), startedAt = Date.now();
+        s.nativeStream = { input, requestId, startedAt, stop: null };
         const response = await fetch(endpoint(c.url), {
           method: "POST", redirect: "error", signal,
           headers: { "Content-Type": "application/json", ...auth,
@@ -295,6 +299,7 @@ export class VoiceService {
         s.segments = [];
         bytes = await streamSpeechSegments({
           text: spokenText(s.text, c.pronunciations), maxChars: c.segmentMaxChars,
+          requireWavCompletion: c.requireWavCompletion,
           protectedTerms: [...Object.keys(c.pronunciations ?? {}), ...Object.values(c.pronunciations ?? {})], signal, failure,
           request: (text, requestId) => fetch(endpoint(c.url), {
             method: "POST", redirect: "error", signal,
@@ -325,7 +330,6 @@ export class VoiceService {
           model: c.model,
           input: spokenText(s.text, c.pronunciations),
           voice: s.voice,
-          speed: 1,
           response_format: "wav",
           ...(c.instructions ? { instructions: c.instructions } : {}),
         }),
@@ -340,6 +344,8 @@ export class VoiceService {
         s.trace[key] = response.headers.get(key) ?? s.trace[key] ?? null;
       if (!response.ok || !response.body)
         throw await failure(response);
+      s.wavStop = response.headers.get("x-speech-stop");
+      assertWavComplete(response, c.requireWavCompletion);
       if (
         !/audio\/(wav|x-wav|wave)|application\/octet-stream/i.test(
           response.headers.get("content-type") ?? "",
@@ -377,6 +383,7 @@ export class VoiceService {
           bytes,
           ...(s.segments ? { segments: s.segments } : {}),
           ...(s.nativeStream ? { nativeStream: s.nativeStream } : {}),
+          ...(s.wavStop !== undefined ? { wavStop: s.wavStop } : {}),
         };
         this.report(s.id, "transport-complete", { trace: s.trace, bytes });
         void this.recordMetadata(s);
@@ -386,14 +393,20 @@ export class VoiceService {
         s.finished = true;
         this.current = null;
         this.last = { id: s.id, status: "failed", trace: s.trace,
-          ...(s.nativeStream ? { nativeStream: s.nativeStream } : {}) };
+          ...(s.nativeStream ? { nativeStream: s.nativeStream } : {}),
+          ...(s.wavStop !== undefined ? { wavStop: s.wavStop } : {}) };
+        // Also close an unread provider body (for example an incomplete WAV
+        // rejected from its headers), rather than leaving generation running.
+        s.abort.abort(e);
         this.report(s.id, "failed", {
           error: e instanceof Error ? e.message : String(e),
           trace: s.trace,
         });
         void this.recordMetadata(s);
-        if (!res.headersSent) res.writeHead(502);
-        res.end();
+        // A clean EOF after partial PCM could be mistaken for successful speech.
+        // Fail the downstream stream so its player cancels already scheduled audio.
+        if (res.headersSent) res.destroy(e instanceof Error ? e : Error(String(e)));
+        else { res.writeHead(502); res.end(); }
       }
     } finally {
       release?.();

@@ -92,6 +92,6 @@ describe('short sentence synthesis',()=>{
   vi.stubGlobal('fetch',async(_url:any,init:any)=>{bodies.push(JSON.parse(init.body));return new Response(wav(),{headers:{'content-type':'audio/wav'}})});
   const voice=new VoiceService(()=>({url:'http://fixture.invalid/speech',model:'fixture',voice:'private',segmentMaxChars:0}),directory,()=>{});await voice.start();
   voice.queue('original','第一句。第二句。');const out=new Output();await voice.stream('original',out as any);
-  expect(bodies).toHaveLength(1);expect(bodies[0]).toMatchObject({input:'第一句。第二句。',speed:1});expect(Buffer.concat(out.chunks)).toEqual(wav());await voice.stop();
+  expect(bodies).toHaveLength(1);expect(bodies[0]).toMatchObject({input:'第一句。第二句。'});expect(bodies[0]).not.toHaveProperty('speed');expect(Buffer.concat(out.chunks)).toEqual(wav());await voice.stop();
  });
 });

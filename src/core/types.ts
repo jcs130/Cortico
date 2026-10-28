@@ -107,6 +107,8 @@ export interface VoiceConfig {
   synthesisTransport?: "wav" | "pcm-sse";
   /** Explicit verified mono PCM16 output rate, required by native PCM SSE. */
   pcmSampleRate?: number;
+  /** Require an explicit successful X-Speech-Stop header on WAV responses. */
+  requireWavCompletion?: boolean;
   /** Opt-in sentence synthesis, forwarded as one PCM WAV stream. Zero disables it. */
   segmentMaxChars?: number;
   /** Explicit plain spoken forms for proper names; applied only at the TTS request boundary. */

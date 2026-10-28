@@ -12,9 +12,9 @@
 
 `voice.pronunciations` 是可选的名字→自然口语读法词典。只在最终合成请求应用，不改变原台词、气泡或聊天记录。相同读法也可用于保护中文名字不被切开；不接受未验证的音素、SSML 或说话人标记。默认空词典，不内置角色或服务器特例。
 
-后端支持时使用 `voice.synthesisTransport: "pcm-sse"` 和经过实测的 `voice.pcmSampleRate`。关闭客户端分段，一条台词发一个请求，原生 PCM SSE 转为同一个 WAV 流供现有播放器消费；首段音频不等待整个合成完成。后端 `stop: complete` 与样本数都核实后才记合成完成，生成上限、缺失终态或音频损坏均保留为失败。固定种子通过服务实际支持的 `extraBody` 配置，不内置角色或后端采样策略。
+后端支持时使用 `voice.synthesisTransport: "pcm-sse"` 和经过实测的 `voice.pcmSampleRate`。关闭客户端分段，一条台词发一个请求，原生 PCM SSE 转为同一个 WAV 流供现有播放器消费；首段音频不等待整个合成完成。后端 `stop: complete` 与样本数都核实后才记合成完成，生成上限、缺失终态或音频损坏均保留为失败，并停止已排队的音频。`top_k`、`top_p`、`temperature`、`seed` 仅按服务实际契约在 `extraBody` 显式配置；不默认给每条直播台词设置同一个种子。
 
-`voice.extraBody` 传入后端实际支持的 JSON 参数，例如服务支持时使用 `{max_seconds:10,top_k:4097}`。模型、台词、音色和所选音频传输由当前配置决定，附加参数不能覆盖。`voice.writingGuides` 按音色 ID 提供实际文本契约，通过语音状态按需读取。未配置分句时保留原有单次合成行为。
+`voice.extraBody` 传入后端实际支持的 JSON 参数，例如原生 Drama 3 连续生成服务使用 `{max_seconds:30,top_k:4097}`。此服务的 `max_seconds` 是每个引擎内部块的预算，整条语音可以超过 30 秒；客户端不发送 `options.text_chunk_size`、`text_chunk_mode` 或 `single_chunk`。模型、台词、音色和所选音频传输由当前配置决定，附加参数不能覆盖。`voice.writingGuides` 按音色 ID 提供实际文本契约，通过语音状态按需读取。未配置分句时保留原有单次合成行为。
 
 一条台词仍只有原来的 actionId；合成结束不产生播放完成证据，继续采用客户端 playing/ended 回执。说话人音色必须在后端真实注册，不会自动替换为其他音色。
 
@@ -151,7 +151,7 @@ npm run presets:install -- ./data/avatars vrm-twist-sample
 }
 ```
 
-只有 `url/model/voice` 是合成必需项。`voicesUrl` 与 LiteLLM 专用 `metricsUrl` 是可选扩展；普通服务无需实现。Bearer 从环境变量或受保护的 `credentialsFile` 读取，配置和状态不返回密钥。会话 ID 在 `dataDir` 下持久保存。请求固定 `speed:1,response_format:"wav"`，播放端支持 8–96kHz/单声道/PCM16 WAV；服务端负责分句、发音和合成修复。本 World 不添加注音、不另开 LLM 改写正文。
+只有 `url/model/voice` 是合成必需项。`voicesUrl` 与 LiteLLM 专用 `metricsUrl` 是可选扩展；普通服务无需实现。Bearer 从环境变量或受保护的 `credentialsFile` 读取，配置和状态不返回密钥。会话 ID 在 `dataDir` 下持久保存。默认请求 `response_format:"wav"`，不添加语速参数；播放端支持 8–96kHz/单声道/PCM16 WAV。切到原生 SSE 时，客户端请求 `response_format:"pcm",stream_format:"sse"`，按已确认的服务采样率消费。WAV 回执存在 `X-Speech-Stop` 时只接受 `complete`；设置 `voice.requireWavCompletion:true` 可要求该字段必填。Drama 3 没有可靠的数值调速接口，不发送 `speed`、`rate`、`tempo`，也不修改采样率冒充调速。本 World 不另开 LLM 改写正文。
 
 三个追踪头 `x-litellm-call-id`、`x-litellm-session-id`、`x-tts-request-id` 随回执归档；若配置 metrics，只归档与本次请求匹配的服务端条目。
 

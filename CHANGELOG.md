@@ -1,3 +1,9 @@
+## 0.1.2-rc.7
+
+- Verify WAV completion headers when present, with an opt-in requirement for services declaring X-Speech-Stop. Do not send an unsolicited speed parameter.
+- Destroy partial downstream audio streams on provider failure so disconnects and generation limits cannot become clean playback completion.
+- Clarify that sampling seeds are optional experiments, not a live voice lock, and keep vocal directions sparse.
+
 ## 0.1.2-rc.6
 
 - Add opt-in native PCM SSE synthesis: one backend generation context per utterance, immediate PCM forwarding under one WAV envelope, and no independent client chunks.

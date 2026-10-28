@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { wavInfo } from "./wav.ts";
+import { assertWavComplete, wavInfo } from "./wav.ts";
 import { SPEECH_MARKUP, termPattern } from "./speech-text.ts";
 
 /** Pack short sentences; prefer clause boundaries, then whole words, never a character offset. */
@@ -68,6 +68,7 @@ export function streamingHeader(sampleRate: number): Buffer {
 export async function streamSpeechSegments(options: {
   text: string; maxChars: number; signal: AbortSignal;
   protectedTerms?: readonly string[];
+  requireWavCompletion?: boolean;
   request(text: string, requestId: string): Promise<Response>;
   failure(response: Response): Promise<Error>;
   begin(response: Response): void;
@@ -81,6 +82,7 @@ export async function streamSpeechSegments(options: {
     const requestId = randomUUID(), startedAt = Date.now();
     const response = await options.request(text, requestId);
     if (!response.ok || !response.body) throw await options.failure(response);
+    const stop = assertWavComplete(response, options.requireWavCompletion);
     if (!/audio\/(wav|x-wav|wave)|application\/octet-stream/i.test(response.headers.get("content-type") ?? ""))
       throw Error("TTS did not return WAV");
     const chunks: Uint8Array[] = []; let length = 0;
@@ -108,7 +110,7 @@ export async function streamSpeechSegments(options: {
     if (bytes > 128 * 1024 * 1024) throw Error("Speech exceeded stream limit");
     await options.write(pcm);
     options.segment?.({ index, total: parts.length, requestId, input: text, startedAt, endedAt: Date.now(),
-      status: response.status, bytes: pcm.length, durationMs: info.durationMs,
+      status: response.status, bytes: pcm.length, durationMs: info.durationMs, stop,
       serverRequestId: response.headers.get("x-tts-request-id") });
   }
   return bytes;

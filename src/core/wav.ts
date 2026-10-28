@@ -1,3 +1,18 @@
+/** A successful HTTP response may still contain a truncated generated WAV. */
+export function assertWavComplete(response: Response, required = false): string | null {
+  const raw = response.headers.get("x-speech-stop");
+  if (raw === null) {
+    if (required) throw Error("TTS WAV is missing X-Speech-Stop completion evidence");
+    return null;
+  }
+  const stop = raw.trim();
+  if (stop !== "complete") {
+    const reason = /^[a-z_]{1,48}$/i.test(stop) ? stop : "unknown";
+    throw Error("TTS generation incomplete: " + reason);
+  }
+  return stop;
+}
+
 export function wavInfo(bytes: Uint8Array, totalBytes = bytes.byteLength) {
   const b = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (

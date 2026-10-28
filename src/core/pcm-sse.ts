@@ -31,7 +31,11 @@ export async function streamPcmSse(options: {
     const payload = data.join("\n"); data = []; dataSize = 0;
     if (!payload || payload === "[DONE]") return;
     const event = JSON.parse(payload);
-    if (event.type === "error" || event.error) throw Error("TTS native stream reported an error");
+    if (event.type === "error" || event.type === "speech.audio.error" || event.error) {
+      options.terminal?.({ stop: "error", samples: pcmBytes / 2, pcmBytes, frames,
+        firstAudioAt, completedAt: Date.now() });
+      throw Error("TTS native stream reported an error");
+    }
     if (event.type === "speech.audio.delta") {
       if (done) throw Error("TTS audio arrived after completion");
       if (typeof event.audio !== "string" || !event.audio.length || event.audio.length % 4
@@ -47,6 +51,9 @@ export async function streamPcmSse(options: {
     } else if (event.type === "speech.audio.done") {
       if (done) throw Error("Duplicate native speech completion");
       done = event;
+      // Retain failed/empty terminal evidence as well as successful generations.
+      options.terminal?.({ samples: event.samples, seed: event.seed ?? null, stop: event.stop ?? null,
+        firstAudioAt, completedAt: Date.now(), pcmBytes, frames });
     }
   };
   const line = async (raw: string) => {
@@ -72,8 +79,6 @@ export async function streamPcmSse(options: {
   signal.throwIfAborted();
   if (!done || firstAudioAt === null || !pcmBytes) throw Error("TTS stream ended without confirmed audio completion");
   const terminal = done as Record<string, unknown>;
-  options.terminal?.({ samples: terminal.samples, seed: terminal.seed ?? null, stop: terminal.stop ?? null,
-    firstAudioAt, completedAt: Date.now(), pcmBytes, frames });
   if (!Number.isSafeInteger(terminal.samples) || terminal.samples !== pcmBytes / 2)
     throw Error("TTS native sample count does not match PCM bytes");
   if (terminal.stop !== "complete") {

@@ -162,6 +162,18 @@ it("keeps cancellation attached after all WAV bytes arrive and clears already sc
     }),
   );
 });
+it("stops queued PCM and never completes playback after an upstream stream failure", async () => {
+  let producer!:ReadableStreamDefaultController<Uint8Array>;
+  const body=new ReadableStream<Uint8Array>({start(c){producer=c;}}), sources:any[]=[], ended=vi.fn();
+  vi.spyOn(globalThis,'fetch').mockResolvedValue(new Response(body,{headers:{'content-type':'audio/wav'}}));
+  const context={state:'running',currentTime:0,destination:{},createBuffer:()=>({copyToChannel(){}}),
+    createBufferSource:()=>{const source={connect(){},start(){},stop:vi.fn()};sources.push(source);return source;}};
+  const result=playSpeech({url:'http://fixture.invalid/partial',context,signal:new AbortController().signal,onEnd:ended});
+  const failed=expect(result).rejects.toThrow('provider disconnected');
+  producer.enqueue(wav(2,44100));await vi.waitFor(()=>expect(sources.length).toBeGreaterThan(0));
+  producer.error(Error('provider disconnected'));await failed;
+  expect(sources.every(n=>n.stop.mock.calls.length===1)).toBe(true);expect(ended).not.toHaveBeenCalled();
+});
 it("streams before provider completion, snapshots the chosen voice, and aborts the old upstream HTTP request", async () => {
   const directory = await mkdtemp(join(tmpdir(), "avatar-voice-"));
   cleanup.push(() => rm(directory, { recursive: true, force: true }));
