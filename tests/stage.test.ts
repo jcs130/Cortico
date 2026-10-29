@@ -62,7 +62,15 @@ it.each([false, true, 'missing', 'rejected', 'slow-catalog'])('routes speech and
   expect(uploads[0]).toEqual(bytes);
   expect(commands.find(c => c.action === 'play-audio')).toMatchObject({ kind: 'speech', text: 'A short spoken line.' });
   expect(server.stage.ledger.result(String(voice.id)).status).toBe('queued');
-  const spoken = state.media.recent[0]; spoken.state = 'playing'; spoken.startedAt = Date.now();
+  const spoken = state.media.recent[0];
+  if (explicit === false) {
+    const receipts = vi.spyOn(server.stage, 'receipt');
+    spoken.waiting = {kind:'speech-floor',position:2,since:Date.now()};
+    await vi.waitFor(() => expect(receipts).toHaveBeenCalledWith(expect.objectContaining({status:'waiting',eventId:voice.id,
+      waiting:expect.objectContaining({kind:'speech-floor',position:2})})), {timeout:2500});
+    expect(server.stage.ledger.result(String(voice.id)).status).toBe('queued');
+  }
+  delete spoken.waiting; spoken.state = 'playing'; spoken.startedAt = Date.now();
   await vi.waitFor(() => expect(server.stage.ledger.result(String(voice.id)).status).toBe('playing'), { timeout: 2500 });
   expect(server.stage.ledger.result(String(voice.id)).evidence).toMatchObject({durationMs:100});
   expect(await renderer.attach({ audioActionId: voice.id, bodyClip: 'wave', expressionWeights: { happy: .5 } })).toMatchObject({ accepted: explicit !== 'rejected' });

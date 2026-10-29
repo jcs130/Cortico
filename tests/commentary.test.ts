@@ -43,9 +43,11 @@ describe("optional evidence-based game commentary", () => {
     r.answer('刚才 Jojo 提到了村口的马。',[1],'observation','recent'); await settle();
     expect(r.perform).toHaveBeenCalledWith('刚才 Jojo 提到了村口的马。',1,[1],'recent'); expect(r.request).toHaveBeenCalledTimes(1);
   });
-  it('cancels an actual reply when newer conversation arrives in its source World', async () => {
-    const r=rig(); r.observe(); r.lane.tick(); r.observe(2,'game.chat','等等，先别过去。');
-    r.answer('好，我听到了。',[1],'reply','recent'); await settle(); expect(r.perform).not.toHaveBeenCalled();
+  it('keeps a dated reply while another speaker appends chat in the same World', async () => {
+    const r=rig(); r.observe(1,'game.chat','Jojo：你看到马了吗？'); r.lane.tick();
+    r.observe(2,'game.chat','Alex：我去取木头。');
+    r.answer('Jojo，刚才看到村口那匹马了。',[1],'reply','recent'); await settle();
+    expect(r.perform).toHaveBeenCalledWith('Jojo，刚才看到村口那匹马了。',1,[1],'recent');
   });
   it('does not cancel a reply for conversation arriving from a different World', async () => {
     const r=rig(); r.config.sources='game other'; r.observe(); r.lane.tick(); r.observe(2,'other.chat','另一边的聊天。','other');
@@ -125,13 +127,12 @@ describe("optional evidence-based game commentary", () => {
       r.speech.backlogMs = 6000; r.lane.tick(); expect(r.request).toHaveBeenCalledTimes(1);
     }
   });
-  it.each(['foreground', 'new-chat', 'pause', 'stop', 'disabled', 'revision', 'expired', 'changed-fact', 'format', 'heartbeat'])(
+  it.each(['foreground', 'pause', 'stop', 'disabled', 'revision', 'expired', 'changed-fact', 'format', 'heartbeat'])(
     'never submits a prefetched candidate after %s', async reason => {
       const r = rig(); Object.assign(r.speech, { busy: true, playing: true, idleSinceMs: null, queueRevision: 7 });
-      r.observe(); r.lane.tick(); r.answer(undefined, [1], reason === 'new-chat' ? 'reply' : 'observation'); await settle();
+      r.observe(); r.lane.tick(); r.answer(undefined, [1], 'observation'); await settle();
       expect(r.perform).not.toHaveBeenCalled();
       if (reason === 'foreground') r.lane.foregroundSpeech('主线程已经接话。');
-      if (reason === 'new-chat') r.observe(2, 'game.chat', '有人向主播提问。');
       if (reason === 'pause') r.available.active = false;
       if (reason === 'stop') r.lane.stop();
       if (reason === 'disabled') r.config.enabled = false;
@@ -184,15 +185,14 @@ describe("optional evidence-based game commentary", () => {
     expect(r.perform).toHaveBeenCalledTimes(1); expect(r.request).toHaveBeenCalledTimes(1);
     r.observe(2); r.lane.tick(); expect(r.request).toHaveBeenCalledTimes(1);
   });
-  it.each(["new-chat", "foreground", "pause", "stop", "cited-replaced", "old-result"])("discards a late draft after %s", async reason => {
+  it.each(["foreground", "pause", "stop", "cited-replaced", "old-result"])("discards a late draft after %s", async reason => {
     const r = rig(); r.observe(); r.lane.tick();
-    if (reason === "new-chat") r.observe(2, "game.chat", "Jojo：等等。");
     if (reason === "foreground") r.lane.foregroundSpeech("主线程先接话。");
     if (reason === "pause") r.available.active = false;
     if (reason === "stop") r.lane.stop();
     if (reason === "cited-replaced") r.observe(2, 'game.snapshot', '刚才那条读数已经发生变化。');
     if (reason === "old-result") r.advance(31_000);
-    r.answer(undefined, [1], reason === 'new-chat' ? 'reply' : 'observation'); await settle(); expect(r.perform).not.toHaveBeenCalled();
+    r.answer(undefined, [1], 'observation'); await settle(); expect(r.perform).not.toHaveBeenCalled();
     expect(r.lane.facts()).toContain("stale");
   });
   it('does not cancel a pending draft for system chat transport or outgoing echoes', async () => {

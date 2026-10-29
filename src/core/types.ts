@@ -169,7 +169,7 @@ export interface RendererReceipt {
   role: "preview" | "broadcast";
   surface?: "control" | "obs" | "desktop";
   renderer?: 'avatar' | 'audio-only';
-  status: "ready" | "heartbeat" | "applied" | "playing" | "ended" | "failed";
+  status: "ready" | "heartbeat" | "applied" | "waiting" | "playing" | "ended" | "failed";
   eventId?: string;
   avatarId: string;
   avatarSha256: string;

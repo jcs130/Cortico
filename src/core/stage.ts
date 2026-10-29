@@ -763,7 +763,7 @@ export class AvatarStage {
       avatar.preset.sha256 !== r.avatarSha256 ||
       r.avatarId !== this.activeId ||
       !["preview", "broadcast"].includes(r.role) ||
-      !["ready", "heartbeat", "applied", "playing", "ended", "failed"].includes(
+      !["ready", "heartbeat", "applied", "waiting", "playing", "ended", "failed"].includes(
         r.status,
       )
     )
@@ -794,6 +794,17 @@ export class AvatarStage {
         !this.audioAllowed(r.sessionId)
       )
         throw Error("Audio receipt from non-owner renderer");
+      if (r.status === 'waiting') {
+        const w = input.waiting as Record<string, unknown> | undefined;
+        if (!['speech','music-play'].includes(previous.kind) || previous.status !== 'queued'
+          || w?.kind !== 'speech-floor' || !Number.isInteger(w.position) || Number(w.position) < 1 || Number(w.position) > 16)
+          throw Error('Invalid external audio wait receipt');
+        await this.ledger.note(r.eventId, {playbackWaiting:{kind:'speech-floor',position:w.position,
+          ...(typeof w.since === 'number' && Number.isFinite(w.since) ? {since:w.since} : {})}});
+        this.emit('avatar.voice', {actionId:r.eventId,status:'waiting-turn',position:w.position,
+          executionConfirmed:false});
+        return {ok:true,executionConfirmed:false};
+      }
       const status =
         r.status === "playing"
           ? "playing"

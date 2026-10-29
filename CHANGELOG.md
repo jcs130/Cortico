@@ -1,3 +1,8 @@
+## 0.1.2-rc.11
+
+- Preserve dated replies when unrelated speakers append chat; keep scene freshness, explicit foreground priority and duplicate guards. Record the cited evidence when freshness rejects a draft.
+- Reconcile external shared-audio turn waits as queued observations, with no playback completion claim.
+
 ## 0.1.2-rc.10
 
 - Add the native drama-rs `/v1/speak` protocol, verified health/remote voice discovery and one unsplit streaming WAV request per utterance. Unknown voices never fall back.

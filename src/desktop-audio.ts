@@ -10,7 +10,7 @@ export class DesktopAudioRenderer {
   private binding: { avatarId: string; avatarSha256: string } | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
-  private live: { stageId: string; desktopId?: string; abort: AbortController; reported?: string; durationMs?: number; performanceCue?: Record<string, unknown> } | null = null;
+  private live: { stageId: string; desktopId?: string; abort: AbortController; reported?: string; waitingKey?: string; durationMs?: number; performanceCue?: Record<string, unknown> } | null = null;
   private texts = new Map<string, string>();
   private alreadyCaptioned = new Set<string>();
   private stopped = false;
@@ -60,6 +60,13 @@ export class DesktopAudioRenderer {
       const current = this.live;
       if (!current?.desktopId) return;
       const row = media.recent.find(r => r.id === current.desktopId);
+      if (row?.state === 'queued' && row.waiting?.kind === 'speech-floor') {
+        const key = JSON.stringify(row.waiting);
+        if (key !== current.waitingKey) {
+          await this.receipt('waiting', current.stageId, {waiting:row.waiting,desktopMediaId:row.id});
+          current.waitingKey = key;
+        }
+      }
       if (!row || row.state === 'queued' || row.state === current.reported) return;
       if (row.state === 'playing') {
         await this.receipt('playing', current.stageId, { audioTimeMs: row.audioTimeMs ?? 0, durationMs: current.durationMs,

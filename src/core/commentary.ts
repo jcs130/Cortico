@@ -46,10 +46,6 @@ export interface CommentaryEvent {
 }
 
 interface Evidence extends CommentaryEvent { truncated: boolean }
-function conversation(e: CommentaryEvent): boolean {
-  return /chat|danmaku|message/.test(e.type) && e.meta?.channel !== 'system'
-    && e.meta?.outgoing !== true && e.meta?.direction !== 'outgoing';
-}
 function sameObservation(a: CommentaryEvent, b: CommentaryEvent): boolean {
   return a.source === b.source && a.type === b.type && a.origin === b.origin && a.senderKey === b.senderKey && a.text === b.text;
 }
@@ -89,7 +85,6 @@ interface Draft {
   revision: number | undefined; idleSince: number | null; duringPlayback: boolean;
   timeframe?: 'current' | 'recent';
   kind?: 'observation' | 'reply' | 'thought';
-  chatVersions: ReadonlyMap<string, number>;
   ownActionId?: string;
 }
 
@@ -176,7 +171,6 @@ export class CommentaryLane {
   private evidence = new Map<string, Evidence>();
   private snapshots = new Map<string, Evidence>();
   private outcomes = new Map<string, Evidence>();
-  private chatVersions = new Map<string, number>();
   private recent: Submission[] = [];
   private lastEvaluated = '';
   private state: CommentaryState = 'disabled';
@@ -197,9 +191,8 @@ export class CommentaryLane {
     // Only snapshots replace a previous complete state. Two independent task
     // results/system events of the same type are separate historical evidence.
     const key = snapshot(e) ? `${e.source}:${e.type}` : `${e.source}:${e.cursor}`;
-    // New chat can supersede a reply in that World, but does not erase a dated
-    // observation or silence other Worlds. Actual foreground speech owns priority.
-    if (conversation(e)) this.chatVersions.set(e.source, (this.chatVersions.get(e.source) ?? 0) + 1);
+    // Chat appends to a conversation; a later speaker does not revoke an earlier
+    // message. Foreground speech explicitly invalidates its competing draft.
     const target = snapshot(e) ? this.snapshots : this.evidence;
     target.delete(key);
     target.set(key, preview(e, text));
@@ -253,8 +246,6 @@ export class CommentaryLane {
     if (!this.healthy() || !s || draft.epoch !== this.epoch || draft.sources !== c.sources || draft.style !== c.style
       || (s.textFormat ?? 'plain') !== draft.textFormat || s.queueRevision !== draft.revision
       || this.now() - draft.startedAt > Math.max(1, c.factAgeSec) * 1000) return false;
-    if (draft.kind === 'reply' && draft.facts.some(e => draft.evidence.includes(e.cursor)
-      && (this.chatVersions.get(e.source) ?? 0) !== (draft.chatVersions.get(e.source) ?? 0))) return false;
     if (draft.ownActionId && s.busy) {
       if (s.foregroundActionId !== draft.ownActionId) return false;
     } else if (draft.duringPlayback ? s.busy && !s.playing : s.busy || s.idleSinceMs !== draft.idleSince) return false;
@@ -328,7 +319,7 @@ export class CommentaryLane {
     this.ports.log('commentary-request', { requestId: serial, idleSinceMs: idleSince, duringPlayback,
       queueRevision: revision, taskChars: brief.length, evidence: facts.map(e => e.cursor), context: 'task', tools: [] });
     const draft: Draft = { script: '', evidence: [], facts, epoch, idleSince, serial, startedAt: now, readyAt: now,
-      sources: c.sources, style: c.style, revision, duringPlayback, textFormat, chatVersions: new Map(this.chatVersions) };
+      sources: c.sources, style: c.style, revision, duringPlayback, textFormat };
     void this.run(brief, draft, inputKey).finally(() => this.finish());
   }
 
@@ -397,7 +388,13 @@ export class CommentaryLane {
           this.state = 'skipped'; this.ports.log('commentary-skipped', { requestId: serial, reason,
             ...(skipReason ? { skipReason } : {}) }); return;
         }
-        if (stale) { this.stale(serial, 'cited-evidence-changed'); return; }
+        if (stale) {
+          this.ports.log('commentary-invalid-evidence', { requestId: serial, kind: draft?.kind,
+            timeframe: draft?.timeframe, evidence: draft?.evidence,
+            agesMs: draft?.evidence.map(cursor => ({ cursor,
+              ageMs: this.now() - Date.parse(candidate.facts.find(e => e.cursor === cursor)!.ts) })) });
+          this.stale(serial, 'cited-evidence-changed'); return;
+        }
         Object.assign(candidate, draft, { readyAt: this.now() });
         if (!this.valid(candidate)) { this.stale(serial, 'cited-evidence-changed'); return; }
         if (this.eligible()) await this.submit(candidate);
@@ -435,6 +432,6 @@ export class CommentaryLane {
     }
   }
 
-  stop(): void { this.stopped = true; this.epoch++; this.ready = null; this.evidence.clear(); this.snapshots.clear(); this.outcomes.clear(); this.chatVersions.clear(); this.lastEvaluated = ''; }
+  stop(): void { this.stopped = true; this.epoch++; this.ready = null; this.evidence.clear(); this.snapshots.clear(); this.outcomes.clear(); this.lastEvaluated = ''; }
   resume(): void { this.stopped = false; this.epoch++; this.ready = null; this.prefetchedRevision = undefined; this.nextAt = 0; }
 }
