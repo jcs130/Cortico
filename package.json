@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-avatar-stage",
-  "version": "0.1.2-rc.11",
+  "version": "0.1.2-rc.12",
   "description": "Independent LLM-controlled 3D avatar, motion library and singing World",
   "type": "module",
   "license": "AGPL-3.0-only",
@@ -104,7 +104,8 @@
     "README.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
-    "AGENTS.md"
+    "AGENTS.md",
+    "docs/game-voice-artifacts.md"
   ],
   "packageManager": "pnpm@11.28.6"
 }

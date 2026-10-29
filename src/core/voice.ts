@@ -10,7 +10,9 @@ import { spokenText, validatePronunciations } from "./speech-text.ts";
 import { streamPcmSse } from "./pcm-sse.ts";
 import { assertWavComplete } from "./wav.ts";
 import { dramaRsBody, dramaRsEndpoints, dramaRsVoices, streamDramaRs } from "./drama-rs.ts";
+import {VoiceArtifacts, type VoiceArtifact} from './voice-artifacts.ts';
 type Session = {
+  artifact?: {metadata:VoiceArtifact;bytes:Buffer};
   id: string;
   text: string;
   voice: string;
@@ -51,6 +53,7 @@ async function failure(response: Response): Promise<Error> {
   finally { await reader.cancel().catch(() => {}); }
 }
 export class VoiceService {
+  readonly artifacts: VoiceArtifacts;
   private sessionId = "";
   private current: Session | null = null;
   private last: Record<string, unknown> | null = null;
@@ -67,7 +70,7 @@ export class VoiceService {
       status: string,
       data: Record<string, unknown>,
     ) => void,
-  ) {}
+  ) {this.artifacts=new VoiceArtifacts(join(directory,'voice-artifacts'),(text,id,signal)=>this.renderArtifact(text,id,signal));}
   async start() {
     this.metadataAbort = new AbortController();
     await mkdir(this.directory, { recursive: true });
@@ -249,6 +252,48 @@ export class VoiceService {
     if (seed !== undefined) config.extraBody = { ...config.extraBody, seed };
     return { text: text.trim(), voice: selected, config };
   }
+  /** Produce audio only: does not acquire a renderer, interrupt speech, emit playback, or use a broadcast floor. */
+  private async renderArtifact(text:string,id:string,caller:AbortSignal) {
+    const {voice,config:c}=this.validate(text);
+    if(c.segmentMaxChars)throw Error('Audio artifacts require one full utterance, not independent clones');
+    const signal=AbortSignal.any([caller,this.metadataAbort.signal,AbortSignal.timeout(c.synthesisTimeoutMs??90000)]);
+    const previous=this.synthesisTail;let release!:()=>void;
+    this.synthesisTail=new Promise<void>(resolve=>{release=resolve;});
+    const chunks:Buffer[]=[];let size=0,generationComplete:boolean|null=null;
+    const write=async(value:Uint8Array)=>{signal.throwIfAborted();size+=value.byteLength;
+      if(size>4*1024*1024)throw Error('Game voice exceeds 4MiB/30s; line was not uploaded');chunks.push(Buffer.from(value));};
+    try {
+      await previous;signal.throwIfAborted();
+      if(c.synthesisTransport==='drama-rs-wav') {
+        await streamDramaRs({url:c.url,text:spokenText(text,c.pronunciations),voice,extraBody:c.extraBody,
+          directory:this.directory,actionId:id,sessionId:this.sessionId,signal,failure,
+          begin:()=>{},write,evidence:()=>{}});
+      } else {
+        const auth=await bearer(c),pcm=c.synthesisTransport==='pcm-sse';
+        const response=await fetch(endpoint(c.url),{method:'POST',redirect:'error',signal,
+          headers:{'Content-Type':'application/json',...auth,'x-client-request-id':id,'x-litellm-session-id':this.sessionId},
+          body:JSON.stringify({...c.extraBody,model:c.model,input:spokenText(text,c.pronunciations),voice,
+            response_format:pcm?'pcm':'wav',...(pcm?{stream_format:'sse'}:{}),...(c.instructions?{instructions:c.instructions}:{})})});
+        if(!response.ok||!response.body)throw await failure(response);
+        if(pcm){await streamPcmSse({response,sampleRate:c.pcmSampleRate!,signal,begin:()=>{},write,terminal:()=>{}});generationComplete=true;}
+        else {
+          try {const stop=assertWavComplete(response,c.requireWavCompletion);generationComplete=stop==='complete'?true:null;
+            const reader=response.body.getReader();try {for(;;){const row=await reader.read();if(row.done)break;await write(row.value);}}
+            finally{await reader.cancel().catch(()=>{});reader.releaseLock();}
+          }catch(error){await response.body.cancel().catch(()=>{});throw error;}
+        }
+      }
+      return {bytes:Buffer.concat(chunks),voice,generationComplete};
+    }finally{release();}
+  }
+  queueArtifact(id:string,artifact:{metadata:VoiceArtifact;bytes:Buffer}) {
+    const artifactId=artifact.metadata.requestId,config=this.config();
+    if(!config)throw Error('Stage voice configuration unavailable');
+    this.interrupt('superseded');
+    this.current={id,text:artifact.metadata.text??'',voice:artifact.metadata.voice??'external-audio',abort:new AbortController(),
+      opened:false,finished:false,trace:{'x-audio-artifact-id':artifactId},config:structuredClone(config),artifact};
+    return {id,url:'/audio/speech/'+encodeURIComponent(id),prebufferMs:480};
+  }
   queue(id: string, text: unknown, voice?: unknown, seed?: unknown) {
     const validated = this.validate(text, voice, seed);
     this.interrupt("superseded");
@@ -292,6 +337,19 @@ export class VoiceService {
       if (!s.finished && !s.abort.signal.aborted)
         this.interrupt("playback-connection-closed");
     });
+    if(s.artifact) {
+      try {
+        res.writeHead(200,{'Content-Type':'audio/wav','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});
+        this.report(s.id,'streaming',{audioArtifact:s.artifact.metadata.requestId,generationComplete:s.artifact.metadata.generationComplete});
+        for(let at=0;at<s.artifact.bytes.length;at+=65536){s.abort.signal.throwIfAborted();
+          if(!res.write(s.artifact.bytes.subarray(at,at+65536)))await once(res,'drain',{signal:s.abort.signal});}
+        s.finished=true;s.transportFinishedAt=Date.now();res.end();
+        this.last={id:s.id,status:'transport-complete',artifact:s.artifact.metadata};
+        this.report(s.id,'transport-complete',{bytes:s.artifact.bytes.length,audioArtifact:s.artifact.metadata.requestId,
+          generationComplete:s.artifact.metadata.generationComplete});
+      }catch(error){if(!s.abort.signal.aborted)this.interrupt('artifact-playback-connection-failed');if(!res.destroyed)res.destroy();}
+      return;
+    }
     let release: (() => void) | undefined;
     try {
       const signal = AbortSignal.any([
@@ -467,6 +525,8 @@ export class VoiceService {
   }
   generationEvidence(id: string): Record<string, unknown> {
     const s = this.current;
+    if(s?.id===id&&s.artifact)return {generationComplete:s.artifact.metadata.generationComplete,
+      audioArtifact:s.artifact.metadata.requestId,transportEnded:s.finished&&!!s.transportFinishedAt};
     if (!s || s.id !== id || s.config.synthesisTransport !== "drama-rs-wav") return {};
     return { generationComplete: null, generationStop: null,
       completionEvidence: "not-provided-by-native-api", transportEnded: s.finished && !!s.transportFinishedAt };

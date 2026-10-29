@@ -510,7 +510,10 @@ export class AvatarStage {
     }
     if (args.action !== "speak") throw Error("Unknown voice action");
     checkSpeechFreshness(args, this.config.speechObservationMaxAgeSeconds ?? 0);
-    this.voice.validate(args.text, args.voice, args.seed);
+    if(args.audioArtifact!==undefined) {
+      const artifact=await this.voice.artifacts.read(id(args.audioArtifact,'audio artifact'));
+      if(args.text!==artifact.metadata.text&&!(artifact.metadata.text===undefined&&args.text===''))throw Error('Artifact text mismatch');
+    } else this.voice.validate(args.text, args.voice, args.seed);
     const busyPolicy=this.config.voice?.busyPolicy??'replace';
     if(!['replace','preserve'].includes(busyPolicy))throw Error('Invalid speech busy policy');
     const active = this.ensureActive();
@@ -537,6 +540,7 @@ export class AvatarStage {
       };
     const command={
       text: args.text,
+      ...(args.audioArtifact!==undefined?{audioArtifact:args.audioArtifact}:{}),
       voice: args.voice ?? this.voice.status().voice,
       ...(args.seed !== undefined ? {seed: args.seed} : {}),
       ...(requestedPerformance ? {performance: requestedPerformance} : {}),
@@ -547,7 +551,7 @@ export class AvatarStage {
     }
     // Only a foreground line blocked by automatic commentary may reserve the
     // next gap. This is one unsynthesized candidate, not another audio queue.
-    if (busyPolicy === 'preserve' && this.foreground && this.automaticSpeech.has(this.foreground)
+    if (busyPolicy === 'preserve' && this.foreground && (this.automaticSpeech.has(this.foreground) || typeof args.audioArtifact==='string')
       && args.ifIdleRevision === undefined && !this.waitingSpeech && !this.speechAdmissions.size) {
       const timeout = this.config.voice?.pendingTimeoutMs ?? 60000;
       if (!Number.isSafeInteger(timeout) || timeout < 1000 || timeout > 300000) throw Error('Invalid pending speech timeout');
@@ -600,7 +604,13 @@ export class AvatarStage {
       : resolveSpeechPerformance(requestedPerformance, active.capabilities.expressions as string[], active.capabilities.clips as string[]);
     const performance = resolved.applied;
     try {
-      const stream = this.voice.queue(actionId, args.text, args.voice, args.seed);
+      const revision=this.audioRevision;
+      const artifact=typeof args.audioArtifact==='string'?await this.voice.artifacts.read(args.audioArtifact):null;
+      if(this.stopped||this.audioRevision!==revision||this.owner?.sessionId!==sessionId) {
+        await this.recordState(actionId,'cancelled',{reason:'Output changed while preparing artifact'});
+        return {...this.ledger.result(actionId),accepted:false};
+      }
+      const stream = artifact?this.voice.queueArtifact(actionId,artifact):this.voice.queue(actionId, args.text, args.voice, args.seed);
       this.foreground = actionId;
       if (args.ifIdleRevision !== undefined) this.automaticSpeech.add(actionId);
       if (performance && !desktop) {
@@ -639,6 +649,16 @@ export class AvatarStage {
       await this.recordState(actionId, "failed", { error: String(e) });
       throw e;
     }
+  }
+  /** Explicit mirror of game audio. Uses ordinary broadcast admission and renderer receipts, never re-synthesizes. */
+  async broadcastVoiceArtifact(requestId:string) {
+    const old=[...this.ledger.actions.values()].find(row=>row.requestId===requestId);
+    if(old) {
+      if(old.kind!=='speech'||old.command.audioArtifact!==requestId)throw Error('Broadcast request ID conflict');
+      return {...this.ledger.result(old.id),accepted:['queued','playing','completed'].includes(old.status),reused:true};
+    }
+    const artifact=await this.voice.artifacts.read(requestId);
+    return this.voiceAction({action:'speak',text:artifact.metadata.text??'',voice:artifact.metadata.voice??'external-audio',audioArtifact:requestId},requestId);
   }
   private async drainWaitingSpeech() {
     const waiting = this.waitingSpeech;

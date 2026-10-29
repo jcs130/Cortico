@@ -189,12 +189,12 @@ export class AvatarStageServer {
     }
     const url = new URL(req.url ?? "/", "http://localhost"),
       path = url.pathname;
-    if (!["GET", "HEAD", "POST"].includes(req.method ?? "")) {
+    if (!["GET", "HEAD", "POST", "PUT"].includes(req.method ?? "")) {
       res.writeHead(405).end();
       return;
     }
     if (
-      req.method === "POST" &&
+      ["POST", "PUT"].includes(req.method ?? "") &&
       req.headers.origin &&
       req.headers.origin !== `http://${req.headers.host}`
     ) {
@@ -268,6 +268,32 @@ export class AvatarStageServer {
         await this.importMusic(Buffer.concat(chunks), metadata),
       );
       return;
+    }
+    if(path==='/api/voice-artifacts'&&req.method==='POST') {
+      const body=await this.body(req),requestId=id(body.requestId,'artifact request ID');
+      if(Object.keys(body).some(key=>!['requestId','text'].includes(key)))throw Error('Audio producer accepts only requestId and one full text line');
+      if(typeof body.text!=='string')throw Error('One full line is required');
+      const abort=new AbortController();res.once('close',()=>{if(!res.writableEnded)abort.abort();});
+      await this.stage.voice.artifacts.create(requestId,body.text,abort.signal);
+      const artifact=await this.stage.voice.artifacts.read(requestId);
+      res.writeHead(200,{'Content-Type':'audio/wav','Cache-Control':'no-store','X-Content-Type-Options':'nosniff',
+        'X-Voice-Artifact-Id':requestId,'X-Voice-Audio-Sha256':artifact.metadata.sha256!,
+        'X-Voice-Generation-Complete':String(artifact.metadata.generationComplete)}).end(artifact.bytes);
+      return;
+    }
+    const voiceArtifact=/^\/api\/voice-artifacts\/([^/]+)(\/broadcast)?$/.exec(path);
+    if(voiceArtifact) {
+      const requestId=id(decodeURIComponent(voiceArtifact[1]),'artifact request ID');
+      if(voiceArtifact[2]&&req.method==='POST') {
+        await this.body(req);this.json(res,200,await this.stage.broadcastVoiceArtifact(requestId));return;
+      }
+      if(!voiceArtifact[2]&&req.method==='PUT') {
+        if(req.headers['content-type']!=='audio/wav')throw Error('PCM16 WAV required');
+        let size=0;const parts:Buffer[]=[];
+        for await(const part of req){size+=part.length;if(size>4*1024*1024)throw Error('Artifact max4MiB');parts.push(Buffer.from(part));}
+        if(req.destroyed&&!req.complete)throw Error('Artifact upload aborted');
+        this.json(res,200,await this.stage.voice.artifacts.import(requestId,Buffer.concat(parts)));return;
+      }
     }
     if (path === "/api/call" && req.method === "POST") {
       const body = await this.body(req),

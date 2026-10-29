@@ -228,3 +228,7 @@ Commentary diagnostics distinguish `model-skip`, `invalid-json`, `invalid-output
 
 
 `voice.pendingTimeoutMs` defaults to 60000 (range 1000–300000) for one waiting foreground line; `voice.synthesisTimeoutMs` defaults to 90000. These are separate from observed-at freshness and the Persona-owned cognition deadline. Extending a queue timeout does not turn stale observations into current facts. Read `avatar_control status` for desktop support: installed expressions/motions and declared moves are available; raw bone control and uninstalled generated clips return an explicit unsupported result. Generated candidates can still be reviewed on the stage preview page.
+
+### Game speech artifacts
+
+[Nearby game speech and optional livestream mirroring](docs/game-voice-artifacts.md) reuse the current voice and one WAV, with separate output admission and playback receipts. Ordinary audience commentary stays in this presentation World.

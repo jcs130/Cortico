@@ -1,3 +1,7 @@
+## 0.1.2-rc.12
+
+Add synthesis-only artifacts and optional same-WAV game/livestream mirroring with independent receipts and no second TTS request.
+
 ## 0.1.2-rc.11
 
 - Preserve dated replies when unrelated speakers append chat; keep scene freshness, explicit foreground priority and duplicate guards. Record the cited evidence when freshness rejects a draft.

@@ -116,6 +116,25 @@ async function speechSetup() {
   return r;
 }
 
+it('broadcasts an imported game WAV once with actual renderer receipts and no new TTS request',async()=>{
+  const {server,preset}=await speechSetup();
+  // The configured upstream port is deliberately closed. Playback can only succeed by reusing the artifact.
+  const artifactId='2ee15ad3-213a-44de-8c83-f435147203ad',bytes=Buffer.alloc(44+9600);
+  bytes.write('RIFF');bytes.writeUInt32LE(bytes.length-8,4);bytes.write('WAVEfmt ',8);bytes.writeUInt32LE(16,16);
+  bytes.writeUInt16LE(1,20);bytes.writeUInt16LE(1,22);bytes.writeUInt32LE(48000,24);bytes.writeUInt32LE(96000,28);
+  bytes.writeUInt16LE(2,32);bytes.writeUInt16LE(16,34);bytes.write('data',36);bytes.writeUInt32LE(9600,40);
+  await server.stage.voice.artifacts.import(artifactId,bytes);
+  const action=await server.stage.broadcastVoiceArtifact(artifactId);expect(action.accepted).toBe(true);
+  expect(server.stage.ledger.result(String(action.id)).status).toBe('queued');
+  const response=await fetch(server.url+'/audio/speech/'+action.id+'?sessionId=renderer');expect(response.status).toBe(200);expect(Buffer.from(await response.arrayBuffer())).toEqual(bytes);
+  expect(server.stage.ledger.result(String(action.id)).status).toBe('queued');
+  const receipt={sessionId:'renderer',role:'broadcast',avatarId:preset.id,avatarSha256:preset.sha256,eventId:action.id};
+  await server.stage.receipt({...receipt,status:'playing',frames:1,audioTimeMs:0});
+  await server.stage.receipt({...receipt,status:'ended',frames:10,audioTimeMs:100,durationMs:100});
+  expect(server.stage.ledger.result(String(action.id)).status).toBe('completed');
+  expect(await server.stage.broadcastVoiceArtifact(artifactId)).toMatchObject({id:action.id,reused:true});
+});
+
 it('keeps native drama-rs generation unknown after genuine playback receipts and includes an explicit seed in action identity', async () => {
   const bytes=Buffer.alloc(444);bytes.write('RIFF');bytes.writeUInt32LE(0xffffffff,4);bytes.write('WAVEfmt ',8);
   bytes.writeUInt32LE(16,16);bytes.writeUInt16LE(1,20);bytes.writeUInt16LE(1,22);bytes.writeUInt32LE(44100,24);
