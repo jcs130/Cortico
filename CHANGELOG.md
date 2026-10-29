@@ -1,3 +1,7 @@
+## Unreleased
+
+- Add shared actual-playback captions to control and OBS pages, with desktop audio support and stale snapshot/cancellation handling.
+
 ## 0.1.2-rc.12
 
 Add synthesis-only artifacts and optional same-WAV game/livestream mirroring with independent receipts and no second TTS request.

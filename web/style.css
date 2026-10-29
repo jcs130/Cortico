@@ -159,3 +159,15 @@ footer {
 .audience-progress { position: fixed; left: 20px; bottom: 28px; max-width: min(380px, calc(100vw - 40px)); padding: 12px 16px; border-radius: 14px; background: #102236e8; color: #e5efff; border: 1px solid #8ebcff60; font: 14px/1.5 system-ui; pointer-events: none; z-index: 12; }
 .audience-progress p { margin: 6px 0 0; }
 .audience-progress[hidden] { display: none; }
+
+/* Captions follow the Stage's actual playing/terminal receipts, including desktop audio. */
+html:has(body.obs) { background: transparent; }
+#speechCaption { position: fixed; left: 24px; right: 354px; bottom: 32px; max-height: 40vh;
+  overflow: auto; scrollbar-width: none; box-sizing: border-box; padding: 12px 18px;
+  border-radius: 14px; background: #14263ce8; color: white; border: 1px solid #ffffff30;
+  font: clamp(16px, 2.8vw, 26px)/1.5 "Microsoft YaHei", sans-serif;
+  white-space: pre-wrap; overflow-wrap: anywhere; text-align: center;
+  text-shadow: 0 1px 2px #0008; pointer-events: none; z-index: 20; }
+#speechCaption[hidden] { display: none; }
+.obs #speechCaption { left: 5%; right: 5%; bottom: 36px; }
+.has-speech-caption .audience-progress { display: none; }

@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { installPlaybackCaptions } from './playback-captions.js';
 import { installAudienceProgress } from './audience-progress.js';
 const audienceProgressCard = installAudienceProgress({ document, window });
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
@@ -12,6 +13,7 @@ const $ = (s) => document.querySelector(s),
   obs = new URLSearchParams(location.search).has("obs"),
   sessionId = crypto.randomUUID();
 if (obs) document.body.classList.add("obs");
+const playbackCaptions = installPlaybackCaptions({ document, window, broadcast: obs });
 const host = $("#viewport"),
   renderer = new THREE.WebGLRenderer({
     alpha: true,
@@ -809,7 +811,9 @@ $("#playMusic").onclick = () =>
 $("#stopMusic").onclick = () =>
   void safe(() => call("avatar_music", { action: "stop" }));
 async function refresh() {
+  const captionRevision = playbackCaptions.revision;
   state = await (await fetch("/api/state")).json();
+  playbackCaptions.snapshot(state, captionRevision);
   audienceProgressCard.update(state.audienceProgress);
   $("#protocol").textContent = state.protocol;
   $("#avatars").replaceChildren(
@@ -932,6 +936,7 @@ async function refresh() {
 const stream = new EventSource("/events");
 stream.onmessage = (event) => {
   const message = JSON.parse(event.data);
+  playbackCaptions.receive(message);
   if (message.type === 'audience.progress') audienceProgressCard.update(message.data);
   if (
     message.type === "avatar.action" &&
@@ -975,6 +980,7 @@ stream.onmessage = (event) => {
     audio.stop();
 };
 stream.onerror = () => {
+  playbackCaptions.clear();
   audienceProgressCard.clear();
   audio.stop();
   notify("演出连接中断，等待恢复");
