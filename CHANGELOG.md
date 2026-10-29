@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Place capture captions above the avatar with reserved headroom, matching the shared rounded dark speech bubble style.
+
 - Add shared actual-playback captions to control and OBS pages, with desktop audio support and stale snapshot/cancellation handling.
 
 ## 0.1.2-rc.12

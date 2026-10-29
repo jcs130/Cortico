@@ -13,7 +13,13 @@ const $ = (s) => document.querySelector(s),
   obs = new URLSearchParams(location.search).has("obs"),
   sessionId = crypto.randomUUID();
 if (obs) document.body.classList.add("obs");
-const playbackCaptions = installPlaybackCaptions({ document, window, broadcast: obs });
+const captionHead = new THREE.Vector3();
+const playbackCaptions = installPlaybackCaptions({ document, window, broadcast: obs, getAnchor: () => {
+  if (!model) return null;
+  camera.updateMatrixWorld();
+  const head = captionHead.set(0, height, 0).project(camera), rect = host.getBoundingClientRect();
+  return { head: rect.top + (1 - head.y) * rect.height / 2, center: rect.left + rect.width / 2, left: rect.left, width: rect.width };
+} });
 const host = $("#viewport"),
   renderer = new THREE.WebGLRenderer({
     alpha: true,
@@ -141,6 +147,7 @@ function view(mode) {
   camera.position.set(0, y, dist);
   orbit.update();
   orbit.enableDamping = damping;
+  playbackCaptions.position();
 }
 function dispose() {
   document.body.dataset.loaded = "false";
@@ -998,6 +1005,7 @@ new ResizeObserver(() => {
   renderer.setSize(host.clientWidth, host.clientHeight);
   camera.aspect = host.clientWidth / host.clientHeight;
   camera.updateProjectionMatrix();
+  playbackCaptions.position();
 }).observe(host);
 renderer.setAnimationLoop(() => {
   const now = performance.now(),

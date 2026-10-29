@@ -4,6 +4,8 @@
 
 演出网页和透明播出页的字幕跟随同一 Stage 台词的实际 `playing`／结束回执，包括由桌宠承担的音频播放。排队、合成完成、思考动态和动作说明都不会冒充台词；中断、失败和断线清除字幕。重新打开页面可从当前播放快照恢复，延迟的旧回执不能清除下一句。
 
+字幕使用深色圆角框，居中位于人物头顶上方；透明播出为字幕保留顶部空间。全身／半身切换和窗口缩放都会重新计算位置，长台词使用较小字号。
+
 The control and transparent capture pages caption the same Stage speech action only after its actual playback receipt, including desktop audio. Queued or synthesized audio is not a subtitle. Cancellation, failure and disconnect clear the line; late receipts cannot erase the next line. This renderer adds no synthesis request or audio owner.
 
 普通对话、问候与创作口播不要求观察时间。描述当前现场事实时，`avatar_voice speak` 的 `observed_at` 直接复制来源事件或采样的 ISO 8601 时间（含时区），也兼容来源已有的 Unix 秒数。显式提供的过期、未来、无时区或无效日期仍被拒绝，不会自动换成当前时间。`speechObservationMaxAgeSeconds` 控制这类来源时间的有效期；0 使用 15 秒。空闲解说继续携带所引用事件的最早原始时间。

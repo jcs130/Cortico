@@ -47,18 +47,30 @@ export class PlaybackCaptionState {
   }
 }
 
-export function installPlaybackCaptions({ document, window, broadcast = false }) {
+export function installPlaybackCaptions({ document, window, broadcast = false, getAnchor }) {
   const state = new PlaybackCaptionState({ broadcast });
   const caption = document.createElement('div');
   caption.id = 'speechCaption';caption.hidden = true;
   caption.setAttribute('role', 'status');caption.setAttribute('aria-live', 'polite');
   document.body.append(caption);
+  const position = () => {
+    if (!state.current || !getAnchor) return;
+    const anchor = getAnchor();
+    if (!anchor || ![anchor.head, anchor.center, anchor.left, anchor.width].every(Number.isFinite)) return;
+    const width = Math.min(600, Math.max(1, anchor.width - 24));
+    caption.style.width = width + 'px';
+    caption.style.left = Math.max(anchor.left + 12, Math.min(anchor.left + anchor.width - width - 12, anchor.center - width / 2)) + 'px';
+    caption.style.fontSize = state.current.text.length > 160 ? '16px' : '20px';
+    caption.style.maxHeight = Math.min(window.innerHeight * .32, Math.max(30, anchor.head - 28)) + 'px';
+    caption.style.top = Math.max(12, Math.min(window.innerHeight - caption.offsetHeight - 12, anchor.head - caption.offsetHeight - 16)) + 'px';
+  };
   const render = () => {
     caption.textContent = state.current?.text ?? '';
     caption.hidden = !state.current;
     if (state.current) caption.dataset.actionId = state.current.id;
     else delete caption.dataset.actionId;
     document.body.classList.toggle('has-speech-caption', !!state.current);
+    position();
   };
   const dispose = () => { state.clear();render();caption.remove(); };
   window.addEventListener('pagehide', dispose, { once: true });
@@ -66,6 +78,6 @@ export function installPlaybackCaptions({ document, window, broadcast = false })
     get revision() { return state.revision; },
     snapshot(value, revision) { state.snapshot(value, revision);render(); },
     receive(value) { state.receive(value);render(); },
-    clear() { state.clear();render(); },dispose,
+    clear() { state.clear();render(); },position,dispose,
   };
 }

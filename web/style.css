@@ -162,12 +162,14 @@ footer {
 
 /* Captions follow the Stage's actual playing/terminal receipts, including desktop audio. */
 html:has(body.obs) { background: transparent; }
-#speechCaption { position: fixed; left: 24px; right: 354px; bottom: 32px; max-height: 40vh;
+#speechCaption { position: fixed; left: 24px; right: 354px; top: 12px; max-height: 32vh;
   overflow: auto; scrollbar-width: none; box-sizing: border-box; padding: 12px 18px;
-  border-radius: 14px; background: #14263ce8; color: white; border: 1px solid #ffffff30;
-  font: clamp(16px, 2.8vw, 26px)/1.5 "Microsoft YaHei", sans-serif;
+  border-radius: 18px; background: #21333ce8; color: #fff;
+  font: 20px/1.5 "Microsoft YaHei", sans-serif;
   white-space: pre-wrap; overflow-wrap: anywhere; text-align: center;
-  text-shadow: 0 1px 2px #0008; pointer-events: none; z-index: 20; }
+  box-shadow: 0 4px 16px #0004; pointer-events: none; z-index: 20; }
 #speechCaption[hidden] { display: none; }
-.obs #speechCaption { left: 5%; right: 5%; bottom: 36px; }
+.obs #speechCaption { left: 12px; right: auto; width: min(600px, calc(100vw - 24px)); }
+.obs #viewport { position: absolute; left: 0; top: clamp(112px, 20vh, 150px);
+  width: 100vw; height: calc(100vh - clamp(112px, 20vh, 150px)); }
 .has-speech-caption .audience-progress { display: none; }
