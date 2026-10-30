@@ -1,3 +1,9 @@
+## 0.1.2-rc.16.memory.1
+
+- Bound display textures to 2048 pixels before their first GPU upload, share resized images across texture clones, and release decoded image resources. Source avatar files remain unchanged.
+- Limit render surfaces to 691,200 pixels and animation rendering to 30 FPS; use a low-power graphics preference and report actual render resource counts.
+- Dispose avatar textures, render lists and WebGL contexts when the presentation page closes. Audio scheduling and character motion catalogues retain their existing contracts.
+
 ## 0.1.2-rc.16
 
 - Separate semantic facial intensity from decision confidence, preserving local continuous interpolation and authored controls.

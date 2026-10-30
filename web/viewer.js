@@ -9,6 +9,7 @@ import { expressionWeights } from "./expression-weights.js";
 import { AudioOutput } from "./audio.js";
 import { VRMMotionLayer } from "./vrm-motion.js";
 import { PerformanceCues } from "./performance-cues.js";
+import { boundAvatarTextures, releaseTextureImages, renderSize, frameCadence } from './render-budget.js';
 const $ = (s) => document.querySelector(s),
   obs = new URLSearchParams(location.search).has("obs"),
   sessionId = crypto.randomUUID();
@@ -24,9 +25,11 @@ const host = $("#viewport"),
   renderer = new THREE.WebGLRenderer({
     alpha: true,
     antialias: true,
-    powerPreference: "high-performance",
+    powerPreference: "low-power",
   });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+renderer.setPixelRatio(1);
+renderer.domElement.style.width = '100%';
+renderer.domElement.style.height = '100%';
 renderer.setClearColor(0, 0);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 host.append(renderer.domElement);
@@ -149,6 +152,11 @@ function view(mode) {
   orbit.enableDamping = damping;
   playbackCaptions.position();
 }
+function disposeAvatarModel(value) {
+  VRMUtils.deepDispose(value);
+  releaseTextureImages(value);
+  renderer.renderLists.dispose();
+}
 function dispose() {
   document.body.dataset.loaded = "false";
   $("#enableAudio").disabled = true;
@@ -167,7 +175,7 @@ function dispose() {
   standardMotion = null;
   if (model) {
     scene.remove(model);
-    VRMUtils.deepDispose(model);
+    disposeAvatarModel(model);
   }
   model = null;
   vrm = null;
@@ -201,11 +209,12 @@ async function load(avatar) {
     if (hash !== avatar.sha256) throw Error("Avatar content hash mismatch");
     gltf = await loader.parseAsync(bytes, "");
     if (ticket !== epoch) {
-      VRMUtils.deepDispose(gltf.scene);
+      disposeAvatarModel(gltf.scene);
       return;
     }
     const pendingVRM = gltf.userData.vrm ?? null;
     const pendingModel = gltf.scene;
+    document.body.dataset.textureBudget = JSON.stringify(boundAvatarTextures(pendingModel));
     if (pendingVRM) VRMUtils.rotateVRM0(pendingVRM);
     const pendingMixer = new THREE.AnimationMixer(pendingModel);
     // Explicit deployment renderer modules are keyed by immutable avatar hash.
@@ -219,7 +228,7 @@ async function load(avatar) {
         throw Error("Renderer profile must be an explicitly installed module");
       const { createPresentation } = await import(profile.module);
       if (ticket !== epoch) {
-        VRMUtils.deepDispose(pendingModel);
+        disposeAvatarModel(pendingModel);
         return;
       }
       pendingPresentation = await createPresentation({
@@ -249,7 +258,7 @@ async function load(avatar) {
     if (ticket !== epoch) {
       pendingPresentation?.dispose?.();
       pendingMotion?.dispose();
-      VRMUtils.deepDispose(pendingModel);
+      disposeAvatarModel(pendingModel);
       return;
     }
     // The render loop must not own the model until asynchronous textures and the
@@ -351,7 +360,7 @@ async function load(avatar) {
     } else if (gltf && model !== gltf.scene) {
       pendingPresentation?.dispose?.();
       pendingMotion?.dispose();
-      VRMUtils.deepDispose(gltf.scene);
+      disposeAvatarModel(gltf.scene);
     }
     throw error;
   } finally {
@@ -1002,14 +1011,22 @@ setInterval(() => {
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") void safe(() => refresh());
 });
-new ResizeObserver(() => {
-  renderer.setSize(host.clientWidth, host.clientHeight);
+const resizeObserver = new ResizeObserver(() => {
+  const size = renderSize(host.clientWidth, host.clientHeight, devicePixelRatio);
+  if (!size) return;
+  if (renderer.domElement.width !== size.width || renderer.domElement.height !== size.height)
+    renderer.setSize(size.width, size.height, false);
   camera.aspect = host.clientWidth / host.clientHeight;
   camera.updateProjectionMatrix();
   playbackCaptions.position();
-}).observe(host);
+});
+resizeObserver.observe(host);
+const renderFrameDue = frameCadence();
+let sampledFrames = 0, sampledFrameAt = performance.now();
 renderer.setAnimationLoop(() => {
-  const now = performance.now(),
+  const now = performance.now();
+  if (!renderFrameDue(now)) return;
+  const
     rawDt = (now - last) / 1000,
     dt = Math.min(0.05, rawDt);
   last = now;
@@ -1047,13 +1064,22 @@ renderer.setAnimationLoop(() => {
   frames++;
   if (now - lastReceipt > 1000) {
     lastReceipt = now;
-    $("#fps").textContent = Math.round(1 / Math.max(0.001, rawDt)) + " FPS";
+    const actualFps = (frames - sampledFrames) * 1000 / (now - sampledFrameAt);
+    sampledFrames = frames; sampledFrameAt = now;
+    $("#fps").textContent = Math.round(actualFps) + " FPS";
+    document.body.dataset.renderResources = JSON.stringify({ fps: actualFps, frames,
+      width: renderer.domElement.width, height: renderer.domElement.height,
+      textures: renderer.info.memory.textures, geometries: renderer.info.memory.geometries });
     document.body.dataset.frames = String(frames);
     document.body.dataset.singing = String(singing);
     void receipt("heartbeat");
   }
 });
 window.addEventListener("pagehide", () => {
-  audio.stop();
+  renderer.setAnimationLoop(null);
+  resizeObserver.disconnect();
+  dispose();
+  renderer.dispose();
+  renderer.forceContextLoss();
   stream.close();
 });
