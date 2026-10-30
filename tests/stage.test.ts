@@ -519,7 +519,7 @@ it.each(['real-receipts','deadline','disconnected'])("keeps a connected physical
   }finally{clock.mockRestore();}
 });
 
-it("binds presentation to current speech without cutting it, validates expression maps and requires the audio owner", async () => {
+it("binds a silent visual renderer to current speech without giving it audio ownership", async () => {
   const { server, events, preset } = await speechSetup();
   const speech = await server.call(
     "avatar_voice",
@@ -561,15 +561,33 @@ it("binds presentation to current speech without cutting it, validates expressio
       avatarId: preset.id,
       avatarSha256: preset.sha256,
     }),
-  ).rejects.toThrow("non-owner");
+  ).rejects.toThrow("matching rendered start");
+  await expect(server.stage.receipt({sessionId:'obs-visual',status:'playing',role:'broadcast',surface:'obs',
+    eventId:cue.id as string,avatarId:preset.id,avatarSha256:preset.sha256})).rejects.toThrow('audio is not playing');
   await server.stage.receipt({
     sessionId: "renderer",
     status: "playing",
     role: "broadcast",
+    eventId: speech.id as string,
+    avatarId: preset.id,
+    avatarSha256: preset.sha256,
+  });
+  await server.stage.receipt({
+    sessionId: "obs-visual",
+    status: "playing",
+    role: "broadcast",
+    surface:'obs',
+    frames:10,
     eventId: cue.id as string,
     avatarId: preset.id,
     avatarSha256: preset.sha256,
   });
+  expect(server.stage.ledger.result(cue.id as string)).toMatchObject({status:'playing',evidence:{sessionId:'obs-visual'}});
+  expect(server.stage.status().audioOwner).toBe('renderer');
+  await expect(server.stage.receipt({sessionId:'other-visual',status:'ended',role:'broadcast',
+    eventId:cue.id as string,avatarId:preset.id,avatarSha256:preset.sha256})).rejects.toThrow('matching rendered start');
+  await expect(server.stage.receipt({sessionId:'obs-visual',status:'ended',role:'broadcast',surface:'obs',
+    eventId:speech.id as string,avatarId:preset.id,avatarSha256:preset.sha256})).rejects.toThrow('non-owner');
   await server.call("avatar_voice", { action: "interrupt" }, "direct-stop");
   expect(server.stage.ledger.result(cue.id as string).status).toBe("cancelled");
   expect(

@@ -1,3 +1,7 @@
+## 0.1.2-rc.14
+
+- Allow silent visual surfaces to confirm their own presentation frames while requiring current parent audio for playback start and the same visual session for completion. They still cannot confirm audio or take over the audio device.
+
 ## 0.1.2-rc.13
 
 - Fill automatic face and gesture channels independently while retaining authored choices, including desktop audio and text surfaces. Unavailable optional cues no longer suppress the entire selector.

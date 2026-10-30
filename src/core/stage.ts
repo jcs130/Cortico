@@ -810,10 +810,21 @@ export class AvatarStage {
         return { ok: true, executionConfirmed: false };
       }
       if (
-        ["speech", "music-play", "presentation"].includes(previous.kind) &&
+        ["speech", "music-play"].includes(previous.kind) &&
         !this.audioAllowed(r.sessionId)
       )
         throw Error("Audio receipt from non-owner renderer");
+      if (previous.kind === 'presentation') {
+        // A silent OBS/control surface owns its visible frames, independently
+        // from the desktop device that owns sound. It cannot certify audio.
+        if (['completed','cancelled','failed'].includes(previous.status))
+          return {ok:true,executionConfirmed:false};
+        const parent=this.ledger.result(id(previous.command.audioActionId,'audio action id'));
+        if(r.status==='playing' && (this.foreground!==parent.id || parent.status!=='playing'))
+          throw Error('Presentation audio is not playing');
+        if(['ended','applied'].includes(r.status) && (previous.status!=='playing' || previous.evidence?.sessionId!==r.sessionId))
+          throw Error('Presentation has no matching rendered start');
+      }
       if (r.status === 'waiting') {
         const w = input.waiting as Record<string, unknown> | undefined;
         if (!['speech','music-play'].includes(previous.kind) || previous.status !== 'queued'
