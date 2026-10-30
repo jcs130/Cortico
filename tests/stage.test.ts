@@ -67,6 +67,7 @@ it.each([false, true, 'face-only', 'missing', 'rejected', 'slow-catalog'])('rout
   expect(uploads[0]).toEqual(bytes);
   expect(commands.find(c => c.action === 'play-audio')).toMatchObject({ kind: 'speech', text: 'A short spoken line.' });
   expect(server.stage.ledger.result(String(voice.id)).status).toBe('queued');
+  expect(server.stage.ledger.history(100).some(row=>row.kind==='presentation')).toBe(false);
   const spoken = state.media.recent[0];
   if (explicit === false) {
     const receipts = vi.spyOn(server.stage, 'receipt');

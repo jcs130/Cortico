@@ -8,7 +8,7 @@ import type { ResolvedSpeechPerformance, SpeechPerformance } from './core/speech
 type LiveAudio = { stageId: string; desktopId?: string; abort: AbortController; reported?: string; waitingKey?: string;
   durationMs?: number; performanceCue?: Record<string, unknown>; authored?: ResolvedSpeechPerformance;
   directed?: {expressions:string[]; weights:Record<string,number>; bodyClip?:string};
-  visualRevision?:number; visualTail?:Promise<void> };
+  visualActions?:string[]; visualRevision?:number; visualTail?:Promise<void> };
 
 /** Optional audio device adapter over the public stage and desktop HTTP protocols. */
 export class DesktopAudioRenderer {
@@ -78,6 +78,7 @@ export class DesktopAudioRenderer {
         await this.receipt('playing', current.stageId, { audioTimeMs: row.audioTimeMs ?? 0, durationMs: current.durationMs,
           desktopMediaId: row.id, desktopStartedAt: row.startedAt, ...(current.performanceCue ? {performanceCue: current.performanceCue} : {}) });
         current.reported = row.state;
+        this.mirror(current);
       } else if (['completed', 'failed', 'cancelled'].includes(row.state)) {
         // A single sample can span a whole short clip. The desktop receipt retains its real start transition.
         if (row.state === 'completed' && current.reported !== 'playing') {
@@ -209,6 +210,16 @@ export class DesktopAudioRenderer {
     if (this.live === current) current.performanceCue = {...current.performanceCue, actions,
       accepted:result.accepted === true, renderingConfirmed:false};
     if(result.accepted===true && this.live===current) {
+      current.visualActions=actions;
+      this.mirror(current);
+    }
+    return result;
+  }
+  private mirror(current: LiveAudio) {
+    const actions=current.visualActions, own=current.authored?.applied;
+    // A shared audio floor may queue speech for much longer than a visual
+    // command's short TTL. Start that TTL only after the device really starts.
+    if(actions?.length && current.reported==='playing' && this.live===current && !current.abort.signal.aborted) {
       const revision=current.visualRevision=(current.visualRevision??0)+1;
       // The visual mirror is independent of audio transport. Serialize only its
       // own cues so a slow catalogue read cannot overwrite a newer selection.
@@ -225,7 +236,6 @@ export class DesktopAudioRenderer {
       }).catch(error=>{if(this.live===current&&!current.abort.signal.aborted)
         this.ports.log('Stage visual cue unavailable: '+String(error));});
     }
-    return result;
   }
   private async cancel() {
     const current = this.live; if (!current) return;

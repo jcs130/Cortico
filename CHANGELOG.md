@@ -1,3 +1,7 @@
+## 0.1.2-rc.15
+
+- Hold visual cues during a shared audio-floor wait and dispatch them only after device playback starts, so long audio queues do not expire their gestures before anyone speaks.
+
 ## 0.1.2-rc.14
 
 - Allow silent visual surfaces to confirm their own presentation frames while requiring current parent audio for playback start and the same visual session for completion. They still cannot confirm audio or take over the audio device.
