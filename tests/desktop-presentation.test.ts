@@ -57,6 +57,20 @@ it('routes authored text while reporting unavailable optional cues', async () =>
   expect(commands[1]).toMatchObject({action:'say',text:'Still valid.'});
   expect(commands[1].actions).toBeUndefined();
 });
+it('keeps an authored face when the automatic selector adds only a body gesture', async () => {
+  const {bridge,commands}=await endpoint();
+  await bridge.speak({action:'speak',text:'Hello.',performance:{expression:'happy'}},'partial');
+  await bridge.attach({audioActionId:'caption-1',expressionWeights:{sad:.7},bodyClip:'wave'});
+  expect(commands.at(-1)).toMatchObject({action:'act',actions:['happy','wave']});
+});
+it('maps a desktop gesture only to an installed Stage clip and keeps expression weights',async()=>{
+  const {bridge,state}=await endpoint();
+  Object.assign(state.vocabulary[1],{presentation:{key:'TripoWave',auto:true,tags:['greeting']}});
+  await bridge.refresh();
+  const cap={expressions:['happy'],animationCatalog:[{bodyClip:'vrma:TripoWave'}]};
+  expect(bridge.stageCue(['happy','wave'],cap,{happy:.4})).toEqual({expressionWeights:{happy:.4},bodyClip:'vrma:TripoWave'});
+  expect(bridge.stageCue(['wave'],{animationCatalog:[{bodyClip:'vrma:other'}]})).toEqual({expressionWeights:{}});
+});
 it('rejects public endpoints instead of falling back to TTS', async () => {
   const bridge = new DesktopPresentation(() => ({ mode: 'desktop-text', url: 'https://example.com' }), new AbortController().signal);
   await expect(bridge.refresh()).rejects.toThrow('loopback');

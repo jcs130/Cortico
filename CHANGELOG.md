@@ -1,4 +1,8 @@
-## Unreleased
+## 0.1.2-rc.13
+
+- Fill automatic face and gesture channels independently while retaining authored choices, including desktop audio and text surfaces. Unavailable optional cues no longer suppress the entire selector.
+- Mirror installed presentation cues to silent Stage/OBS surfaces when desktop owns audio; retain separate rendering receipts and stale-cue cancellation without delaying speech.
+- Retain installed motion keys and semantic tags in decision diagnostics. Document an optional self-only YSM integration and its cancellation/ownership boundaries; no game-server bridge is installed by this package.
 
 - Place capture captions above the avatar with reserved headroom, matching the shared rounded dark speech bubble style.
 

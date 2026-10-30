@@ -158,6 +158,23 @@ it("omits questions with no actual alternative instead of submitting invalid one
   }).input;
   expect(Object.keys(faceOnly.questions)).toEqual(["emotion"]);
 });
+it('fills face and gesture independently and never overrides authored channels', async () => {
+  const request = vi.fn(async (input:DecisionInput)=>answer(input));
+  const attach = vi.fn(async (_args:Record<string,unknown>)=>({accepted:true}));
+  const director = new PerformanceDirector({config:()=>({enabled:true,provider:'lan',timeoutMs:1200}),
+    decide:{request},state:()=>scene,attach,log(){}});
+  await director.direct('voice','你好！','speaking',{expression:'sad'});
+  expect(Object.keys(request.mock.calls[0][0].questions)).toEqual(['movement']);
+  expect(attach.mock.calls[0][0]).toMatchObject({expressionWeights:{},bodyClip:'vrma:wave'});
+  expect(director.status().last).toMatchObject({presentation:{key:'vrma:wave',tags:['greeting']}});
+  const both = new PerformanceDirector({config:()=>({enabled:true,provider:'lan',timeoutMs:1200}),
+    decide:{request},state:()=>scene,attach,log(){}});
+  await both.direct('voice','你好！','speaking',{expression:'sad',bodyClip:'vrma:wave'});
+  expect(request).toHaveBeenCalledTimes(1);
+  expect(both.status().last.status).toBe('no-choice');
+  const body = presentationQuestion('你好','speaking',scene,[],{bodyClip:'vrma:wave'}).input;
+  expect(Object.keys(body.questions)).toEqual(['emotion']);
+});
 it("classifies once alongside the audio, attaches only to its current parent and records actual usage", async () => {
   const decide = vi.fn(async (input: DecisionInput) => answer(input)),
     attach = vi.fn(async (_args: Record<string, unknown>) => ({

@@ -3,6 +3,12 @@ import type { DesktopPresentation } from './desktop-presentation.ts';
 import type { StageEvent } from './core/types.ts';
 import { AvatarStageClient } from './sdk.ts';
 import { wavInfo } from './core/wav.ts';
+import type { ResolvedSpeechPerformance, SpeechPerformance } from './core/speech-performance.ts';
+
+type LiveAudio = { stageId: string; desktopId?: string; abort: AbortController; reported?: string; waitingKey?: string;
+  durationMs?: number; performanceCue?: Record<string, unknown>; authored?: ResolvedSpeechPerformance;
+  directed?: {expressions:string[]; weights:Record<string,number>; bodyClip?:string};
+  visualRevision?:number; visualTail?:Promise<void> };
 
 /** Optional audio device adapter over the public stage and desktop HTTP protocols. */
 export class DesktopAudioRenderer {
@@ -10,7 +16,7 @@ export class DesktopAudioRenderer {
   private binding: { avatarId: string; avatarSha256: string } | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
-  private live: { stageId: string; desktopId?: string; abort: AbortController; reported?: string; waitingKey?: string; durationMs?: number; performanceCue?: Record<string, unknown> } | null = null;
+  private live: LiveAudio | null = null;
   private texts = new Map<string, string>();
   private alreadyCaptioned = new Set<string>();
   private stopped = false;
@@ -18,7 +24,7 @@ export class DesktopAudioRenderer {
   private client: AvatarStageClient | null = null;
   constructor(private readonly ports: {
     stageUrl(): string; display: DesktopPresentation; signal: AbortSignal;
-    admitted(id: string, text: string, kind: 'speaking' | 'singing'): void;
+    admitted(id: string, text: string, kind: 'speaking' | 'singing', authored?: SpeechPerformance): void;
     log(error: string): void;
   }) {}
   get foreground() { return this.live?.stageId ?? null; }
@@ -101,7 +107,7 @@ export class DesktopAudioRenderer {
   private async play(command: Record<string, unknown>) {
     if (this.stopped || this.ports.signal.aborted) return;
     const previous = this.live;
-    const current = { stageId: String(command.eventId), abort: new AbortController(), desktopId: undefined as string | undefined, reported: undefined as string | undefined, durationMs: undefined as number | undefined, performanceCue: undefined as Record<string, unknown> | undefined };
+    const current: LiveAudio = { stageId: String(command.eventId), abort: new AbortController() };
     this.live = current;
     if (previous) {
       previous.abort.abort();
@@ -162,17 +168,17 @@ export class DesktopAudioRenderer {
           current.performanceCue = {accepted:false,renderingConfirmed:false,warnings:['Presentation unavailable: '+String(outcome.error)]};
           return;
         }
-        const {actions, warnings, requested} = outcome.value;
+        current.authored = outcome.value;
+        const {actions, warnings, requested, applied} = outcome.value;
         if (requested) current.performanceCue = {accepted:false,actions,requestedPerformance:requested,warnings,renderingConfirmed:false};
-        if (!actions.length) return;
-        try {
-          const cue = await this.ports.display.request({action:'act',id:current.desktopId,actions});
+        if (actions.length) try {
+          const cue = await this.apply(current);
           if (!cue.accepted) throw Error(String(cue.reason ?? 'Desktop performance cue was rejected'));
-          if (this.live === current && !signal.aborted) current.performanceCue = {...current.performanceCue,accepted:true};
-        } catch (error) { warnings.push('Presentation was not admitted: '+String(error)); }
+        }
+        catch (error) { warnings.push('Presentation was not admitted: '+String(error)); }
+        if (this.live === current && !signal.aborted && !(applied?.bodyClip && (applied.expression || applied.emotion)))
+          this.ports.admitted(current.stageId, String(command.title ?? this.texts.get(current.stageId) ?? ''), command.kind === 'music' ? 'singing' : 'speaking', applied);
       });
-      if (command.performance === undefined)
-        this.ports.admitted(current.stageId, String(command.title ?? this.texts.get(current.stageId) ?? ''), command.kind === 'music' ? 'singing' : 'speaking');
     } catch (error) {
       if (!current.abort.signal.aborted && !this.ports.signal.aborted) {
         await this.receipt('failed', current.stageId, { error: String(error).slice(0, 240) }).catch(() => {});
@@ -186,8 +192,40 @@ export class DesktopAudioRenderer {
   async attach(args: Record<string, unknown>) {
     const current = this.live;
     if (!current?.desktopId || current.stageId !== args.audioActionId) return { accepted: false, reason: 'Desktop audio changed' };
-    const actions = [...Object.keys((args.expressionWeights ?? {}) as object), ...(typeof args.bodyClip === 'string' ? [args.bodyClip] : [])];
-    return this.ports.display.request({ action: 'act', id: current.desktopId, actions });
+    current.directed = {expressions:Object.keys((args.expressionWeights ?? {}) as object),
+      weights:(args.expressionWeights ?? {}) as Record<string,number>,
+      ...(typeof args.bodyClip === 'string' ? {bodyClip:args.bodyClip} : {})};
+    return this.apply(current);
+  }
+  private async apply(current: LiveAudio) {
+    if (this.live !== current || current.abort.signal.aborted || !current.desktopId)
+      return {accepted:false, reason:'Desktop audio changed'};
+    const own=current.authored?.applied;
+    const actions = [...new Set([...(current.authored?.actions ?? []),
+      ...(own?.expression || own?.emotion ? [] : current.directed?.expressions ?? []),
+      ...(own?.bodyClip || !current.directed?.bodyClip ? [] : [current.directed.bodyClip])])];
+    if (!actions.length) return {accepted:true, skipped:true};
+    const result = await this.ports.display.request({action:'act',id:current.desktopId,actions});
+    if (this.live === current) current.performanceCue = {...current.performanceCue, actions,
+      accepted:result.accepted === true, renderingConfirmed:false};
+    if(result.accepted===true && this.live===current) {
+      const revision=current.visualRevision=(current.visualRevision??0)+1;
+      // The visual mirror is independent of audio transport. Serialize only its
+      // own cues so a slow catalogue read cannot overwrite a newer selection.
+      current.visualTail=(current.visualTail??Promise.resolve()).then(async()=>{
+        if(this.live!==current || current.abort.signal.aborted || current.visualRevision!==revision)return;
+        const state=await this.stage('/api/state',undefined,current.abort.signal);
+        if(this.live!==current || current.abort.signal.aborted || current.visualRevision!==revision || state.foreground!==current.stageId)return;
+        const cue=this.ports.display.stageCue(actions,state.activeAvatar?.capabilities??{},own?.expression||own?.emotion?{}:current.directed?.weights);
+        if(!Object.keys(cue.expressionWeights).length&&!cue.bodyClip)return;
+        const response=await this.stage('/api/call',{tool:'avatar_control',requestId:current.stageId+':visual:'+revision,
+          args:{action:'direct',audioActionId:current.stageId,...cue}},current.abort.signal);
+        if(this.live===current && current.visualRevision===revision)current.performanceCue={...current.performanceCue,
+          stageVisual:{accepted:response.result?.accepted===true,id:response.result?.id??null,renderingConfirmed:false}};
+      }).catch(error=>{if(this.live===current&&!current.abort.signal.aborted)
+        this.ports.log('Stage visual cue unavailable: '+String(error));});
+    }
+    return result;
   }
   private async cancel() {
     const current = this.live; if (!current) return;

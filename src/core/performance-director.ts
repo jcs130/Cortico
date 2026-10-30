@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { SpeechPerformance } from './speech-performance.ts';
 
 export interface DirectorConfig {
   enabled: boolean;
@@ -73,6 +74,7 @@ export function presentationQuestion(
   mode: PresentationMode,
   scene: Scene,
   facts: readonly PresentationFact[] = [],
+  authored?: SpeechPerformance,
 ): { input: DecisionInput; clips: Map<string, Clip> } {
   const available = new Set(scene.activeAvatar?.capabilities.expressions ?? []);
   const expressions = Object.fromEntries(
@@ -116,6 +118,7 @@ export function presentationQuestion(
               .map((f) => ({ ...f, text: f.text.slice(0, 300) })),
           }
         : {}),
+      ...(authored ? { authoredPerformance: authored } : {}),
     },
     questions: {
       emotion: {
@@ -140,6 +143,10 @@ export function presentationQuestion(
       },
     },
   };
+  // Authored face and body choices own separate channels. A smile alone must
+  // not disable gesture selection, and a manual gesture must not replace a face.
+  if (authored?.expression || authored?.emotion) delete input.questions.emotion;
+  if (authored?.bodyClip) delete input.questions.movement;
   for (const [key, question] of Object.entries(input.questions))
     if (Object.keys(question.criteria).length < 2) delete input.questions[key];
   return { clips, input };
@@ -267,14 +274,16 @@ export class PerformanceDirector {
     audioActionId: string,
     text: string,
     mode: "speaking" | "singing",
+    authored?: SpeechPerformance,
   ) {
-    return this.run(audioActionId, text, mode);
+    return this.run(audioActionId, text, mode, undefined, authored);
   }
   private async run(
     audioActionId: string,
     text: string,
     mode: PresentationMode,
     reaction?: PresentationFact,
+    authored?: SpeechPerformance,
   ) {
     const cfg = this.ports.config();
     if (
@@ -304,6 +313,7 @@ export class PerformanceDirector {
         mode,
         state,
         this.facts.filter((f) => Date.now() - Date.parse(f.ts) <= 30_000),
+        authored,
       );
     try {
       if (!Object.keys(input.questions).length) {
@@ -365,6 +375,8 @@ export class PerformanceDirector {
         cueId: receipt.id,
         emotion,
         movement,
+        presentation: { expressionWeights: weights,
+          ...(clip ? {bodyClip:clip.bodyClip, key:clip.key ?? clip.bodyClip, tags:clip.tags ?? []} : {}) },
         source: reaction
           ? {
               source: reaction.source,

@@ -13,7 +13,7 @@ import { DesktopAudioRenderer } from '../src/desktop-audio.ts';
 import { animationFixture } from "./fixtures/vrma.ts";
 const cleanup: Array<() => Promise<unknown>> = [];
 
-it.each([false, true, 'missing', 'rejected', 'slow-catalog'])('routes speech and song to desktop with explicit performance=%s and reconciles playback', async (explicit) => {
+it.each([false, true, 'face-only', 'missing', 'rejected', 'slow-catalog'])('routes speech and song to desktop with explicit performance=%s and reconciles playback', async (explicit) => {
   const bytes = Buffer.alloc(4844); bytes.write('RIFF'); bytes.writeUInt32LE(bytes.length - 8, 4); bytes.write('WAVEfmt ', 8);
   bytes.writeUInt32LE(16,16); bytes.writeUInt16LE(1,20); bytes.writeUInt16LE(1,22); bytes.writeUInt32LE(24000,24);
   bytes.writeUInt32LE(48000,28); bytes.writeUInt16LE(2,32); bytes.writeUInt16LE(16,34); bytes.write('data',36); bytes.writeUInt32LE(bytes.length-44,40);
@@ -49,16 +49,21 @@ it.each([false, true, 'missing', 'rejected', 'slow-catalog'])('routes speech and
     }));
   }
   const voice = await server.call('avatar_voice', { action: 'speak', text: 'A short spoken line.',
-    ...(explicit ? {performance: explicit === 'missing' ? {emotion: 'unavailable'} : {emotion: 'happy', bodyClip: 'wave'}} : {}) }, 'desktop-voice');
+    ...(explicit ? {performance: explicit === 'missing' ? {emotion: 'unavailable'} : explicit === 'face-only' ? {emotion:'happy'} : {emotion: 'happy', bodyClip: 'wave'}} : {}) }, 'desktop-voice');
   if (explicit === 'slow-catalog') {
     await vi.waitFor(() => expect(commands.some(c => c.action === 'play-audio')).toBe(true), {timeout:2500});
     expect(uploads[0]).toEqual(bytes); expect(commands.some(c => c.action === 'act')).toBe(false);
     // A blocked gesture catalogue has not blocked synthesis, upload or play.
+    await renderer.attach({audioActionId:voice.id,expressionWeights:{sad:.5}});
     releaseCatalog!();
   }
   await vi.waitFor(() => { expect(errors).toEqual([]); expect(commands.some(c => c.action === (explicit && explicit !== 'missing' ? 'act' : 'play-audio'))).toBe(true); }, { timeout: 2500 });
-  expect(admitted).toHaveLength(explicit ? 0 : 1); // Explicit cues never call the optional decision model.
-  if (explicit && explicit !== 'missing') expect(commands.find(c => c.action === 'act')).toMatchObject({id: state.media.recent[0].id, actions: ['happy', 'wave']});
+  const automatic = !explicit || explicit === 'face-only' || explicit === 'missing';
+  await vi.waitFor(()=>expect(admitted).toHaveLength(automatic ? 1 : 0));
+  // Complete authored cues skip the optional model; a face alone leaves the gesture channel open.
+  if (explicit === 'face-only') expect(admitted[0][3]).toEqual({emotion:'happy'});
+  if (explicit && explicit !== 'missing') await vi.waitFor(()=>expect(commands.filter(c => c.action === 'act').at(-1)).toMatchObject({id: state.media.recent[0].id,
+    actions: explicit === 'face-only' ? ['happy'] : ['happy', 'wave']}));
   expect(uploads[0]).toEqual(bytes);
   expect(commands.find(c => c.action === 'play-audio')).toMatchObject({ kind: 'speech', text: 'A short spoken line.' });
   expect(server.stage.ledger.result(String(voice.id)).status).toBe('queued');
@@ -73,10 +78,14 @@ it.each([false, true, 'missing', 'rejected', 'slow-catalog'])('routes speech and
   delete spoken.waiting; spoken.state = 'playing'; spoken.startedAt = Date.now();
   await vi.waitFor(() => expect(server.stage.ledger.result(String(voice.id)).status).toBe('playing'), { timeout: 2500 });
   expect(server.stage.ledger.result(String(voice.id)).evidence).toMatchObject({durationMs:100});
-  expect(await renderer.attach({ audioActionId: voice.id, bodyClip: 'wave', expressionWeights: { happy: .5 } })).toMatchObject({ accepted: explicit !== 'rejected' });
+  expect(await renderer.attach({ audioActionId: voice.id, bodyClip: 'wave', expressionWeights: explicit==='face-only'?{sad:.5}:{happy:.5} })).toMatchObject({ accepted: explicit !== 'rejected' });
+  if (explicit === 'face-only') expect(commands.filter(c=>c.action==='act').at(-1).actions).toEqual(['happy','wave']);
+  await vi.waitFor(()=>expect(server.stage.ledger.history(100).some(row=>row.kind==='presentation'&&row.command.audioActionId===voice.id)).toBe(explicit!=='rejected'));
+  // Desktop playback admission does not certify execution in the silent OBS mirror.
+  if(explicit!=='rejected')expect(server.stage.ledger.history(100).find(row=>row.kind==='presentation')?.status).toBe('queued');
   spoken.state = 'completed'; spoken.audioTimeMs = 100;
   await vi.waitFor(() => expect(server.stage.ledger.result(String(voice.id)).status).toBe('completed'), { timeout: 2500 });
-  if (explicit === 'missing' || explicit === 'rejected') {
+  if (explicit === 'rejected') {
     expect(server.stage.ledger.result(String(voice.id)).evidence).toMatchObject({performanceCue: {
       accepted: false, renderingConfirmed: false, warnings: [expect.any(String)],
     }});
@@ -85,7 +94,7 @@ it.each([false, true, 'missing', 'rejected', 'slow-catalog'])('routes speech and
   const imported = await server.importMusic(bytes, { title: 'Fixture song', instrumental: true });
   await server.call('avatar_music', { action: 'approve', jobId: imported.jobId });
   const song = await server.call('avatar_music', { action: 'play', trackId: imported.trackId }, 'desktop-song');
-  await vi.waitFor(() => expect(admitted).toHaveLength(explicit ? 1 : 2));
+  await vi.waitFor(() => expect(admitted).toHaveLength(automatic ? 2 : 1));
   expect(commands.find(c => c.kind === 'music')).toMatchObject({ cues: { mouthSource: 'none' } });
   const music = state.media.recent.at(-1); music.startedAt = Date.now(); music.state = 'completed'; music.audioTimeMs = 100;
   await vi.waitFor(() => expect(server.stage.ledger.result(String(song.id)).status).toBe('completed'), { timeout: 2500 });

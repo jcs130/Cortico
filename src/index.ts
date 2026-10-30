@@ -62,8 +62,8 @@ export class AvatarStageWorld implements World {
       const result = await this.presentation.speak(args, requestId);
       if (result.accepted && !result.duplicate && args.action === 'speak' && typeof args.text === 'string')
         this.audienceSpeaker?.noteSpeech(args.text);
-      if (result.accepted && !result.duplicate && typeof result.id === 'string' && args.action === 'speak' && args.performance === undefined)
-        void this.director?.direct(result.id, String(result.text ?? args.text), 'speaking');
+      if (result.accepted && !result.duplicate && typeof result.id === 'string' && args.action === 'speak')
+        void this.director?.direct(result.id, String(result.text ?? args.text), 'speaking', result.appliedPerformance);
       return result;
     }
     if (!this.client && !this.server) throw Error('3D stage is not started');
@@ -79,12 +79,11 @@ export class AvatarStageWorld implements World {
     if (epoch === this.epoch && this.director && !this.presentation?.audioEnabled()) {
       if (
         event.type === "avatar.speech.submitted" &&
-        event.data.performance === undefined &&
         typeof event.data.actionId === "string" &&
         typeof event.data.text === "string"
       )
         void this.director
-          .direct(event.data.actionId, event.data.text, "speaking")
+          .direct(event.data.actionId, event.data.text, "speaking", event.data.appliedPerformance as import('./core/speech-performance.ts').SpeechPerformance | undefined)
           .catch((error) =>
             this.host?.log.warn("演出选择未完成", { error: String(error) }),
           );
@@ -247,7 +246,7 @@ export class AvatarStageWorld implements World {
       if (this.presentation.audioEnabled()) {
         this.desktopAudio = new DesktopAudioRenderer({
           stageUrl: () => config.remoteUrl || this.server!.url, display: this.presentation, signal: lifetime.signal,
-          admitted: (id, text, mode) => { void this.director?.direct(id, text, mode); },
+          admitted: (id, text, mode, authored) => { void this.director?.direct(id, text, mode, authored); },
           log: error => this.host?.log.warn('桌宠音频呈现未确认', { error }),
         });
         await this.desktopAudio.start();

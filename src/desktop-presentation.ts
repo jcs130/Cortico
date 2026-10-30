@@ -1,6 +1,6 @@
 import type { PresentationScene } from './core/performance-director.ts';
 import { commentarySpeechText } from './core/commentary.ts';
-import { resolveSpeechPerformance, speechPerformance } from './core/speech-performance.ts';
+import { resolveSpeechPerformance, speechPerformance, type ResolvedSpeechPerformance } from './core/speech-performance.ts';
 
 const PROTOCOL = 'desktop-presentation/v1';
 export interface DesktopPresentationConfig { mode: 'stage' | 'desktop-text' | 'desktop-audio'; url: string }
@@ -16,6 +16,7 @@ export type DesktopState = {
 export class DesktopPresentation {
   private state: DesktopState | null = null;
   private readonly ownedIds = new Set<string>();
+  private readonly authored = new Map<string, ResolvedSpeechPerformance>();
   constructor(private readonly config: () => DesktopPresentationConfig,
     private readonly signal: AbortSignal, private readonly fetchImpl: typeof fetch = fetch) {}
   enabled() { return this.config().mode !== 'stage'; }
@@ -30,6 +31,23 @@ export class DesktopPresentation {
   resolvePerformance(raw: unknown) {
     const catalog = this.performanceCatalog();
     return resolveSpeechPerformance(speechPerformance(raw), catalog.expressions, catalog.bodyClips);
+  }
+  /** Resolve display ids against the actual Stage catalogue, never invent a clip. */
+  stageCue(actions: readonly string[], capabilities: {expressions?:string[];animationCatalog?:{bodyClip:string}[]},
+    weights:Record<string,number> = {}) {
+    const expressionWeights:Record<string,number> = {};
+    let bodyClip:string|undefined;
+    for(const id of actions) {
+      const word=this.state?.vocabulary.find(w=>w.id===id);if(!word)continue;
+      if(word.kind==='expression') {
+        const matches=(capabilities.expressions??[]).filter(name=>name===id || name.replace(/-/g,'').toLowerCase()===id.replace(/-/g,'').toLowerCase());
+        if(matches.length===1)expressionWeights[matches[0]]=weights[id]??.8;
+      } else {
+        const key=word.presentation?.key;
+        bodyClip=(capabilities.animationCatalog??[]).find(c=>c.bodyClip===id || (key && (c.bodyClip===key || c.bodyClip==='vrma:'+key)))?.bodyClip;
+      }
+    }
+    return {expressionWeights,...(bodyClip?{bodyClip}:{})};
   }
   private endpoint() {
     const url = new URL(this.config().url);
@@ -126,22 +144,25 @@ export class DesktopPresentation {
     if (args.action !== 'speak') return { accepted: false, reason: 'Text presentation does not select or start a speech service' };
     const text = typeof args.text === 'string' ? commentarySpeechText(args.text) : '';
     if (args.performance !== undefined) await this.refresh();
-    const {actions, warnings, requested} = this.resolvePerformance(args.performance);
+    const resolved = this.resolvePerformance(args.performance);
+    const {actions, warnings, requested, applied} = resolved;
     const result = await this.request({ action: 'say', source: 'avatar-stage', requestId, text,
       ...(actions.length ? {actions} : {}),
       ...(args.ifIdleRevision !== undefined ? { ifIdleRevision: args.ifIdleRevision } : {}),
       ...(args.evidence !== undefined ? { evidence: args.evidence } : {}) });
-    if (result.accepted === true && typeof result.id === 'string') this.ownedIds.add(result.id);
-    while (this.ownedIds.size > 64) this.ownedIds.delete(this.ownedIds.values().next().value!);
+    if (result.accepted === true && typeof result.id === 'string') {this.ownedIds.add(result.id);this.authored.set(result.id,resolved);}
+    while (this.ownedIds.size > 64) {const id=this.ownedIds.values().next().value!;this.ownedIds.delete(id);this.authored.delete(id);}
     await this.refresh();
-    return {...result, requestedPerformance: requested, presentationWarnings: warnings};
+    return {...result, requestedPerformance: requested, appliedPerformance: applied, presentationWarnings: warnings};
   }
   async attach(args: Record<string, unknown>) {
     await this.refresh();
     if (this.state?.foreground !== args.audioActionId)
       return { accepted: false, reason: 'Desktop presentation is no longer current' };
-    const actions = [...Object.keys((args.expressionWeights ?? {}) as object),
-      ...(typeof args.bodyClip === 'string' ? [args.bodyClip] : [])];
+    const original=this.authored.get(String(args.audioActionId)), own=original?.applied;
+    const actions = [...new Set([...(original?.actions ?? []),
+      ...(own?.expression || own?.emotion ? [] : Object.keys((args.expressionWeights ?? {}) as object)),
+      ...(own?.bodyClip || typeof args.bodyClip !== 'string' ? [] : [args.bodyClip])])];
     if (!actions.length) return { accepted: true, id: args.audioActionId, audio: false };
     return this.request({ action: 'act', id: args.audioActionId, actions });
   }
@@ -151,6 +172,6 @@ export class DesktopPresentation {
       await this.refresh();
       for (const r of this.state!.recent) if (this.ownedIds.has(String(r.id)) && ['queued', 'shown'].includes(String(r.status)))
         await this.request({ action: 'cancel', id: r.id });
-    } finally { this.ownedIds.clear(); }
+    } finally { this.ownedIds.clear(); this.authored.clear(); }
   }
 }
