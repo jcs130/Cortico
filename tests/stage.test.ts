@@ -242,6 +242,22 @@ it('reserves one foreground line nonblockingly, then dispatches exactly once aft
  await server.stage.receipt({...receipt,status:'ended',audioTimeMs:10000});
  expect(events.filter(e=>e.type==='command'&&e.data.kind==='speech')).toHaveLength(2);
 });
+it('keeps an unsynthesized reserved line past the renderer fallback deadline, then dispatches it once',async()=>{
+ const now=Date.now(),clock=vi.spyOn(Date,'now').mockReturnValue(now);
+ const {server,events,first,waiting,receipt}=await automaticSpeechWithWaitingForeground();
+ clock.mockReturnValue(now+16001);
+ await server.stage.receipt({...receipt,eventId:undefined,status:'heartbeat'});
+ await (server.stage as any).check();
+ expect(server.stage.ledger.result(String(waiting.id)).status).toBe('queued');
+ expect(server.stage.status()).toMatchObject({foreground:first.id,waitingSpeech:{actionId:waiting.id,synthesisStarted:false}});
+ expect(events.filter(e=>e.type==='command'&&e.data.kind==='speech')).toHaveLength(1);
+ await server.stage.receipt({...receipt,status:'ended',audioTimeMs:16001});
+ expect(server.stage.status()).toMatchObject({foreground:waiting.id,waitingSpeech:null});
+ expect(events.filter(e=>e.type==='command'&&e.data.kind==='speech')).toHaveLength(2);
+ await server.stage.receipt({...receipt,eventId:waiting.id,status:'playing',audioTimeMs:0});
+ await server.stage.receipt({...receipt,eventId:waiting.id,status:'ended',audioTimeMs:2000});
+ expect(server.stage.ledger.result(String(waiting.id)).status).toBe('completed');
+});
 it.each(['ttl','source-age','interrupt','cancel','renderer-release','stop'])(
  'does not replay a deferred line after %s, and never refreshes its observation clock',async(reason)=>{
   const now=Date.now(); const clock=vi.spyOn(Date,'now').mockReturnValue(now);

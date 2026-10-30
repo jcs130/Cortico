@@ -1,3 +1,7 @@
+## 0.1.2-rc.17
+
+- Keep reserved, unsynthesized speech under its own pending deadline until dispatch. Renderer startup timeout begins after a renderer command exists; expiry, cancellation and stale-observation checks remain in force.
+
 ## 0.1.2-rc.16.memory.1
 
 - Bound display textures to 2048 pixels before their first GPU upload, share resized images across texture clones, and release decoded image resources. Source avatar files remain unchanged.

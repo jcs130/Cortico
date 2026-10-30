@@ -899,6 +899,10 @@ export class AvatarStage {
                 typeof action.command.audioActionId === "string"
               ? action.command.audioActionId
               : null;
+        // Reserved speech has no renderer command yet. Its pending deadline
+        // above remains authoritative until it is actually dispatched.
+        if (audioId && this.waitingSpeech?.id === audioId && Date.now() < this.waitingSpeech.expiresAt)
+          continue;
         const wait = audioId ? this.voice.playbackWait(audioId) : null;
         const rendererConnected = !!this.owner && this.sessions.has(this.owner.sessionId);
         const synthesizing =
