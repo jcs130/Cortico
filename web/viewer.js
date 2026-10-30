@@ -664,6 +664,7 @@ function applyPose(dt, now) {
       speechPlaying: audio.speechPlaying,
       mouth,
       automatic: performanceWeights,
+      directed: active?.expressionWeights,
       blink: blink < 0.18 ? Math.sin((blink / 0.18) * Math.PI) : 0,
     }),
   ))

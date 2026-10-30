@@ -62,6 +62,8 @@ export class PerformanceCues {
       this.weights[key] =
         (this.weights[key] ?? 0) +
         ((target[key] ?? 0) - (this.weights[key] ?? 0)) * alpha;
+    for(const key of Object.keys(this.weights))
+      if(!(key in target) && Math.abs(this.weights[key])<.001)delete this.weights[key];
     return {
       weights: this.weights,
       loopClip:

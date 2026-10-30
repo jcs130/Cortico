@@ -125,6 +125,15 @@ async function speechSetup() {
   r.server.stage.claimAudio("renderer");
   return r;
 }
+it('validates independent numeric face weights through the public control contract',async()=>{
+ const {server}=await setup({customExpressions:['browInnerUp','mouthSmileLeft']});
+ const args={action:'perform',expressionWeights:{browInnerUp:.35,mouthSmileLeft:.7},durationMs:3000};
+ const r=await server.call('avatar_control',args,'weighted-face');
+ expect(server.stage.ledger.result(String(r.id)).command).toMatchObject({expressionWeights:args.expressionWeights});
+ await expect(server.call('avatar_control',{...args,expression:'happy'})).rejects.toThrow('not both');
+ await expect(server.call('avatar_control',{...args,expressionWeights:{missing:.1}})).rejects.toThrow('unavailable');
+ await expect(server.call('avatar_control',{...args,expressionWeights:{happy:NaN}})).rejects.toThrow('Invalid number');
+});
 
 it('broadcasts an imported game WAV once with actual renderer receipts and no new TTS request',async()=>{
   const {server,preset}=await speechSetup();

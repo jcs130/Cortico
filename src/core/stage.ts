@@ -378,6 +378,15 @@ export class AvatarStage {
         throw Error("Expression is unavailable for this avatar");
       command.expression = args.expression;
     }
+    if (args.expressionWeights !== undefined) {
+      if(args.expression !== undefined)throw Error('Use expression or expressionWeights, not both');
+      const weights=object(args.expressionWeights);
+      for(const [name,weight]of Object.entries(weights)){
+        if(!(cap.expressions as string[]).includes(name))throw Error('Expression is unavailable for this avatar');
+        number(weight,0,1,'expression weight');
+      }
+      command.expressionWeights=weights;
+    }
     if (args.gesture !== undefined) {
       if (
         !["wave", "nod", "bow", "cheer", "idle"].includes(String(args.gesture))

@@ -94,14 +94,17 @@ export class DesktopPresentation {
       foreground: s.busy ? s.foreground ?? 'desktop-busy' : null, audioRevision: s.revision,
       voice: { configured: false, textFormat: 'plain' }, textReady: s.ready === true };
   }
-  scene(foreground = this.state?.foreground): PresentationScene {
+  scene(foreground = this.state?.foreground, stage?:PresentationScene): PresentationScene {
     return { foreground, busy:this.state?.busy ?? true, cueVersion:this.state?.revision, activeAvatar: this.state ? { id: 'desktop-current-figure',
       capabilities: { expressions: this.state.vocabulary.filter(w => w.kind === 'expression').map(w => w.id),
-        animationCatalog: this.state.vocabulary.filter(w => w.kind === 'motion').map(w => ({
+        animationCatalog: this.state.vocabulary.filter(w => w.kind === 'motion').map(w => {
+          const key=w.presentation?.key ?? w.id;
+          const installed=stage?.activeAvatar?.capabilities.animationCatalog?.find(c=>c.bodyClip===w.id||c.bodyClip===key||c.bodyClip==='vrma:'+key);
+          return {
           bodyClip: w.id, key:w.presentation?.key ?? w.id,
           description: w.about.en ?? Object.values(w.about)[0] ?? w.id,
-          auto: w.presentation?.auto ?? true, tags:w.presentation?.tags ?? [],
-        })) } } : null };
+          auto: (w.presentation?.auto ?? true) && (stage===undefined || installed?.auto===true), tags:w.presentation?.tags ?? [],
+        };}) } } : null };
   }
   async control(args: Record<string, unknown>, requestId: string) {
     await this.refresh();

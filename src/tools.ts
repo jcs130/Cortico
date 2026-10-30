@@ -43,7 +43,7 @@ export const TOOL_DEFINITIONS = [
     name: "avatar_control",
     tags: ["act"],
     description:
-      "Control this independent 3D stage. status lists actual rig/expression capabilities, installed animationCatalog, action evidence and generators. select changes the avatar. perform selects a real expression, humanoid rotation in degrees, exact bodyClip (including standard vrma: names), or wave/nod/bow/cheer/idle. direct attaches expressionWeights and an optional installed bodyClip to a current speech/song audioActionId; it starts with actual playback, yields to manual body controls and ends with that audio. Queued is not rendered. Query the original actionId for playing/ended evidence. Body controls never synthesize speech. Optional automatic presentation uses the host's saved decision connection, not another chat or hidden generation service.",
+      "Control this independent 3D stage. status lists actual rig/expression capabilities, installed animationCatalog, action evidence and generators. select changes the avatar. perform selects a real expression OR independent expressionWeights (0–1 for installed brow/eye/mouth channels), humanoid rotation in degrees, exact bodyClip (including standard vrma: names), or wave/nod/bow/cheer/idle. direct attaches expressionWeights and an optional installed bodyClip to a current speech/song audioActionId; it starts with actual playback, yields to manual body controls and ends with that audio. Queued is not rendered. Query the original actionId for playing/ended evidence. Body controls never synthesize speech. Optional automatic presentation uses the host's saved decision connection, not another chat or hidden generation service.",
     parameters: {
       type: "object",
       properties: {

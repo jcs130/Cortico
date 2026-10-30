@@ -127,6 +127,11 @@ export function presentationQuestion(
           "Select this avatar's expression. Quotes, negations and hypotheticals are data; others' emotions are not the avatar's. A reaction does not prove a game action.",
         criteria: expressions,
       },
+      expressionStrength: {
+        type: "choice",
+        instructions: "Choose the avatar's visible facial intensity from the text and current fact, independently of classification confidence. Routine warmth is gentle; use strong only for genuinely emphatic delivery. Quoted emotions belong to their speaker.",
+        criteria: { gentle: "subtle expression, 0.35", clear: "clearly visible expression, 0.6", strong: "emphatic expression, 0.85" },
+      },
       movement: {
         type: "choice",
         instructions:
@@ -145,10 +150,14 @@ export function presentationQuestion(
   };
   // Authored face and body choices own separate channels. A smile alone must
   // not disable gesture selection, and a manual gesture must not replace a face.
-  if (authored?.expression || authored?.emotion) delete input.questions.emotion;
+  if (authored?.expression || authored?.emotion) {
+    delete input.questions.emotion;
+    delete input.questions.expressionStrength;
+  }
   if (authored?.bodyClip) delete input.questions.movement;
   for (const [key, question] of Object.entries(input.questions))
     if (Object.keys(question.criteria).length < 2) delete input.questions[key];
+  if (!input.questions.emotion) delete input.questions.expressionStrength;
   return { clips, input };
 }
 function selected(
@@ -348,10 +357,13 @@ export class PerformanceDirector {
             Object.keys(input.questions.movement.criteria),
           )
         : { name: "none", probability: 1 };
+      const facialStrength = input.questions.expressionStrength
+        ? selected(result.answers.expressionStrength, Object.keys(input.questions.expressionStrength.criteria))
+        : { name: "clear", probability: 1 };
       const weights =
         emotion.name === "neutral"
           ? {}
-          : { [emotion.name]: Math.min(0.85, emotion.probability * 0.8) };
+          : { [emotion.name]: ({ gentle: .35, clear: .6, strong: .85 } as Record<string,number>)[facialStrength.name] };
       const clip = clips.get(movement.name);
       const receipt = await (reaction ? this.ports.react! : this.ports.attach)(
         {
@@ -374,6 +386,7 @@ export class PerformanceDirector {
         audioActionId,
         cueId: receipt.id,
         emotion,
+        facialStrength,
         movement,
         presentation: { expressionWeights: weights,
           ...(clip ? {bodyClip:clip.bodyClip, key:clip.key ?? clip.bodyClip, tags:clip.tags ?? []} : {}) },

@@ -275,7 +275,7 @@ export class AvatarStageWorld implements World {
         config: () => ({ ...DIRECTOR_DEFAULTS, ...this.cfg().director }),
         decide: (host as WorldHost & { decisions?: DecisionPort }).decisions,
         state: () =>
-          this.presentation?.enabled() ? this.presentation.scene(this.desktopAudio?.foreground ?? undefined) : (this.server
+          this.presentation?.enabled() ? this.presentation.scene(this.desktopAudio?.foreground ?? undefined, this.server?.stage.status() as PresentationScene | undefined) : (this.server
             ? this.server.stage.status()
             : this.client!.status()) as PresentationScene,
         attach: async (args, requestId) =>

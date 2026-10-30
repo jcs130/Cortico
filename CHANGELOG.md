@@ -1,3 +1,9 @@
+## 0.1.2-rc.16
+
+- Separate semantic facial intensity from decision confidence, preserving local continuous interpolation and authored controls.
+- Support independent numeric facial channels in Stage manual performance, preserve directed blink ownership, and release decayed channels.
+- Intersect desktop automatic motion choices with the visible Stage model's reviewed catalogue.
+
 ## 0.1.2-rc.15
 
 - Hold visual cues during a shared audio-floor wait and dispatch them only after device playback starts, so long audio queues do not expire their gestures before anyone speaks.

@@ -50,3 +50,8 @@ it("serves the facial mixer imported by the public browser entry", async () => {
     expect(await module.text()).toContain('export function expressionWeights');
   } finally {await server.stop();await rm(dataDir,{recursive:true,force:true});}
 });
+it('interpolates independent directed face channels and gives blinks and speech separate ownership',()=>{
+ const state={available:['happy','browInnerUp','blink','blinkLeft','aa'],expression:null,strength:.5,singing:false,speechPlaying:false,mouth:0,blink:1};
+ expect(expressionWeights({...state,directed:{happy:.6,browInnerUp:.4,blinkLeft:.8}})).toEqual({happy:.3,browInnerUp:.2,blink:0,blinkLeft:.4,aa:0});
+ expect(expressionWeights({...state,directed:{aa:.8},speechPlaying:true,mouth:.7}).aa).toBe(.7);
+});

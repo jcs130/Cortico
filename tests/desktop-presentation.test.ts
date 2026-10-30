@@ -77,6 +77,15 @@ it('rejects public endpoints instead of falling back to TTS', async () => {
   const { bridge: running } = await endpoint();
   expect(running.enabled()).toBe(true);
 });
+it('intersects automatic eligibility with the actual visible Stage model review',async()=>{
+  const {bridge,state}=await endpoint();
+  Object.assign(state.vocabulary[1],{presentation:{key:'TripoWave',auto:true,tags:['greeting']}});await bridge.refresh();
+  const visible=(auto:boolean)=>({activeAvatar:{id:'reviewed',capabilities:{animationCatalog:[{bodyClip:'vrma:TripoWave',auto}]}}});
+  expect(bridge.scene(undefined,visible(false)).activeAvatar?.capabilities.animationCatalog?.[0].auto).toBe(false);
+  expect(bridge.scene(undefined,visible(true)).activeAvatar?.capabilities.animationCatalog?.[0].auto).toBe(true);
+  expect(bridge.scene(undefined,{activeAvatar:null}).activeAvatar?.capabilities.animationCatalog?.[0].auto).toBe(false);
+  expect(bridge.scene().activeAvatar?.capabilities.animationCatalog?.[0].auto).toBe(true);
+});
 it('routes manual avatar controls through the same displayed figure vocabulary',async()=>{
   const {bridge,commands}=await endpoint();
   expect(await bridge.control({action:'perform',expression:'happy',bodyClip:'wave'},'manual')).toMatchObject({accepted:true});

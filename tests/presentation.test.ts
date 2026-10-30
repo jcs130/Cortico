@@ -91,7 +91,7 @@ function answer(input: DecisionInput): DecisionOutput {
   return {
     answers: Object.fromEntries(
       Object.entries(input.questions).map(([q, spec]) => {
-        const choice = q === "emotion" ? "happy" : "m0";
+        const choice = q === "emotion" ? "happy" : q === 'expressionStrength' ? 'clear' : "m0";
         return [
           q,
           {
@@ -110,6 +110,23 @@ function answer(input: DecisionInput): DecisionOutput {
     usage: { input_tokens: 250, output_tokens: 20 },
   };
 }
+it('uses semantic expression strength rather than treating decision probability as muscle intensity',async()=>{
+ const traces:Record<string,unknown>[]=[];
+ for(const level of ['gentle','strong']){
+  const director=new PerformanceDirector({config:()=>({enabled:true,provider:'lan',timeoutMs:1200}),
+   decide:{request:async(input)=>{const result=answer(input);result.answers.emotion={choice:'happy',probabilities:{neutral:.4,happy:.6,sad:0,angry:0}};result.answers.expressionStrength={choice:level,probabilities:{gentle:level==='gentle'?1:0,clear:0,strong:level==='strong'?1:0}};return result;}},
+   state:()=>scene,attach:async(args)=>{traces.push(args);return{accepted:true};},log(){}});
+  await director.direct('voice','你好','speaking');
+ }
+ expect(traces.map(t=>t.expressionWeights)).toEqual([{happy:.35},{happy:.85}]);
+});
+it('releases automatic blink ownership when a face cue has decayed to zero',()=>{
+ const cues=new PerformanceCues(()=>{}),audio={playing:true,actionId:'a'};
+ cues.receive({eventId:'blink-cue',audioActionId:'a',expiresAt:Date.now()+10000,expressionWeights:{blinkLeft:1}});cues.update(audio,.5);
+ cues.cancel('blink-cue');const automatic=cues.update(audio,3).weights;
+ expect(automatic).toEqual({});
+ expect(expressionWeights({available:['blink','blinkLeft'],automatic,blink:1})).toEqual({blink:1,blinkLeft:0});
+});
 it("offers only installed eligible clips and necessary current text, preserving speaker/quotation instructions", () => {
   const question = presentationQuestion(
     "他说‘不要挥手’。" + "长".repeat(800),
@@ -156,7 +173,7 @@ it("omits questions with no actual alternative instead of submitting invalid one
     foreground: "voice",
     activeAvatar: { id: "a", capabilities: { expressions: ["happy"] } },
   }).input;
-  expect(Object.keys(faceOnly.questions)).toEqual(["emotion"]);
+  expect(Object.keys(faceOnly.questions)).toEqual(["emotion", "expressionStrength"]);
 });
 it('fills face and gesture independently and never overrides authored channels', async () => {
   const request = vi.fn(async (input:DecisionInput)=>answer(input));
@@ -173,7 +190,7 @@ it('fills face and gesture independently and never overrides authored channels',
   expect(request).toHaveBeenCalledTimes(1);
   expect(both.status().last.status).toBe('no-choice');
   const body = presentationQuestion('你好','speaking',scene,[],{bodyClip:'vrma:wave'}).input;
-  expect(Object.keys(body.questions)).toEqual(['emotion']);
+  expect(Object.keys(body.questions)).toEqual(['emotion','expressionStrength']);
 });
 it("classifies once alongside the audio, attaches only to its current parent and records actual usage", async () => {
   const decide = vi.fn(async (input: DecisionInput) => answer(input)),
@@ -196,7 +213,7 @@ it("classifies once alongside the audio, attaches only to its current parent and
   expect(attach.mock.calls[0][0]).toEqual({
     action: "direct",
     audioActionId: "voice",
-    expressionWeights: { happy: 0.8 },
+    expressionWeights: { happy: 0.6 },
     bodyClip: "vrma:wave",
   });
   expect(director.status().last).toMatchObject({
@@ -281,7 +298,7 @@ it("waits for actual matching audio, respects manual body priority and cleans up
   expect(result.weights.happy).toBeLessThan(0.8);
   cues.cancel("cue");
   expect(play.mock.results[0].value).toHaveBeenCalledTimes(1);
-  expect(cues.update(audio, 2).weights.happy).toBeLessThan(0.01);
+  expect(cues.update(audio, 2).weights.happy ?? 0).toBeLessThan(0.01);
 });
 it("finishes performance with audio and follows loop activity without replaying one-shot gestures", () => {
   const receipt = vi.fn(),

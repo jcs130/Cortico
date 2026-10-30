@@ -49,6 +49,16 @@ Useful references: [JEV typed decisions](https://jev-ai.org/docs/), [Eidolon emo
 
 Measure actual request tokens, elapsed time, cache values when supplied, audio start/end and matching renderer receipts separately. Small isolated examples do not prove live responsiveness, speech quality or long-term animation variety.
 
+## Continuous facial controls
+
+Emotion category confidence is not muscle intensity. The same bounded host decision request also selects gentle (0.35), clear (0.6), or strong (0.85) facial delivery from the current utterance. These targets interpolate locally; manual facial cues retain priority. No extra conversation or full history is created. Neutral keeps zero emotion weights.
+
+Stage output accepts `avatar_control {action:"perform", expressionWeights:{browInnerUp:0.3,mouthSmileLeft:0.6},durationMs:3000}` for exact installed expression channels. Use values in [0,1]; absent channels are not inferred. This replaces the single `expression` field for that cue. It can mix brows, eyes and mouth; actual speech retains viseme ownership and a directed blink temporarily owns blink channels. Expired zero weights release ownership. Desktop transports that expose only word IDs still reject unsupported weighted manual controls explicitly.
+
+Desktop automatic body candidates must be approved by both the desktop vocabulary and the visible Stage avatar's catalogue. A stale desktop pack cannot re-enable a motion disabled after actual visual review. Explicit manual previews stay available.
+
+Model authoring and runtime controls are separate. A declared eye bone or morph name does not prove that any vertices move. Check real skin influences, nonzero morph deltas, closed-eye endpoints and multiple camera/head angles. [VRM expressions](https://github.com/vrm-c/vrm-specification/blob/master/specification/VRMC_vrm-1.0/expressions.md) define blink/mouth/look ownership. [SoullinkEmotion3D](https://github.com/nanlingyin/SoullinkEmotion3D) is a useful reference for per-region channels and continuous transitions; Live2D parameter IDs cannot be applied directly to a VRM. This implementation reuses the existing host decision port and installed VRM channels, without importing its model assets or external inference service.
+
 ## Optional in-game YSM presentation
 
 YSM is a separate renderer and has a different skeleton and animation format. Share semantic intentions such as greeting or celebration, then resolve them against the actual installed model's extra-animation catalogue. Never send VRMA joint rotations as YSM rotations or assume a common animation name across models. Missing mappings should stay unsupported.
