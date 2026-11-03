@@ -46,6 +46,8 @@ export interface CommentaryEvent {
 }
 
 interface Evidence extends CommentaryEvent { truncated: boolean }
+const observationKey = (e: CommentaryEvent): string | null => outcome(e)
+  ? JSON.stringify([e.source, e.execution!.id]) : null;
 function sameObservation(a: CommentaryEvent, b: CommentaryEvent): boolean {
   return a.source === b.source && a.type === b.type && a.origin === b.origin && a.senderKey === b.senderKey && a.text === b.text;
 }
@@ -65,6 +67,13 @@ function preview(e: CommentaryEvent, text: string): Evidence {
     if (typeof value === 'boolean') meta[key] = value;
     else if (typeof value === 'string' && value.length <= 80 && cleanEvidence(value) !== null) meta[key] = value;
   }
+  const life = e.meta?.deathLifecycle as Record<string, unknown> | undefined;
+  if (life && typeof life.episodeId === 'string' && life.episodeId.length <= 160
+    && ['dead', 'respawn_pending', 'alive'].includes(String(life.phase))) {
+    meta.deathLifecycle = { episodeId: life.episodeId, phase: life.phase,
+      ...(typeof life.observedAt === 'string' && Number.isFinite(Date.parse(life.observedAt)) ? { observedAt: life.observedAt } : {}),
+      ...(Number.isSafeInteger(life.deathsToday) && Number(life.deathsToday) >= 0 ? { deathsToday: life.deathsToday } : {}) };
+  }
   // A snapshot often ends with body progress after a long visible-block list.
   // Preserve both ends inside the SAME budget instead of dropping that state.
   const short = snapshot(e) && text.length > 600 && text.includes('\n')
@@ -76,7 +85,7 @@ function preview(e: CommentaryEvent, text: string): Evidence {
       evidence: { outcome: e.execution!.evidence!.outcome } } } : {}),
     truncated: text.length > 600 || Object.keys(e.meta ?? {}).length > Object.keys(meta).length };
 }
-interface Submission { at: string; script: string }
+interface Submission { at: string; script: string; observations?: string[] }
 export type CommentaryState = 'disabled' | 'waiting' | 'drafting' | 'ready' | 'submitted' | 'skipped' | 'stale' | 'failed';
 interface Draft {
   script: string; evidence: number[]; facts: Evidence[];
@@ -172,6 +181,7 @@ export class CommentaryLane {
   private snapshots = new Map<string, Evidence>();
   private outcomes = new Map<string, Evidence>();
   private recent: Submission[] = [];
+  private announced = new Set<string>();
   private lastEvaluated = '';
   private state: CommentaryState = 'disabled';
   private ready: Draft | null = null;
@@ -211,9 +221,25 @@ export class CommentaryLane {
     if (script?.trim()) this.submitted(script);
   }
 
-  private submitted(script: string): void {
-    this.recent.push({ at: new Date(this.now()).toISOString(), script: commentarySpeechText(script).slice(0, 400) });
+  private submitted(script: string, observations: string[] = []): void {
+    for (const key of observations) this.announced.add(key);
+    while (this.announced.size > 64) this.announced.delete(this.announced.values().next().value!);
+    this.recent.push({ at: new Date(this.now()).toISOString(), script: commentarySpeechText(script).slice(0, 400),
+      ...(observations.length ? { observations } : {}) });
     this.recent = this.recent.slice(-8);
+  }
+  private citedObservations(draft: Draft): string[] {
+    return draft.evidence.flatMap(cursor => {
+      const fact = draft.facts.find(e => e.cursor === cursor), key = fact && observationKey(fact);
+      return key ? [key] : [];
+    });
+  }
+  private repeatedObservation(draft: Draft): boolean {
+    const keys = this.citedObservations(draft);
+    // Preserve replies, reflection and follow-up evidence. Only a fresh announcement
+    // based entirely on already announced terminal observations is a duplicate.
+    return draft.kind === 'observation' && keys.length > 0 && keys.length === draft.evidence.length
+      && keys.every(key => this.announced.has(key));
   }
 
   facts(): string {
@@ -414,13 +440,17 @@ export class CommentaryLane {
     const serial = draft.serial;
     try {
       if (!this.eligible() || !this.valid(draft)) { this.stale(serial, 'candidate-invalidated'); return; }
+      if (this.repeatedObservation(draft)) {
+        this.state = 'skipped'; this.ports.log('commentary-skipped', { requestId: serial,
+          reason: 'observation-already-announced', evidence: draft.evidence }); return;
+      }
       const receipt = draft.timeframe === 'recent'
         ? await this.ports.perform(draft.script, serial, draft.evidence, 'recent')
         : await this.ports.perform(draft.script, serial, draft.evidence);
       if (!receipt.accepted) {
         this.state = 'stale'; this.ports.log('commentary-stale', { requestId: serial, receipt }); return;
       }
-      this.submitted(draft.script);
+      this.submitted(draft.script, this.citedObservations(draft));
       this.state = 'submitted';
       this.ports.log('commentary-submitted', { requestId: serial, script: draft.script, evidence: draft.evidence, receipt,
         duringPlayback: draft.duringPlayback, draftMs: draft.readyAt - draft.startedAt,
@@ -432,6 +462,6 @@ export class CommentaryLane {
     }
   }
 
-  stop(): void { this.stopped = true; this.epoch++; this.ready = null; this.evidence.clear(); this.snapshots.clear(); this.outcomes.clear(); this.lastEvaluated = ''; }
+  stop(): void { this.stopped = true; this.epoch++; this.ready = null; this.evidence.clear(); this.snapshots.clear(); this.outcomes.clear(); this.announced.clear(); this.lastEvaluated = ''; }
   resume(): void { this.stopped = false; this.epoch++; this.ready = null; this.prefetchedRevision = undefined; this.nextAt = 0; }
 }

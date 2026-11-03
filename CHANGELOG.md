@@ -1,3 +1,8 @@
+## 0.1.2-rc.17.preview.1
+
+- Track announced terminal observations by source and event identity. A changed wording or redelivered cursor cannot announce the same outcome as a new occurrence. Replies, thoughts, new evidence and genuinely distinct outcomes remain available.
+- Retain bounded death lifecycle identity and authoritative count in commentary previews; rejected audio admission does not consume an observation.
+
 ## 0.1.2-rc.17
 
 - Keep reserved, unsynthesized speech under its own pending deadline until dispatch. Renderer startup timeout begins after a renderer command exists; expiry, cancellation and stale-observation checks remain in force.

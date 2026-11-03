@@ -21,6 +21,36 @@ function rig() {
     advance(ms: number) { now += ms; speech.observedAtMs = now; } };
 }
 describe("optional evidence-based game commentary", () => {
+  it('does not announce the same death again under new wording or a redelivered cursor', async () => {
+    const r = rig();
+    const death = (cursor: number, id: string, count: number) => r.lane.observe({ cursor, ts: new Date(100_000).toISOString(),
+      source: 'game', type: 'game.event', origin: 'external', text: `今天第 ${count} 次死亡`,
+      meta: { deathLifecycle: { episodeId: id, phase: 'respawn_pending', deathsToday: count } },
+      execution: { kind: 'observation', id, terminal: true, evidence: { outcome: 'death' } } });
+    const answer = (script: string, cursor: number, kind = 'observation') => r.request.mockResolvedValue({ text:
+      JSON.stringify({ script, evidence: [cursor], kind, timeframe: 'recent' }) });
+    death(1, 'life-1', 1); answer('刚才第一次阵亡。', 1); r.lane.tick(); await settle();
+    expect(r.perform).toHaveBeenCalledTimes(1);
+    expect(r.request.mock.calls[0][0]).toContain('"deathsToday":1');
+    r.advance(3000); r.observe(2, 'game.result', '重生后的身体尚未就绪');
+    answer('刚才又阵亡，今天第二次。', 1); r.lane.tick(); await settle();
+    expect(r.perform).toHaveBeenCalledTimes(1);
+    expect(r.log).toHaveBeenCalledWith('commentary-skipped', expect.objectContaining({ reason: 'observation-already-announced' }));
+    r.advance(3000); death(3, 'life-1', 1); answer('又一次倒下了。', 3); r.lane.tick(); await settle();
+    expect(r.perform).toHaveBeenCalledTimes(1);
+    r.advance(3000); r.observe(4, 'game.result', '新近状态'); answer('下次该怎么应对呢？', 3, 'thought');
+    r.lane.tick(); await settle(); expect(r.perform).toHaveBeenCalledTimes(2);
+    r.advance(3000); death(5, 'life-2', 2); answer('这回第二次阵亡。', 5); r.lane.tick(); await settle();
+    expect(r.perform).toHaveBeenCalledTimes(3);
+  });
+  it('does not consume a terminal observation when the renderer rejects admission', async () => {
+    const r = rig(); r.perform.mockResolvedValueOnce({ accepted: false });
+    r.lane.observe({cursor:1,ts:new Date(100_000).toISOString(),source:'game',type:'game.event',origin:'external',text:'死亡',
+      execution:{kind:'observation',id:'life-1',terminal:true,evidence:{outcome:'death'}}});
+    r.request.mockResolvedValue({text:JSON.stringify({script:'刚才倒下了。',kind:'observation',timeframe:'recent',evidence:[1]})});
+    r.lane.tick(); await settle(); r.advance(3000); r.observe(2,'game.result','连接仍在'); r.lane.tick(); await settle();
+    expect(r.perform).toHaveBeenCalledTimes(2);
+  });
   it('skips an already spoken line without spending another generation to rewrite it', async () => {
     const r=rig(); r.lane.foregroundSpeech('已经说过。'); r.observe();
     r.request.mockResolvedValue({text:JSON.stringify({script:'已经说过。',kind:'thought',evidence:[]})});
