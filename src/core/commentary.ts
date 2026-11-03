@@ -341,7 +341,9 @@ export class CommentaryLane {
     const revision = this.ports.availability().speech!.queueRevision;
     if (duringPlayback) this.prefetchedRevision = revision;
     this.state = 'drafting';
-    const brief = commentaryBrief(facts, this.recent, c.style, textFormat);
+    const brief = commentaryBrief(facts.map(e => ({ ...e,
+      ...(observationKey(e) ? { announced: this.announced.has(observationKey(e)!) } : {}) })),
+      this.recent, c.style, textFormat);
     this.ports.log('commentary-request', { requestId: serial, idleSinceMs: idleSince, duringPlayback,
       queueRevision: revision, taskChars: brief.length, evidence: facts.map(e => e.cursor), context: 'task', tools: [] });
     const draft: Draft = { script: '', evidence: [], facts, epoch, idleSince, serial, startedAt: now, readyAt: now,

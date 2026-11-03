@@ -34,6 +34,7 @@ describe("optional evidence-based game commentary", () => {
     expect(r.request.mock.calls[0][0]).toContain('"deathsToday":1');
     r.advance(3000); r.observe(2, 'game.result', '重生后的身体尚未就绪');
     answer('刚才又阵亡，今天第二次。', 1); r.lane.tick(); await settle();
+    expect(r.request.mock.calls[1][0]).toContain('"announced":true');
     expect(r.perform).toHaveBeenCalledTimes(1);
     expect(r.log).toHaveBeenCalledWith('commentary-skipped', expect.objectContaining({ reason: 'observation-already-announced' }));
     r.advance(3000); death(3, 'life-1', 1); answer('又一次倒下了。', 3); r.lane.tick(); await settle();
