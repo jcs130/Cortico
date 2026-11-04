@@ -1,3 +1,8 @@
+## 0.1.2-rc.17.preview.5
+
+- Recheck the existing playback device after a host watchdog stall before cancelling an already playing song. Reserve ownership for a bounded five-second recovery window; fresh device receipts still determine liveness and completion, and repeated stalls cannot renew one missing receipt indefinitely.
+- Restore bounded music queue acknowledgement handling so a song waiting for the shared audio output is not mistaken for an unconsumed command after fifteen seconds.
+
 ## 0.1.2-rc.17.preview.4
 
 - Exclude explicitly labeled terrain classification from the small commentary projection; retain observed footing, objects and attributed room messages. Original events, main/worker context and TTS remain unchanged.

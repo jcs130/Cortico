@@ -135,6 +135,44 @@ async function speechSetup() {
   r.server.stage.claimAudio("renderer");
   return r;
 }
+it.each(['recovered','disconnected','monitor-running'])(
+  'reconciles independent playback after a stalled host without inventing completion: %s', async mode => {
+    const {server,preset,events} = await speechSetup();
+    const action = await server.call('avatar_voice',{action:'speak',text:'Long playback on an independent device.'},'monitor-'+mode);
+    const receipt = {sessionId:'renderer',role:'broadcast',avatarId:preset.id,avatarSha256:preset.sha256,eventId:action.id};
+    await server.stage.receipt({...receipt,status:'playing',durationMs:73000});
+    const now=Date.now(), clock=vi.spyOn(Date,'now').mockReturnValue(now);
+    const check=()=> (server.stage as unknown as {check():Promise<void>}).check();
+    try {
+      if(mode==='monitor-running') {
+        for(let elapsed=1000;elapsed<=11000;elapsed+=1000){clock.mockReturnValue(now+elapsed);await check();}
+        expect(server.stage.ledger.result(String(action.id)).status).toBe('failed');
+        return;
+      }
+      clock.mockReturnValue(now+55000);await check();
+      expect(server.stage.ledger.result(String(action.id)).status).toBe('playing');
+      expect(server.stage.status().renderers[0]).toMatchObject({connectionState:'rechecking'});
+      expect(()=>server.stage.claimAudio('renderer')).toThrow('fresh receipt');
+      await server.stage.receipt({...receipt,sessionId:'second',eventId:undefined,status:'ready'});
+      expect(()=>server.stage.claimAudio('second')).toThrow('Another renderer');
+      if(mode==='recovered') {
+        clock.mockReturnValue(now+56000);
+        await server.stage.receipt({...receipt,eventId:undefined,status:'heartbeat'});await check();
+        expect(server.stage.status().audioOwner).toBe('renderer');
+        expect(server.stage.ledger.result(String(action.id)).status).toBe('playing');
+        await server.stage.receipt({...receipt,status:'ended',audioTimeMs:73000});
+        expect(server.stage.ledger.result(String(action.id)).status).toBe('completed');
+        expect(events.filter(e=>e.type==='audio.cut'&&e.data.reason==='renderer-unavailable')).toHaveLength(0);
+      } else {
+        // Another late monitor cannot renew the same missing receipt forever.
+        clock.mockReturnValue(now+59000);await check();
+        clock.mockReturnValue(now+61000);await check();
+        expect(server.stage.ledger.result(String(action.id)).status).toBe('failed');
+        expect(server.stage.status().audioOwner).toBeNull();
+      }
+      expect(events.filter(e=>e.type==='command'&&e.data.eventId===action.id)).toHaveLength(1);
+    } finally {clock.mockRestore();}
+  });
 it('retries the original renderer end after journal failure without replaying speech', async () => {
   const {server, preset, events} = await speechSetup();
   const action = await server.call('avatar_voice', {action:'speak', text:'One actual playback.'}, 'journal-recovery');
@@ -574,6 +612,34 @@ it.each(['real-receipts','deadline','disconnected'])("keeps a connected physical
     }else{
       await receipt('playing',String(speech.id));expect(r.server.stage.ledger.result(String(speech.id)).status).toBe('playing');
       await receipt('ended',String(speech.id));expect(r.server.stage.ledger.result(String(speech.id)).status).toBe('completed');
+    }
+  }finally{clock.mockRestore();}
+});
+
+it.each(['completed','deadline','disconnected','unconsumed'])('bounds an acknowledged music playback queue without inventing a start: %s',async mode=>{
+  const r=await speechSetup();r.server.stage.config.voice!.rendererStartTimeoutMs=120000;
+  const bytes=Buffer.alloc(2444);bytes.write('RIFF');bytes.writeUInt32LE(bytes.length-8,4);bytes.write('WAVEfmt ',8);
+  bytes.writeUInt32LE(16,16);bytes.writeUInt16LE(1,20);bytes.writeUInt16LE(1,22);bytes.writeUInt32LE(24000,24);
+  bytes.writeUInt32LE(48000,28);bytes.writeUInt16LE(2,32);bytes.writeUInt16LE(16,34);bytes.write('data',36);bytes.writeUInt32LE(bytes.length-44,40);
+  const imported=await r.server.importMusic(bytes,{title:'Queued fixture music',instrumental:true});
+  await r.server.call('avatar_music',{action:'approve',jobId:imported.jobId});
+  const song=await r.server.call('avatar_music',{action:'play',trackId:imported.trackId},'music-queue-'+mode);
+  const now=Date.now(),clock=vi.spyOn(Date,'now').mockReturnValue(now);
+  const receipt=(status:string,waiting?:Record<string,unknown>)=>r.server.stage.receipt({sessionId:'renderer',role:'broadcast',avatarId:r.preset.id,avatarSha256:r.preset.sha256,status,eventId:song.id,...(waiting?{waiting}:{})});
+  try{
+    if(mode!=='unconsumed')await receipt('waiting',{kind:'speech-floor',position:2,since:now-900000});
+    clock.mockReturnValue(now+20000);
+    if(mode!=='disconnected')await receipt('heartbeat');
+    await (r.server.stage as unknown as {check():Promise<void>}).check();
+    const state=()=>r.server.stage.ledger.result(String(song.id)).status;
+    if(['disconnected','unconsumed'].includes(mode)){expect(state()).toBe('failed');return;}
+    expect(state()).toBe('queued');
+    if(mode==='deadline'){
+      await receipt('waiting',{kind:'speech-floor',position:1,since:now+20000});
+      clock.mockReturnValue(now+120001);await receipt('heartbeat');
+      await (r.server.stage as unknown as {check():Promise<void>}).check();expect(state()).toBe('failed');
+    }else{
+      await receipt('playing');expect(state()).toBe('playing');await receipt('ended');expect(state()).toBe('completed');
     }
   }finally{clock.mockRestore();}
 });

@@ -43,6 +43,7 @@ export class AvatarStage {
   private audioRevision = 0;
   private speechAdmissions = new Set<string>();
   private automaticSpeech = new Set<string>();
+  private musicPlaybackWait = new Map<string, number>();
   private waitingSpeech: { id: string; requestId: string; args: Record<string, unknown>;
     sessionId: string; expiresAt: number } | null = null;
   private ownedMotions = new Map<
@@ -50,6 +51,9 @@ export class AvatarStage {
     { avatarId: string; status: string }
   >();
   private checking = false;
+  private lastRendererCheck = 0;
+  private rendererRecoveryUntil = 0;
+  private rendererRecoveryReceipt: string | null = null;
   private lastMusicPoll = 0;
   private pendingTransitions = new Set<Promise<unknown>>();
   constructor(
@@ -98,6 +102,7 @@ export class AvatarStage {
   ) {
     const old = this.ledger.result(actionId);
     const record = await this.ledger.update(actionId, status, evidence);
+    if(record.status!=='queued')this.musicPlaybackWait.delete(actionId);
     if (old.status !== record.status) this.emit("avatar.action", { ...record });
     return record;
   }
@@ -112,6 +117,7 @@ export class AvatarStage {
     await this.music.start();
     this.motion.start();
     this.stopped = false;
+    this.lastRendererCheck = Date.now();
     this.tick = setInterval(() => void this.check(), 1000);
     this.tick.unref();
   }
@@ -137,15 +143,28 @@ export class AvatarStage {
   }
   status() {
     const now = Date.now();
+    // The watchdog and HTTP renderer adapter share this event loop. After a
+    // monitor stall, old heartbeat age is not evidence that an independent
+    // audio device stopped. Reserve the existing owner for one bounded probe
+    // window; only a real receipt renews its lease or completes the song.
+    const recoveryReceipt = this.owner && this.owner.sessionId + ':' + this.sessions.get(this.owner.sessionId)?.at;
+    if (now - this.lastRendererCheck > 3000 && this.owner && this.foreground &&
+        this.rendererRecoveryReceipt !== recoveryReceipt && this.ledger.result(this.foreground).status === 'playing') {
+      this.rendererRecoveryUntil = now + 5000;
+      this.rendererRecoveryReceipt = recoveryReceipt;
+    }
+    this.lastRendererCheck = now;
     for (const [key, value] of this.sessions)
-      if (now - value.at > 10000) this.sessions.delete(key);
-    if (this.owner && this.owner.until < now) this.owner = null;
+      if (now - value.at > 10000 && (key !== this.owner?.sessionId || now >= this.rendererRecoveryUntil)) this.sessions.delete(key);
+    if (this.owner && this.owner.until < now && now >= this.rendererRecoveryUntil) this.owner = null;
     return {
       protocol: PROTOCOL,
       activeAvatar: this.activeId ? this.avatars.public(this.activeId) : null,
       audienceProgress: this.audienceProgress && Date.parse(this.audienceProgress.expiresAt) > now ? this.audienceProgress : null,
       avatars: this.avatars.list(),
-      renderers: [...this.sessions.values()].map((s) => s.receipt),
+      renderers: [...this.sessions.values()].map((s) => ({...s.receipt,
+        connectionState: now - s.at > 10000 ? 'rechecking' : 'connected', lastReceiptAt: s.at})),
+      rendererRecoveryUntil: now < this.rendererRecoveryUntil ? this.rendererRecoveryUntil : null,
       audioOwner: this.owner?.sessionId ?? null,
       foreground: this.foreground,
       audioRevision: this.audioRevision,
@@ -166,6 +185,8 @@ export class AvatarStage {
     const renderer = this.sessions.get(sessionId);
     if (!renderer || renderer.receipt.role !== "broadcast")
       throw Error("Audio requires a connected broadcast renderer");
+    if (Date.now() - renderer.at > 10000)
+      throw Error('Audio renderer is awaiting a fresh receipt');
     if (this.owner && this.owner.sessionId !== sessionId)
       throw Error("Another renderer owns the single audio output");
     this.owner = { sessionId, until: Date.now() + 10000 };
@@ -197,6 +218,8 @@ export class AvatarStage {
       throw Error(
         "Enable audio in one broadcast renderer before requesting speech or singing",
       );
+    if (Date.now() - (this.sessions.get(this.owner.sessionId)?.at ?? 0) > 10000)
+      throw Error('Audio renderer is awaiting a fresh receipt');
     return this.owner.sessionId;
   }
   private ensureActive() {
@@ -839,7 +862,9 @@ export class AvatarStage {
         if (!['speech','music-play'].includes(previous.kind) || previous.status !== 'queued'
           || w?.kind !== 'speech-floor' || !Number.isInteger(w.position) || Number(w.position) < 1 || Number(w.position) > 16)
           throw Error('Invalid external audio wait receipt');
-        await this.ledger.note(r.eventId, {playbackWaiting:{kind:'speech-floor',position:w.position,
+        const receivedAt=this.musicPlaybackWait.get(r.eventId)??Date.now();
+        if(previous.kind==='music-play')this.musicPlaybackWait.set(r.eventId,receivedAt);
+        await this.ledger.note(r.eventId, {playbackWaiting:{kind:'speech-floor',position:w.position,receivedAt,
           ...(typeof w.since === 'number' && Number.isFinite(w.since) ? {since:w.since} : {})}});
         this.emit('avatar.voice', {actionId:r.eventId,status:'waiting-turn',position:w.position,
           executionConfirmed:false});
@@ -883,7 +908,9 @@ export class AvatarStage {
     return { ok: true };
   }
   private async check() {
-    if (this.stopped || this.checking) return;
+    if (this.stopped) return;
+    this.status(); // Monitor even while an asynchronous check awaits I/O.
+    if (this.checking) return;
     this.checking = true;
     try {
       this.status();
@@ -913,12 +940,14 @@ export class AvatarStage {
         // legitimately queued behind other audio. This grace is independent of
         // generation time, source freshness and actual playing/ended receipts.
         // Unconsumed commands or disconnected renderers keep the short fallback.
-        const rendererStartTimeout = rendererConnected && wait?.rendererSince !== undefined
-          ? wait.rendererStartTimeoutMs : 15000;
+        const musicWaitingSince=action.kind==='music-play'?this.musicPlaybackWait.get(action.id):undefined;
+        const rendererSince=wait?.rendererSince??musicWaitingSince;
+        const rendererStartTimeout = rendererConnected && rendererSince !== undefined
+          ? wait?.rendererStartTimeoutMs??this.config.voice?.rendererStartTimeoutMs??15000 : 15000;
         if (
           (action.status === "queued" &&
             !synthesizing &&
-            Date.now() - (wait?.rendererSince ?? action.createdAt) > rendererStartTimeout) ||
+            Date.now() - (rendererSince ?? action.createdAt) > rendererStartTimeout) ||
           (action.status === "playing" &&
             typeof action.evidence?.sessionId === "string" &&
             !this.sessions.has(action.evidence.sessionId))
