@@ -12,6 +12,14 @@ export class ActionLedger {
   readonly actions = new Map<string, ActionRecord>();
   private writing = Promise.resolve();
   constructor(private readonly directory: string) {}
+  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    // Preserve the caller's error, but let a later receipt retry the journal.
+    // One transient Windows file lock must not poison every future operation.
+    const pending = this.writing.catch(() => {}).then(operation);
+    this.writing = pending.then(() => {});
+    void this.writing.catch(() => {});
+    return pending;
+  }
   async start() {
     await mkdir(this.directory, { recursive: true });
     let loaded: ActionRecord[] = [];
@@ -32,7 +40,7 @@ export class ActionLedger {
       }
       this.actions.set(row.id, row);
     }
-    await this.save();
+    await this.enqueue(() => this.save());
   }
   async submit(
     requestId: string,
@@ -40,59 +48,72 @@ export class ActionLedger {
     avatarId: string | null,
     command: Record<string, unknown>,
   ) {
-    const canonical = (v: any): any =>
-      Array.isArray(v)
-        ? v.map(canonical)
-        : v && typeof v === "object"
-          ? Object.fromEntries(
-              Object.keys(v)
-                .sort()
-                .map((k) => [k, canonical(v[k])]),
-            )
-          : v;
-    const key = createHash("sha256")
-      .update(JSON.stringify(canonical({ kind, avatarId, command })))
-      .digest("hex");
-    const old = [...this.actions.values()].find(
-      (a) => a.requestId === requestId,
-    );
-    if (old) {
-      if (old.key !== key) throw Error("Request id belongs to another action");
-      return { record: old, reused: true };
-    }
-    const now = Date.now(),
-      record: ActionRecord = {
-        id: randomUUID(),
-        requestId,
-        key,
-        kind,
-        avatarId,
-        status: "queued",
-        createdAt: now,
-        updatedAt: now,
-        command,
-      };
-    this.actions.set(record.id, record);
-    await this.audit({ type: "request", record });
-    await this.save();
-    return { record, reused: false };
+    return this.enqueue(async () => {
+      const canonical = (v: any): any =>
+        Array.isArray(v)
+          ? v.map(canonical)
+          : v && typeof v === "object"
+            ? Object.fromEntries(
+                Object.keys(v)
+                  .sort()
+                  .map((k) => [k, canonical(v[k])]),
+              )
+            : v;
+      const key = createHash("sha256")
+        .update(JSON.stringify(canonical({ kind, avatarId, command })))
+        .digest("hex");
+      const old = [...this.actions.values()].find(
+        (a) => a.requestId === requestId,
+      );
+      if (old) {
+        if (old.key !== key)
+          throw Error("Request id belongs to another action");
+        await this.save();
+        return { record: old, reused: true };
+      }
+      const now = Date.now(),
+        record: ActionRecord = {
+          id: randomUUID(),
+          requestId,
+          key,
+          kind,
+          avatarId,
+          status: "queued",
+          createdAt: now,
+          updatedAt: now,
+          command,
+        };
+      await this.audit({ type: "request", record });
+      this.actions.set(record.id, record);
+      await this.save();
+      return { record, reused: false };
+    });
   }
   async update(
     actionId: string,
     status: ActionRecord["status"],
     evidence: Record<string, unknown>,
   ) {
-    const row = this.actions.get(actionId);
-    if (!row) throw Error("Unknown action");
-    const ignored = ["completed", "failed", "cancelled"].includes(row.status);
-    if (!ignored) {
-      row.status = status;
-      row.updatedAt = Date.now();
-      row.evidence = evidence;
-    }
-    await this.audit({ type: "receipt", actionId, status, evidence, ignored });
-    if (!ignored) await this.save();
-    return row;
+    return this.enqueue(async () => {
+      const row = this.actions.get(actionId);
+      if (!row) throw Error("Unknown action");
+      const ignored = ["completed", "failed", "cancelled"].includes(row.status);
+      await this.audit({
+        type: "receipt",
+        actionId,
+        status,
+        evidence,
+        ignored,
+      });
+      if (!ignored) {
+        row.status = status;
+        row.updatedAt = Date.now();
+        row.evidence = evidence;
+      }
+      // Also repair a snapshot whose prior write failed after its audit append.
+      await this.save();
+      return row;
+    });
   }
   result(id: string) {
     const row = this.actions.get(id);
@@ -106,28 +127,44 @@ export class ActionLedger {
       .map((row) => structuredClone(row));
   }
   note(actionId: string, evidence: Record<string, unknown>) {
-    return this.audit({ type: "transport", actionId, evidence });
+    return this.enqueue(() =>
+      this.audit({ type: "transport", actionId, evidence }),
+    );
   }
   private audit(value: unknown) {
-    const operation = () =>
+    return this.retryBusy(() =>
       appendFile(
         join(this.directory, "events.jsonl"),
         JSON.stringify({ at: Date.now(), ...(value as object) }) + "\n",
-      );
-    this.writing = this.writing.then(operation);
-    return this.writing;
+      ),
+    );
   }
   private save() {
-    const operation = async () => {
+    return this.retryBusy(async () => {
       const file = join(this.directory, "actions.json");
       await writeFile(
         file + ".tmp",
         JSON.stringify([...this.actions.values()]),
+        { flush: true },
       );
       await rename(file + ".tmp", file);
-    };
-    this.writing = this.writing.then(operation);
-    return this.writing;
+    });
+  }
+  private async retryBusy<T>(operation: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await operation();
+      } catch (error) {
+        const e = error as NodeJS.ErrnoException;
+        if (
+          attempt >= 4 ||
+          !["EBUSY", "EPERM", "EACCES"].includes(e.code ?? "") ||
+          (e.syscall !== undefined && !["open", "rename"].includes(e.syscall))
+        )
+          throw error;
+        await new Promise((resolve) => setTimeout(resolve, 25 * 2 ** attempt));
+      }
+    }
   }
   async close() {
     await this.writing;

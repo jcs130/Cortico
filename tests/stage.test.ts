@@ -135,6 +135,29 @@ async function speechSetup() {
   r.server.stage.claimAudio("renderer");
   return r;
 }
+it('retries the original renderer end after journal failure without replaying speech', async () => {
+  const {server, preset, events} = await speechSetup();
+  const action = await server.call('avatar_voice', {action:'speak', text:'One actual playback.'}, 'journal-recovery');
+  const receipt = {sessionId:'renderer', role:'broadcast', avatarId:preset.id,
+    avatarSha256:preset.sha256, eventId:action.id};
+  await server.stage.receipt({...receipt, status:'playing'});
+  // A rejected journal transaction used to poison every later receipt and
+  // mutate the in-memory row before its failed append, stranding foreground.
+  vi.spyOn(server.stage.ledger as any, 'audit').mockRejectedValueOnce(Object.assign(Error('file busy'), {code:'EBUSY'}));
+  const end = {...receipt, status:'ended', audioTimeMs:1200};
+  const post = () => fetch(server.url+'/api/receipt', {method:'POST',
+    headers:{'content-type':'application/json'}, body:JSON.stringify(end)});
+  const failed = await post();
+  expect(failed.status).toBe(400); await failed.text();
+  expect(server.stage.ledger.result(String(action.id)).status).toBe('playing');
+  expect(server.stage.status().foreground).toBe(action.id);
+  const retried = await post();
+  expect(retried.status).toBe(200); await retried.text();
+  expect(server.stage.ledger.result(String(action.id))).toMatchObject({status:'completed', evidence:{audioTimeMs:1200}});
+  expect(server.stage.status().foreground).toBeNull();
+  expect(server.stage.voice.status().current).toBeNull();
+  expect(events.filter(e=>e.type==='command'&&e.data.eventId===action.id)).toHaveLength(1);
+});
 it('validates independent numeric face weights through the public control contract',async()=>{
  const {server}=await setup({customExpressions:['browInnerUp','mouthSmileLeft']});
  const args={action:'perform',expressionWeights:{browInnerUp:.35,mouthSmileLeft:.7},durationMs:3000};
@@ -351,7 +374,7 @@ it('keeps valid speech when an optional cue is unavailable and does not repeat a
   const second = await server.call('avatar_voice', args, 'missing-cue');
   expect(second).toMatchObject({accepted: true, presentationWarnings: [expect.any(String), expect.any(String)]});
   expect(server.stage.status().foreground).toBe(second.id);
-  expect(server.stage.ledger.result(String(first.id)).status).toBe('cancelled');
+  await vi.waitFor(() => expect(server.stage.ledger.result(String(first.id)).status).toBe('cancelled'));
   expect(server.stage.ledger.history().filter(r => r.kind === 'presentation')).toHaveLength(0);
   const submitted = events.filter(e => e.type === 'avatar.speech.submitted' && e.data.actionId === second.id);
   expect(submitted).toHaveLength(1);
@@ -625,7 +648,7 @@ it("binds a silent visual renderer to current speech without giving it audio own
   await expect(server.stage.receipt({sessionId:'obs-visual',status:'ended',role:'broadcast',surface:'obs',
     eventId:speech.id as string,avatarId:preset.id,avatarSha256:preset.sha256})).rejects.toThrow('non-owner');
   await server.call("avatar_voice", { action: "interrupt" }, "direct-stop");
-  expect(server.stage.ledger.result(cue.id as string).status).toBe("cancelled");
+  await vi.waitFor(() => expect(server.stage.ledger.result(cue.id as string).status).toBe("cancelled"));
   expect(
     await server.call("avatar_control", {
       action: "direct",
