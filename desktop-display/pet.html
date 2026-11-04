@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>可米桌面形象</title>
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+  #pet { position: absolute; right: 32px; bottom: 12px; width: 300px; height: min(520px, 75vh); touch-action: none; }
+  iframe { width: 100%; height: 100%; border: 0; background: transparent; pointer-events: none; }
+  #tools { position: absolute; left: 18px; right: 18px; top: 4px; display: flex; align-items: center; justify-content: space-between;
+    color: #fff; font: 12px system-ui; text-shadow: 0 1px 3px #000; cursor: grab; opacity: 0; transition: opacity .15s; }
+  #pet:hover #tools { opacity: 1; }
+  button, a { color: #fff; background: #252938cf; border: 1px solid #ffffff4a; border-radius: 5px; padding: 4px 7px; font: inherit; text-decoration: none; cursor: pointer; }
+  #name { background: #252938aa; padding: 4px 7px; border-radius: 5px; }
+</style>
+<div id="pet" aria-label="可米桌面形象，可拖动">
+  <iframe title="当前可米的模型与动作" src="__STAGE_URL__/?obs=1" allow="autoplay"></iframe>
+  <div id="tools"><span id="name">可米 · 拖动移动</span><a href="__STAGE_URL__/" target="_blank">设置</a><button id="hide">隐藏</button></div>
+</div>
+<script>
+  const pet = document.querySelector('#pet'), host = window.petHost;
+  host?.setLanguage('zh');
+  host?.hideWhenFullscreen(false);
+  host?.onCursor(point => {
+    const b = pet.getBoundingClientRect();
+    host.setInteractive(!!point && point.x >= b.left && point.x < b.right && point.y >= b.top && point.y < b.bottom);
+  });
+  document.querySelector('#hide').onclick = () => host?.hide();
+  let drag = null;
+  pet.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || event.target.closest('button, a')) return;
+    const b = pet.getBoundingClientRect();
+    drag = { x: event.clientX - b.left, y: event.clientY - b.top };
+    pet.setPointerCapture(event.pointerId);
+  });
+  pet.addEventListener('pointermove', event => {
+    if (!drag) return;
+    pet.style.right = 'auto'; pet.style.bottom = 'auto';
+    pet.style.left = Math.max(0, Math.min(innerWidth - pet.clientWidth, event.clientX - drag.x)) + 'px';
+    pet.style.top = Math.max(0, Math.min(innerHeight - pet.clientHeight, event.clientY - drag.y)) + 'px';
+  });
+  pet.addEventListener('pointerup', () => { drag = null; });
+  pet.addEventListener('pointercancel', () => { drag = null; });
+</script>
+</html>
