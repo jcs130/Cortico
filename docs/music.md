@@ -1,6 +1,8 @@
 <!-- Owner: ../src/core/music.ts, ../src/desktop-audio.ts -->
 # 音乐服务接入
 
+音乐已由当前播音设备确认在统一音频队列中等待时，沿用配置的 `voice.rendererStartTimeoutMs` 等待开播。队列位置变化不重置期限；掉线或从未取得等待回执的命令仍按短超时失败。实际 `playing` 和 `ended` 回执仍分别确认开播与结束。
+
 歌曲既可以由演出室页面播放，也可以通过显式的 `presentation.mode:desktop-audio` 使用桌宠音频设备。两者复用同一曲库、原 action 回执、采用状态、人声包络及歌词。桌宠音频设备不渲染演出室的骨骼指令；它只报告实际音频播放，桌面形象使用自己的动作词表。
 
 曲库配置 `music.directory`。目录中的 `catalog.json`：
