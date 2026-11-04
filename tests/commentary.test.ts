@@ -21,6 +21,22 @@ function rig() {
     advance(ms: number) { now += ms; speech.observedAtMs = now; } };
 }
 describe("optional evidence-based game commentary", () => {
+  it('keeps observed room and footing without projecting a biome identifier as a place', () => {
+    const r=rig();
+    r.observe(1,'game.chat','[MC 系统] 第7/15层：灯火驿站；可使用工作台与商人。');
+    const raw='[Minecraft] 生物群系：terralith:cave/fungal_caves（地形类型，不是建筑或活动地点名称），脚下是樱花木板。\n东北有武器匠。';
+    r.observe(2,'game.snapshot',raw);r.lane.tick();
+    const brief=r.request.mock.calls[0][0];
+    expect(brief).toContain('灯火驿站');expect(brief).toContain('脚下是樱花木板');expect(brief).toContain('武器匠');
+    expect(brief).not.toContain('fungal_caves');expect(brief).toContain('terrain-classification');
+    expect(raw).toContain('fungal_caves');
+  });
+  it('omits terrain classification deltas but does not rewrite a speaker discussing a biome', () => {
+    const r=rig();r.observe(1,'game.world','当前生物群系：mod:fungal（地形类型）\n生命已恢复。');
+    r.observe(2,'game.chat','Jojo：生物群系是地图分类，不是驿站名称。');r.lane.tick();
+    const brief=r.request.mock.calls[0][0];expect(brief).not.toContain('mod:fungal');
+    expect(brief).toContain('生命已恢复');expect(brief).toContain('Jojo：生物群系是地图分类');
+  });
   it('does not announce the same death again under new wording or a redelivered cursor', async () => {
     const r = rig();
     const death = (cursor: number, id: string, count: number) => r.lane.observe({ cursor, ts: new Date(100_000).toISOString(),
