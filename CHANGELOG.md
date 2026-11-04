@@ -1,3 +1,7 @@
+## 0.1.2-rc.17.preview.2
+
+- Revalidate desktop audio ownership after heartbeat and before audio download, recovering an expired lease while keeping single-renderer checks and actual playback receipts.
+
 ## 0.1.2-rc.17.preview.1
 
 - Track announced terminal observations by source and event identity. A changed wording or redelivered cursor cannot announce the same outcome as a new occurrence. Replies, thoughts, new evidence and genuinely distinct outcomes remain available.

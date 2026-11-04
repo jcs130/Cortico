@@ -13,7 +13,7 @@ import { DesktopAudioRenderer } from '../src/desktop-audio.ts';
 import { animationFixture } from "./fixtures/vrma.ts";
 const cleanup: Array<() => Promise<unknown>> = [];
 
-it.each([false, true, 'face-only', 'missing', 'rejected', 'slow-catalog'])('routes speech and song to desktop with explicit performance=%s and reconciles playback', async (explicit) => {
+it.each([false, true, 'face-only', 'missing', 'rejected', 'slow-catalog', 'expired-lease'])('routes speech and song to desktop with explicit performance=%s and reconciles playback', async (explicit) => {
   const bytes = Buffer.alloc(4844); bytes.write('RIFF'); bytes.writeUInt32LE(bytes.length - 8, 4); bytes.write('WAVEfmt ', 8);
   bytes.writeUInt32LE(16,16); bytes.writeUInt16LE(1,20); bytes.writeUInt16LE(1,22); bytes.writeUInt32LE(24000,24);
   bytes.writeUInt32LE(48000,28); bytes.writeUInt16LE(2,32); bytes.writeUInt16LE(16,34); bytes.write('data',36); bytes.writeUInt32LE(bytes.length-44,40);
@@ -41,6 +41,16 @@ it.each([false, true, 'face-only', 'missing', 'rejected', 'slow-catalog'])('rout
   const renderer = new DesktopAudioRenderer({ stageUrl: () => server.url, display, signal: new AbortController().signal,
     admitted: (...args) => admitted.push(args), log: error => errors.push(error) });
   await renderer.start(); cleanup.push(() => renderer.stop());
+  if(explicit==='expired-lease') {
+    const event=renderer.event.bind(renderer);
+    vi.spyOn(renderer,'event').mockImplementation(e=>{
+      if(e.type==='command' && ['speech','music'].includes(String(e.data.kind))) {
+        (server.stage as any).owner.until=Date.now()-1;
+        expect(server.stage.status().audioOwner).toBeNull();
+      }
+      event(e);
+    });
+  }
   let releaseCatalog: (() => void) | undefined;
   if (explicit === 'slow-catalog') {
     const refresh = display.refresh.bind(display);

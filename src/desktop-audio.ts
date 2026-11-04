@@ -61,8 +61,11 @@ export class DesktopAudioRenderer {
       if (this.binding?.avatarSha256 !== state.activeAvatar.sha256) await this.cancel();
       this.binding = { avatarId: state.activeAvatar.id, avatarSha256: state.activeAvatar.sha256 };
       await this.receipt('heartbeat');
-      if (!state.audioOwner) await this.stage('/api/audio-owner', { sessionId: this.sessionId });
-      else if (state.audioOwner !== this.sessionId) { await this.cancel(); return; }
+      if (state.audioOwner && state.audioOwner !== this.sessionId) { await this.cancel(); return; }
+      // The preceding snapshot can outlive its lease while the host is busy.
+      // Claim atomically after the heartbeat, including when the snapshot named
+      // us. The server still rejects a different current owner.
+      await this.stage('/api/audio-owner', { sessionId: this.sessionId });
       const current = this.live;
       if (!current?.desktopId) return;
       const row = media.recent.find(r => r.id === current.desktopId);
@@ -126,6 +129,10 @@ export class DesktopAudioRenderer {
       const audioUrl = new URL(String(command.url), this.ports.stageUrl());
       if (audioUrl.origin !== new URL(this.ports.stageUrl()).origin || !/^\/audio\/(speech|music)\/[^/]+$/.test(audioUrl.pathname)) throw Error('Unexpected stage audio URL');
       audioUrl.searchParams.set('sessionId', this.sessionId);
+      // Synthesis and command delivery can span a lease boundary. Revalidate
+      // ownership before opening audio, without weakening the download guard.
+      await this.receipt('heartbeat');
+      await this.stage('/api/audio-owner', {sessionId:this.sessionId}, signal);
       const response = await fetch(audioUrl, { signal, redirect: 'error' });
       if (!response.ok || !response.body) throw Error('Stage audio download HTTP ' + response.status);
       let asset: { assetId: string };
