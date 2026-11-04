@@ -1,3 +1,7 @@
+## 0.1.2-rc.17.preview.4
+
+- Exclude explicitly labeled terrain classification from the small commentary projection; retain observed footing, objects and attributed room messages. Original events, main/worker context and TTS remain unchanged.
+
 ## 0.1.2-rc.17.preview.3
 
 - Recover the action ledger queue after transient Windows file locks without claiming an unaudited terminal. Serialize complete ledger transactions, preserve duplicate-request identity, and repair failed snapshots on receipt retry.

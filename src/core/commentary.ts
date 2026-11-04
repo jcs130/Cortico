@@ -62,6 +62,15 @@ const OUTCOME_AGE_MS = 300_000;
  * receipts, snapshots or credential-bearing metadata to this small task. */
 function preview(e: CommentaryEvent, text: string): Evidence {
   const meta: Record<string, unknown> = {};
+  // Terrain classification is useful to navigation, but is not a named place.
+  // Keep actual footing/objects and attributed room announcements in this small
+  // presentation projection; do not expose a raw biome ID as its opening place.
+  // The original event and the main/worker context remain untouched.
+  const originalText = text;
+  if (snapshot(e) || /(?:^|\.)world$/.test(e.type)) {
+    text = text.replace(/(^|\n)(\[[^\]\r\n]{1,40}\]\s*)?(?:当前)?生物群系[:：][^\r\n，；。()（）]*(?:（[^）\r\n]*）)?[，；。]?/g, '$1$2');
+    if (text !== originalText) meta.omitted = ['terrain-classification'];
+  }
   for (const key of ['channel', 'direction', 'outgoing']) {
     const value = e.meta?.[key];
     if (typeof value === 'boolean') meta[key] = value;
@@ -83,7 +92,7 @@ function preview(e: CommentaryEvent, text: string): Evidence {
     text: short, ...(Object.keys(meta).length ? { meta } : {}),
     ...(outcome(e) ? { execution: { kind: 'observation', id: e.execution!.id.slice(0, 160), terminal: true,
       evidence: { outcome: e.execution!.evidence!.outcome } } } : {}),
-    truncated: text.length > 600 || Object.keys(e.meta ?? {}).length > Object.keys(meta).length };
+    truncated: text !== originalText || text.length > 600 || Object.keys(e.meta ?? {}).length > Object.keys(meta).length };
 }
 interface Submission { at: string; script: string; observations?: string[] }
 export type CommentaryState = 'disabled' | 'waiting' | 'drafting' | 'ready' | 'submitted' | 'skipped' | 'stale' | 'failed';
