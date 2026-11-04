@@ -2,13 +2,19 @@
 
 ## 直播小助手
 
+独立服务器观战支持“只看可米”“指定玩家”“自动切换”。`PrimaryTargetName` 配置主角实际游戏名；其他玩家按当前原生名单及 UUID 选择。选择写入同一实例的 `config/mcvisual-broadcast-selection.json`，导播即时读取，不重启 Agent、客户端或音频。状态显示实际相机跟随对象，提交不冒充切换完成。固定玩家离线时等待，不自动换人；恢复自动模式后按真实活动选镜头，空闲角色不因缺少出镜时间抢镜。
+
 `StudioWindow.cs` 提供 380px 宽的独立控制窗：打开／切回观战客户端、动态读取当前 World 的网页观战地址、显示现有透明形象、复制 OBS 浏览器源地址，以及控制台、置顶和托盘。透明形象仍由已安装的静音展示程序负责，声音仍走原演出播放器。面板只读刷新状态，不自动启动 Agent 或观战端；关闭面板不停止直播。重复打开会显示原面板，透明形象复用原程序的单实例。
 
 安装使用 `install-studio.ps1 -AvatarExecutable <现有Electron绝对路径> -AvatarApp <透明形象程序目录>`。默认读取 `I:/CormyLive/settings.json`，新建独立的 `Cormy.Live.Studio` 按需任务及桌面“可米直播小助手”快捷方式；不更新或停止 `Cormy.Live`、`Cormy.Live.Panel`，不改宿主配置。`studio-active.json` 记录实际程序及配置路径，窗口位置和置顶保存到 `studio-window.json`。没有开机触发器。删除小助手时只处理这个新增任务、快捷方式和对应版本目录，不处理宿主。
 
-观战启动使用当前官方 `/api/webui/providers/.../panels/mount/client.*`；正在启动的客户端只等待，不重复启动。网页地址通过 World 的 connection 面板读取，避免旧设置中的演出页被当成游戏画面。状态读取失败显示“未确认”，不据历史文件宣称运行正常。
+小助手明确区分两种入口：未配置独立观战时显示“个人游戏观战”，使用当前官方 `/api/webui/providers/.../panels/mount/client.*`；配置独立观战后显示“服务器直播观战”，只使用该实例的启动器和原生状态，不调用 World 的 `client.start`，失败也不回退到个人 eye。独立观战按钮不依赖宿主控制台在线。网页地址仍通过 World 的 connection 面板读取。
 
-`test-studio.ps1` 用随机本机端口的假宿主验证启动、重复打开、失败状态及链接限制，不调用真实游戏、模型或音频；真实界面另行检查。预览可运行 `CormyLive.exe --studio --config <settings.json> --studio-config <studio.json> --preview <output.png>`，该模式不访问运行服务。
+独立观战安装增加 `-ObserverConfig <JSON绝对路径>`。该 JSON 使用 `StandaloneObserverSettings` 字段：`ProfileDirectory`、`LauncherExecutable`、`LauncherScript`、可选 `SelectorFile`、`ExpectedAccount`、`ExpectedServer`、`ExpectedUuid`、`ExpectedLoader`、`ExpectedJavaExecutable`、`NativeVersion`、`ObserverVersion`、`Artifacts`（`RelativePath` 与 `Sha256`）。它指向已安装、已验收且自身具备单实例保护的 mc-visual-console 启动器；不下载客户端，不复制登录凭据，也不修改自动重连配置。版本升级须同步这份清单，校验不符时停止打开。再次安装小助手未传此参数时，保留上一版独立观战配置，避免退回旧入口。
+
+打开前核对选择文件与发行包哈希；状态读取交叉核对真实进程的启动时间、Java 路径、`--gameDir`、`--username`，以及原生窗口 PID、加载版本、服务器与 UUID。命令行仅在内存中提取身份字段，不记录令牌。过期帧、PID 复用和身份不符都不会显示“跟拍中”，启动器返回也不等于客户端已完成启动。该接入只读 `process.json` 与 `diagnostics/mcvisual-native-{window,director,observer}.json`，不会把旧验收字段当作当前状态。小助手刷新只读，关闭小助手不停止观战。
+
+`test-studio.ps1` 用随机本机端口的假宿主验证个人观战启动、重复打开、失败状态及链接限制，并用临时文件和可注入进程边界验证独立观战的实例、PID、身份、版本、时间戳、发行包与启动终态；不调用真实游戏、模型或音频，真实界面另行检查。预览可运行 `CormyLive.exe --studio --config <settings.json> --studio-config <studio.json> --preview <output.png>`，该模式不访问运行服务。
 
 `audio-host.cjs` 可作为官方桌宠 `CORTICO_DESKTOP_PET_HOST` 的显式外壳：使用已安装 Electron 运行本文件，沿用宿主传入的 `--pet-url`、`--parent-pid`。它在独立配置目录中加载原桌宠媒体页，后台播放仍使用原演出接口、音频队列和实际播放回执。启用需保留桌宠 `media.backgroundAudio=true`；形象可由现有独立窗口展示。它不启动 TTS、模型或游戏。`node --test test-audio-host.mjs` 检查地址及宿主生命周期参数。
 

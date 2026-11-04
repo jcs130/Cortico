@@ -1,14 +1,16 @@
-param(
+﻿param(
  [string]$InstallDir='I:/CormyLive',
  [Parameter(Mandatory=$true)][string]$AvatarExecutable,
  [Parameter(Mandatory=$true)][string]$AvatarApp,
  [string]$AvatarUrl='http://127.0.0.1:18431/?obs=1',
+ [string]$ObserverConfig,
+ [string]$PrimaryTargetName,
  [switch]$SkipShortcuts
 )
 $ErrorActionPreference='Stop'
 $studioRoot=[IO.Path]::GetFullPath($InstallDir)
 $studioHostConfig=Join-Path $studioRoot 'settings.json'
-$studioHost=Get-Content -LiteralPath $studioHostConfig -Raw | ConvertFrom-Json
+$studioHost=Get-Content -LiteralPath $studioHostConfig -Raw -Encoding UTF8 | ConvertFrom-Json
 $studioOriginalHash=(Get-FileHash -LiteralPath $studioHostConfig).Hash
 $studioTaskName=$studioHost.TaskName+'.Studio'
 $studioDescription='Cormy Live studio panel; display controls only, manual start, closing keeps the host running.'
@@ -21,7 +23,21 @@ $studioVersion=Join-Path $studioRoot ('studio/'+(Get-Date -Format 'yyyyMMdd-HHmm
 $studioExe=Join-Path $studioVersion 'CormyLive.exe'
 & (Join-Path $PSScriptRoot 'build.ps1') -OutputFile $studioExe | Out-Null
 $studioSettings=Join-Path $studioVersion 'studio.json'
-@{AvatarExecutable=[IO.Path]::GetFullPath($AvatarExecutable);AvatarApp=[IO.Path]::GetFullPath($AvatarApp);AvatarStatusFile=Join-Path ([IO.Path]::GetFullPath($AvatarApp)) 'runtime/status.json';AvatarUrl=$AvatarUrl;StateFile=Join-Path $studioRoot 'studio-window.json'} | ConvertTo-Json | Set-Content -LiteralPath $studioSettings -Encoding utf8
+$studioConfig=@{AvatarExecutable=[IO.Path]::GetFullPath($AvatarExecutable);AvatarApp=[IO.Path]::GetFullPath($AvatarApp);AvatarStatusFile=Join-Path ([IO.Path]::GetFullPath($AvatarApp)) 'runtime/status.json';AvatarUrl=$AvatarUrl;StateFile=Join-Path $studioRoot 'studio-window.json'}
+if($ObserverConfig){
+ $studioConfig.Observer=Get-Content -LiteralPath $ObserverConfig -Raw -Encoding UTF8 | ConvertFrom-Json
+} elseif(Test-Path -LiteralPath (Join-Path $studioRoot 'studio-active.json')) {
+ # An unrelated panel upgrade must not silently revert an installed live entry to eye.
+ $studioPrevious=Get-Content -LiteralPath (Join-Path $studioRoot 'studio-active.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+ $studioPreviousConfig=Get-Content -LiteralPath $studioPrevious.settings -Raw -Encoding UTF8 | ConvertFrom-Json
+ if($studioPreviousConfig.Observer){$studioConfig.Observer=$studioPreviousConfig.Observer}
+ if($studioPreviousConfig.PrimaryTargetName){$studioConfig.PrimaryTargetName=$studioPreviousConfig.PrimaryTargetName}
+}
+if($PrimaryTargetName){$studioConfig.PrimaryTargetName=$PrimaryTargetName}
+$studioConfig | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $studioSettings -Encoding utf8
+[void][Reflection.Assembly]::LoadFrom($studioExe)
+$studioValidated=[CormyLive.StudioSettings]::Load($studioSettings)
+if($studioValidated.Observer){$studioValidated.Observer.VerifyDeployment()}
 if($studioOldTask){Export-ScheduledTask -TaskName $studioTaskName | Set-Content -LiteralPath (Join-Path $studioVersion 'task-before.xml') -Encoding utf8}
 $studioUser=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $studioPrincipal=New-ScheduledTaskPrincipal -UserId $studioUser -LogonType Interactive -RunLevel Limited
