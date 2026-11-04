@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.build.json",
+  "compilerOptions": { "outDir": "dist-core" },
+  "include": [
+    "src/core/**/*.ts",
+    "src/server.ts",
+    "src/sdk.ts",
+    "src/tools.ts",
+    "src/standalone.ts"
+  ],
+  "exclude": ["src/index.ts", "tests"]
+}

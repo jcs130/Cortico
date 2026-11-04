@@ -1,0 +1,104 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { EventEmitter } from "node:events";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { streamPcmSse } from "../src/core/pcm-sse.ts";
+import { VoiceService } from "../src/core/voice.ts";
+import { wavInfo } from "../src/core/wav.ts";
+
+const dirs: string[] = [];
+afterEach(async () => { vi.unstubAllGlobals(); for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true }); });
+const frame = (value: unknown, ending="\n\n") => "data: " + JSON.stringify(value) + ending;
+const delta = (b=Buffer.from([1,0,2,0])) => frame({ type: "speech.audio.delta", audio: b.toString("base64") });
+const done = (stop="complete", samples=2) => frame({ type:"speech.audio.done", seed:20261021, samples, stop });
+const response = (text: string) => new Response(text, { headers:{"content-type":"text/event-stream"} });
+async function forward(text: string) { const out: Buffer[]=[]; const result=await streamPcmSse({response:response(text), sampleRate:44100, signal:new AbortController().signal, begin:()=>{}, write:async b=>{out.push(Buffer.from(b))} }); return {result,out:Buffer.concat(out)}; }
+class Output extends EventEmitter { chunks:Buffer[]=[]; headersSent=false; ended=false; destroyed=false; error?:Error; writeHead(){this.headersSent=true;} write(b:Uint8Array){this.chunks.push(Buffer.from(b));return true;}end(){this.ended=true;}destroy(error?:Error){this.destroyed=true;this.error=error;this.emit('close');} }
+
+describe("one-context native PCM streaming", () => {
+  it("forwards PCM before provider completion and preserves one WAV envelope", async () => {
+    const writes:Buffer[]=[],log:string[]=[];
+    const stream=new ReadableStream({async start(c){ c.enqueue(new TextEncoder().encode(delta())); await new Promise(r=>setTimeout(r,15));log.push('done-sent');c.enqueue(new TextEncoder().encode(done()));c.close(); }});
+    const result=await streamPcmSse({response:new Response(stream,{headers:{'content-type':'text/event-stream'}}),sampleRate:44100,signal:new AbortController().signal,begin:()=>log.push('begin'),write:async b=>{writes.push(Buffer.from(b));log.push(writes.length===1?'header':'pcm');}});
+    expect(log.indexOf('pcm')).toBeLessThan(log.indexOf('done-sent'));expect(result).toMatchObject({samples:2,frames:1,seed:20261021,stop:'complete',bytes:48});
+    const wav=Buffer.concat(writes);expect(wavInfo(wav)).toMatchObject({sampleRate:44100,channels:1,bits:16,dataSize:4});expect(wav.subarray(44)).toEqual(Buffer.from([1,0,2,0]));
+  });
+  it("handles arbitrary network splits, CRLF and SSE comments without corrupting PCM",async()=>{
+    const text=': ping\r\n\r\n'+delta().replaceAll('\n','\r\n')+done().replaceAll('\n','\r\n');const bytes=new TextEncoder().encode(text);
+    const stream=new ReadableStream({start(c){for(let i=0;i<bytes.length;i+=3)c.enqueue(bytes.slice(i,i+3));c.close();}});
+    const out:Buffer[]=[];const result=await streamPcmSse({response:new Response(stream,{headers:{'content-type':'text/event-stream'}}),sampleRate:44100,signal:new AbortController().signal,begin:()=>{},write:async b=>{out.push(Buffer.from(b))}});
+    expect(result.samples).toBe(2);expect(Buffer.concat(out).subarray(44)).toEqual(Buffer.from([1,0,2,0]));
+  });
+  it("never treats provider truncation, missing terminal or sample mismatch as complete",async()=>{
+    await expect(forward(delta()+done('max_seconds'))).rejects.toThrow('generation incomplete: max_seconds');
+    await expect(forward(delta())).rejects.toThrow('without confirmed audio completion');
+    await expect(forward(delta()+done('complete',9))).rejects.toThrow('sample count');
+    await expect(forward(done())).rejects.toThrow('without confirmed audio completion');
+    await expect(forward(delta()+done()+delta())).rejects.toThrow('after completion');
+  });
+  it("rejects malformed audio and observes cancellation before forwarding more data",async()=>{
+    await expect(forward(frame({type:'speech.audio.delta',audio:'bad!'}))).rejects.toThrow('base64');
+    await expect(forward(delta(Buffer.from([1]))+done())).rejects.toThrow('Unaligned');
+    const c=new AbortController();await expect(streamPcmSse({response:response(delta()+done()),sampleRate:44100,signal:c.signal,begin:()=>{},write:async()=>{c.abort();}})).rejects.toThrow();
+  });
+  it("keeps explicit sampling settings available for controlled reproduction",async()=>{
+    const directory=await mkdtemp(join(tmpdir(),'stage-native-'));dirs.push(directory);const bodies:any[]=[],events:any[]=[];
+    vi.stubGlobal('fetch',async(_url:any,init:any)=>{bodies.push(JSON.parse(init.body));return response(delta()+done());});
+    const voice=new VoiceService(()=>({url:'http://fixture.invalid/speech',model:'fixture',voice:'private',synthesisTransport:'pcm-sse',pcmSampleRate:44100,segmentMaxChars:0,extraBody:{seed:20261021,max_seconds:30,top_k:4097,top_p:.9,temperature:.7}}),directory,(id,status,data)=>events.push({id,status,data}));await voice.start();
+    const text='一条完整的台词，保持同一次生成，不重新克隆。';voice.queue('same-action',text);await voice.stream('same-action',new Output() as any);
+    expect(bodies).toEqual([{model:'fixture',input:text,voice:'private',response_format:'pcm',stream_format:'sse',seed:20261021,max_seconds:30,top_k:4097,top_p:.9,temperature:.7}]);
+    expect(voice.status().last).toMatchObject({id:'same-action',status:'transport-complete',nativeStream:{input:text,seed:20261021,stop:'complete',samples:2}});
+    expect(events.some(x=>['playing','completed','ended'].includes(x.status))).toBe(false);await voice.stop();
+  });
+  it("uses one complete live utterance without a pinned seed or unsupported text/speed controls",async()=>{
+    const directory=await mkdtemp(join(tmpdir(),'stage-native-live-'));dirs.push(directory);const bodies:any[]=[];
+    vi.stubGlobal('fetch',async(_url:any,init:any)=>{bodies.push(JSON.parse(init.body));return response(delta()+done());});
+    const voice=new VoiceService(()=>({url:'http://fixture.invalid/speech',model:'drama-3',voice:'cormy',synthesisTransport:'pcm-sse',pcmSampleRate:44100,segmentMaxChars:0,extraBody:{max_seconds:30,top_k:4097}}),directory,()=>{});await voice.start();
+    const text='可米和结衣在 X=128、Y=64、Z=-302，先核对地图再出发。'.repeat(6);expect(text.length).toBeGreaterThanOrEqual(172);
+    try { voice.queue('full-utterance',text);const output=new Output();await voice.stream('full-utterance',output as any);
+      expect(bodies).toEqual([{model:'drama-3',voice:'cormy',input:text,response_format:'pcm',stream_format:'sse',max_seconds:30,top_k:4097}]);
+      expect(output.ended).toBe(true);expect(output.destroyed).toBe(false);expect(voice.status().configuredSeed).toBeNull();
+    } finally { await voice.stop(); }
+  });
+  it.each(['max_seconds','model_limit','error'])("fails and destroys partial downstream PCM on native stop=%s",async stop=>{
+    const directory=await mkdtemp(join(tmpdir(),'stage-native-stop-'));dirs.push(directory);const events:any[]=[];
+    vi.stubGlobal('fetch',async()=>response(delta()+done(stop)));
+    const voice=new VoiceService(()=>({url:'http://fixture.invalid/speech',model:'fixture',voice:'private',synthesisTransport:'pcm-sse',pcmSampleRate:44100}),directory,(id,status,data)=>events.push({id,status,data}));await voice.start();
+    try { voice.queue('partial','不能把半句当完成。');const output=new Output();await voice.stream('partial',output as any);
+      expect(output.chunks.length).toBeGreaterThan(0);expect(output.destroyed).toBe(true);expect(output.ended).toBe(false);
+      expect(output.error?.message).toContain(stop);expect(voice.status().last).toMatchObject({status:'failed',nativeStream:{stop}});
+      expect(events.some(e=>['transport-complete','playing','ended','completed'].includes(e.status))).toBe(false);
+    } finally { await voice.stop(); }
+  });
+  it("records a native engine error even when no audio was generated",async()=>{
+    const terminal=vi.fn();
+    await expect(streamPcmSse({response:response(done('error',0)),sampleRate:44100,signal:new AbortController().signal,begin:()=>{},write:async()=>{},terminal})).rejects.toThrow();
+    expect(terminal).toHaveBeenCalledWith(expect.objectContaining({stop:'error',samples:0}));
+    terminal.mockClear();
+    await expect(streamPcmSse({response:response(frame({type:'speech.audio.error',error:{message:'private backend details'}})),sampleRate:44100,signal:new AbortController().signal,begin:()=>{},write:async()=>{},terminal})).rejects.toThrow('native stream reported an error');
+    expect(terminal).toHaveBeenCalledWith(expect.objectContaining({stop:'error',samples:0}));
+  });
+  it("closes the provider connection when the playback connection disconnects",async()=>{
+    const directory=await mkdtemp(join(tmpdir(),'stage-native-disconnect-'));dirs.push(directory);const events:any[]=[];let cancelled=false;
+    vi.stubGlobal('fetch',async(_url:any,init:any)=>{
+      const body=new ReadableStream({start(c){c.enqueue(new TextEncoder().encode(delta()));init.signal.addEventListener('abort',()=>{cancelled=true;c.error(init.signal.reason)},{once:true});}});
+      return new Response(body,{headers:{'content-type':'text/event-stream'}});
+    });
+    const voice=new VoiceService(()=>({url:'http://fixture.invalid/speech',model:'fixture',voice:'private',synthesisTransport:'pcm-sse',pcmSampleRate:44100}),directory,(id,status,data)=>events.push({id,status,data}));await voice.start();
+    try { voice.queue('disconnected','断线不算完成。');const output=new Output();const running=voice.stream('disconnected',output as any);
+      await vi.waitFor(()=>expect(output.chunks.length).toBeGreaterThan(1));output.destroy();await running;
+      expect(cancelled).toBe(true);expect(output.ended).toBe(false);
+      expect(events).toContainEqual(expect.objectContaining({status:'cancelled',data:expect.objectContaining({reason:'playback-connection-closed'})}));
+      expect(events.some(e=>e.status==='transport-complete')).toBe(false);
+    } finally { await voice.stop(); }
+  });
+  it("retains an incomplete native stop as failed and rejects independent client segmentation",async()=>{
+    const directory=await mkdtemp(join(tmpdir(),'stage-native-limit-'));dirs.push(directory);const events:any[]=[];
+    vi.stubGlobal('fetch',async()=>response(delta()+done('max_seconds')));
+    const config={url:'http://fixture.invalid/speech',model:'fixture',voice:'private',synthesisTransport:'pcm-sse' as const,pcmSampleRate:44100,segmentMaxChars:0};
+    const voice=new VoiceService(()=>config,directory,(id,status,data)=>events.push({id,status,data}));await voice.start();voice.queue('limited','一个长句。');await voice.stream('limited',new Output() as any);
+    expect(voice.status().last).toMatchObject({status:'failed',nativeStream:{stop:'max_seconds'}});expect(events.some(x=>x.status==='transport-complete')).toBe(false);
+    config.segmentMaxChars=24;expect(()=>voice.validate('不应独立切开。')).toThrow('one synthesis context');await voice.stop();
+  });
+});

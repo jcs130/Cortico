@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "repository": "vrm-c/vrm-specification",
+  "revision": "94e82dd346fa6cf0337c4421728640e5252dd38e",
+  "presets": [
+    {
+      "id": "seed-san",
+      "label": "Seed-san",
+      "url": "https://raw.githubusercontent.com/vrm-c/vrm-specification/94e82dd346fa6cf0337c4421728640e5252dd38e/samples/Seed-san/vrm/Seed-san.vrm",
+      "sha256": "624d0d554bc205bbdc33e22a68a2c3c20edebb3e573011ead8878a65e5329b23",
+      "bytes": 10917800,
+      "format": "vrm",
+      "attribution": "VirtualCast, Inc.",
+      "licenseUrl": "https://vrm.dev/licenses/1.0/",
+      "meta": {
+        "allowAntisocialOrHateUsage": true,
+        "allowExcessivelySexualUsage": true,
+        "allowExcessivelyViolentUsage": true,
+        "allowPoliticalOrReligiousUsage": true,
+        "allowRedistribution": true,
+        "authors": [
+          "VirtualCast, Inc."
+        ],
+        "avatarPermission": "everyone",
+        "commercialUsage": "corporation",
+        "copyrightInformation": "VirtualCast, Inc.",
+        "creditNotation": "required",
+        "licenseUrl": "https://vrm.dev/licenses/1.0/",
+        "modification": "allowModificationRedistribution",
+        "name": "Seed-san",
+        "thumbnailImage": 14,
+        "version": "1"
+      }
+    },
+    {
+      "id": "vrm-twist-sample",
+      "label": "VRM1_Constraint_Twist_Sample",
+      "url": "https://raw.githubusercontent.com/vrm-c/vrm-specification/94e82dd346fa6cf0337c4421728640e5252dd38e/samples/VRM1_Constraint_Twist_Sample/vrm/VRM1_Constraint_Twist_Sample.vrm",
+      "sha256": "12c2b97e95e700783a6a550dc0eee2d7880aeedccef9ae67bc4c5a2f0f2631a2",
+      "bytes": 10776032,
+      "format": "vrm",
+      "attribution": "pixiv Inc.",
+      "licenseUrl": "https://vrm.dev/licenses/1.0/",
+      "meta": {
+        "allowAntisocialOrHateUsage": false,
+        "allowExcessivelySexualUsage": true,
+        "allowExcessivelyViolentUsage": true,
+        "allowPoliticalOrReligiousUsage": true,
+        "allowRedistribution": true,
+        "authors": [
+          "pixiv Inc."
+        ],
+        "avatarPermission": "everyone",
+        "commercialUsage": "corporation",
+        "copyrightInformation": "(c) 2022 pixiv Inc.",
+        "creditNotation": "unnecessary",
+        "licenseUrl": "https://vrm.dev/licenses/1.0/",
+        "modification": "allowModificationRedistribution",
+        "name": "VRM1_Constraint_Twist_Sample",
+        "thumbnailImage": 18,
+        "version": "v1.0.1"
+      }
+    }
+  ]
+}

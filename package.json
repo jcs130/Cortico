@@ -1,0 +1,111 @@
+{
+  "name": "cortico-world-avatar-stage",
+  "version": "0.1.2-rc.17.preview.3",
+  "description": "Independent LLM-controlled 3D avatar, motion library and singing World",
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "engines": {
+    "node": ">=22.15.0"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./core": {
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core/index.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    },
+    "./sdk": {
+      "types": "./dist/sdk.d.ts",
+      "import": "./dist/sdk.js"
+    },
+    "./renderer/vrm-motion.js": "./web/vrm-motion.js",
+    "./renderer/vrm-body.js": "./web/vrm-body.js",
+    "./renderer/desktop-player.js": "./web/desktop-player.js",
+    "./renderer/speech.js": "./web/speech.js",
+    "./renderer/expression-weights.js": "./web/expression-weights.js",
+    "./tools": {
+      "types": "./dist/tools.d.ts",
+      "import": "./dist/tools.js"
+    }
+  },
+  "cortico": {
+    "kind": "world",
+    "api": 6,
+    "describe": "describe.json",
+    "displayName": "3D 演出室",
+    "tags": [
+      "streaming",
+      "voice",
+      "creative",
+      "external-setup",
+      "high-cost",
+      "experimental"
+    ]
+  },
+  "keywords": [
+    "cortico-world",
+    "vrm",
+    "avatar",
+    "unimate"
+  ],
+  "scripts": {
+    "start": "node dist/standalone.js",
+    "dev": "tsx src/standalone.ts",
+    "predev": "node scripts/build.mjs",
+    "build": "node scripts/build.mjs",
+    "build:core": "tsc -p tsconfig.core.json",
+    "prepack": "npm run build",
+    "test": "vitest run",
+    "pretest": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "presets:install": "node scripts/install-presets.mjs"
+  },
+  "dependencies": {
+    "@pixiv/three-vrm": "3.5.5",
+    "@pixiv/three-vrm-animation": "3.5.5",
+    "three": "0.186.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/three": "0.186.0",
+    "cortico": "0.2.4",
+    "esbuild": "0.25.12",
+    "prettier": "^3.9.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "files": [
+    "dist",
+    "src",
+    "web",
+    "providers/unimate/*.py",
+    "providers/unimate/README.md",
+    "scripts/install-presets.mjs",
+    "assets/presets.json",
+    "describe.json",
+    "CHANGELOG.md",
+    "docs/architecture.md",
+    "docs/audience-progress.md",
+    "docs/cloud-services.md",
+    "docs/music.md",
+    "docs/presentation-director.md",
+    "docs/speech-writing.md",
+    "skills/drama3-voice",
+    "examples",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "AGENTS.md",
+    "docs/game-voice-artifacts.md"
+  ],
+  "packageManager": "pnpm@11.28.6"
+}

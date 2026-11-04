@@ -1,0 +1,11 @@
+{
+  "worlds": {
+    "avatar-stage": {
+      "enabled": false,
+      "remoteUrl": "http://127.0.0.1:18431",
+      "port": 0,
+      "dataDir": "",
+      "avatars": []
+    }
+  }
+}
