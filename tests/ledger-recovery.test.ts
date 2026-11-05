@@ -70,6 +70,7 @@ it("keeps failed end evidence uncommitted and recovers the queue on the original
     status: "completed",
     evidence: { device: "ended" },
   });
+  await r.ledger.close();
   expect(
     JSON.parse(await readFile(join(r.dir, "actions.json"), "utf8"))[0].status,
   ).toBe("completed");
@@ -83,6 +84,7 @@ it("repairs a snapshot failed after audit without losing or replaying the termin
   ).rejects.toThrow("snapshot lock");
   fault.rename = 0;
   await r.ledger.update(r.id, "completed", { device: "duplicate ended" });
+  await r.ledger.close();
   expect(
     JSON.parse(await readFile(join(r.dir, "actions.json"), "utf8"))[0],
   ).toMatchObject({ status: "completed", evidence: { device: "ended" } });

@@ -294,3 +294,7 @@ Add synthesis-only artifacts and optional same-WAV game/livestream mirroring wit
 - Reserve bounded scene and observed-outcome slots across telemetry floods. Later cleanup receipts retain the earlier dated outcome; they do not overwrite the reason an activity ended.
 - Separate current-state speech freshness from explicitly retrospective speech. Preserve original evidence timestamps through draft admission and deferred playback; output ownership, pause, deduplication and foreground priority remain enforced.
 - Preserve body progress at the end of long snapshots within the existing preview budget. Allow short reactions to difficulties and discoveries without waiting for a successful task result.
+## 0.1.2-rc.17.preview.6
+
+- Persist action receipts as atomic per-action records instead of rewriting the entire historical snapshot on each playback transition. Recover newer records on startup and export the complete legacy snapshot on clean stop for rollback.
+- Keep all historical actions, request idempotency, terminal precedence and actual playback evidence. No changes to voice, synthesis or playback parameters.

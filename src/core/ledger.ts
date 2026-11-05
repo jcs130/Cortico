@@ -5,11 +5,13 @@ import {
   writeFile,
   rename,
   appendFile,
+  readdir,
 } from "node:fs/promises";
 import { join } from "node:path";
 import type { ActionRecord } from "./types.ts";
 export class ActionLedger {
   readonly actions = new Map<string, ActionRecord>();
+  private readonly requests = new Map<string, ActionRecord>();
   private writing = Promise.resolve();
   constructor(private readonly directory: string) {}
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -30,6 +32,18 @@ export class ActionLedger {
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
     }
+    // The full snapshot is also a rollback/export format. Individual durable
+    // receipts overlay it, so a busy renderer never rewrites the whole history.
+    const records = new Map(loaded.map(row => [row.id, row]));
+    await mkdir(join(this.directory, 'action-records'), { recursive: true });
+    for (const file of await readdir(join(this.directory, 'action-records'))) {
+      if (!/^[a-f0-9]{64}\.json$/.test(file)) continue;
+      const row: ActionRecord = JSON.parse(await readFile(join(this.directory, 'action-records', file), 'utf8'));
+      if (this.recordName(row.id) !== file) throw Error('Action record identity mismatch');
+      const old = records.get(row.id);
+      if (!old || row.updatedAt > old.updatedAt) records.set(row.id, row);
+    }
+    loaded = [...records.values()].sort((a,b) => a.createdAt - b.createdAt);
     for (const row of loaded) {
       if (["queued", "playing"].includes(row.status)) {
         row.status = "failed";
@@ -37,8 +51,10 @@ export class ActionLedger {
           reason:
             "Stage restarted before execution was reconciled; not replayed",
         };
+        row.updatedAt = Date.now();
       }
       this.actions.set(row.id, row);
+      this.requests.set(row.requestId, row);
     }
     await this.enqueue(() => this.save());
   }
@@ -62,13 +78,11 @@ export class ActionLedger {
       const key = createHash("sha256")
         .update(JSON.stringify(canonical({ kind, avatarId, command })))
         .digest("hex");
-      const old = [...this.actions.values()].find(
-        (a) => a.requestId === requestId,
-      );
+      const old = this.requests.get(requestId);
       if (old) {
         if (old.key !== key)
           throw Error("Request id belongs to another action");
-        await this.save();
+        await this.save(old);
         return { record: old, reused: true };
       }
       const now = Date.now(),
@@ -85,7 +99,8 @@ export class ActionLedger {
         };
       await this.audit({ type: "request", record });
       this.actions.set(record.id, record);
-      await this.save();
+      this.requests.set(record.requestId, record);
+      await this.save(record);
       return { record, reused: false };
     });
   }
@@ -111,7 +126,7 @@ export class ActionLedger {
         row.evidence = evidence;
       }
       // Also repair a snapshot whose prior write failed after its audit append.
-      await this.save();
+      await this.save(row);
       return row;
     });
   }
@@ -139,12 +154,13 @@ export class ActionLedger {
       ),
     );
   }
-  private save() {
+  private recordName(id: string) { return createHash('sha256').update(id).digest('hex') + '.json'; }
+  private save(row?: ActionRecord) {
     return this.retryBusy(async () => {
-      const file = join(this.directory, "actions.json");
+      const file = row ? join(this.directory, 'action-records', this.recordName(row.id)) : join(this.directory, "actions.json");
       await writeFile(
         file + ".tmp",
-        JSON.stringify([...this.actions.values()]),
+        JSON.stringify(row ?? [...this.actions.values()]),
         { flush: true },
       );
       await rename(file + ".tmp", file);
@@ -167,6 +183,6 @@ export class ActionLedger {
     }
   }
   async close() {
-    await this.writing;
+    await this.enqueue(() => this.save());
   }
 }
