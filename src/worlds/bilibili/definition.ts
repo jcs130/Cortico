@@ -83,6 +83,16 @@ export const BILIBILI: WorldDefinition<BilibiliConfigSection> = {
         trigger: 'debounce',
       },
       {
+        type: 'bilibili.enter',
+        description: { zh: '平台报告观众进场，保留可获得的昵称和账号；刷新或重连也可能触发。', en: 'A reported viewer entry with available name and identity; refreshes and reconnections may also trigger it.' },
+        trigger: 'debounce',
+      },
+      {
+        type: 'bilibili.interaction',
+        description: { zh: '观众关注主播或分享直播间，保留交互类型和可获得的身份。', en: 'A viewer followed or shared the room, retaining the interaction type and available identity.' },
+        trigger: 'debounce',
+      },
+      {
         type: 'bilibili.enter-guard',
         description: { zh: '舰长等大航海成员进入直播间。', en: 'A guard member entered the room.' },
         trigger: 'debounce',
@@ -111,11 +121,10 @@ export const BILIBILI: WorldDefinition<BilibiliConfigSection> = {
       {
         type: 'bilibili.audience',
         description: {
-          zh: '进场、点赞、免费礼物的计数与在线人数等读数的汇总,随下一批事件送达。',
-          en: 'Counts of entries, likes and free gifts plus audience gauges, sent with the next batch.',
+          zh: '本次窗口内的进场、点赞、免费礼物计数及收到的人数读数；随下一批事件送达，发送后重新计数。',
+          en: 'Entry, like and free-gift counts plus received audience gauges for this interval; counters reset after delivery.',
         },
         trigger: 'piggyback',
-        tags: ['snapshot'],
       },
     ],
   },

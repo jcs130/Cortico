@@ -134,8 +134,8 @@ describe.sequential('CortiV 集成测试', () => {
 
   it('把弹幕突发、人流读数和高价值礼物接进同一条真实投递链', async () => {
     const callsBefore = llm.calls.length;
-    feedBilibili({ cmd: 'INTERACT_WORD_V2', data: {} });
-    feedBilibili({ cmd: 'INTERACT_WORD_V2', data: {} });
+    feedBilibili({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
+    feedBilibili({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
     feedBilibili({ cmd: 'WATCHED_CHANGE', data: { num: 288429 } });
     feedBilibili(danmaku(42, '阿明', '刷怪塔要记得照明外圈'));
     feedBilibili(danmaku(84, '小羽', '农场旁边留红石检修道'));

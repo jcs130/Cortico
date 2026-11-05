@@ -2,6 +2,10 @@
 
 # Session
 
+投递记录的 `context.frame.events` 为内部与外部事件分别记录归档游标、类型、来源和正文偏移。
+`onDelivery` 执行期间注入的内部事件同样带索引；相同文字的不同事件仍保留各自游标。
+Persona 可据此在请求视图中替换已覆盖的状态，原始 session 和事件账本不变。
+
 一个 session 是一次独立的模型对话:常驻的那一个接收事件投递,其余是临时 fork。session 由
 Persona 声明,Core 只把 `role` 当分类标签。
 

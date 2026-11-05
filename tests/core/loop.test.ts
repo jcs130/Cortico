@@ -20,7 +20,7 @@ import { Transcript } from '../../src/core/transcript.ts';
 import { LLMError, LLMStreamAborted } from './fixture-errors.ts';
 import { SessionTracker } from '../../src/core/sessions.ts';
 import { ABORT_PREEMPTED, ABORT_SHUTDOWN, INTERRUPTED_WHILE_RUNNING, NOT_EXECUTED_BARRIER, NOT_EXECUTED_INTERRUPTED, SHUTDOWN_INTERRUPTED, streamedPastBarrier } from '../../src/core/markers.ts';
-import type { UsageRecord, Persona } from '../../src/core/types.ts';
+import type { UsageRecord, Persona, TurnEndedContext } from '../../src/core/types.ts';
 import type { ChatMessage, LLMDelta } from './fixture-types.ts';
 import { functionCall, functionResult, type ContextRecord } from '../../src/protocol/open-responses/context.ts';
 import type { Logger, CandidateProjector, EventEnvelope, RunPhase, World, WorldHost, ToolDef } from '../../src/core/types.ts';
@@ -1980,6 +1980,45 @@ describe('MainLoop user事件协议', () => {
     expect(ended).toBe(2);
   });
 
+  it('reports a hard cap after persisting the last receipts, without scheduling another wake', async () => {
+    const ended: TurnEndedContext[] = [];
+    const visible: TurnEndedContext[] = [];
+    const world = makeFakeIO('qq', [makeTool('noop', 'ok')]);
+    world.onTurnEnded = context => { if (context) visible.push(context); };
+    rig = makeRig({ worlds: [world], cfgPatch: cfg => { cfg.loop.hardCap = 2; },
+      hooks: { onTurnEnded: context => { if (context) ended.push(context); } } });
+    rig.start(); await until(() => ended.length === 1);
+    expect(ended[0]).toMatchObject({ reason: 'completed', rounds: 1 });
+    rig.llm.script(toolReply([{ name: 'noop', id: 'cap-1' }]), toolReply([{ name: 'noop', id: 'cap-2' }]));
+    rig.pushEvent('Review the result.'); await until(() => ended.length === 2);
+    expect(ended[1]).toMatchObject({ sessionId: 'main', reason: 'hard-cap', round: 3, rounds: 2 });
+    expect(visible).toEqual(ended);
+    expect(rig.session.messages.at(-1)?.tool_call_id).toBe('cap-2');
+    await sleep(100); expect(rig.llm.calls).toHaveLength(3);
+  });
+
+  it('reports an explicit end-turn separately when it executes on the last budgeted round', async () => {
+    const ended: TurnEndedContext[] = [];
+    const endTool: ToolDef = { ...makeTool('finish', 'Done.'), endsTurn: true };
+    rig = makeRig({ worlds: [makeFakeIO('qq', [endTool])], cfgPatch: cfg => { cfg.loop.hardCap = 1; },
+      hooks: { onTurnEnded: context => { if (context) ended.push(context); } } });
+    rig.start(); await until(() => ended.length === 1);
+    rig.llm.script(toolReply([{ name: 'finish', id: 'explicit-end' }])); rig.pushEvent('Decide whether to stop.');
+    await until(() => ended.length === 2);
+    expect(ended[1]).toMatchObject({ reason: 'ended', rounds: 1 });
+    await sleep(100); expect(rig.llm.calls).toHaveLength(2);
+  });
+
+  it('reports a model error separately when it exhausts the last round', async () => {
+    const ended: TurnEndedContext[] = [];
+    rig = makeRig({ cfgPatch: cfg => { cfg.loop.hardCap = 1; },
+      hooks: { onTurnEnded: context => { if (context) ended.push(context); } } });
+    rig.start(); await until(() => ended.length === 1);
+    rig.llm.throwNext = new LLMError('fixture model failure', 503, 'Temporarily unavailable'); rig.pushEvent('New input.');
+    await until(() => ended.length === 2);
+    expect(ended[1]).toMatchObject({ reason: 'model-error', rounds: 1 });
+  });
+
   it('clearSession只保留system，随后boot以user消息重开且仍可继续', async () => {
     rig = makeRig();
     rig.start();
@@ -3828,6 +3867,30 @@ describe('MainLoop 异步 onDelivery', () => {
   let rig: ReturnType<typeof makeRig>;
   afterEach(async () => {
     if (rig) await rig.cleanup();
+  });
+
+  it.each(['user', 'tool'] as const)('%s delivery indexes hook injections and duplicate text by real cursor', async (eventDelivery) => {
+    rig = makeRig({ eventDelivery, hooks: { onDelivery: async ({ events }) => {
+      if (!events.some(e => e.origin === 'external')) return;
+      rig.loop.injectInternal('same text\nsecond line', 'state.one');
+      await Promise.resolve();
+      rig.loop.injectInternal('same text\nsecond line', 'state.two');
+    } } });
+    rig.start();
+    await until(() => rig.llm.calls.length >= 1);
+    rig.pushEvent('external message');
+    await until(() => rig.session.messages.some(m => m.frame?.events.some(e => e.type === 'state.two')));
+    const messages = rig.session.messages.filter(m => m.frame?.events.some(e => ['state.one', 'state.two'].includes(e.type)));
+    expect(messages).toHaveLength(1);
+    const refs = messages[0].frame!.events;
+    for (const ref of refs) {
+      const archived = rig.store.get(ref.cursor)!;
+      expect(messages[0].content.slice(ref.start, ref.start + ref.chars)).toBe(archived.text);
+      expect(ref).toMatchObject({ source: archived.source, ts: archived.ts, type: archived.type });
+    }
+    expect(refs.filter(e => e.source === 'persona').map(e => e.type)).toEqual(['state.one', 'state.two']);
+    expect(new Set(refs.map(e => e.cursor)).size).toBe(refs.length);
+    assertPairing(rig.session.messages);
   });
 
   /** 钩子开始等待时置位；调用 release() 后钩子继续。 */

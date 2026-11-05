@@ -18,7 +18,7 @@ World 不直接访问 Memory 或调用 Persona 的工具。
 | `start(host)` / `stop()` | 启动与停止;运行中挂载时先调用 `start`,成功后加入挂载表 |
 | `webUi?()` | WebUI 页声明(见 [webui.md](webui.md)) |
 | `outputTap?()` | 主 session 输出流的接收器(演出、字幕);这一刻没有接收器时返回 `undefined` |
-| `onHandoffEnded?()`、`onTurnEnded?()` | 交接结束与主循环一轮结束的通知;隐藏的 World 不接收 |
+| `onHandoffEnded?()`、`onTurnEnded?(context?)` | 交接结束与主循环一轮结束的通知;后者可含 `TurnEndedContext` 的原因及轮号，隐藏的 World 不接收 |
 | `onEventsSettled?(events, outcome)` | 本 World 的事件写入主 session(`delivered`)或被操作者清空队列丢弃(`discarded`) |
 | `onRunPhase?(phase)` | 主循环的 `RunPhase`(`idle`、`delivering`、`model`、`tools`、`backoff`、`handoff`,轮序号,执行中的工具名)改变时同步调用;隐藏的 World 不接收 |
 | `shutdownVerification?(language)` | 关机前要核对的外部状态,同步只读快照;文案按 `language` 给 |
@@ -191,3 +191,5 @@ Minecraft 的 `PwsrTables` 管理目标、路标及蓝图的 realm 视图,空间
 `webui/client.ts`;有环境描述就加 `ENV_PROMPT.md`。测试用 `tests/helpers/fake-host.ts` 的
 `FakeHost` 记录推送。放进仓库的在 `src/worlds/index.ts` 的 id 表里登记 id 与定义的导出名;放进仓库还是做成扩展,判据在
 [CONTRIBUTING.md](../CONTRIBUTING.md)。
+
+`CognitionRequest.onText` is an optional callback receiving cumulative public answer text from a supporting Persona; a new provider attempt may reset the text to empty. It excludes reasoning. Core fences updates after completion or World deactivation. Consumers must validate complete records before external effects, retain emitted-prefix identity across resets, and support Personas/transports that provide only the final result. This hook does not supply a model, context, output format or speech policy.

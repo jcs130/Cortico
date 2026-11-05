@@ -4,7 +4,9 @@
  * 分片按 cursor / ts 区间按需装载,只缓存最近一次查询读到的那些;range / around / grep
  * 跨分片作答。
  */
-import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, rmSync } from 'node:fs';
+import { appendFileSync, closeSync, createReadStream, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, rmSync } from 'node:fs';
+import { createInterface } from 'node:readline';
+import { setImmediate as yieldEventLoop } from 'node:timers/promises';
 import { join } from 'node:path';
 import type {
   EventEnvelope,
@@ -253,6 +255,62 @@ export class JsonlEventStore implements EventStore {
 
   range(q: EventRangeQuery): EventEnvelope[] {
     return this.query(() => this.scanRange(q));
+  }
+
+  async rangeAsync(q: EventRangeQuery, signal?: AbortSignal): Promise<EventEnvelope[]> {
+    signal?.throwIfAborted();
+    const limit = q.limit !== undefined && q.limit >= 0 ? Math.floor(q.limit) : undefined;
+    if (limit === 0) return [];
+    const query = { ...q, toCursor: Math.min(q.toCursor ?? Infinity, this.latestCursor()) };
+    const { fromMs, toMs } = timeWindow(query, this.timezone);
+    let matched: EventEnvelope[] = [];
+    let visited = 0;
+    for (const segment of this.segmentsIn(query).reverse()) {
+      // 有限查询仅保留本分片末尾所需的条数，历史文件不进入同步查询缓存。
+      const capacity = limit === undefined ? Infinity : limit - matched.length;
+      const tail: EventEnvelope[] = [];
+      let next = 0;
+      let previous = 0;
+      const accept = (e: EventEnvelope | null): void => {
+        if (!e || e.cursor <= previous) return;
+        previous = e.cursor;
+        if (e.cursor > query.toCursor || (query.fromCursor !== undefined && e.cursor < query.fromCursor)
+          || outside(e, query, fromMs, toMs)
+          || (query.senderKey !== undefined && e.senderKey !== query.senderKey)
+          || (query.source !== undefined && e.source !== query.source)
+          || (query.origin !== undefined && e.origin !== query.origin)) return;
+        if (tail.length < capacity) tail.push(e);
+        else { tail[next] = e; next = (next + 1) % capacity; }
+      };
+      if (segment.events) {
+        const events = segment.events;
+        const end = events.length;
+        for (let i = 0; i < end; i++) {
+          if (++visited % 256 === 0) { await yieldEventLoop(); signal?.throwIfAborted(); }
+          accept(events[i]);
+        }
+      } else {
+        const stream = createReadStream(segment.file, { encoding: 'utf8', signal });
+        const lines = createInterface({ input: stream, crlfDelay: Infinity });
+        try {
+          for await (const line of lines) {
+            if (++visited % 256 === 0) { await yieldEventLoop(); signal?.throwIfAborted(); }
+            accept(parseLine(line));
+          }
+        } catch (error) {
+          signal?.throwIfAborted();
+          // 历史读取失败必须显式失败；部分历史不能冒充完整查询结果。
+          throw error;
+        } finally {
+          lines.close();
+          stream.destroy();
+        }
+      }
+      signal?.throwIfAborted();
+      matched = tail.slice(next).concat(tail.slice(0, next), matched);
+      if (limit !== undefined && matched.length >= limit) break;
+    }
+    return matched;
   }
 
   private scanRange(q: EventRangeQuery): EventEnvelope[] {

@@ -168,6 +168,8 @@ export interface EventStoreReader {
   get(cursor: number): EventEnvelope | undefined;
   latestCursor(): number;
   range(q: EventRangeQuery): EventEnvelope[];
+  /** 异步读取历史，保持 range 的排序与筛选；查询开始后的事件留给下一次查询。 */
+  rangeAsync?(q: EventRangeQuery, signal?: AbortSignal): Promise<EventEnvelope[]>;
   /** 返回前 before 条、自身及后 after 条事件。 */
   around(cursor: number, before: number, after: number): EventEnvelope[];
   grep(q: EventGrepQuery): EventGrepHit[];
@@ -639,6 +641,10 @@ export interface PushOptions {
 export interface CognitionRequest {
   /** 任务说明；不指定身份、模型或执行预算。 */
   brief: string;
+  /** Optional cumulative public answer text. A new attempt may reset it to empty.
+   * Persona may omit updates; the final result remains authoritative. Never includes reasoning.
+   * Consumers validate complete records before external effects and must not replay an emitted prefix. */
+  onText?: (text: string) => void;
   /**
    * 仅可引用请求方 World.tools() 中的工具；越界请求以 error 返回，不交给 Persona。
    * 缺省为空；Persona 仍可自行提供 Memory 等自有工具。
@@ -937,7 +943,7 @@ export interface World {
    * assistant 自然结束、LLM 失败或轮数达到硬上限时调用，用于清理本轮暂态。
    * 隐藏 World 不接收通知。
    */
-  onTurnEnded?(): void;
+  onTurnEnded?(context?: TurnEndedContext): void;
   /**
    * 本 World 产生的事件离开队列时调用：delivered 表示已写入主 session，discarded 表示被操作者
    * 清空队列丢弃。经 withdrawPending 撤回的事件不通知；drainPendingEvents 取走的事件只在
@@ -982,6 +988,16 @@ export interface SystemPrefixContext {
 
 export type SessionOpeningReason = 'new' | 'restarted' | 'cleared';
 
+/** Why the event-receiving session stopped its current batch; this does not request another wake. */
+export interface TurnEndedContext {
+  sessionId: string;
+  reason: 'completed' | 'ended' | 'hard-cap' | 'context-limit' | 'model-error' | 'interrupted' | 'shutdown' | 'cleared';
+  /** Monotonic model round within this loop instance. */
+  round: number;
+  /** Model rounds charged to the current batch. */
+  rounds: number;
+}
+
 export interface MemoryAssemblyContext {
   now: Date;
   timezone: string;
@@ -1023,7 +1039,7 @@ export interface Persona {
    */
   onBatchEnd?(): void;
   /** assistant 自然结束、LLM 失败或轮数达到硬上限时调用。 */
-  onTurnEnded?(): void;
+  onTurnEnded?(context?: TurnEndedContext): void;
   /** 一批处理结束且总线没有非 piggyback 的即时事件或候选时调用。 */
   onIdle?(): void | Promise<void>;
   /** 连续模型调用失败后恢复时调用；返回待注入文本，null 表示不注入。 */

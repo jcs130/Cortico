@@ -398,13 +398,17 @@ export class Core<C extends CoreConfig = CoreConfig> {
         const tools = named.map((name) => mod.tools().find((t) => t.name === name)!);
         const running = (this.cognitionRunning.get(mod.id) ?? 0) + 1;
         this.cognitionRunning.set(mod.id, running);
+        let open = true;
         try {
-          return await impl.request({ ...req, brief }, { worldId: mod.id, tools, running });
+          return await impl.request({ ...req, brief, onText: typeof req.onText === 'function' ? (text) => {
+            if (open && active() && typeof text === 'string') req.onText!(text);
+          } : undefined }, { worldId: mod.id, tools, running });
         } catch (e) {
           // Persona 异常转换为请求错误，返回 World。
           log.warn('认知请求受理失败', { err: e });
           return { error: e instanceof Error ? e.message : String(e) };
         } finally {
+          open = false;
           this.cognitionRunning.set(mod.id, this.cognitionRunning.get(mod.id)! - 1);
         }
       },

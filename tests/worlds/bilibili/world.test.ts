@@ -21,7 +21,7 @@ import { PB_SMALL } from './gift-v2-frames.ts';
 import { nullLogger } from '../../../src/core/util.ts';
 
 type DeferredPush = {
-  spec: Pick<DeferredEventSpec, 'type' | 'senderKey' | 'meta' | 'render'>;
+  spec: Pick<DeferredEventSpec, 'type' | 'senderKey' | 'meta' | 'render' | 'tags'>;
   opts?: { trigger?: TriggerMode };
 };
 
@@ -239,6 +239,20 @@ function danmaku(uid: number, uname: string, text: string): Record<string, unkno
 describe('BilibiliWorld', () => {
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it('delivers identifiable visitors with batchable triggers and counts only actual entries', async () => {
+    const {module,host,feed}=await mount();
+    feed({cmd:'INTERACT_WORD_V2',data:{pb:Buffer.from([8,7,18,4,89,117,107,111,40,1]).toString('base64')}});
+    feed({cmd:'INTERACT_WORD',data:{uid:8,uname:'Kai',msg_type:2}});
+    feed({cmd:'INTERACT_WORD_V2',data:{pb:'invalid'}});
+    await vi.waitFor(()=>expect(host.events.filter(e=>e.type==='bilibili.enter'||e.type==='bilibili.interaction')).toHaveLength(2));
+    const entry=host.events.find(e=>e.type==='bilibili.enter')!;
+    expect(entry).toMatchObject({senderKey:'7',meta:{uname:'Yuko',msgType:1,socialScope:'live-room'}});
+    expect(host.pushOpts[host.events.indexOf(entry)]?.trigger).toBe('debounce');
+    expect(await host.deferred.find(d=>d.spec.type==='bilibili.audience')!.spec.render()).toContain('1 人进场');
+    expect(host.archivedEvents.find(e=>e.senderKey==='7')).toMatchObject({contextDelivery:'archive-only',meta:{sourceCommand:'INTERACT_WORD_V2'}});
+    await module.stop();
   });
 
   it('只提供本机 Agent 公告与视频排队工具，不向 B 站账号写入', async () => {
@@ -703,8 +717,8 @@ describe('BilibiliWorld', () => {
 
   it('人流读数不成事件:布置一条待成文的,发车刻才渲染,而且只布置一条', async () => {
     const { module, host, feed } = await mount();
-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
     feed({ cmd: 'WATCHED_CHANGE', data: { num: 288429 } });
     feed({ cmd: 'LIKE_INFO_V3_CLICK', data: {} });
 
@@ -712,6 +726,8 @@ describe('BilibiliWorld', () => {
     expect(host.deferred).toHaveLength(1);
     expect(host.deferred[0].opts?.trigger).toBe('piggyback');
     expect(host.deferred[0].spec.type).toBe('bilibili.audience');
+
+    expect(host.deferred[0].spec.tags ?? []).not.toContain('snapshot');
 
     // 发车刻渲染:带的是这一刻的读数
     const line = await host.deferred[0].spec.render();
@@ -721,7 +737,7 @@ describe('BilibiliWorld', () => {
     expect(await host.deferred[0].spec.render()).toBeNull();
 
     // 清空后新来的读数会重新布置一条
-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
     expect(host.deferred).toHaveLength(2);
     await module.stop();
   });
@@ -731,7 +747,7 @@ describe('BilibiliWorld', () => {
     vi.setSystemTime(new Date('2026-08-22T15:37:00+08:00'));
     const { module, host, feed } = await mount();
 
-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
     expect(host.deferred).toHaveLength(1);
 
     // WebUI「清空待投递」把挂单抽走了,render 一次都没跑 —— 复位点随之消失
@@ -739,7 +755,7 @@ describe('BilibiliWorld', () => {
 
     // 窗口内不重挂:安静期不该堆一叠陈旧观察
     vi.setSystemTime(Date.now() + 299_000);
-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
     expect(host.deferred).toHaveLength(0);
 
     // 过了陈旧窗口视为失踪,允许重挂 —— 这一条在布尔闩版本里永远拿不到
@@ -758,9 +774,9 @@ describe('BilibiliWorld', () => {
     vi.setSystemTime(new Date('2026-08-22T15:37:00+08:00'));
     const { module, host, feed } = await mount();
 
-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
     vi.setSystemTime(Date.now() + 301_000); // 一直没发车,窗口到期
-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
     expect(host.deferred).toHaveLength(2);
 
     // 第一条把攒下的读数整个带走,第二条渲染出空正文 → 整条蒸发
@@ -774,10 +790,10 @@ describe('BilibiliWorld', () => {
     vi.setSystemTime(new Date('2026-08-22T15:37:00+08:00'));
     const { module, host, feed } = await mount();
 
-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
     await host.deferred[0].spec.render();
 
-    feed({ cmd: 'INTERACT_WORD_V2', data: {} });
+    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
     expect(host.deferred).toHaveLength(2);
     await module.stop();
   });
