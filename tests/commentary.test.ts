@@ -21,6 +21,29 @@ function rig() {
     advance(ms: number) { now += ms; speech.observedAtMs = now; } };
 }
 describe("optional evidence-based game commentary", () => {
+  it('offers only eligible citation windows while keeping the original expiry at admission', async () => {
+    const r=rig();Object.assign(r.config,{liveFactAgeSec:5});
+    r.observe();r.advance(6000);r.lane.tick();
+    const facts=JSON.parse(r.request.mock.calls[0][0].split('\n').at(-1)!);
+    expect(facts[0].citationWindows).toEqual({recent:new Date(130000).toISOString()});
+    r.answer('刚才 Jojo 提到了村口的马。',[1],'observation','recent');await settle();
+    expect(r.perform).toHaveBeenCalledTimes(1);
+  });
+  it('does not convert an invalid current claim into a recent statement', async () => {
+    const r=rig();Object.assign(r.config,{liveFactAgeSec:5});
+    r.observe();r.advance(6000);r.lane.tick();r.answer('Jojo 现在在村口。');await settle();
+    expect(r.perform).not.toHaveBeenCalled();
+  });
+  it('describes outcome retention without presenting an old result as current', async () => {
+    const r=rig();Object.assign(r.config,{liveFactAgeSec:5});
+    r.lane.observe({cursor:9,source:'game',type:'game.observation',origin:'external',ts:new Date(100000).toISOString(),
+      text:'试炼已结束',execution:{kind:'observation',id:'run-9',terminal:true,evidence:{outcome:'won'}}});
+    r.advance(40000);r.lane.tick();
+    const facts=JSON.parse(r.request.mock.calls[0][0].split('\n').at(-1)!);
+    expect(facts[0].citationWindows).toEqual({recent:new Date(400000).toISOString()});
+    r.answer('刚才那场试炼结束了。',[9],'observation','recent');await settle();
+    expect(r.perform).toHaveBeenCalledTimes(1);
+  });
   it('keeps observed room and footing without projecting a biome identifier as a place', () => {
     const r=rig();
     r.observe(1,'game.chat','[MC 系统] 第7/15层：灯火驿站；可使用工作台与商人。');

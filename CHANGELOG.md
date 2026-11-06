@@ -1,3 +1,7 @@
+## 0.1.2-rc.17.preview.7
+
+- Project the actual current/recent citation windows before commentary generation, using the same original-clock validation as admission. Keep freshness checks and original text intact; do not rewrite stale claims or generate filler.
+
 ## 0.1.2-rc.17.preview.5
 
 - Recheck the existing playback device after a host watchdog stall before cancelling an already playing song. Reserve ownership for a bounded five-second recovery window; fresh device receipts still determine liveness and completion, and repeated stalls cannot renew one missing receipt indefinitely.

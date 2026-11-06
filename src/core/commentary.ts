@@ -46,6 +46,15 @@ export interface CommentaryEvent {
 }
 
 interface Evidence extends CommentaryEvent { truncated: boolean }
+function citationWindows(e: CommentaryEvent, c: CommentaryConfig, now: number) {
+  const observedAt = Date.parse(e.ts);
+  const expiresAt = {
+    current: observedAt + Math.max(1, c.liveFactAgeSec ?? c.factAgeSec) * 1000,
+    recent: observedAt + (outcome(e) ? OUTCOME_AGE_MS : Math.max(1, c.factAgeSec) * 1000),
+  };
+  return Object.fromEntries(Object.entries(expiresAt).filter(([, at]) => now <= at)
+    .map(([timeframe, at]) => [timeframe, new Date(at).toISOString()]));
+}
 const observationKey = (e: CommentaryEvent): string | null => outcome(e)
   ? JSON.stringify([e.source, e.execution!.id]) : null;
 function sameObservation(a: CommentaryEvent, b: CommentaryEvent): boolean {
@@ -134,7 +143,7 @@ export function commentaryBrief(evidence: readonly Evidence[], recent: readonly 
     'execution.kind=observation 的终态保留事情结束的原因。后来的清理、注销、退出手续不覆盖先前已经发生的结果；结合各自时间说明前后关系，不把手续倒说成原先主动选择。',
     '聊天、旧台词、计划和工具的文本参数只证明表达过，不验证其中的经历、次数、原因或成果；即使是主播自己的发言也一样。未由现场观察或执行效果独立确认的内容，不能通过同义改写变成亲历事实。不要代主线程承诺下一步行动或改写活动目标。',
     '可以说明正在核实的困难、眼前新见闻、回应真实交流，或顺着现场提出一个新的想法；不必等游戏成功。thought可为想法或问题，不编造见闻或进展。没有现场依据不声称危险已解除、已经抵达、赢了、完成了。',
-    '材料时间是观察时间，不是起草完成时的现场；回顾已发生的事用“刚才”等准确时态，不把过去状态说成现在。不要复述近期已提交台词，不以换词重复同一个进度、问题、承诺或道歉。不念内部提醒、工具名、参数、坐标、来源编号和JSON；不声称观众刚来。script只放实际台词，不放动作标签。',
+    '材料时间是观察时间，不是起草完成时的现场；citationWindows列出此材料仍可引用的timeframe及截止时间，不能选择未列出的timeframe。回顾已发生的事用“刚才”等准确时态，不把过去状态说成现在。不要复述近期已提交台词，不以换词重复同一个进度、问题、承诺或道歉。不念内部提醒、工具名、参数、坐标、来源编号和JSON；不声称观众刚来。script只放实际台词，不放动作标签。',
     '主线程和自动解说是同一位主播。可回应途中见闻、困难、同伴遭遇，也可分享由现场引起的感受或想法；不必等到任务成功。近期已讲过的内容避免换词重播。recent用回顾时态，不将过去位置、生命或敌情说成现在仍然如此。',
     textFormat === "drama-3"
       ? '当前语音契约 drama-3：正常script使用自然口语。仅剧情确实需要时少量使用后端支持的方括号声音指令，例如[whispers]或[laughs]；不逐句添加，避免过多提示改变音色。用自然台词和标点引导节奏，不声称精确语速倍率。身体动作、表情不写在script里；单人发言不用说话人切换、音素或尖括号标签。'
@@ -284,16 +293,15 @@ export class CommentaryLane {
     if (draft.ownActionId && s.busy) {
       if (s.foregroundActionId !== draft.ownActionId) return false;
     } else if (draft.duringPlayback ? s.busy && !s.playing : s.busy || s.idleSinceMs !== draft.idleSince) return false;
-    const limit = draft.timeframe === 'recent' ? c.factAgeSec : (c.liveFactAgeSec ?? c.factAgeSec);
-    const fresh = (e: CommentaryEvent) => this.now() - Date.parse(e.ts) <= Math.max(1, limit) * 1000;
-    const current = [...this.evidence.values(), ...this.snapshots.values()].filter(fresh);
+    const timeframe = draft.timeframe ?? 'current';
+    const current = [...this.evidence.values(), ...this.snapshots.values()]
+      .filter(e => timeframe in citationWindows(e, c, this.now()));
     return draft.evidence.every(cursor => {
       const cited = draft.facts.find(e => e.cursor === cursor);
       // Matching telemetry does not refresh the ORIGINAL source clock.
       // A dated event does not cease to have happened when the rolling inbox
       // evicts it or a later snapshot changes. Its ORIGINAL clock still expires.
-      const validAge = cited && draft.timeframe === 'recent' && outcome(cited)
-        ? this.now() - Date.parse(cited.ts) <= OUTCOME_AGE_MS : cited && fresh(cited);
+      const validAge = cited && timeframe in citationWindows(cited, c, this.now());
       return !!cited && validAge && (draft.timeframe === 'recent'
         || current.some(e => e.cursor === cursor || sameObservation(cited, e)));
     });
@@ -350,7 +358,7 @@ export class CommentaryLane {
     const revision = this.ports.availability().speech!.queueRevision;
     if (duringPlayback) this.prefetchedRevision = revision;
     this.state = 'drafting';
-    const brief = commentaryBrief(facts.map(e => ({ ...e,
+    const brief = commentaryBrief(facts.map(e => ({ ...e, citationWindows: citationWindows(e, c, now),
       ...(observationKey(e) ? { announced: this.announced.has(observationKey(e)!) } : {}) })),
       this.recent, c.style, textFormat);
     this.ports.log('commentary-request', { requestId: serial, idleSinceMs: idleSince, duringPlayback,
