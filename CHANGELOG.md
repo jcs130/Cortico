@@ -1,3 +1,7 @@
+## 0.1.2-rc.17.preview.8-supervisor.1
+
+- Attach an optional, hash-bound supervisor view to routine avatar control receipts. Preserve original renderer data and event archives; voice playback, errors and unknown outcomes retain their complete payloads. A presentation receipt never implies game progress or actual audibility.
+
 ## 0.1.2-rc.17.preview.5
 
 - Recheck the existing playback device after a host watchdog stall before cancelling an already playing song. Reserve ownership for a bounded five-second recovery window; fresh device receipts still determine liveness and completion, and repeated stalls cannot renew one missing receipt indefinitely.
