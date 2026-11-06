@@ -1,3 +1,11 @@
+## 0.1.2-rc.17.preview.9
+
+- Combine the reviewed citation-window and incremental-ledger fixes with the supervisor event views. Verify all three source paths in the packed extension; no voice, model or freshness-policy changes.
+
+## 0.1.2-rc.17.preview.8-supervisor.1
+
+- Attach an optional, hash-bound supervisor view to routine avatar control receipts. Preserve original renderer data and event archives; voice playback, errors and unknown outcomes retain their complete payloads. A presentation receipt never implies game progress or actual audibility.
+
 ## 0.1.2-rc.17.preview.7
 
 - Project the actual current/recent citation windows before commentary generation, using the same original-clock validation as admission. Keep freshness checks and original text intact; do not rewrite stale claims or generate filler.

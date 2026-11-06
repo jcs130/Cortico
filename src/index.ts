@@ -19,6 +19,7 @@ import { DesktopPresentation } from "./desktop-presentation.ts";
 import { DesktopReplySpeech, REPLY_SPEECH_DEFAULTS } from './desktop-reply-speech.ts';
 import { DesktopAudioRenderer } from './desktop-audio.ts';
 import { randomUUID } from 'node:crypto';
+import { stageSupervisorView } from './event-context.ts';
 import { checkSpeechFreshness } from './speech-freshness.ts';
 import { speechPerformance } from './core/speech-performance.ts';
 import {
@@ -119,7 +120,7 @@ export class AvatarStageWorld implements World {
             origin: "external",
             senderKey: this.id,
             text: JSON.stringify(event.data),
-            meta: { stage: event },
+            meta: { stage: event, requestContext: stageSupervisorView(event) },
           },
           {
             trigger:
