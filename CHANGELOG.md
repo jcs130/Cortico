@@ -1,3 +1,7 @@
+## 0.1.2-rc.17.preview.10
+
+- Shorten commentary evidence at complete line boundaries. Never separate a personal name from its observed identity or a result from its qualifier; retain the bounded scene prefix and body-progress suffix without adding a second memory store or changing voice settings.
+
 ## 0.1.2-rc.17.preview.9
 
 - Combine the reviewed citation-window and incremental-ledger fixes with the supervisor event views. Verify all three source paths in the packed extension; no voice, model or freshness-policy changes.

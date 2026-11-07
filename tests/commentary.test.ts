@@ -136,6 +136,25 @@ describe("optional evidence-based game commentary", () => {
     expect(brief).not.toContain('可见方块'.repeat(400));
     expect(r.log).toHaveBeenCalledWith('commentary-request',expect.objectContaining({evidence:expect.arrayContaining([1])}));
   });
+  it('does not separate an actor name from its semantic identity at the preview boundary', () => {
+    const r=rig();
+    const identity='看得见的：北边有小饼干（服务端角色身份=maid，归属本人，名字「小饼干」）。';
+    r.observe(1,'game.snapshot','位置已确认。\n'+'前方方块。'.repeat(72)+'\n'+identity+'\n'+'环境资料'.repeat(130)+'\n身体正沿路行走。');
+    r.lane.tick();const brief=r.request.mock.calls[0][0];
+    const evidence=JSON.parse(brief.split('\n').at(-1)!)[0];
+    expect(evidence.text.length).toBeLessThanOrEqual(600);
+    expect(evidence.text).toContain('身体正沿路行走');
+    expect(evidence.text.includes('小饼干')).toBe(evidence.text.includes('服务端角色身份=maid，归属本人'));
+    expect(evidence.truncated).toBe(true);
+  });
+  it('keeps a complete observed identity while omitting long unrelated detail', () => {
+    const r=rig();
+    r.observe(1,'game.snapshot','位置已确认。\n看得见的：北边有小饼干（服务端角色身份=maid，归属本人，名字「小饼干」）。\n'+'环境资料'.repeat(180)+'\n身体正在行走。');
+    r.lane.tick();const facts=JSON.parse(r.request.mock.calls[0][0].split('\n').at(-1)!);
+    expect(facts[0].text).toContain('身份=maid，归属本人');
+    expect(facts[0].text).not.toContain('环境资料');
+    expect(facts[0].text).toContain('身体正在行走');
+  });
   it('keeps an observed outcome beside later cleanup without turning it into current state', async () => {
     const r=rig();
     r.lane.observe({cursor:1,ts:new Date(100_000).toISOString(),source:'game',type:'game.event',origin:'external',

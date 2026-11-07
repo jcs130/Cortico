@@ -67,6 +67,29 @@ const outcome = (e: CommentaryEvent) => e.execution?.kind === 'observation' && e
   && typeof e.execution.evidence?.outcome === 'string' && e.execution.evidence.outcome.length <= 80;
 const OUTCOME_AGE_MS = 300_000;
 
+/** A partial line can separate a name from its role, a result from its failure,
+ * or a quantity from its qualifier. Omit a whole oversized line rather than
+ * presenting its surviving prefix as usable observation evidence. */
+function completeLines(text: string, budget: number, tail = false): string {
+  const lines = text.split('\n');
+  if (tail) lines.reverse();
+  const selected: string[] = [];
+  let size = 0;
+  for (const line of lines) {
+    const cost = line.length + (selected.length ? 1 : 0);
+    if (size + cost > budget) break;
+    selected.push(line); size += cost;
+  }
+  return (tail ? selected.reverse() : selected).join('\n');
+}
+
+function evidenceExcerpt(e: CommentaryEvent, text: string): string {
+  if (text.length <= 600) return text;
+  return snapshot(e) && text.includes('\n')
+    ? [completeLines(text, 400), '[…]', completeLines(text, 190, true)].filter(Boolean).join('\n')
+    : [completeLines(text, 594), '[…]'].filter(Boolean).join('\n');
+}
+
 /** The event text is an attributed preview. Do not silently append entire tool
  * receipts, snapshots or credential-bearing metadata to this small task. */
 function preview(e: CommentaryEvent, text: string): Evidence {
@@ -94,8 +117,7 @@ function preview(e: CommentaryEvent, text: string): Evidence {
   }
   // A snapshot often ends with body progress after a long visible-block list.
   // Preserve both ends inside the SAME budget instead of dropping that state.
-  const short = snapshot(e) && text.length > 600 && text.includes('\n')
-    ? text.slice(0, 400) + '\n[…]\n' + text.slice(-190) : text.slice(0, 600);
+  const short = evidenceExcerpt(e, text);
   return { cursor: e.cursor, ts: e.ts, source: e.source, type: e.type, origin: e.origin,
     ...(e.senderKey ? { senderKey: e.senderKey.slice(0, 160) } : {}),
     text: short, ...(Object.keys(meta).length ? { meta } : {}),
