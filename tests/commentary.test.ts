@@ -21,6 +21,25 @@ function rig() {
     advance(ms: number) { now += ms; speech.observedAtMs = now; } };
 }
 describe("optional evidence-based game commentary", () => {
+  it('does not redraft when repeated telemetry rotates, expires, or alternates between seen states', async () => {
+    const r=rig();r.request.mockResolvedValue({text:JSON.stringify({skip:'没有新进展'})});
+    r.observe(1,'game.event','同伴在一格外');r.observe(2,'game.event','同伴在两格外');
+    r.lane.tick();await settle();expect(r.request).toHaveBeenCalledTimes(1);
+    for(let i=3;i<35;i++){r.advance(3000);r.observe(i,'game.event',i%2?'同伴在一格外':'同伴在两格外');r.lane.tick();await settle();}
+    expect(r.request).toHaveBeenCalledTimes(1);
+    r.observe(35,'game.event','获得铁剑');r.lane.tick();await settle();expect(r.request).toHaveBeenCalledTimes(2);
+  });
+  it('does not use outgoing chat echoes to trigger optional narration', async () => {
+    const r=rig();r.lane.observe({cursor:1,source:'game',type:'game.chat',origin:'external',
+      ts:new Date(100000).toISOString(),text:'我准备出发啦',meta:{outgoing:true,channel:'public'}});
+    r.lane.tick();expect(r.request).not.toHaveBeenCalled();
+  });
+  it('still considers repeated incoming questions and distinct senders', async () => {
+    const r=rig();r.request.mockResolvedValue({text:JSON.stringify({skip:'交给主人格回复'})});
+    for(let i=1;i<=2;i++){r.observe(i,'game.chat','你在哪里？');r.lane.tick();await settle();r.advance(3000);}
+    expect(r.request).toHaveBeenCalledTimes(2);
+  });
+
   it('offers only eligible citation windows while keeping the original expiry at admission', async () => {
     const r=rig();Object.assign(r.config,{liveFactAgeSec:5});
     r.observe();r.advance(6000);r.lane.tick();

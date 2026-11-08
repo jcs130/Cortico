@@ -46,6 +46,15 @@ export interface CommentaryEvent {
 }
 
 interface Evidence extends CommentaryEvent { truncated: boolean }
+// Telemetry can be redelivered under new cursors or rotate through the rolling
+// window. Only new evidence earns another optional model call. Real incoming
+// dialogue remains occurrence-specific, including repeated questions.
+function evaluationKey(e: Evidence): string {
+  const dialogue = /(?:^|\.)chat$/.test(e.type) && e.meta?.channel !== 'system';
+  return JSON.stringify([e.source, e.type, e.origin, e.senderKey ?? null,
+    dialogue ? e.cursor : null, observationKey(e), e.text]);
+}
+
 function citationWindows(e: CommentaryEvent, c: CommentaryConfig, now: number) {
   const observedAt = Date.parse(e.ts);
   const expiresAt = {
@@ -223,6 +232,8 @@ export class CommentaryLane {
   private recent: Submission[] = [];
   private announced = new Set<string>();
   private lastEvaluated = '';
+  private evaluated = new Map<string, number>();
+  private evaluationScope = '';
   private state: CommentaryState = 'disabled';
   private ready: Draft | null = null;
   private prefetchedRevision: number | undefined;
@@ -236,6 +247,9 @@ export class CommentaryLane {
     const sources = new Set(this.ports.config().sources.split(/[\s,]+/).filter(Boolean));
     if (!sources.has(e.source) || !e.text || e.type === 'worlds.note') return;
     if (e.origin !== 'external' && e.source !== 'terminal') return;
+    // Own speech is already tracked by foregroundSpeech/recent. Echoing it back
+    // as new World evidence makes optional narration self-trigger indefinitely.
+    if (e.meta?.outgoing === true || e.meta?.direction === 'outgoing') return;
     const text = cleanEvidence(e.text);
     if (text === null) return;
     // Only snapshots replace a previous complete state. Two independent task
@@ -376,6 +390,10 @@ export class CommentaryLane {
     const textFormat = this.ports.availability().speech?.textFormat ?? "plain";
     const inputKey = JSON.stringify([c.sources, c.style, textFormat, facts.map(({ source, type, origin, text }) => ({ source, type, origin, text }))]);
     if (inputKey === this.lastEvaluated) return;
+    const scope = JSON.stringify([c.sources, c.style, textFormat]);
+    if (scope !== this.evaluationScope) { this.evaluated.clear(); this.evaluationScope = scope; }
+    for (const [key, expires] of this.evaluated) if (expires < now) this.evaluated.delete(key);
+    if (facts.every(e => this.evaluated.has(evaluationKey(e)))) return;
     this.inFlight = true;
     const revision = this.ports.availability().speech!.queueRevision;
     if (duringPlayback) this.prefetchedRevision = revision;
@@ -388,6 +406,13 @@ export class CommentaryLane {
     const draft: Draft = { script: '', evidence: [], facts, epoch, idleSince, serial, startedAt: now, readyAt: now,
       sources: c.sources, style: c.style, revision, duringPlayback, textFormat };
     void this.run(brief, draft, inputKey).finally(() => this.finish());
+  }
+
+  private markEvaluated(facts: readonly Evidence[], inputKey: string): void {
+    this.lastEvaluated = inputKey;
+    const retention = Math.max(OUTCOME_AGE_MS, this.ports.config().factAgeSec * 1000);
+    for (const fact of facts) this.evaluated.set(evaluationKey(fact), this.now() + retention);
+    while (this.evaluated.size > 512) this.evaluated.delete(this.evaluated.keys().next().value!);
   }
 
   private async run(brief: string, candidate: Draft, inputKey: string): Promise<void> {
@@ -416,7 +441,7 @@ export class CommentaryLane {
         if (admission) await admission;
         if (streamed) {
           const first = streamed as Draft;
-          this.lastEvaluated = inputKey;
+          this.markEvaluated(facts, inputKey);
           if ('error' in result || brokenPrefix) {
             this.ports.log('commentary-partial', { requestId: serial, reason: 'generation-ended-after-first-sentence', evidence: first.evidence });
             return;
@@ -436,7 +461,7 @@ export class CommentaryLane {
         if (!this.valid(candidate)) { this.stale(serial, 'output-or-context-changed'); return; }
         if ('error' in result) throw new Error(result.error);
         this.draftMs = Math.max(1000, Math.min(15000, this.now() - candidate.startedAt));
-        this.lastEvaluated = inputKey;
+        this.markEvaluated(facts, inputKey);
         const draft = parseCommentary(speechRecords(result.text)[0] ?? result.text, new Set(facts.map(e => e.cursor)), textFormat);
         const duplicate = draft && this.recent.some(r => r.script === commentarySpeechText(draft.script));
         const stale = draft && !this.valid({ ...candidate, ...draft });
@@ -503,6 +528,6 @@ export class CommentaryLane {
     }
   }
 
-  stop(): void { this.stopped = true; this.epoch++; this.ready = null; this.evidence.clear(); this.snapshots.clear(); this.outcomes.clear(); this.announced.clear(); this.lastEvaluated = ''; }
+  stop(): void { this.stopped = true; this.epoch++; this.ready = null; this.evidence.clear(); this.snapshots.clear(); this.outcomes.clear(); this.announced.clear(); this.lastEvaluated = ''; this.evaluated.clear(); }
   resume(): void { this.stopped = false; this.epoch++; this.ready = null; this.prefetchedRevision = undefined; this.nextAt = 0; }
 }

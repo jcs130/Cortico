@@ -1,3 +1,7 @@
+## 0.1.2-rc.17.preview.12
+
+- Gate optional commentary on previously unevaluated evidence rather than rolling-window equality. Ignore outgoing speech echoes, retain occurrence-specific incoming dialogue, and preserve retry, freshness and foreground priority.
+
 ## 0.1.2-rc.17.preview.11
 
 - Restore independent action receipts with at most eight concurrent reads, retaining deterministic ordering, newest-record reconciliation and restart uncertainty. Drain pending reads and fail closed on invalid records instead of writing a partial checkpoint.
