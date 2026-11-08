@@ -53,9 +53,9 @@ export class AvatarStageServer {
   get url() {
     return `http://127.0.0.1:${this.actualPort}`;
   }
-  async start() {
+  async start(progress?: (phase: string) => void) {
     if (this.http) return;
-    await this.stage.start();
+    await this.stage.start(progress);
     const http = createServer((req, res) => {
       void this.handle(req, res).catch((e) => {
         if (!res.headersSent)
@@ -69,11 +69,13 @@ export class AvatarStageServer {
     this.http = http;
     http.requestTimeout = 10000;
     try {
+      progress?.('http-listen');
       await new Promise<void>((ok, fail) => {
         http.once("error", fail);
         http.listen(this.stage.config.port, "127.0.0.1", ok);
       });
       this.actualPort = (http.address() as { port: number }).port;
+      progress?.('http-ready');
     } catch (e) {
       this.http = null;
       await this.stage.stop();

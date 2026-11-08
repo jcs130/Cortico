@@ -1,3 +1,8 @@
+## 0.1.2-rc.17.preview.11
+
+- Restore independent action receipts with at most eight concurrent reads, retaining deterministic ordering, newest-record reconciliation and restart uncertainty. Drain pending reads and fail closed on invalid records instead of writing a partial checkpoint.
+- Log awaited avatar, ledger, voice catalogue, music, HTTP and desktop audio startup phases so slow restoration can be distinguished from a missing game connection. No speech, model, voice-reference or playback settings change.
+
 ## 0.1.2-rc.17.preview.10
 
 - Shorten commentary evidence at complete line boundaries. Never separate a personal name from its observed identity or a result from its qualifier; retain the bounded scene prefix and body-progress suffix without adding a second memory store or changing voice settings.

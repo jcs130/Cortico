@@ -106,20 +106,24 @@ export class AvatarStage {
     if (old.status !== record.status) this.emit("avatar.action", { ...record });
     return record;
   }
-  async start() {
+  async start(progress?: (phase: string) => void) {
     if (!this.stopped) return;
+    progress?.('avatars');
     await this.avatars.load(this.config.avatars);
     this.activeId =
       this.config.defaultAvatar ?? this.avatars.list()[0]?.id ?? null;
     if (this.activeId) this.avatars.get(this.activeId);
-    await this.ledger.start();
+    await this.ledger.start(progress);
+    progress?.('voice-catalogue');
     await this.voice.start();
+    progress?.('music-ledger');
     await this.music.start();
     this.motion.start();
     this.stopped = false;
     this.lastRendererCheck = Date.now();
     this.tick = setInterval(() => void this.check(), 1000);
     this.tick.unref();
+    progress?.('stage-ready');
   }
   async query(args: Record<string, unknown>): Promise<Record<string, unknown>> {
     if (args.action === "status") return this.status();

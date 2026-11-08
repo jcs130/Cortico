@@ -22,7 +22,8 @@ export class ActionLedger {
     void this.writing.catch(() => {});
     return pending;
   }
-  async start() {
+  async start(progress?: (phase: string) => void) {
+    progress?.('ledger-snapshot');
     await mkdir(this.directory, { recursive: true });
     let loaded: ActionRecord[] = [];
     try {
@@ -36,10 +37,32 @@ export class ActionLedger {
     // receipts overlay it, so a busy renderer never rewrites the whole history.
     const records = new Map(loaded.map(row => [row.id, row]));
     await mkdir(join(this.directory, 'action-records'), { recursive: true });
-    for (const file of await readdir(join(this.directory, 'action-records'))) {
-      if (!/^[a-f0-9]{64}\.json$/.test(file)) continue;
-      const row: ActionRecord = JSON.parse(await readFile(join(this.directory, 'action-records', file), 'utf8'));
-      if (this.recordName(row.id) !== file) throw Error('Action record identity mismatch');
+    const files = (await readdir(join(this.directory, 'action-records')))
+      .filter(file => /^[a-f0-9]{64}\.json$/.test(file));
+    progress?.('ledger-receipts');
+    // Receipts are independent immutable reads during restoration. Bound the
+    // open files instead of making every cold-file latency block the next one.
+    let next = 0, failed = false;
+    const receipts: ActionRecord[] = new Array(files.length);
+    const readers = await Promise.allSettled(Array.from({length: Math.min(8, files.length)}, async () => {
+      while (!failed) {
+        const index = next++;
+        if (index >= files.length) return;
+        const file = files[index];
+        try {
+          const row: ActionRecord = JSON.parse(await readFile(join(this.directory, 'action-records', file), 'utf8'));
+          if (this.recordName(row.id) !== file) throw Error('Action record identity mismatch');
+          receipts[index] = row;
+        } catch (error) {
+          failed = true;
+          throw error;
+        }
+      }
+    }));
+    const failure = readers.find(result => result.status === 'rejected');
+    if (failure?.status === 'rejected') throw failure.reason;
+    // Preserve replay order for equal timestamps regardless of disk completion order.
+    for (const row of receipts) {
       const old = records.get(row.id);
       if (!old || row.updatedAt > old.updatedAt) records.set(row.id, row);
     }
@@ -56,6 +79,7 @@ export class ActionLedger {
       this.actions.set(row.id, row);
       this.requests.set(row.requestId, row);
     }
+    progress?.('ledger-checkpoint');
     await this.enqueue(() => this.save());
   }
   async submit(

@@ -230,6 +230,10 @@ export class AvatarStageWorld implements World {
       epoch = ++this.epoch;
     this.lifetime = lifetime;
     this.host = host;
+    const startedAt = performance.now();
+    const progress = (phase: string) => host.log?.emit('info', '演出启动阶段', {
+      event: 'avatar-stage.startup', data: { phase, elapsedMs: Math.round(performance.now() - startedAt) },
+    });
     let local: AvatarStageClient | AvatarStageServer | null = null;
     try {
       const config = this.cfg();
@@ -240,11 +244,13 @@ export class AvatarStageWorld implements World {
         : new AvatarStageServer(config, (event) => this.report(event, epoch));
       if (local instanceof AvatarStageClient) this.client = local;
       else this.server = local;
-      await local.start();
+      if (local instanceof AvatarStageServer) await local.start(progress);
+      else { progress('remote-stage'); await local.start(); }
       lifetime.signal.throwIfAborted();
       this.presentation = new DesktopPresentation(() => ({ mode: this.cfg().presentation?.mode ?? 'stage',
         url: this.cfg().presentation?.url ?? '' }), lifetime.signal);
       if (this.presentation.audioEnabled()) {
+        progress('desktop-audio');
         this.desktopAudio = new DesktopAudioRenderer({
           stageUrl: () => config.remoteUrl || this.server!.url, display: this.presentation, signal: lifetime.signal,
           admitted: (id, text, mode, authored) => { void this.director?.direct(id, text, mode, authored); },
@@ -304,6 +310,7 @@ export class AvatarStageWorld implements World {
       this.replySpeech=new DesktopReplySpeech({config:()=>({...REPLY_SPEECH_DEFAULTS,...this.cfg().replySpeech}),
         speak:(text,requestId)=>this.speak({action:'speak',text},requestId,lifetime.signal),
         log:data=>this.host?.log.emit('info','桌面回复语音提交',{event:'desktop-reply-speech',data})});
+      progress('world-ready');
     } catch (error) {
       await this.desktopAudio?.stop(); this.desktopAudio = null;
       await local?.stop();
