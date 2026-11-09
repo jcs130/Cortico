@@ -28,6 +28,10 @@ type Session = {
   nativeStream?: Record<string, unknown>;
   wavStop?: string | null;
 };
+function upstreamUnavailable(error: unknown): boolean {
+  return error instanceof TypeError || error instanceof Error &&
+    (error.name === 'TimeoutError' || /^(TTS HTTP|drama-rs)/.test(error.message));
+}
 /** Forward typed recovery identifiers, never raw provider error text. */
 async function failure(response: Response): Promise<Error> {
   const basic = "TTS HTTP " + response.status;
@@ -61,6 +65,8 @@ export class VoiceService {
   private selectedVoice: string | null = null;
   private catalogError: string | null = null;
   private metadataAbort = new AbortController();
+  private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  private recoveryAt: number | null = null;
   private synthesisTail: Promise<void> = Promise.resolve();
   constructor(
     private readonly config: () => VoiceConfig | undefined,
@@ -72,6 +78,8 @@ export class VoiceService {
     ) => void,
   ) {this.artifacts=new VoiceArtifacts(join(directory,'voice-artifacts'),(text,id,signal)=>this.renderArtifact(text,id,signal));}
   async start() {
+    if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = null; this.recoveryAt = null;
     this.metadataAbort = new AbortController();
     await mkdir(this.directory, { recursive: true });
     const file = join(this.directory, "tts-session.json");
@@ -104,7 +112,10 @@ export class VoiceService {
           ? remoteVoices.filter(v => v === c.voice || c.voices!.includes(v))
           : remoteVoices;
         if (!this.availableVoices.includes(c.voice)) throw Error("Configured voice is absent from drama-rs: " + c.voice);
-      } catch (error) { this.catalogError = error instanceof Error ? error.message : String(error); }
+      } catch (error) {
+        this.catalogError = error instanceof Error ? error.message : String(error);
+        this.scheduleRecovery();
+      }
     } else if (c?.voicesUrl) {
       try {
         const catalog = await jsonRequest(endpoint(c.voicesUrl), {
@@ -156,6 +167,7 @@ export class VoiceService {
       voice: this.selectedVoice ?? c?.voice ?? null,
       voices: this.availableVoices,
       catalogError: this.catalogError ?? (native && !nativeVoiceAvailable ? "Selected drama-rs voice is unavailable" : null),
+      recoveryAt: this.recoveryAt,
       sessionId: this.sessionId,
       prebufferMs: 480,
       transport: "chunked-wav",
@@ -284,7 +296,13 @@ export class VoiceService {
         }
       }
       return {bytes:Buffer.concat(chunks),voice,generationComplete};
-    }finally{release();}
+    } catch (error) {
+      if (!caller.aborted && !this.metadataAbort.signal.aborted && c.synthesisTransport === 'drama-rs-wav' && upstreamUnavailable(error)) {
+        this.catalogError = 'drama-rs synthesis unavailable; health and configured voice must be reverified';
+        this.scheduleRecovery();
+      }
+      throw error;
+    } finally { release(); }
   }
   queueArtifact(id:string,artifact:{metadata:VoiceArtifact;bytes:Buffer}) {
     const artifactId=artifact.metadata.requestId,config=this.config();
@@ -498,6 +516,10 @@ export class VoiceService {
       }
     } catch (e) {
       if (!s.abort.signal.aborted) {
+        if (s.config.synthesisTransport === 'drama-rs-wav' && upstreamUnavailable(e)) {
+          this.catalogError = 'drama-rs synthesis unavailable; health and configured voice must be reverified';
+          this.scheduleRecovery();
+        }
         s.finished = true;
         this.current = null;
         this.last = { id: s.id, status: "failed", trace: s.trace,
@@ -586,7 +608,34 @@ export class VoiceService {
     return jsonRequest(endpoint(c.metricsUrl), { headers: await bearer(c) });
   }
   stop() {
+    if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = null;
+    this.recoveryAt = null;
     this.metadataAbort.abort();
     this.interrupt("stage-stopped");
+  }
+  /** A failed utterance is never replayed. Probe only discovery after failure;
+   * fresh speech can resume once this exact configured voice is available. */
+  private scheduleRecovery() {
+    if (this.recoveryTimer || this.metadataAbort.signal.aborted) return;
+    this.recoveryAt = Date.now() + 30000;
+    const lifetime = this.metadataAbort;
+    this.recoveryTimer = setTimeout(async () => {
+      this.recoveryTimer = null;
+      const config = this.config();
+      if (!config || config.synthesisTransport !== 'drama-rs-wav' || lifetime.signal.aborted) return;
+      try {
+        const voices = await dramaRsVoices(config.url, AbortSignal.any([lifetime.signal, AbortSignal.timeout(10000)]));
+        const selected = this.selectedVoice ?? config.voice;
+        if (!voices.includes(selected)) throw Error('Configured voice is absent from drama-rs');
+        if (lifetime !== this.metadataAbort || lifetime.signal.aborted || this.config()?.url !== config.url) return;
+        this.availableVoices = config.voices?.length ? voices.filter(v => v === config.voice || config.voices!.includes(v)) : voices;
+        this.catalogError = null;
+        this.recoveryAt = null;
+      } catch {
+        if (lifetime === this.metadataAbort && !lifetime.signal.aborted) this.scheduleRecovery();
+      }
+    }, 30000);
+    this.recoveryTimer.unref();
   }
 }
