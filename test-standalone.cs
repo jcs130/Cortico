@@ -64,6 +64,8 @@ static class StandaloneTests {
       f.OnLaunch=()=>f.Process.Exists=true;Task.WhenAll(f.Adapter.Open(),f.Adapter.Open()).GetAwaiter().GetResult();
       Check(f.Launches==1&&f.Focuses==2,"two opens share one launch and the same process");}
     using(var f=new Fixture()) {f.Process.StartedAt=DateTimeOffset.UtcNow.AddHours(-1);Rejected(f,"reused PID cannot be activated or restarted");}
+    using(var f=new Fixture()) {f.Config.EnsureExistingServices=true;var r=f.Adapter.Open().GetAwaiter().GetResult();Check(r.activated&&f.Launches==1&&f.Process.Exists,"explicit service bootstrap runs once for an existing verified observer");}
+    using(var f=new Fixture()) {f.Config.EnsureExistingServices=true;f.Adapter=new StandaloneObserver(f.Config,p=>f.Process,()=>Task.FromResult(1),p=>{f.Focuses++;return true;},ms=>Task.FromResult(0),1);Rejected(f,"failed service bootstrap cannot pretend the display is ready");}
     using(var f=new Fixture()) {f.Process.ProfileDirectory=Path.Combine(f.Root,"old-eye");Rejected(f,"same Java executable with wrong game directory is rejected");}
     using(var f=new Fixture()) {f.Process.Account="eye";Rejected(f,"personal eye account is rejected");}
     using(var f=new Fixture()) {f.Process.Executable=Path.Combine(f.Root,"wrong-java.exe");Rejected(f,"different Java runtime is rejected");}

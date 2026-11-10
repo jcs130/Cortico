@@ -13,3 +13,8 @@ $studioObserverTest=Join-Path $studioTestRoot 'test-standalone.exe'
 if($LASTEXITCODE -ne 0){throw 'Standalone observer tests did not compile'}
 & $studioObserverTest
 if($LASTEXITCODE -ne 0){throw 'Standalone observer tests failed'}
+$studioChoiceTest=Join-Path $studioTestRoot 'test-observer-choice.exe'
+& 'C:/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe' /nologo /target:exe ('/out:'+$studioChoiceTest) ('/r:'+$studioTestApp) (Join-Path $PSScriptRoot 'test-observer-choice.cs')
+if($LASTEXITCODE -ne 0){throw 'Observer choice tests did not compile'}
+& $studioChoiceTest
+if($LASTEXITCODE -ne 0){throw 'Observer choice tests failed'}

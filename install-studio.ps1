@@ -4,6 +4,7 @@
  [Parameter(Mandatory=$true)][string]$AvatarApp,
  [string]$AvatarUrl='http://127.0.0.1:18431/?obs=1',
  [string]$ObserverConfig,
+ [string]$ObserverProfiles,
  [string]$PrimaryTargetName,
  [switch]$SkipShortcuts
 )
@@ -24,12 +25,19 @@ $studioExe=Join-Path $studioVersion 'CormyLive.exe'
 & (Join-Path $PSScriptRoot 'build.ps1') -OutputFile $studioExe | Out-Null
 $studioSettings=Join-Path $studioVersion 'studio.json'
 $studioConfig=@{AvatarExecutable=[IO.Path]::GetFullPath($AvatarExecutable);AvatarApp=[IO.Path]::GetFullPath($AvatarApp);AvatarStatusFile=Join-Path ([IO.Path]::GetFullPath($AvatarApp)) 'runtime/status.json';AvatarUrl=$AvatarUrl;StateFile=Join-Path $studioRoot 'studio-window.json'}
-if($ObserverConfig){
+if($ObserverConfig -and $ObserverProfiles){throw 'Choose one observer config format'}
+if($ObserverProfiles){
+ $studioProfiles=Get-Content -LiteralPath $ObserverProfiles -Raw -Encoding UTF8 | ConvertFrom-Json
+ if(-not $studioProfiles.Observers -or -not $studioProfiles.SelectedObserverId){throw 'Explicit observer choices and default are required'}
+ $studioConfig.Observers=$studioProfiles.Observers
+ $studioConfig.SelectedObserverId=$studioProfiles.SelectedObserverId
+} elseif($ObserverConfig){
  $studioConfig.Observer=Get-Content -LiteralPath $ObserverConfig -Raw -Encoding UTF8 | ConvertFrom-Json
 } elseif(Test-Path -LiteralPath (Join-Path $studioRoot 'studio-active.json')) {
  # An unrelated panel upgrade must not silently revert an installed live entry to eye.
  $studioPrevious=Get-Content -LiteralPath (Join-Path $studioRoot 'studio-active.json') -Raw -Encoding UTF8 | ConvertFrom-Json
  $studioPreviousConfig=Get-Content -LiteralPath $studioPrevious.settings -Raw -Encoding UTF8 | ConvertFrom-Json
+ if($studioPreviousConfig.Observers){$studioConfig.Observers=$studioPreviousConfig.Observers;$studioConfig.SelectedObserverId=$studioPreviousConfig.SelectedObserverId}
  if($studioPreviousConfig.Observer){$studioConfig.Observer=$studioPreviousConfig.Observer}
  if($studioPreviousConfig.PrimaryTargetName){$studioConfig.PrimaryTargetName=$studioPreviousConfig.PrimaryTargetName}
 }

@@ -20,6 +20,7 @@ namespace CormyLive {
     public string ExpectedAccount, ExpectedServer, ExpectedUuid, ExpectedLoader;
     public string ExpectedJavaExecutable, NativeVersion, ObserverVersion;
     public ObserverArtifact[] Artifacts;
+    public bool EnsureExistingServices;
     public static bool SamePath(string a,string b) {
       return !String.IsNullOrWhiteSpace(a)&&!String.IsNullOrWhiteSpace(b)
         &&String.Equals(Path.GetFullPath(a).TrimEnd('\\','/'),Path.GetFullPath(b).TrimEnd('\\','/'),StringComparison.OrdinalIgnoreCase);
@@ -223,6 +224,10 @@ namespace CormyLive {
         for(int i=0;i<attempts;i++) {
           state=Probe();result.pid=state.Pid;result.phase=state.Phase;
           if(state.Ready) {
+            if(settings.EnsureExistingServices){
+              if(helper==null)helper=launch();
+              if(await helper!=0)throw new InvalidOperationException("观战界面服务未就绪；没有重启或切换其他账号。");
+            }
             result.activated=await Task.Run(()=>{var latest=Probe();return latest.Ready&&latest.Pid==state.Pid&&focus(latest.Pid);});
             return result;
           }
