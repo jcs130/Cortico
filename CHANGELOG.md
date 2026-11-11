@@ -1,3 +1,7 @@
+## 0.1.2-rc.17.preview.13
+
+- Mark failed native Drama-rs synthesis unavailable and recover using bounded health and exact-voice discovery. Never retry an old utterance, change voice or claim native EOF proves complete speech.
+
 ## 0.1.2-rc.17.preview.12
 
 - Gate optional commentary on previously unevaluated evidence rather than rolling-window equality. Ignore outgoing speech echoes, retain occurrence-specific incoming dialogue, and preserve retry, freshness and foreground priority.

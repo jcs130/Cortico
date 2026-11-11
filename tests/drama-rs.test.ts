@@ -15,6 +15,7 @@ afterEach(async () => {
   for (const clean of cleanups.splice(0).reverse()) await clean();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 function wav(samples = 30000, rate = 44100, finite = false) {
   const bytes = Buffer.alloc(44 + samples * 2);
@@ -106,6 +107,25 @@ async function fixture(
 }
 
 describe("native drama-rs", () => {
+  it('stops repeated synthesis after an upstream failure and recovers through discovery without replaying speech', async () => {
+    const f = await fixture({response: () => new Response('', {status: 502})});
+    vi.useFakeTimers();
+    f.voice.queue('failed-line','这句未播完。');
+    await f.voice.stream('failed-line',new Output() as any);
+    expect(f.voice.status()).toMatchObject({configured:false,recoveryAt:expect.any(Number)});
+    expect(() => f.voice.queue('next','不重复旧台词。')).toThrow();
+    expect(f.bodies).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(f.voice.status()).toMatchObject({configured:true,voice:'cormy',recoveryAt:null});
+    expect(f.calls.slice(-2)).toEqual(['/health','/v1/voices']);
+    expect(f.bodies).toHaveLength(1);
+    expect(f.events.some(row=>row.id==='failed-line'&&row.status==='transport-complete')).toBe(false);
+    f.voice.queue('fresh','这是恢复后的新台词。');
+    f.voice.stop();
+    const count=f.calls.length;
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(f.calls).toHaveLength(count);
+  });
   it("preserves an explicit voice allowlist instead of enabling other server voices", async () => {
     const f = await fixture({ allowedVoices: ["cormy"] });
     expect(f.voice.status().voices).toEqual(["cormy"]);
