@@ -8,16 +8,38 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace CormyLive {
+  public sealed class StudioObserverChoice {
+    public string Id,Label;
+    public StandaloneObserverSettings Observer;
+    public override string ToString(){return Label;}
+  }
   public sealed class StudioSettings {
     public string AvatarExecutable, AvatarApp, AvatarStatusFile, AvatarUrl, StateFile;
     public string PrimaryTargetName;
     public StandaloneObserverSettings Observer;
+    public StudioObserverChoice[] Observers;
+    public string SelectedObserverId;
+    public void SelectObserver(string id) {
+      if(Observers==null||Observers.Length==0)throw new InvalidDataException("没有配置观战入口。");
+      var choice=Array.Find(Observers,x=>x!=null&&x.Id==id);
+      if(choice==null)throw new InvalidDataException("未知的观战入口。");
+      choice.Observer.Validate();Observer=choice.Observer;SelectedObserverId=id;
+    }
     public static StudioSettings Load(string path) {
       var value=Json.Read<StudioSettings>(path);
       LocalUrl(value.AvatarUrl);
       foreach(var file in new[]{value.AvatarExecutable,value.AvatarApp,value.AvatarStatusFile,value.StateFile})
         if(String.IsNullOrWhiteSpace(file)||!Path.IsPathRooted(file))throw new InvalidDataException("直播小助手需要绝对路径配置。");
       if(value.Observer!=null)value.Observer.Validate();
+      if(value.Observers!=null&&value.Observers.Length>0){
+        if(value.Observers.Length>8)throw new InvalidDataException("观战入口过多。");
+        var ids=new HashSet<string>(StringComparer.Ordinal);
+        foreach(var choice in value.Observers){
+          if(choice==null||String.IsNullOrWhiteSpace(choice.Id)||String.IsNullOrWhiteSpace(choice.Label)||!ids.Add(choice.Id)||choice.Observer==null)throw new InvalidDataException("观战入口配置无效。");
+          choice.Observer.Validate();
+        }
+        value.SelectObserver(value.SelectedObserverId??value.Observers[0].Id);
+      }
       return value;
     }
     public static string LocalUrl(string text) {
@@ -52,13 +74,13 @@ namespace CormyLive {
     public const string WindowTitle="可米 · 直播小助手";
     private readonly Settings host;
     private readonly StudioSettings settings;
-    private readonly StandaloneObserver standalone;
+    private StandaloneObserver standalone;
     private readonly System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer { Interval=4000 };
     private readonly Color ink=Color.FromArgb(233,238,246),muted=Color.FromArgb(155,169,189),accent=Color.FromArgb(111,213,190);
     private Label status,gameState,avatarState,feedback,broadcastLabel;
     private Button observer,web,avatar;
     private Button applyTarget;
-    private ComboBox broadcastMode,players;
+    private ComboBox broadcastMode,players,observerChoice;
     private BroadcastState broadcast;
     private bool selectionInitialized,selectionDirty,updatingSelection;
     private string requestedSelection;
@@ -84,7 +106,12 @@ namespace CormyLive {
       pin.CheckedChanged+=(s,e)=>{TopMost=pin.Checked;SavePosition();};Controls.Add(pin);
       status=LabelAt(this,"正在连接可米…",21,57,338,25,9,muted,FontStyle.Regular);
       var game=Card(92,222);
-      LabelAt(game,standalone==null?"个人游戏观战":"服务器直播观战",15,12,280,26,12,ink,FontStyle.Bold);
+      LabelAt(game,settings.Observers!=null?"游戏观战":standalone==null?"个人游戏观战":"服务器直播观战",15,12,settings.Observers!=null?130:280,26,12,ink,FontStyle.Bold);
+      if(settings.Observers!=null&&settings.Observers.Length>0){
+        observerChoice=new ComboBox {Location=new Point(151,12),Size=new Size(170,25),DropDownStyle=ComboBoxStyle.DropDownList};
+        foreach(var choice in settings.Observers)observerChoice.Items.Add(choice);
+        observerChoice.SelectedIndex=Array.FindIndex(settings.Observers,x=>x.Id==settings.SelectedObserverId);game.Controls.Add(observerChoice);
+      }
       gameState=LabelAt(game,"正在检查观战入口…",15,42,307,23,9,muted,FontStyle.Regular);
       observer=ButtonAt(game,"打开观战客户端",15,76,183,true,async()=>{
         feedback.Text="正在打开观战客户端…";
@@ -129,6 +156,15 @@ namespace CormyLive {
       Move+=(s,e)=>{if(Visible&&WindowState==FormWindowState.Normal)SavePosition();};
       Resize+=(s,e)=>{if(WindowState==FormWindowState.Minimized)Hide();};
       FormClosed+=(s,e)=>{timer.Stop();timer.Dispose();tray.Visible=false;tray.Dispose();};
+      if(observerChoice!=null)observerChoice.SelectedIndexChanged+=async(s,e)=>{
+        if(pending.Count>0){observerChoice.SelectedIndex=Array.FindIndex(settings.Observers,x=>x.Id==settings.SelectedObserverId);return;}
+        var choice=observerChoice.SelectedItem as StudioObserverChoice;if(choice==null||choice.Id==settings.SelectedObserverId)return;
+        settings.SelectObserver(choice.Id);standalone=new StandaloneObserver(settings.Observer);
+        broadcast=null;selectionInitialized=false;selectionDirty=false;requestedSelection=null;
+        gameState.Text="正在检查所选观战入口…";broadcastLabel.Text="等待所选导播状态…";
+        feedback.Text="已选择入口；点击打开才会启动，不会关闭其他观战。";
+        EnableActions();await RefreshState();
+      };
     }
     private string ConnectionRoute(){return "/api/webui/providers/"+Uri.EscapeDataString("world:"+host.ObserverWorld)+"/panels/connection/state";}
     private Panel Card(int y,int height){var p=new Panel {Location=new Point(20,y),Size=new Size(340,height),BackColor=Color.FromArgb(28,38,53)};Controls.Add(p);return p;}
@@ -165,16 +201,17 @@ namespace CormyLive {
     }
     private async Task RefreshState(){
       if(refreshing||IsDisposed)return;refreshing=true;
+      var chosen=standalone;
       try{
         var root=await Runtime.Api(host,"/api/status",false,8);if(IsDisposed)return;online=true;
         bool running=Json.IsTrue(Json.Get(root,"loop","running"))&&!Json.IsTrue(Json.Get(root,"loop","paused"));
         status.Text=running?"● 可米在线 · 正在运行":"● 可米在线 · 思考已暂停";status.ForeColor=running?accent:Color.FromArgb(241,195,123);
         var connection=Runtime.Api(host,ConnectionRoute(),false,8);
-        var client=standalone==null?Runtime.Api(host,"/api/webui/providers/"+Uri.EscapeDataString("world:"+host.ObserverWorld)+"/panels/mount/client.state",true,8,new{args=new object[0]}):null;
+        var client=chosen==null?Runtime.Api(host,"/api/webui/providers/"+Uri.EscapeDataString("world:"+host.ObserverWorld)+"/panels/mount/client.state",true,8,new{args=new object[0]}):null;
         try{var c=await connection;viewerUrl=Json.Get(c,"viewer","url")==null?null:StudioSettings.LocalUrl(Convert.ToString(Json.Get(c,"viewer","url")));}catch{viewerUrl=null;}
         if(client!=null)try{var c=await client;if(IsDisposed)return;var phase=Convert.ToString(Json.Get(c,"phase"));gameState.Text=phase=="running"?(Json.IsTrue(Json.Get(c,"windowReady"))?"个人观战运行中 · 点击切回窗口":"个人观战进程已启动 · 窗口准备中"):phase=="starting"?"个人观战正在启动…":phase=="error"||phase=="failed"?"个人观战异常 · 可打开控制台":"个人观战未打开 · 可按需启动";}catch{if(!IsDisposed)gameState.Text="客户端状态未确认 · 可打开控制台";}
       }catch{online=false;viewerUrl=null;status.Text="● 暂时连不上可米 · 打开控制台检查";status.ForeColor=muted;gameState.Text="观战入口暂不可用";}
-      if(standalone!=null){var current=await Task.Run(()=>standalone.Probe());var view=await Task.Run(()=>standalone.Broadcast());if(!IsDisposed){gameState.Text=current.Label;RefreshBroadcast(view);}}
+      if(chosen!=null){var current=await Task.Run(()=>chosen.Probe());var view=await Task.Run(()=>chosen.Broadcast());if(!IsDisposed&&Object.ReferenceEquals(chosen,standalone)){gameState.Text=current.Label;if(!String.IsNullOrWhiteSpace(current.Detail))feedback.Text=current.Detail;RefreshBroadcast(view);}}
       else broadcastLabel.Text="此入口未配置独立导播";
       refreshing=false;if(!IsDisposed){avatarState.Text=settings.AvatarLabel();EnableActions();}
     }
