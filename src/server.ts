@@ -9,6 +9,7 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import { resolve, dirname, relative, isAbsolute, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import { VoiceArtifactValidationError } from "./core/voice-artifacts.ts";
 import { createRequire } from "node:module";
 import {
   AvatarStage,
@@ -62,6 +63,7 @@ export class AvatarStageServer {
           this.json(res, 400, {
             protocol: PROTOCOL,
             error: e instanceof Error ? e.message : String(e),
+            ...(e instanceof VoiceArtifactValidationError ? {diagnostic:e.diagnostic} : {}),
           });
         else res.destroy();
       });
