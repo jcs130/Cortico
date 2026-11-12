@@ -1,3 +1,7 @@
+## 0.1.2-rc.17.preview.14
+
+- Return durable measured duration diagnostics for overlong game speech. Explain current versus recent-event speech recovery while preserving the original observation time.
+
 ## 0.1.2-rc.17.preview.13
 
 - Mark failed native Drama-rs synthesis unavailable and recover using bounded health and exact-voice discovery. Never retry an old utterance, change voice or claim native EOF proves complete speech.

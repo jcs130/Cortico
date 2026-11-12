@@ -25,5 +25,12 @@ export function checkSpeechFreshness(args: Record<string, unknown>, maxAgeSecond
   const at = observationSeconds(args.observed_at);
   const limit = args.evidence_mode === 'recent' ? RECENT_SPEECH_MAX_AGE_SECONDS : (maxAgeSeconds || 15);
   if (!Number.isFinite(at) || at > now+1 || now-at > limit)
-    throw Error('stale_speech_observation: the supplied observation time is invalid or expired; speech was not submitted. Copy captured_at or the source event/sample timestamp verbatim as an ISO 8601 string including timezone, or use its existing Unix seconds. Do not replace old evidence with the current time or remove a stale timestamp to repeat the same claim. Read fresh evidence, describe it as history, or reply without making that live observation claim.');
+    throw Error('stale_speech_observation: speech was not submitted. '
+      + (Number.isFinite(at) ? `Observation age ${Math.round((now-at)*10)/10}s; ${args.evidence_mode??'current'} limit ${limit}s. ` : 'Invalid source timestamp. ')
+      + 'Copy captured_at or the source event/sample timestamp verbatim as ISO 8601 with timezone or existing Unix seconds. '
+      + 'Do not refresh an old timestamp or delete it to repeat the same claim. '
+      + (Number.isFinite(at)&&at<=now&&now-at<=RECENT_SPEECH_MAX_AGE_SECONDS
+        ? 'To recount this event as something that just happened, keep observed_at unchanged and use evidence_mode:"recent" (300s); phrase the text as a past event, not current state. '
+        : '')
+      + 'For current-state claims read fresh evidence; otherwise reply without that observation claim.');
 }

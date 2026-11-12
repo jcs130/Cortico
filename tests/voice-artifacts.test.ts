@@ -48,7 +48,10 @@ describe('game synthesis and optional livestream mirror',()=>{
  });
  it('unknown cormy fails instead of falling back; overlong audio is never uploaded or silently clipped',async()=>{const missing=await fixture({missingVoice:true});await expect(missing.service.artifacts.create(randomUUID(),'你好。',new AbortController().signal)).rejects.toThrow(/unavailable/);expect(missing.requests.length).toBe(0);
    const long=await fixture({long:true}),id=randomUUID();await expect(long.service.artifacts.create(id,'太长的声音。',new AbortController().signal)).rejects.toThrow(/30s/);
-   await expect(long.service.artifacts.create(id,'太长的声音。',new AbortController().signal)).rejects.toThrow(/failed\/unknown/);expect(long.requests.length).toBe(1);
+   await expect(long.service.artifacts.create(id,'太长的声音。',new AbortController().signal)).rejects.toThrow(/VOICE_AUDIO_DURATION_EXCEEDED/);expect(long.requests.length).toBe(1);
+   const row=JSON.parse(await readFile(join(long.dir,'voice','voice-artifacts',id+'.json'),'utf8'));
+   expect(row).toMatchObject({state:'failed',durationMs:31000,diagnostic:{protocol:'voice-artifact-error/v1',code:'VOICE_AUDIO_DURATION_EXCEEDED',retryable:false,durationMs:31000,maxDurationMs:30000}});
+   await expect(long.service.artifacts.read(id)).rejects.toThrow(/unavailable/);
  });
  it('cancellation does not make a partial line ready or replay it',async()=>{const f=await fixture(),abort=new AbortController(),id=randomUUID();abort.abort();
    await expect(f.service.artifacts.create(id,'不要播放。',abort.signal)).rejects.toThrow();await expect(f.service.artifacts.read(id)).rejects.toThrow(/unavailable/);expect(f.requests.length).toBe(0);
@@ -62,5 +65,14 @@ describe('game synthesis and optional livestream mirror',()=>{
    const logs=JSON.parse(await readFile(join(f.dir,'server','voice-artifacts',id+'.json'),'utf8'));
    expect(logs.state).toBe('ready');
    const imported=randomUUID();const put=await fetch(server.url+'/api/voice-artifacts/'+imported,{method:'PUT',headers:{'Content-Type':'audio/wav'},body:new Uint8Array(bytes)});expect(put.status).toBe(200);expect(f.requests.length).toBe(1);
+ });
+ it('returns the measured duration over HTTP and retains the same error across retry without another clone',async()=>{
+   const f=await fixture({long:true}),server=new AvatarStageServer({port:0,dataDir:join(f.dir,'server'),avatars:[],voice:f.voice});
+   await server.start();cleanups.push(()=>server.stop());const requestId=randomUUID();
+   for(let i=0;i<2;i++){
+     const response=await fetch(server.url+'/api/voice-artifacts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({requestId,text:'One complete overlong utterance.'})});
+     expect(response.status).toBe(400);expect(await response.json()).toMatchObject({diagnostic:{protocol:'voice-artifact-error/v1',code:'VOICE_AUDIO_DURATION_EXCEEDED',durationMs:31000,maxDurationMs:30000,retryable:false}});
+   }
+   expect(f.requests).toHaveLength(1);expect([...server.stage.ledger.actions.values()]).toHaveLength(0);
  });
 });

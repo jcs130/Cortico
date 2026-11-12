@@ -4,16 +4,25 @@ import {join} from 'node:path';
 import {wavInfo} from './wav.ts';
 
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export type VoiceArtifactDiagnostic={protocol:'voice-artifact-error/v1';code:'VOICE_AUDIO_DURATION_EXCEEDED';
+  retryable:false;durationMs:number;maxDurationMs:number};
+export class VoiceArtifactValidationError extends Error {
+  constructor(readonly diagnostic:VoiceArtifactDiagnostic) {
+    super(`VOICE_AUDIO_DURATION_EXCEEDED: ${Math.round(diagnostic.durationMs)}ms exceeds 30s. Compose a shorter complete utterance; do not clip audio, split cloning requests or replay the same text.`);
+  }
+}
 export type VoiceArtifact={requestId:string;fingerprint:string;state:'rendering'|'ready'|'failed';
   createdAt:string;sha256?:string;bytes?:number;durationMs?:number;sampleRate?:number;
-  voice:string|null;text?:string;generationComplete:boolean|null;reason?:string};
+  voice:string|null;text?:string;generationComplete:boolean|null;reason?:string;diagnostic?:VoiceArtifactDiagnostic};
 const digest=(bytes:string|Uint8Array)=>createHash('sha256').update(bytes).digest('hex');
 /** A finite, independently validated WAV. No segmentation, clipping, rate tricks or text-completion claim. */
 export function gameVoiceWav(bytes:Buffer):Buffer {
   if(bytes.length>4*1024*1024)throw Error('Voice artifact exceeds 4MiB');
   const info=wavInfo(bytes);
   if(info.format!==1||info.bits!==16||![1,2].includes(info.channels)||info.sampleRate<8000||info.sampleRate>96000
-    ||info.durationMs<100||info.durationMs>30000||info.dataSize%(info.channels*2))throw Error('Game voice requires PCM16 WAV, 0.1–30s, mono/stereo');
+    ||info.durationMs<100||info.dataSize%(info.channels*2))throw Error('Game voice requires PCM16 WAV, 0.1–30s, mono/stereo');
+  if(info.durationMs>30000)throw new VoiceArtifactValidationError({protocol:'voice-artifact-error/v1',
+    code:'VOICE_AUDIO_DURATION_EXCEEDED',retryable:false,durationMs:info.durationMs,maxDurationMs:30000});
   const pcm=bytes.subarray(info.dataOffset,info.dataOffset+info.dataSize),header=Buffer.alloc(44);
   header.write('RIFF');header.writeUInt32LE(36+pcm.length,4);header.write('WAVEfmt ',8);header.writeUInt32LE(16,16);
   header.writeUInt16LE(1,20);header.writeUInt16LE(info.channels,22);header.writeUInt32LE(info.sampleRate,24);
@@ -41,14 +50,17 @@ export class VoiceArtifacts {
     try{return await job;}finally{this.inFlight.delete(id);}
   }
   private async createOnce(id:string,text:string,fingerprint:string,signal:AbortSignal){
-    const old=await this.metadata(id);if(old){if(old.fingerprint!==fingerprint)throw Error('Artifact requestId content conflict');if(old.state!=='ready')throw Error('Prior synthesis failed/unknown; do not replay automatically');return old;}
+    const old=await this.metadata(id);if(old){if(old.fingerprint!==fingerprint)throw Error('Artifact requestId content conflict');
+      if(old.state!=='ready'){if(old.diagnostic)throw new VoiceArtifactValidationError(old.diagnostic);throw Error('Prior synthesis failed/unknown; do not replay automatically');}return old;}
     const row:VoiceArtifact={requestId:id,fingerprint,state:'rendering',createdAt:new Date().toISOString(),text,voice:null,generationComplete:null};
     await this.save(row);
     try {signal.throwIfAborted();const result=await this.render(text,id,signal);signal.throwIfAborted();
       const bytes=gameVoiceWav(result.bytes),info=wavInfo(bytes);await writeFile(this.key(id)+'.wav',bytes,{flag:'wx'});
       Object.assign(row,{state:'ready',voice:result.voice,sha256:digest(bytes),bytes:bytes.length,durationMs:info.durationMs,sampleRate:info.sampleRate,generationComplete:result.generationComplete});
       await this.save(row);return row;
-    }catch(error){row.state='failed';row.reason=String(error).slice(0,240);await this.save(row);throw error;}
+    }catch(error){row.state='failed';row.reason=String(error).slice(0,240);
+      if(error instanceof VoiceArtifactValidationError){row.diagnostic=error.diagnostic;row.durationMs=error.diagnostic.durationMs;}
+      await this.save(row);throw error;}
   }
   async import(id:string,input:Buffer){
     this.key(id);if(this.inFlight.has(id))throw Error('Artifact request already rendering');
