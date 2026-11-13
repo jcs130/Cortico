@@ -1,9 +1,29 @@
 import { expect, it } from 'vitest';
-import { checkSpeechFreshness } from '../src/speech-freshness.ts';
+import { checkSpeechFreshness, resolveSpeechEvidence } from '../src/speech-freshness.ts';
 import { validateToolInput } from '../src/core/schema.ts';
 import { TOOL_DEFINITIONS } from '../src/tools.ts';
 
 const now = Date.parse('2026-10-25T14:05:20Z') / 1000;
+it('resolves source identity without timezone arithmetic and retains age on later admission', () => {
+  const source={source:'mymc',ts:'2026-10-25T22:04:50+08:00'};
+  const get=(cursor:number)=>cursor===42?source:undefined;
+  const args={action:'speak',evidence_mode:'recent',observed_event:{source:'mymc',cursor:42}};
+  const normalized=resolveSpeechEvidence(args,get);
+  expect(normalized).toEqual({action:'speak',evidence_mode:'recent',observed_at:source.ts});
+  expect(args).not.toHaveProperty('observed_at');
+  expect(()=>checkSpeechFreshness(normalized,15,now)).not.toThrow();
+  expect(()=>checkSpeechFreshness(normalized,15,now+271)).toThrow('stale_speech');
+  expect(()=>checkSpeechFreshness({...normalized,evidence_mode:'current'},15,now)).toThrow('stale_speech');
+  for(const observed_event of [{source:'other-world',cursor:42},{source:'mymc',cursor:43},{source:'mymc',cursor:NaN}])
+    expect(()=>resolveSpeechEvidence({...args,observed_event},get)).toThrow();
+  expect(()=>resolveSpeechEvidence({...args,observed_at:'2026-10-25T22:04:50Z'},get)).toThrow('conflicts');
+  expect(()=>checkSpeechFreshness(args,15,now)).toThrow('resolved by the host');
+});
+it('keeps explicit dialogue independent of observation expiry without permitting evidence removal by the adapter',()=>{
+  expect(()=>checkSpeechFreshness({action:'speak',evidence_mode:'dialogue',text:'你好。'},15,now)).not.toThrow();
+  for(const evidence of [{observed_at:now-30},{observed_event:{source:'mymc',cursor:42}}])
+    expect(()=>checkSpeechFreshness({action:'speak',evidence_mode:'dialogue',...evidence},15,now)).toThrow('cannot carry');
+});
 it('validates both advertised timestamp forms in the standalone tool schema', () => {
   const schema = TOOL_DEFINITIONS.find(t=>t.name==='avatar_voice')!.parameters;
   for (const observed_at of [now, '2026-10-25T14:05:16Z'])

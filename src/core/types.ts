@@ -121,7 +121,7 @@ export interface VoiceConfig {
   rendererStartTimeoutMs?: number;
   /** Explicit text contract of the configured synthesis backend. */
   textFormat?: "plain" | "drama-3";
-  /** preserve keeps admitted audio. One foreground line may wait behind automatic commentary. */
+  /** preserve keeps admitted audio. One foreground line may wait behind active speech. */
   busyPolicy?: "replace" | "preserve";
   /** Queue wait budget, separate from source observation age and synthesis. Default 60 seconds. */
   pendingTimeoutMs?: number;

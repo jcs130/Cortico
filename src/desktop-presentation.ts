@@ -57,10 +57,11 @@ export class DesktopPresentation {
     url.pathname = '/api/presentation';
     return url;
   }
-  async request(command?: Record<string, unknown>) {
+  async request(command?: Record<string, unknown>, signal: AbortSignal = this.signal) {
+    const audioControl = command?.action === 'play-audio' || command?.action === 'cancel-audio';
     const r = await this.fetchImpl(this.endpoint(), {
       ...(command ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ protocol: PROTOCOL, ...command }) } : {}),
-      signal: AbortSignal.any([this.signal, AbortSignal.timeout(2000)]), redirect: 'error',
+      signal: AbortSignal.any([this.signal, signal, AbortSignal.timeout(audioControl ? 10000 : 2000)]), redirect: 'error',
     });
     if (!r.ok) throw Error('Desktop presentation HTTP ' + r.status);
     return await r.json() as Record<string, any>;
@@ -74,7 +75,7 @@ export class DesktopPresentation {
   }
   async reserveStream(signal: AbortSignal) {
     const url = this.endpoint(); url.pathname += '/audio-stream';
-    const r = await this.fetchImpl(url, { method: 'POST', signal: AbortSignal.any([this.signal, signal, AbortSignal.timeout(2000)]), redirect: 'error' });
+    const r = await this.fetchImpl(url, { method: 'POST', signal: AbortSignal.any([this.signal, signal, AbortSignal.timeout(10000)]), redirect: 'error' });
     if (!r.ok) throw Error('Desktop stream reservation HTTP ' + r.status);
     return await r.json() as { assetId: string; streaming: true };
   }

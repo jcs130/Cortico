@@ -30,14 +30,14 @@ export class DesktopAudioRenderer {
   get foreground() { return this.live?.stageId ?? null; }
   private async stage(path: string, body?: Record<string, unknown>, signal = this.ports.signal) {
     const r = await fetch(new URL(path, this.ports.stageUrl()), { redirect: 'error',
-      signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(body ? 10000 : 3000)]),
       ...(body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}) });
     if (!r.ok) throw Error('Stage audio renderer HTTP ' + r.status);
     return await r.json() as Record<string, any>;
   }
-  private receipt(status: string, eventId?: string, detail: Record<string, unknown> = {}) {
+  private receipt(status: string, eventId?: string, detail: Record<string, unknown> = {}, signal = this.ports.signal) {
     return this.stage('/api/receipt', { ...this.binding, sessionId: this.sessionId, role: 'broadcast', surface: 'desktop',
-      renderer: 'audio-only', status, ...(eventId ? { eventId } : {}), ...detail });
+      renderer: 'audio-only', status, ...(eventId ? { eventId } : {}), ...detail }, signal);
   }
   async start() {
     this.client = new AvatarStageClient(this.ports.stageUrl(), event => this.event(event), { rendererEvents: true });
@@ -119,6 +119,7 @@ export class DesktopAudioRenderer {
     }
     if (this.live !== current) return;
     const signal = AbortSignal.any([current.abort.signal, this.ports.signal, AbortSignal.timeout(180000)]);
+    let phase = 'ownership-heartbeat';
     try {
       // Optional gesture discovery must not delay TTS or audio playback. It is
       // revision-fenced below and never owns the speech transport/body task.
@@ -131,18 +132,21 @@ export class DesktopAudioRenderer {
       audioUrl.searchParams.set('sessionId', this.sessionId);
       // Synthesis and command delivery can span a lease boundary. Revalidate
       // ownership before opening audio, without weakening the download guard.
-      await this.receipt('heartbeat');
+      await this.receipt('heartbeat', undefined, {}, signal);
+      phase = 'ownership-claim';
       await this.stage('/api/audio-owner', {sessionId:this.sessionId}, signal);
+      phase = 'audio-download';
       const response = await fetch(audioUrl, { signal, redirect: 'error' });
       if (!response.ok || !response.body) throw Error('Stage audio download HTTP ' + response.status);
       let asset: { assetId: string };
       if (command.kind === 'speech' && this.ports.display.media()?.streaming) {
+        phase = 'stream-reservation';
         asset = await this.ports.display.reserveStream(signal);
         // Upload and playback share one bounded stream. The renderer can start
         // as soon as PCM arrives; completion below is transport, not playback.
         void this.ports.display.uploadStream(asset.assetId, response.body, signal).catch(async error => {
           if (this.live === current && !signal.aborted) {
-            await this.receipt('failed', current.stageId, { error: String(error).slice(0, 240) }).catch(() => {});
+            await this.receipt('failed', current.stageId, { phase:'stream-upload', error: String(error).slice(0, 240) }).catch(() => {});
             await this.cancel();
           }
         });
@@ -153,20 +157,23 @@ export class DesktopAudioRenderer {
         }
         signal.throwIfAborted();
         const bytes = Buffer.concat(parts); current.durationMs = wavInfo(bytes).durationMs;
+        phase = 'audio-upload';
         asset = await this.ports.display.upload(bytes, signal);
       }
       let cues: unknown;
       if (command.kind === 'music') {
+        phase = 'music-cues';
         const url = new URL(String(command.cues), this.ports.stageUrl());
         if (url.origin !== audioUrl.origin || !/^\/audio\/cues\/[^/]+$/.test(url.pathname)) throw Error('Unexpected stage cue URL');
         url.searchParams.set('sessionId', this.sessionId);
         const r = await fetch(url, { signal, redirect: 'error' }); if (!r.ok) throw Error('Stage song cues HTTP ' + r.status); cues = await r.json();
       }
       signal.throwIfAborted();
+      phase = 'play-admission';
       const result = await this.ports.display.request({ action: 'play-audio', source: 'avatar-stage', requestId: current.stageId,
         ...asset, kind: command.kind, text: this.texts.get(current.stageId) ?? '', title: String(command.title ?? ''),
         ...(this.alreadyCaptioned.has(current.stageId) ? {showText:false} : {}),
-        volume: command.volume ?? 1, ...(cues ? { cues } : {}) });
+        volume: command.volume ?? 1, ...(cues ? { cues } : {}) }, signal);
       signal.throwIfAborted();
       if (!result.accepted) throw Error(String(result.reason ?? 'Desktop audio was rejected'));
       current.desktopId = String(result.id);
@@ -189,8 +196,8 @@ export class DesktopAudioRenderer {
       });
     } catch (error) {
       if (!current.abort.signal.aborted && !this.ports.signal.aborted) {
-        await this.receipt('failed', current.stageId, { error: String(error).slice(0, 240) }).catch(() => {});
-        this.ports.log(String(error));
+        await this.receipt('failed', current.stageId, { phase, error: String(error).slice(0, 240) }).catch(() => {});
+        this.ports.log(phase+': '+String(error));
       }
       current.abort.abort();
       if (this.live === current) this.live = null;

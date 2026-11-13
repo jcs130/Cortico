@@ -102,11 +102,17 @@ it('passes a copied ISO observation through the real World once and keeps stale 
     // The remote stage must retain the original clock for a possible deferred
     // foreground admission; the host must not replace it with receipt time.
     expect(calls[0]).toMatchObject({args:{observed_at:original.observed_at}});expect(original.observed_at).toBeTruthy();
-    const reply=await voice.handler({action:'speak',text:'Hello, I can read your message.'},{callId:'conversation'} as never);
+    const reply=await voice.handler({action:'speak',evidence_mode:'dialogue',text:'Hello, I can read your message.'},{callId:'conversation'} as never);
     expect(reply).toBe(JSON.stringify({accepted:true,id:'fixture-speech'}));expect(calls).toHaveLength(2);
     expect(JSON.stringify(calls[1])).not.toContain('observed_at');
+    const sourceTime=new Date(Date.now()-25000).toISOString();
+    (world as unknown as {host:unknown}).host={pushEvent:async()=>{},store:{get:(cursor:number)=>cursor===42?{source:'mymc',ts:sourceTime}:undefined}};
+    const recount=await voice.handler({action:'speak',text:'刚才听到你的问候了。',evidence_mode:'recent',observed_event:{source:'mymc',cursor:42}},{callId:'source-event'} as never);
+    expect(recount).toBe(JSON.stringify({accepted:true,id:'fixture-speech'}));
+    const normalizedArgs=(calls[2] as {args:Record<string,unknown>}).args;
+    expect(normalizedArgs).toMatchObject({observed_at:sourceTime});expect(normalizedArgs).not.toHaveProperty('observed_event');
     const stale=await voice.handler({...original,observed_at:new Date(Date.now()-60_000).toISOString()},{callId:'stale-iso'} as never);
-    expect(stale).toMatchObject({failed:true});expect(JSON.stringify(stale)).toContain('stale_speech_observation');expect(calls).toHaveLength(2);
+    expect(stale).toMatchObject({failed:true});expect(JSON.stringify(stale)).toContain('stale_speech_observation');expect(calls).toHaveLength(3);
   } finally {await world.stop();for(const socket of sockets)socket.destroy();await new Promise<void>(ok=>server.close(()=>ok()));}
 });
 it("passes Cortico 0.2.4 published manifest, dry-mount and self-description checks without network or services", async () => {

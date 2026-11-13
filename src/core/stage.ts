@@ -585,9 +585,9 @@ export class AvatarStage {
       const old=await this.ledger.submit(requestId,'speech',this.activeId,command);
       return {...old.record,reused:true};
     }
-    // Only a foreground line blocked by automatic commentary may reserve the
-    // next gap. This is one unsynthesized candidate, not another audio queue.
-    if (busyPolicy === 'preserve' && this.foreground && (this.automaticSpeech.has(this.foreground) || typeof args.audioArtifact==='string')
+    // One foreground line may wait behind speech without blocking its caller.
+    // Music keeps its existing ownership policy; do not grow an unbounded queue.
+    if (busyPolicy === 'preserve' && this.foreground && (this.ledger.result(this.foreground).kind === 'speech' || typeof args.audioArtifact==='string')
       && args.ifIdleRevision === undefined && !this.waitingSpeech && !this.speechAdmissions.size) {
       const timeout = this.config.voice?.pendingTimeoutMs ?? 60000;
       if (!Number.isSafeInteger(timeout) || timeout < 1000 || timeout > 300000) throw Error('Invalid pending speech timeout');

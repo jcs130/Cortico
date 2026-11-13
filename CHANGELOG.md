@@ -1,3 +1,9 @@
+## 0.1.2-rc.17.preview.16
+
+- Queue one foreground speech behind active speech without blocking game tasks. Preserve cancellation and original evidence age.
+- Resolve source event timestamps in the host; distinguish ordinary dialogue from current observations.
+- Give local audio controls a bounded 10-second window, propagate cancellation, and record the failing transport phase.
+
 ## 0.1.2-rc.17.preview.15
 
 - After a flushed complete checkpoint, archive its covered receipt generation and restore only subsequent deltas on the next start. Keep archived receipts and the old-version-compatible full snapshot; never replay interrupted audio.

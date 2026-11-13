@@ -20,7 +20,7 @@ import { DesktopReplySpeech, REPLY_SPEECH_DEFAULTS } from './desktop-reply-speec
 import { DesktopAudioRenderer } from './desktop-audio.ts';
 import { randomUUID } from 'node:crypto';
 import { stageSupervisorView } from './event-context.ts';
-import { checkSpeechFreshness } from './speech-freshness.ts';
+import { checkSpeechFreshness, resolveSpeechEvidence } from './speech-freshness.ts';
 import { speechPerformance } from './core/speech-performance.ts';
 import {
   PerformanceDirector,
@@ -50,6 +50,7 @@ export class AvatarStageWorld implements World {
   private replySpeech:DesktopReplySpeech|null=null;
   private desktopAudio: DesktopAudioRenderer | null = null;
   private async speak(args: Record<string, unknown>, requestId: string, signal?: AbortSignal) {
+    args = resolveSpeechEvidence(args, cursor => this.host?.store?.get(cursor));
     checkSpeechFreshness(args, this.cfg().speechObservationMaxAgeSeconds ?? 0);
     args = { ...args };
     if (args.performance !== undefined) speechPerformance(args.performance);
@@ -395,7 +396,7 @@ export class AvatarStageWorld implements World {
               },
               "worlds.avatar-stage.voice.busyPolicy": {
                 type:'string',enum:['replace','preserve'],'x-hot':false,title:'新台词遇到正在播放的音频',
-                description:'preserve 保留当前一句，跳过新台词且不合成；replace 用新台词打断。显式 interrupt 始终可打断。',
+                description:'preserve 保留当前一句，并允许一条人工或主人格台词待播；满额时明确拒绝。replace 用新台词打断。显式 interrupt 始终可打断。',
               },
               'worlds.avatar-stage.voice.pendingTimeoutMs': { type: 'integer', minimum: 1000, maximum: 300000,
                 title: '台词待播超时（毫秒）', description: '默认 60000。仅延长排队等待；事实观察时间仍按原来源校验。' },
