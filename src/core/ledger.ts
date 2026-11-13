@@ -32,6 +32,12 @@ export class ActionLedger {
       );
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      // Archived receipts were already folded into a complete snapshot. A
+      // missing snapshot is corruption, not an empty new deployment. Never
+      // silently restore only the latest deltas (or replay old speech).
+      const archives = await readdir(join(this.directory, 'action-record-archives'))
+        .catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return []; throw error; });
+      if (archives.length) throw Error('Action checkpoint missing; restore actions.json before starting the ledger');
     }
     // The full snapshot is also a rollback/export format. Individual durable
     // receipts overlay it, so a busy renderer never rewrites the whole history.
@@ -80,7 +86,7 @@ export class ActionLedger {
       this.requests.set(row.requestId, row);
     }
     progress?.('ledger-checkpoint');
-    await this.enqueue(() => this.save());
+    await this.enqueue(() => this.checkpoint());
   }
   async submit(
     requestId: string,
@@ -190,6 +196,21 @@ export class ActionLedger {
       await rename(file + ".tmp", file);
     });
   }
+  /** Snapshot first, then retire only its already-covered receipt generation.
+   * All admissions/receipts/checkpoints share the same writer queue. A crash
+   * before the rename leaves harmless duplicate deltas; a crash after it leaves
+   * the complete snapshot. Old package versions can still read actions.json.
+   * Archives are retained, never replayed or deleted by startup. */
+  private async checkpoint() {
+    await this.save();
+    const active = join(this.directory, 'action-records');
+    await mkdir(active, { recursive: true });
+    if (!(await readdir(active)).length) return;
+    const archives = join(this.directory, 'action-record-archives');
+    await mkdir(archives, { recursive: true });
+    await this.retryBusy(() => rename(active, join(archives, `${Date.now()}-${randomUUID()}`)));
+    await mkdir(active, { recursive: true });
+  }
   private async retryBusy<T>(operation: () => Promise<T>): Promise<T> {
     for (let attempt = 0; ; attempt++) {
       try {
@@ -207,6 +228,6 @@ export class ActionLedger {
     }
   }
   async close() {
-    await this.enqueue(() => this.save());
+    await this.enqueue(() => this.checkpoint());
   }
 }

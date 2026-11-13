@@ -1,3 +1,9 @@
+## 0.1.2-rc.17.preview.15
+
+- After a flushed complete checkpoint, archive its covered receipt generation and restore only subsequent deltas on the next start. Keep archived receipts and the old-version-compatible full snapshot; never replay interrupted audio.
+- Serialize checkpoint rotation with receipt writes. Failed snapshot/archive operations retain recovery inputs; missing checkpoints after rotation fail explicitly instead of silently losing history.
+- Verify dirty restarts, failures on either side of rotation, preserved request deduplication and rollback compatibility. The first migration still reads legacy receipts.
+
 ## 0.1.2-rc.17.preview.14
 
 - Return durable measured duration diagnostics for overlong game speech. Explain current versus recent-event speech recovery while preserving the original observation time.
