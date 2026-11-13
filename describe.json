@@ -70,13 +70,33 @@
             ],
             "description": "For a claim about a current observation, copy the actual source event/sample timestamp or captured_at. Prefer its original ISO 8601 string with timezone; existing Unix seconds also work. Ordinary conversation, greetings and creative speech need no observation timestamp. Supplied invalid or stale times are rejected. Never invent a time or remove a stale timestamp to repeat the same live claim."
           },
+          "observed_event": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source",
+              "cursor"
+            ],
+            "properties": {
+              "source": {
+                "type": "string",
+                "minLength": 1
+              },
+              "cursor": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "description": "Host tool: copy the source and cursor of a received event; the host resolves its original timestamp, without model time arithmetic. Alternative to observed_at, not a fresh observation. Standalone HTTP/SDK requires observed_at instead."
+          },
           "evidence_mode": {
             "type": "string",
             "enum": [
               "current",
-              "recent"
+              "recent",
+              "dialogue"
             ],
-            "description": "Default current uses the configured live-state age limit. recent is a dated account of an event within 300 seconds and requires its original observed_at: describe what happened, never imply its location, health, danger or result remains current."
+            "description": "Choose dialogue for greetings, questions and creative speech without claims about observed game state; omit observation fields. Choose recent to recount what just happened (300 seconds, original observed_event or observed_at), without implying old state is still current. Default current uses the configured live-state age limit and fresh evidence. Thinking and audio waiting do not refresh evidence."
           },
           "ifIdleRevision": {
             "type": "integer",
@@ -921,7 +941,7 @@
   "events": [
     {
       "type": "avatar.speech.waiting",
-      "description": "One foreground speech candidate waiting for automatic commentary to finish; bounded by voice.pendingTimeoutMs (default 60 seconds), not synthesized or played yet. Original observation age remains independently validated."
+      "description": "One foreground speech candidate waiting for current speech to finish; bounded by voice.pendingTimeoutMs (default 60 seconds), not synthesized or played yet. Original observation age remains independently validated."
     },
     {
       "type": "avatar.speech.submitted",

@@ -257,13 +257,13 @@ it('keeps native drama-rs generation unknown after genuine playback receipts and
     status:'ended',transportEnded:true,generationComplete:null,generationStop:null,completionEvidence:'not-provided-by-native-api'}});
 });
 
-it('preserves admitted speech, skips new speech without synthesis, and permits explicit interruption',async()=>{
+it('preserves admitted speech, reserves one new line without synthesis, and permits explicit interruption',async()=>{
  const {server,events}=await speechSetup();server.stage.config.voice!.busyPolicy='preserve';
  const first=await server.call('avatar_voice',{action:'speak',text:'Finish this sentence.'},'preserve-first');
  const skipped=await server.call('avatar_voice',{action:'speak',text:'Do not cut it off.'},'preserve-second');
- expect(skipped).toMatchObject({accepted:false,status:'skipped',reason:'audio_busy'});
+ expect(skipped).toMatchObject({accepted:true,status:'queued',deferred:true,synthesisStarted:false});
  expect(server.stage.status().foreground).toBe(first.id);
- expect(server.stage.ledger.history(20)).toHaveLength(1);
+ expect(server.stage.ledger.history(20)).toHaveLength(2);
  expect(events.filter(e=>e.type==='avatar.speech.submitted')).toHaveLength(1);
  const duplicate=await server.call('avatar_voice',{action:'speak',text:'Finish this sentence.'},'preserve-first');
  expect(duplicate).toMatchObject({id:first.id,reused:true});
@@ -283,19 +283,19 @@ it('preserve also reserves audio across asynchronous admission',async()=>{
  expect(events.filter(e=>e.type==='audio.cut')).toHaveLength(0);
 });
 
-async function automaticSpeechWithWaitingForeground(observedAt?: string) {
+async function automaticSpeechWithWaitingForeground(observedAt?: string, automatic=true) {
  const r=await speechSetup(); r.server.stage.config.voice!.busyPolicy='preserve';
  r.server.stage.config.speechObservationMaxAgeSeconds=15;
  const first=await r.server.call('avatar_voice',{action:'speak',text:'An automatic observation.',
-  ifIdleRevision:r.server.stage.status().audioRevision},'automatic-first');
+  ...(automatic?{ifIdleRevision:r.server.stage.status().audioRevision}:{})},'automatic-first');
  const receipt={sessionId:'renderer',role:'broadcast',avatarId:r.preset.id,avatarSha256:r.preset.sha256,eventId:first.id};
  await r.server.stage.receipt({...receipt,status:'playing',audioTimeMs:0});
  const args={action:'speak',text:'A foreground line while moving.',...(observedAt?{observed_at:observedAt}:{})};
  const waiting=await r.server.call('avatar_voice',args,'foreground-next');
  return {...r,first,waiting,args,receipt};
 }
-it('reserves one foreground line nonblockingly, then dispatches exactly once after automatic audio really ends',async()=>{
- const {server,events,first,waiting,args,receipt}=await automaticSpeechWithWaitingForeground();
+it.each([true,false])('reserves one foreground line nonblockingly, then dispatches exactly once after speech ends (automatic=%s)',async(automatic)=>{
+ const {server,events,first,waiting,args,receipt}=await automaticSpeechWithWaitingForeground(undefined,automatic);
  expect(waiting).toMatchObject({accepted:true,status:'queued',deferred:true,synthesisStarted:false});
  expect(server.stage.status().foreground).toBe(first.id);
  expect(server.stage.voice.status().current?.id).toBe(first.id);

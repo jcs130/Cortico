@@ -27,6 +27,27 @@ async function endpoint() {
   const bridge = new DesktopPresentation(() => ({ mode: 'desktop-text', url }), new AbortController().signal);
   return { bridge, state, commands };
 }
+it('survives a slow local audio admission without replay and cancels a pending request promptly', async()=>{
+  const calls:string[]=[];
+  const server=createServer(async(req,res)=>{
+    let body=''; for await(const part of req)body+=part;
+    const key=req.url==='/api/presentation/audio-stream'?'reserve':JSON.parse(body).requestId;
+    calls.push(key);
+    await new Promise(done=>setTimeout(done,2300));
+    if(!res.destroyed)res.end(JSON.stringify({accepted:true,id:'audio-1',assetId:'stream-1',streaming:true}));
+  });
+  servers.push(server);await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));
+  const bridge=new DesktopPresentation(()=>({mode:'desktop-audio',url:'http://127.0.0.1:'+(server.address() as {port:number}).port}),new AbortController().signal);
+  const active=new AbortController(),cancelled=new AbortController();
+  const pending=bridge.request({action:'play-audio',requestId:'cancel-me'},cancelled.signal);
+  const rejected=expect(pending).rejects.toThrow();
+  const [reservation,admitted]=await Promise.all([
+    bridge.reserveStream(active.signal),bridge.request({action:'play-audio',requestId:'once'},active.signal),
+    new Promise<void>(resolve=>setTimeout(()=>{cancelled.abort();resolve();},50)),rejected,
+  ]);
+  expect(reservation.assetId).toBe('stream-1');expect(admitted.accepted).toBe(true);
+  expect(calls.filter(x=>x==='once')).toHaveLength(1);expect(calls.filter(x=>x==='reserve')).toHaveLength(1);
+});
 it('presents dialogue and host-selected installed actions without a speech backend', async () => {
   const { bridge, commands } = await endpoint();
   expect(await bridge.refresh()).toMatchObject({ textReady: true, voice: { configured: false }, audioOwner: false });
