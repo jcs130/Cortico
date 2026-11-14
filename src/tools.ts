@@ -154,6 +154,7 @@ export const TOOL_DEFINITIONS = [
           "reject",
         ]),
         trackId: text,
+        ifIdleRevision: {type:'integer',minimum:0,description:'Optional play-only admission guard: copy current audioRevision; a newer speech or music action declines playback without interruption.'},
         jobId: text,
         reference_handle: text,
         title: text,

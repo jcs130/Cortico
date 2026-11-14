@@ -51,3 +51,10 @@
 创作新歌先读 `aigc_query {"action":"capabilities"}` 与 `aigc_help {}`。当前生成契约为 `aigc_create` 的 `action:"generate"`、`kind:"music"`、`prompt` 与稳定 `request_id`；只使用服务声明过的 parameters。结果未知时查询原任务，不重复生成。完成后通过宿主 WAV 句柄导入、试听、采用，再显式播放。
 
 记录原 action 的真实播放起止及失败原因。音频设备的成功不能证明三维动作已经显示；新歌曲生成也不能自动证明歌唱音色与当前口播相同。检索到指南不代表人格已经采用它或学会了新的演出方法。
+# Proactive singing
+
+`autoMusic.enabled` opts into timer-driven playback of approved, validated vocal tracks already installed in the library. It does not generate or clone songs. Defaults: continuous travel 90 seconds, idle 120 seconds, minimum 300 seconds between songs. Instrumentals are excluded and the next eligible track rotates after the last one.
+
+Supporting hosts call `publishPerformanceActivity({source, observedAt, mode, activityId})` with fresh structured facts. Modes are `travel`, `idle`, `busy`, `unavailable`. Missing/stale facts, paused host, combat/emergency activity, missing playback device, active/pending local speech or music postpone admission. Recheck `audioRevision` after asynchronous work prevents a song from replacing a new dialogue. The playback ledger retains the last music action across reload; queue/playing is not proof of completion. Existing received-game-voice ducking remains the renderer's responsibility.
+
+This optional timer never acquires game body control or waits for a model turn to end. Disable `autoMusic.enabled` to turn it off. A stopped or completed song starts the cooldown; it is not immediately restarted.

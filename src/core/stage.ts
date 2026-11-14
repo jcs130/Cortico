@@ -41,6 +41,7 @@ export class AvatarStage {
   private owner: { sessionId: string; until: number } | null = null;
   private foreground: string | null = null;
   private audioRevision = 0;
+  private lastMusicId: string | null = null;
   private speechAdmissions = new Set<string>();
   private automaticSpeech = new Set<string>();
   private musicPlaybackWait = new Map<string, number>();
@@ -114,6 +115,7 @@ export class AvatarStage {
       this.config.defaultAvatar ?? this.avatars.list()[0]?.id ?? null;
     if (this.activeId) this.avatars.get(this.activeId);
     await this.ledger.start(progress);
+    this.lastMusicId = [...this.ledger.actions.values()].filter(row=>row.kind==='music-play').at(-1)?.id ?? null;
     progress?.('voice-catalogue');
     await this.voice.start();
     progress?.('music-ledger');
@@ -176,6 +178,7 @@ export class AvatarStage {
         state: 'waiting-for-audio', synthesisStarted: false } : null,
       voice: this.voice.status(),
       music: this.music.state(),
+      lastMusic: this.lastMusicId ? this.ledger.result(this.lastMusicId) : null,
       actions: this.ledger.history(12),
       motionJobs: [...this.ownedMotions.entries()]
         .slice(-12)
@@ -235,6 +238,7 @@ export class AvatarStage {
     kind: string,
     command: Record<string, unknown>,
     requestId: string,
+    admit?: () => boolean,
   ) {
     if (this.stopped) throw Error("Stage is stopped");
     const { record, reused } = await this.ledger.submit(
@@ -243,9 +247,9 @@ export class AvatarStage {
       this.activeId,
       command,
     );
-    if (this.stopped) {
+    if (this.stopped || (admit && !admit())) {
       await this.ledger.update(record.id, "cancelled", {
-        reason: "Stage stopped during admission",
+        reason: "Stage stopped or output changed during admission",
       });
       return { ...record, reused };
     }
@@ -585,6 +589,13 @@ export class AvatarStage {
       const old=await this.ledger.submit(requestId,'speech',this.activeId,command);
       return {...old.record,reused:true};
     }
+    // A timer-selected song is interruptible entertainment, never a barrier to a direct reply.
+    // Automatic commentary keeps its idle-revision guard; explicit/manual music keeps its policy.
+    if(this.foreground&&args.ifIdleRevision===undefined){
+      const foreground=this.ledger.result(this.foreground);
+      if(foreground.kind==='music-play'&&foreground.requestId.startsWith('avatar-auto-song-'))
+        this.cutAudio('automatic-song-yielded-to-dialogue');
+    }
     // One foreground line may wait behind speech without blocking its caller.
     // Music keeps its existing ownership policy; do not grow an unbounded queue.
     if (busyPolicy === 'preserve' && this.foreground && (this.ledger.result(this.foreground).kind === 'speech' || typeof args.audioArtifact==='string')
@@ -778,7 +789,12 @@ export class AvatarStage {
         reused: true,
       };
     }
+    // Recheck after catalog/cue I/O: a newer dialogue or manual action must win.
+    if (args.ifIdleRevision !== undefined && (!Number.isSafeInteger(args.ifIdleRevision) || Number(args.ifIdleRevision)<0))throw Error('Invalid audio revision');
+    if (args.ifIdleRevision !== undefined && (args.ifIdleRevision !== this.audioRevision || this.foreground || this.waitingSpeech || this.speechAdmissions.size))
+      return {accepted:false,status:'not-admitted',reason:'audio-state-changed'};
     this.cutAudio("music-started");
+    const admissionRevision=this.audioRevision;
     const record = await this.queue(
       "music-play",
       {
@@ -796,8 +812,10 @@ export class AvatarStage {
         scope: preview ? "preview" : "broadcast",
       },
       requestId,
+      () => this.audioRevision===admissionRevision && this.owner?.sessionId===sessionId && !this.speechAdmissions.size,
     );
-    this.foreground = String(record.id);
+    this.lastMusicId=String(record.id);
+    if(record.status==='queued')this.foreground = String(record.id);
     return record;
   }
   async receipt(input: Record<string, unknown>) {

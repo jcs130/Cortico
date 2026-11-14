@@ -20,6 +20,7 @@ import { DesktopReplySpeech, REPLY_SPEECH_DEFAULTS } from './desktop-reply-speec
 import { DesktopAudioRenderer } from './desktop-audio.ts';
 import { randomUUID } from 'node:crypto';
 import { stageSupervisorView } from './event-context.ts';
+import { AutoMusic, AUTO_MUSIC_DEFAULTS } from './core/auto-music.ts';
 import { checkSpeechFreshness, resolveSpeechEvidence } from './speech-freshness.ts';
 import { speechPerformance } from './core/speech-performance.ts';
 import {
@@ -37,6 +38,9 @@ export class AvatarStageWorld implements World {
   private client: AvatarStageClient | null = null;
   private commentary: CommentaryController | null = null;
   private audienceSpeaker: AudienceProgressSpeaker | null = null;
+  private autoMusic: AutoMusic | null = null;
+  /** Optional current activity input; presentation never takes ownership of the game body. */
+  publishPerformanceActivity(value: unknown): void { this.autoMusic?.observe(value); }
   /** Optional host presentation port. Does not inspect model reasoning or perform game actions. */
   async publishAudienceProgress(value: unknown): Promise<void> {
     if (!this.lifetime || this.lifetime.signal.aborted || !this.cfg().audienceProgress?.enabled) return;
@@ -268,9 +272,19 @@ export class AvatarStageWorld implements World {
         speak: async (args, requestId) =>
           this.speak(args, requestId, lifetime.signal),
         observe:event=>{this.replySpeech?.observe(event);this.director?.observe(event);this.audienceSpeaker?.observeEvent(event);},
-        tick:()=>{ this.director?.tick(); this.audienceSpeaker?.tick(); },
+        tick:()=>{ this.director?.tick(); this.audienceSpeaker?.tick(); void this.autoMusic?.tick(); },
       });
       this.commentary.start(host);
+      this.autoMusic = new AutoMusic({
+        config: () => ({...AUTO_MUSIC_DEFAULTS, ...this.cfg().autoMusic}),
+        state: () => this.commentary?.presentationState() ?? null,
+        tracks: async () => {
+          const result = await (this.client ?? this.server!).call('avatar_query', {action:'music'});
+          return Array.isArray(result.tracks) ? result.tracks as {id:string;instrumental?:boolean}[] : [];
+        },
+        play: (args, requestId) => (this.client ?? this.server!).call('avatar_music', args, requestId, lifetime.signal),
+        log: data => this.host?.log.emit('info','主动唱歌触发',{event:'auto-music-trigger',data}),
+      });
       this.audienceSpeaker = new AudienceProgressSpeaker({
         config: () => ({ ...AUDIENCE_PROGRESS_DEFAULTS, ...this.cfg().audienceProgress }),
         decide: (host as WorldHost & { decisions?: DecisionPort }).decisions,
@@ -325,6 +339,7 @@ export class AvatarStageWorld implements World {
     }
   }
   async stop() {
+    this.autoMusic?.stop(); this.autoMusic = null;
     this.audienceSpeaker?.stop(); this.audienceSpeaker = null;
     this.director?.stop();
     this.replySpeech?.stop();this.replySpeech=null;
@@ -543,6 +558,7 @@ const definition: WorldDefinition<WorldConfig> = {
     voice: { url: "", model: "", voice: "", textFormat: "plain", busyPolicy:"replace", pendingTimeoutMs:60000, synthesisTimeoutMs:90000, rendererStartTimeoutMs:15000, extraBody:{}, synthesisTransport:'wav', pcmSampleRate:44100, requireWavCompletion:false, segmentMaxChars:0, pronunciations:{}, writingGuides:{} },
     presentation: { mode: 'stage', url: '' },
     commentary: { ...COMMENTARY_DEFAULTS },
+    autoMusic: { ...AUTO_MUSIC_DEFAULTS },
     audienceProgress: { ...AUDIENCE_PROGRESS_DEFAULTS },
     director: { ...DIRECTOR_DEFAULTS },
     replySpeech: { ...REPLY_SPEECH_DEFAULTS },

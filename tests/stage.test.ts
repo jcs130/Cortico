@@ -135,6 +135,30 @@ async function speechSetup() {
   r.server.stage.claimAudio("renderer");
   return r;
 }
+it('automatic music respects a new audio revision through catalog and durable admission',async()=>{
+ const r=await speechSetup(),bytes=Buffer.alloc(4844);
+ bytes.write('RIFF');bytes.writeUInt32LE(bytes.length-8,4);bytes.write('WAVEfmt ',8);bytes.writeUInt32LE(16,16);
+ bytes.writeUInt16LE(1,20);bytes.writeUInt16LE(1,22);bytes.writeUInt32LE(24000,24);bytes.writeUInt32LE(48000,28);
+ bytes.writeUInt16LE(2,32);bytes.writeUInt16LE(16,34);bytes.write('data',36);bytes.writeUInt32LE(bytes.length-44,40);
+ const imported=await r.server.importMusic(bytes,{title:'fixture',instrumental:true});
+ await r.server.call('avatar_music',{action:'approve',jobId:imported.jobId});
+ const revision=r.server.stage.status().audioRevision;
+ await r.server.call('avatar_music',{action:'stop'});
+ expect(await r.server.call('avatar_music',{action:'play',trackId:imported.trackId,ifIdleRevision:revision},'stale-auto')).toMatchObject({accepted:false});
+ const submit=r.server.stage.ledger.submit.bind(r.server.stage.ledger);let release!:()=>void,entered!:()=>void;
+ const reached=new Promise<void>(r=>entered=r),gate=new Promise<void>(r=>release=r);
+ vi.spyOn(r.server.stage.ledger,'submit').mockImplementation(async(...args)=>{
+   const result=await submit(...args);if(args[0]==='racing-auto'){entered();await gate;}return result;
+ });
+ const request=r.server.call('avatar_music',{action:'play',trackId:imported.trackId,ifIdleRevision:r.server.stage.status().audioRevision},'racing-auto');
+ await reached;await r.server.call('avatar_music',{action:'stop'});release();
+ expect(await request).toMatchObject({status:'cancelled'});expect(r.server.stage.status().foreground).toBeNull();
+ const song=await r.server.call('avatar_music',{action:'play',trackId:imported.trackId,ifIdleRevision:r.server.stage.status().audioRevision},'avatar-auto-song-fixture');
+ expect(song.status).toBe('queued');
+ const speech=await r.server.call('avatar_voice',{action:'speak',text:'A direct reply.'},'direct-after-song');
+ expect(speech.status).toBe('queued');
+ await vi.waitFor(()=>expect(r.server.stage.ledger.result(String(song.id)).status).toBe('cancelled'));
+});
 it.each(['recovered','disconnected','monitor-running'])(
   'reconciles independent playback after a stalled host without inventing completion: %s', async mode => {
     const {server,preset,events} = await speechSetup();

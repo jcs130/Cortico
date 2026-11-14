@@ -1,3 +1,7 @@
+## 0.1.2-rc.17.preview.17
+
+Add opt-in, independently timed singing from fresh host activity; rotate installed vocal songs, persist cooldown through the playback ledger, and yield atomic music admission to dialogue.
+
 ## 0.1.2-rc.17.preview.16
 
 - Queue one foreground speech behind active speech without blocking game tasks. Preserve cancellation and original evidence age.

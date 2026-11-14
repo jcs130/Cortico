@@ -137,6 +137,7 @@ export interface StageConfig {
   speechObservationMaxAgeSeconds?: number;
 }
 export interface WorldConfig extends StageConfig {
+  autoMusic?: Partial<import('./auto-music.ts').AutoMusicConfig>;
   audienceProgress?: Partial<import('./audience-progress.ts').AudienceProgressConfig>;
   enabled: boolean;
   presentation?: Partial<import('../desktop-presentation.ts').DesktopPresentationConfig>;
