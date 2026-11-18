@@ -992,14 +992,21 @@ export interface SystemPrefixContext {
 export type SessionOpeningReason = 'new' | 'restarted' | 'cleared';
 
 /** Why the event-receiving session stopped its current batch; this does not request another wake. */
-export interface TurnEndedContext {
+export interface IncompleteTurnContext {
+  reason: 'response-incomplete';
+  responseId: string;
+  incompleteReason: string | null;
+}
+
+export type TurnEndedContext = {
   sessionId: string;
-  reason: 'completed' | 'ended' | 'hard-cap' | 'context-limit' | 'model-error' | 'interrupted' | 'shutdown' | 'cleared';
   /** Monotonic model round within this loop instance. */
   round: number;
   /** Model rounds charged to the current batch. */
   rounds: number;
-}
+} & (IncompleteTurnContext | {
+  reason: 'completed' | 'ended' | 'hard-cap' | 'context-limit' | 'model-error' | 'interrupted' | 'shutdown' | 'cleared';
+});
 
 export interface MemoryAssemblyContext {
   now: Date;
