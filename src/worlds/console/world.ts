@@ -69,6 +69,7 @@ const PIN_SHAPE = /^\d{6}$/;
  * 被引用的标签是这件事的事实内容,和口令标记里的数字同类。
  */
 const MODEL_TEXT = {
+  queuedForHistory: (count: number) => `Queued for ${count} connection(s) while their history loads; delivery is not confirmed.`,
   pinMark: (pin: string) => `[console|PIN:${pin}]`,
   selfLine: (time: string, text: string) => `[${time}] you: ${text}`,
   inviteLine: (time: string, name: string, label: string, spokenBefore: boolean) =>
@@ -150,6 +151,9 @@ interface ChatClient {
   name: string | null;
   /** 这条连接握手时的界面语言;流上给它的系统提示按此取。 */
   language: Language;
+  lifetime: AbortController;
+  historyPending: boolean;
+  liveFrames: string[];
 }
 
 
@@ -295,6 +299,7 @@ export class ConsoleWorld implements World {
     // 关闭连接前清除 host，禁止 close 回调继续投递 presence 事件。
     this.host = null;
     for (const c of [...this.clients]) {
+      c.lifetime.abort();
       try { c.peer.close(text(c.language).botOffline); } catch { /* ignore */ }
     }
     this.clients.clear();
@@ -303,13 +308,15 @@ export class ConsoleWorld implements World {
   /**
    * console_send 回执报告目标、当前连接者、距上次发送的时间及其后是否收到控制台发言。没有已读回执，不能判断消息是否被阅读；控制台 World 不推断其他 World 的直播状态，也不附加建议。
    */
-  private deliveryFacts(delivered: number): string {
+  private deliveryFacts(delivered: number, queued: number): string {
     const t = MODEL_TEXT;
     const facts: string[] = [];
     const names = [...this.clients]
       .filter((c) => c.peer.open && c.name !== null)
       .map((c) => c.name as string);
-    facts.push(delivered > 0 ? t.deliveredTo(delivered, names) : t.deliveredToNobody);
+    if (delivered > 0) facts.push(t.deliveredTo(delivered, names));
+    else if (!queued) facts.push(t.deliveredToNobody);
+    if (queued > 0) facts.push(t.queuedForHistory(queued));
     if (this.lastSendAt !== null) {
       const minutes = Math.round((Date.now() - this.lastSendAt) / 60_000);
       const since = this.operatorMessages - this.operatorMessagesAtLastSend;
@@ -338,7 +345,12 @@ export class ConsoleWorld implements World {
   stream(panel: string, socket: WebUiStream, language: Language = 'zh'): void {
     if (panel !== PANEL_CHAT) throw new Error(text(language).unknownPanel(panel));
     const client = this.attach(streamPeer(socket), language);
-    socket.onMessage((text) => this.onFrame(client, text));
+    socket.onMessage((raw) => { void this.onFrame(client, raw).catch((error) => {
+      if (!client.lifetime.signal.aborted) {
+        this.host?.log.warn('控制台请求失败', { err: String(error) });
+        this.reject(client, text(client.language).deliveryFailed(String(error)));
+      }
+    }); });
     socket.onClose(() => this.detach(client));
     this.greet(client);
   }
@@ -351,7 +363,7 @@ export class ConsoleWorld implements World {
           const text = typeof args.text === 'string' ? args.text.trim() : '';
           if (!text) return '[send failed] text must not be empty';
           if (!this.host) return '[send failed] console module not started';
-          const delivered = this.broadcast({
+          const { delivered, queued } = this.broadcast({
             type: 'msg',
             from: this.botName,
             text,
@@ -368,9 +380,11 @@ export class ConsoleWorld implements World {
             },
             { deliver: false },
           ).catch((e) => this.host?.log.warn('自录事件落库失败', { err: String(e) }));
-          const receipt = `[sent] ${this.deliveryFacts(delivered)}`;
-          this.lastSendAt = Date.now();
-          this.operatorMessagesAtLastSend = this.operatorMessages;
+          const receipt = `[${queued > 0 && delivered === 0 ? 'queued' : 'sent'}] ${this.deliveryFacts(delivered, queued)}`;
+          if (delivered > 0 || queued === 0) {
+            this.lastSendAt = Date.now();
+            this.operatorMessagesAtLastSend = this.operatorMessages;
+          }
           return receipt;
         },
       },
@@ -381,7 +395,7 @@ export class ConsoleWorld implements World {
 
   /** 登记一条新连接。回调的挂接归各自入口,因为那是宿主 API 唯一不同的地方。 */
   private attach(peer: ChatPeer, language: Language): ChatClient {
-    const client: ChatClient = { peer, name: null, language };
+    const client: ChatClient = { peer, name: null, language, lifetime: new AbortController(), historyPending: false, liveFrames: [] };
     this.clients.add(client);
     return client;
   }
@@ -393,6 +407,8 @@ export class ConsoleWorld implements World {
 
   /** 连接结束:出名单、给还在场的人一句提示。进出不打扰bot。 */
   private detach(client: ChatClient): void {
+    client.lifetime.abort();
+    client.liveFrames.length = 0;
     this.clients.delete(client);
     if (client.name === null || !this.host) return;
     const name = client.name;
@@ -418,7 +434,7 @@ export class ConsoleWorld implements World {
    * 收到一帧原始文本。**这是协议解析的唯一入口**——`/ws/chat` 的 `RawData` 与
    * 流式通道的 `string` 在各自入口就已经归一成文本,到这里两条路完全同一份代码。
    */
-  private onFrame(client: ChatClient, raw: string): void {
+  private async onFrame(client: ChatClient, raw: string): Promise<void> {
     const t = text(client.language);
     let parsed: unknown;
     try {
@@ -442,7 +458,12 @@ export class ConsoleWorld implements World {
       const firstHello = client.name === null;
       client.name = name;
       this.sendJson(client.peer, { type: 'sys', text: t.hello(name) });
-      if (firstHello) this.replayHistory(client);
+      if (firstHello) void this.replayHistory(client).catch((error) => {
+        if (!client.lifetime.signal.aborted) {
+          this.host?.log.warn('控制台历史读取失败', { err: String(error) });
+          this.reject(client, t.deliveryFailed(String(error)));
+        }
+      });
       // 给其他在场客户端一条提示;进出不打扰bot
       if (firstHello) this.broadcastSys((tt) => tt.joined(name), client);
       return;
@@ -524,13 +545,15 @@ export class ConsoleWorld implements World {
       const label = typeof msg.label === 'string' ? msg.label.replace(/\s+/g, ' ').trim().slice(0, LABEL_MAX) : '';
       if (!label) return;
       const host = this.host;
+      const spokenBefore = await this.spokenBefore(client.lifetime.signal);
+      if (this.host !== host || !client.peer.open) return;
       host.pushEvent(
         {
           type: 'console.invite',
           ts: nowIso(this.timezone),
           source: this.id,
           origin: 'internal',
-          text: MODEL_TEXT.inviteLine(shortTime(this.timezone), client.name, label, this.spokenBefore()),
+          text: MODEL_TEXT.inviteLine(shortTime(this.timezone), client.name, label, spokenBefore),
           senderKey: client.name,
           meta: { from: client.name, label },
         },
@@ -546,13 +569,15 @@ export class ConsoleWorld implements World {
   }
 
   /** 已保存的控制台事件里有没有人说过话;从最新往前逐页读,读到一条发言即止。 */
-  private spokenBefore(): boolean {
+  private async spokenBefore(signal: AbortSignal): Promise<boolean> {
     if (!this.host) return false;
     const store = this.host.store;
     // 每页条数只决定往前读几次,不影响结果
     const pageSize = 100;
     for (let toCursor = store.latestCursor(); ;) {
-      const page = store.range({ source: this.id, toCursor, limit: pageSize });
+      signal.throwIfAborted();
+      const query = { source: this.id, toCursor, limit: pageSize };
+      const page = store.rangeAsync ? await store.rangeAsync(query, signal) : store.range(query);
       if (page.some((e) => e.type === 'console.message' || e.type === 'console.self')) return true;
       if (page.length < pageSize) return false;
       toCursor = page[0].cursor - 1;
@@ -560,31 +585,44 @@ export class ConsoleWorld implements World {
   }
 
   /** hello 后回放最近的对话历史;发言人与正文读本 World 落库时写下的 meta.from/body。 */
-  private replayHistory(client: ChatClient): void {
+  private async replayHistory(client: ChatClient): Promise<void> {
     if (!this.host) return;
-    const events = this.host.store
-      .range({ source: this.id, limit: 60 })
-      .filter((e) => e.type === 'console.message' || e.type === 'console.self')
-      .slice(-30);
-    for (const e of events) {
-      const { from, body } = e.meta as { from: string; body: string };
-      const images = wireImagesOf(e);
-      this.sendJson(client.peer, {
-        type: 'msg', from, text: body, ts: e.ts, history: true,
-        ...(images.length ? { images } : {}),
-      });
+    const store = this.host.store;
+    client.historyPending = true;
+    try {
+      const query = { source: this.id, toCursor: store.latestCursor(), limit: 60 };
+      const events = (store.rangeAsync ? await store.rangeAsync(query, client.lifetime.signal) : store.range(query))
+        .filter((e) => e.type === 'console.message' || e.type === 'console.self')
+        .slice(-30);
+      for (const e of events) {
+        if (!client.peer.open || client.lifetime.signal.aborted) return;
+        const { from, body } = e.meta as { from: string; body: string };
+        const images = wireImagesOf(e);
+        this.sendJson(client.peer, {
+          type: 'msg', from, text: body, ts: e.ts, history: true,
+          ...(images.length ? { images } : {}),
+        });
+      }
+    } finally {
+      client.historyPending = false;
+      const frames = client.liveFrames.splice(0);
+      for (const raw of frames) {
+        if (!client.peer.open || client.lifetime.signal.aborted) break;
+        try { client.peer.send(raw); } catch { this.detach(client); client.peer.drop(); break; }
+      }
     }
   }
 
   /** 返回实际送达的客户端数，并移除已关闭的连接。 */
-  private broadcast(payload: unknown): number {
+  private broadcast(payload: unknown): { delivered: number; queued: number } {
     const raw = JSON.stringify(payload);
     let n = 0;
+    let queued = 0;
     for (const c of [...this.clients]) {
       if (c.peer.open) {
         try {
-          c.peer.send(raw);
-          n++;
+          if (c.historyPending) { c.liveFrames.push(raw); queued++; }
+          else { c.peer.send(raw); n++; }
         } catch {
           this.clients.delete(c);
           c.peer.drop();
@@ -594,7 +632,7 @@ export class ConsoleWorld implements World {
         this.clients.delete(c);
       }
     }
-    return n;
+    return { delivered: n, queued };
   }
 
   private sendJson(peer: ChatPeer, payload: unknown): void {

@@ -202,7 +202,7 @@ describe('归一化', () => {
   });
 
   it('人流类只给计数与读数', () => {
-    expect(normalize({ cmd: 'INTERACT_WORD_V2', data: {} }, OPTS)).toEqual({ kind: 'count', field: 'enter', by: 1 });
+    expect(normalize({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } }, OPTS)).toEqual({ kind: 'count', field: 'enter', by: 1 });
     expect(normalize({ cmd: 'LIKE_INFO_V3_CLICK', data: {} }, OPTS)).toEqual({ kind: 'count', field: 'like', by: 1 });
     expect(normalize({ cmd: 'WATCHED_CHANGE', data: { num: 288429 } }, OPTS)).toEqual({
       kind: 'gauge',
@@ -214,6 +214,24 @@ describe('归一化', () => {
       field: 'online',
       value: 12,
     });
+  });
+
+  it('V1/V2 distinguish entry, follow and share while retaining name and stable account', () => {
+    for (const msgType of [1, 2, 3]) {
+      const pb = Buffer.from([8, 7, 18, 4, 89, 117, 107, 111, 40, msgType]).toString('base64');
+      const v1 = normalize({ cmd:'INTERACT_WORD', data:{ uid:7, uname:'Yuko', msg_type:msgType } }, OPTS);
+      const v2 = normalize({ cmd:'INTERACT_WORD_V2', data:{ pb } }, OPTS);
+      const expected = { kind:'event', trigger:'debounce', senderKey:'7', meta:{uid:7,uname:'Yuko',msgType},
+        type:msgType===1?'bilibili.enter':'bilibili.interaction' };
+      expect(v1).toMatchObject(expected);expect(v2).toMatchObject(expected);
+      if(msgType!==1)expect(v2?.kind==='event'&&v2.text).not.toContain('进场');
+    }
+  });
+  it('does not invent entries or stable identities from malformed, anonymous or unknown interaction frames', () => {
+    for (const data of [{}, {pb:'!!!'}, {pb:Buffer.from([18,20,65]).toString('base64')}, {pb:Buffer.from([40,99]).toString('base64')}])
+      expect(normalize({cmd:'INTERACT_WORD_V2',data},OPTS)).toBeNull();
+    expect(normalize({cmd:'INTERACT_WORD',data:{uid:0,uname:'某***',msg_type:1}},OPTS)).toMatchObject({type:'bilibili.enter',senderKey:undefined});
+    expect(normalize({cmd:'INTERACT_WORD',data:{msg_type:3}},OPTS)).toMatchObject({type:'bilibili.interaction'});
   });
 
   it('运营挂件与她自己的语音转写不推;没见过的 cmd 也不推', () => {

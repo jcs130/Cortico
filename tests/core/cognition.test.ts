@@ -114,6 +114,17 @@ async function rig(cognition?: PersonaCognition): Promise<Rig> {
 }
 
 let live: Rig | null = null;
+it('forwards cumulative public text only during the request and World lifetime', async () => {
+  let update!: (text:string)=>void, finish!:()=>void;
+  live=await rig({request: async req=>{update=req.onText!;await new Promise<void>(r=>{finish=r;});return {text:'complete'};}});
+  const values:string[]=[];
+  const result=live.host().cognition!.request({brief:'stream',onText:text=>values.push(text)});
+  update('first');expect(values).toEqual(['first']);finish();await result;
+  update('late');expect(values).toEqual(['first']);
+  const second=live.host().cognition!.request({brief:'second',onText:text=>values.push(text)});
+  await live.core.stop();update('after-world-stop');finish();await second;
+  expect(values).toEqual(['first']);
+});
 afterEach(async () => {
   await live?.cleanup();
   live = null;

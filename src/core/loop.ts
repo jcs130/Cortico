@@ -38,6 +38,7 @@ import type {
   ToolOutcome,
   ToolSchema,
   ToolTag,
+  TurnEndedContext,
   WakeItem,
 } from './types.ts';
 import { defaultExternalizes } from './types.ts';
@@ -330,10 +331,11 @@ export class MainLoop {
   /** 同一次停滞已报次数(首报计 1) */
   private watermarkStallReports = 0;
   /**
-   * 最近成功请求的输入与输出 token 总数，覆盖前 records 条（含响应）。
-   * 新增条目使用本地估算，下次成功后更新计数；上下文整体重写后失效。
+   * 最近准备的输入估算，或成功请求的输入与输出计数，覆盖前 records 条。
+   * 新增条目另行估算；真实用量替换估算，上下文重写后失效。
    */
-  private anchor: { records: number; tokens: number; reasoningTokens: number } | null = null;
+  private anchor: { records: number; tokens: number; reasoningTokens: number; estimated?: boolean } | null = null;
+  private contextRevision = 0;
   /** 当前 system 前缀和工具表采用的可见 World 集合。 */
   private appliedVisibleWorlds: Set<string> | null = null;
   /** 当前前缀中各可见 World 的工具签名，用于检测工具表漂移。 */
@@ -366,7 +368,7 @@ export class MainLoop {
   constructor(deps: MainLoopDeps) {
     this.d = deps;
     this.phase = { state: 'idle', running: [], enteredAt: nowIso(deps.cfg.timezone) };
-    deps.session.onReset(() => { this.anchor = null; });
+    deps.session.onReset(() => { this.anchor = null; this.contextRevision++; });
   }
 
   /** WebUI 订阅 RunPhase 变化;与 World.onRunPhase 同时、同步调用。 */
@@ -608,17 +610,20 @@ export class MainLoop {
   }
 
   /** 一轮结束时先通知 Persona，再通知可见 World。 */
-  private finishTurn(context?: IncompleteTurnContext): void {
+  private finishTurn(end: Exclude<TurnEndedContext['reason'], 'response-incomplete'> | IncompleteTurnContext): void {
     if (!this.activeNow()) return;
     const { persona, worlds, log } = this.d;
+    const context: TurnEndedContext = { sessionId: this.d.decl.id, round: this.roundSeq, rounds: this.roundsLastBatch,
+      ...(typeof end === 'string' ? { reason: end } : { reason: end.kind, responseId: end.responseId, incompleteReason: end.incompleteReason }) };
+    const incomplete = typeof end === 'string' ? undefined : end;
     try {
-      persona.onTurnEnded?.(context);
+      persona.onTurnEnded?.(incomplete, context);
     } catch (e) {
       log.warn('onTurnEnded钩子异常', { err: e });
     }
     for (const m of worlds.visible()) {
       try {
-        m.onTurnEnded?.(context);
+        m.onTurnEnded?.(incomplete, context);
       } catch (e) {
         log.warn('World 回合收束钩子异常', { id: m.id, err: e });
       }
@@ -725,11 +730,8 @@ export class MainLoop {
     if (lines.length > 0) {
       const msg: ContextRecord = message('user', lines.join('\n'));
       if (ephemeral) msg.context.ephemeral = true;
-      // user 模式下事件块接在内部行后面:sidecar 的位置从那一段之后起算
-      if (events.length > 0 && inUser) {
-        const base = lines.slice(0, -1).reduce((n, l) => n + l.length + 1, 0);
-        msg.context.frame = { events: frameEventRefs(events, base) };
-      }
+      // 每段正文都携带归档游标，包含 onDelivery 内即时注入的内部事件。
+      msg.context.frame = { events: frameEventRefs(inUser ? [...internals, ...events] : internals, 0) };
       const blobs = eventBlobs(inUser ? [...internals, ...events] : internals);
       if (blobs.length > 0) msg.context.blobs = blobs;
       session.append(msg);
@@ -1175,7 +1177,7 @@ export class MainLoop {
         const hard = this.exceededHardLimit();
         if (hard !== null) {
           log.warn('计数越过模型上下文上限,本批在轮边界收束,批末交接', { round, estTokens: this.estTokens(), hardTokens: hard });
-          this.finishTurn();
+          this.finishTurn('context-limit');
           return;
         }
       }
@@ -1221,7 +1223,7 @@ export class MainLoop {
         const arrived: WakeItem[] = [...arrivedEarly.map((event) => ({ event })), ...(ready ?? [])];
         if (!ready) {
           for (const item of arrived) bus.push(item, { trigger: 'flush' });
-          this.finishTurn();
+          this.finishTurn('interrupted');
           return false;
         }
         await this.deliverBatch(arrived, generation, round);
@@ -1253,18 +1255,28 @@ export class MainLoop {
       let meters: TokenMeters | null = null;
       const outbound = this.outboundMessages();
       const prefixHash = prefixFingerprint(outbound);
+      const requestRecords = session.records.length;
+      const requestRevision = this.contextRevision;
       try {
         // role 仅用于故障分类，不写入请求体。
         const llmStart = Date.now();
         let res: Awaited<ReturnType<typeof llm.respond>>;
+        let acceptingEstimate = true;
         try {
           res = await llm.respond(responseRequest(spec, outbound, schemas), {
             context: outbound, nativeSpec: spec, onEvent,
+            onInputEstimate: tokens => {
+              if (!acceptingEstimate || !this.active(generation) || this.currentRound !== flight
+                || flight.controller.signal.aborted || this.contextRevision !== requestRevision
+                || !Number.isSafeInteger(tokens) || tokens < 0) return;
+              this.anchor = { records: requestRecords, tokens, reasoningTokens: 0, estimated: true };
+            },
             role: decl.id,
             sessionId: this.mainTrack?.id,
             signal: flight.controller.signal,
           });
         } finally {
+          acceptingEstimate = false;
           llmMs = Date.now() - llmStart;
         }
         assistant = responseRecords(res.response, res.origin);
@@ -1294,7 +1306,7 @@ export class MainLoop {
           }
           this.tapAbort(tap, ABORT_SHUTDOWN);
           noteRound('discarded');
-          this.finishTurn();
+          this.finishTurn('shutdown');
           return;
         }
         meters = res.attempts[res.attempts.length - 1].meters;
@@ -1309,7 +1321,7 @@ export class MainLoop {
             this.tapAbort(tap, ABORT_SHUTDOWN);
             log.info('模型轮随关机终止');
             noteRound('shutdown');
-            this.finishTurn();
+            this.finishTurn('shutdown');
             return;
           }
           const interrupted = flight.abortReason === 'interrupt';
@@ -1344,7 +1356,7 @@ export class MainLoop {
           log.warn('上游拒绝:输入超过模型上下文,本批结束即交接', { estTokens: this.estTokens(), hardTokens: this.d.context.hardTokens() });
           this.handoffRequested = true;
           noteRound('overflow');
-          this.finishTurn();
+          this.finishTurn('context-limit');
           return;
         }
         consecutiveFailures++;
@@ -1376,7 +1388,7 @@ export class MainLoop {
         }
         log.error('LLM调用失败,本轮自然结束', detail);
         noteRound('failed', { resubmit: false });
-        this.finishTurn();
+        this.finishTurn('model-error');
         return;
       } finally {
         if (flight.phase === 'model') flight.phase = 'tools';
@@ -1398,9 +1410,13 @@ export class MainLoop {
       }
 
       if (calls.length === 0) {
-        if (incomplete) noteRound('incomplete', { responseId: incomplete.responseId, incompleteReason: incomplete.incompleteReason });
-        else noteRound('completed');
-        this.finishTurn(incomplete);
+        if (incomplete) {
+          noteRound('incomplete', { responseId: incomplete.responseId, incompleteReason: incomplete.incompleteReason });
+          this.finishTurn(incomplete);
+          return;
+        }
+        noteRound('completed');
+        this.finishTurn('completed');
         return;
       }
 
@@ -1502,13 +1518,13 @@ export class MainLoop {
       // endsTurn 与自然结束使用同一出口；事件已退回总线。
       if (turnEnded) {
         noteRound('ended', { toolCalls: calls.length, arrived: arrived.length });
-        this.finishTurn();
+        this.finishTurn('ended');
         return;
       }
       if (round >= caps.hard) {
         log.warn('硬上限强制结束本次唤醒', { round });
         noteRound('hard-cap', { toolCalls: calls.length, arrived: arrived.length });
-        this.finishTurn();
+        this.finishTurn('hard-cap');
         return;
       }
       noteRound('continue', { toolCalls: calls.length, arrived: arrived.length });
@@ -1596,8 +1612,8 @@ export class MainLoop {
   }
 
   /**
-   * 使用上次成功请求的 token 计数，加上此后新增条目的本地估算。
-   * 禁用历史推理时扣除上次输出中的推理量；无上游计数时估算完整请求，含合成首轮对话。
+   * 使用最近准备输入的估算或上游计数，加上此后新增条目的本地估算。
+   * 禁用历史推理时扣除上次输出中的推理量；无锚点时估算完整请求，含合成首轮对话。
    */
   estTokens(): number {
     const { anchor } = this;
@@ -1612,7 +1628,7 @@ export class MainLoop {
   /** 上游已计数的部分；全部由本地估算时为 0。 */
   private countedTokens(): number {
     const { anchor } = this;
-    if (!anchor || this.d.session.records.length < anchor.records) return 0;
+    if (!anchor || anchor.estimated || this.d.session.records.length < anchor.records) return 0;
     return anchor.tokens - (this.d.cfg.context.keepPastThinking ? 0 : anchor.reasoningTokens);
   }
 
@@ -1802,7 +1818,7 @@ export class MainLoop {
     if (!this.active(generation)) return;
     session.reset([sysMsg]);
     this.d.transcript?.boundary('clear', {});
-    this.finishTurn();
+    this.finishTurn('cleared');
     this.pushOpening('cleared');
     log.emit('warn', 'session已清空重开', { event: 'session-cleared' });
   }

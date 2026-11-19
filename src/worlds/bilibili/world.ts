@@ -716,6 +716,10 @@ export class BilibiliWorld implements World {
       return;
     }
 
+    if (item.type === 'bilibili.enter') {
+      this.agg.enter++;
+      this.armAggregate();
+    }
     if (item.type === 'bilibili.guard' || item.type === 'bilibili.guard-renew') {
       if (this.suppressDuplicateGuard(item)) return;
       if (overlayEvent) this.emitOverlayAudience(overlayEvent);
@@ -1057,7 +1061,6 @@ export class BilibiliWorld implements World {
     this.host.pushDeferred(
       {
         type: 'bilibili.audience',
-        tags: ['snapshot'],
         render: () => {
           this.armedAt = null;
           const line = renderAggregate(this.agg);

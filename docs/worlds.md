@@ -193,3 +193,5 @@ Minecraft 的 `PwsrTables` 管理目标、路标及蓝图的 realm 视图,空间
 `webui/client.ts`;有环境描述就加 `ENV_PROMPT.md`。测试用 `tests/helpers/fake-host.ts` 的
 `FakeHost` 记录推送。放进仓库的在 `src/worlds/index.ts` 的 id 表里登记 id 与定义的导出名;放进仓库还是做成扩展,判据在
 [CONTRIBUTING.md](../CONTRIBUTING.md)。
+
+`CognitionRequest.onText` is an optional callback receiving cumulative public answer text from a supporting Persona; a new provider attempt may reset the text to empty. It excludes reasoning. Core fences updates after completion or World deactivation. Consumers must validate complete records before external effects, retain emitted-prefix identity across resets, and support Personas/transports that provide only the final result. This hook does not supply a model, context, output format or speech policy.

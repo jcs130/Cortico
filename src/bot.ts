@@ -33,7 +33,6 @@ import { RESERVED_FRAME_NAMES } from './core/loop.ts';
 import type { ResponseClient } from './core/generation.ts';
 import { acquireInstanceLock, type InstanceLock } from './core/instance-lock.ts';
 import { assembleSystemSegments, envPromptOverridePath, envPromptTemplateSource, renderWorldEnvPrompt, type EnvPromptDirs, type EnvPromptOrigin } from './core/prefix.ts';
-import { aggregateUsage, usageRecordFilter } from './core/cost.ts';
 import { createUsageRates } from './core/usage-rates.ts';
 import { DeadlineError, nowIso, withDeadline, readTextFile } from './core/util.ts';
 import { closeRun } from './core/run.ts';
@@ -1047,8 +1046,7 @@ export function createBot<C extends CoreConfig>(
       usage: {
         aggregate: async (opts) => {
           const { rates, sources } = await liveRates.resolve();
-          const options = { ...opts, timezone: core.config.timezone, rates, now: new Date() };
-          return { ...aggregateUsage(await core.usageLog.readAll(usageRecordFilter(options)), options), rateSources: sources };
+          return { ...await core.usageLog.aggregate({ ...opts, timezone: core.config.timezone, rates }), rateSources: sources };
         },
         status: () => core.usageLog.status(),
       },

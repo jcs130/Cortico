@@ -2,6 +2,9 @@
 
 # worlds/bilibili
 
+`bilibili.audience` 描述发送前一个窗口的计数及收到的读数，渲染后计数清零。
+它是历史事件，不带 `snapshot` 标签；原始汇总仍归档，后续窗口不表示此前窗口的完整状态。
+
 B 站直播间协议只读接入。观众的弹幕、礼物、醒目留言、上舰、进场与人流读数从这里进事件流；
 同一 World 提供本机透明 Overlay。两个工具只改本机 Overlay:`bilibili_set_announcement` 写 Agent 公告栏，
 `bilibili_update_video_queue` 改视频排队列表；都不会向 B 站账号发送弹幕或执行平台操作。
@@ -75,7 +78,9 @@ World 每 2 秒轮询登录状态，成功后取响应 `Set-Cookie` 里的 SESSD
 | `bilibili.gift` | flush / debounce | 金额 ≥ `worlds.bilibili.giftFlushYuan` 走 flush,低于它先过短窗归并再排常规合批 |
 | `bilibili.guard-renew` | debounce | 续费 |
 | `bilibili.danmaku` | debounce | 弹幕 |
-| `bilibili.enter-guard` | debounce | 舰长进场(普通进场只计数) |
+| `bilibili.enter` | debounce | 可识别的普通观众进场，保留昵称与可获得的 UID |
+| `bilibili.interaction` | debounce | 关注或分享，按平台类型区分 |
+| `bilibili.enter-guard` | debounce | 舰长进场特效 |
 | `bilibili.block` | debounce | 观众被禁言 |
 | `bilibili.room` | flush / debounce | 开播、下播、全员禁言走 flush;标题变更 debounce |
 | `bilibili.feed` | flush / debounce | 弹幕接入中断超过 60 秒成文一次(flush),恢复时补一条带中断时长(debounce);60 秒内的抖动不推 |
@@ -181,7 +186,7 @@ WebUI 提供直播间事件诊断和独立 Overlay 编辑器入口。样式、�
 已用接收帧核对的 cmd 包括 `DANMU_MSG`、`USER_TOAST_MSG_V2`、`INTERACT_WORD_V2`、`LIKE_INFO_V3_*`、`WATCHED_CHANGE`、
 `ONLINE_RANK_COUNT`、`ROOM_REAL_TIME_MESSAGE_UPDATE`、`STOP_LIVE_ROOM_LIST`。
 
-`INTERACT_WORD_V2` 使用 protobuf；当前解析未区分进场、关注和分享，均计为进场。
+`INTERACT_WORD` 与 `INTERACT_WORD_V2` 分别读取 JSON 和 protobuf，区分进场、关注及分享。V2 的 UID、昵称、交互类型和原时间字段依据 [blivedm 的 InteractWordV2](https://github.com/xfgryujk/blivedm/blob/master/blivedm/models/pb.py) 核对；未知类型或损坏帧不计作进场。无可识别身份的真实进场仍只计数，其他进场同时保留带身份的原事件。刷新和重连也可能产生进场信号，World 不据此判定首次到访或自动欢迎。
 
 ## 接入限制
 

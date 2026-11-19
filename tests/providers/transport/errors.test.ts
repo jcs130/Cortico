@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { isContextOverflow, parseRetryAfter } from '../../../src/providers/transport/errors.ts';
+import { isContextOverflow, parseRetryAfter, upstreamStatus } from '../../../src/providers/transport/errors.ts';
 
 afterEach(() => vi.useRealTimers());
 
@@ -29,4 +29,15 @@ describe('parseRetryAfter', () => {
     vi.setSystemTime(new Date('2026-09-21T00:00:00Z'));
     expect(parseRetryAfter('Mon, 01 Jan 2024 00:00:00 GMT')).toBe(0);
   });
+});
+
+it('uses explicit upstream statuses while leaving ambiguous failures unknown', () => {
+  expect(upstreamStatus(JSON.stringify({ error: { status: 422, message: 'bad input' } }))).toBe(422);
+  expect(upstreamStatus(JSON.stringify({ code: 'server_error', message: '<429> overloaded' }))).toBe(429);
+  expect(upstreamStatus(JSON.stringify({ code: 'server_error', message: '<503> unavailable' }))).toBe(503);
+  expect(upstreamStatus(JSON.stringify({ code: 'invalid_request_error', message: 'invalid argument' }))).toBe(400);
+  expect(upstreamStatus(JSON.stringify({ code: 'rate_limit_exceeded' }))).toBe(429);
+  expect(upstreamStatus(JSON.stringify({ code: 'server_error', message: '400 characters received' }))).toBe(0);
+  expect(upstreamStatus(JSON.stringify({ status: 200, message: 'unknown failure' }))).toBe(0);
+  expect(upstreamStatus('network failure')).toBe(0);
 });

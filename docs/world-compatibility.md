@@ -24,7 +24,7 @@
   照常按顺序执行。
   `endsTurn`:该工具完成后结束本次唤醒,期间到达的事件留待下一次投递。
 - 一轮结束(assistant 自然结束、模型调用失败或轮数达到硬上限)时调用 `onTurnEnded()`;一轮因回复截断而结束时，带一个说明原因的参数
-  (`IncompleteTurnContext`)。
+  (`IncompleteTurnContext`)。支持详细回合结果的宿主通过第二个可选参数提供 session、轮号和结束原因。
 - 宿主放弃一次工具调用时触发 `ToolCallContext.signal`。
 - 提供 `modelFacts`(当前模型名、接受的 MIME、上下文窗口)、`blob(handle)` 与 `reportUsage()`。
 

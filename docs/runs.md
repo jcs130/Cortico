@@ -1,6 +1,11 @@
-<!-- Owner: src/core/run.ts, src/core/types.ts (LogRecord), scripts/logq.ts -->
+<!-- Owner: src/core/run.ts, src/core/event-store.ts, src/core/types.ts (LogRecord, EventStoreReader), scripts/logq.ts -->
 
 # Run 与日志
+
+`JsonlEventStore.rangeAsync(query, signal)` 异步读取跨 run 历史，按游标升序返回筛选结果，
+`limit` 取区间末尾。查询使用开始时的游标上限，支持取消，并分批让出事件循环；历史文件不会整体进入同步查询缓存。
+`EventStoreReader` 上该方法为可选能力，兼容已有扩展的读取器。控制台历史回放和开场历史检查优先使用它；
+回放期间新消息继续归档，向该连接的显示按历史、实时消息排列。排队回执不表示已送达。
 
 一个 run 对应一次进程运行。暂停沿用当前 run，重启创建新 run。`data/runs/index.jsonl`
 每次启动与关机各记录一行，崩溃的 run 没有关机行;文件被别的程序占着、重试后仍写不进时也缺那一行,

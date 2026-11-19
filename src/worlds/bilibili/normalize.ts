@@ -1,6 +1,7 @@
 /** 将原始 cmd 转换为事件、累加计数或最新读数；不处理的命令返回 null。计数与读数由 World 聚合后随批次投递。 */
 import type { TriggerMode } from '../../core/types.ts';
 import { giftFrameData } from './gift-frame.ts';
+import { pbFromBase64, pbInt, pbText } from './protobuf.ts';
 
 export interface LiveEvent {
   kind: 'event';
@@ -241,8 +242,7 @@ export function normalize(msg: Record<string, unknown>, opts: NormalizeOptions):
 
     case 'INTERACT_WORD':
     case 'INTERACT_WORD_V2':
-      // V2 是 protobuf,分不出进场/关注/分享,一律按进场计数
-      return { kind: 'count', field: 'enter', by: 1 };
+      return interaction(cmd, data, opts);
 
     case 'LIKE_INFO_V3_CLICK':
       return { kind: 'count', field: 'like', by: 1 };
@@ -425,6 +425,27 @@ function str(v: unknown): string {
 
 function num(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0;
+}
+
+/** V2 field mapping: xfgryujk/blivedm, models/pb.py InteractWordV2 (not an official schema). */
+function interaction(cmd: string, data: Record<string, unknown>, opts: NormalizeOptions): Normalized | null {
+  const fields = cmd === 'INTERACT_WORD_V2' ? pbFromBase64(data.pb) : null;
+  if (cmd === 'INTERACT_WORD_V2' && !fields) {
+    opts.warn?.('INTERACT_WORD_V2 无法解析，不计作进场');
+    return null;
+  }
+  const uid = fields ? pbInt(fields, 1) ?? 0 : audienceUid(data);
+  const uname = fields ? pbText(fields, 2) : str(data.uname);
+  const msgType = fields ? pbInt(fields, 5) : num(data.msg_type);
+  const timestamp = fields ? pbInt(fields, 7) : num(data.timestamp);
+  if (msgType !== 1 && msgType !== 2 && msgType !== 3) return null;
+  if (msgType === 1 && !uname && !senderKeyOf(uid)) return { kind: 'count', field: 'enter', by: 1 };
+  const label = msgType === 1 ? '进场' : msgType === 2 ? '关注' : '分享';
+  const action = msgType === 1 ? '进入了直播间' : msgType === 2 ? '关注了主播' : '分享了直播间';
+  return { kind: 'event', type: msgType === 1 ? 'bilibili.enter' : 'bilibili.interaction', trigger: 'debounce',
+    text: `[${label}|${uname || '某位观众'}] ${action}`, senderKey: senderKeyOf(uid),
+    meta: { uid, uname, msgType, socialScope: 'live-room', sourceCommand: cmd,
+      ...(timestamp ? { sourceTimestamp: timestamp } : {}) } };
 }
 
 function bool(v: unknown): boolean {
