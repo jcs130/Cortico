@@ -203,12 +203,85 @@ describe('归一化', () => {
     });
   });
 
-  it('平台执法插队,但只成事件——收不收嘴是她自己的事', () => {
+  it('区分平台警告和切断通知，并保留原指令', () => {
+    expect(normalize({ cmd: 'WARNING', msg: '平台提示' }, OPTS)).toMatchObject({
+      type: 'bilibili.warning',
+      trigger: 'flush',
+      meta: { sourceCommand: 'WARNING' },
+    });
     expect(normalize({ cmd: 'CUT_OFF', msg: '因违规被切断' }, OPTS)).toMatchObject({
       type: 'bilibili.warning',
       trigger: 'flush',
       text: '[直播被切断] 因违规被切断',
+      meta: { sourceCommand: 'CUT_OFF' },
     });
+  });
+
+  it('房间资料只报告本次回包提供的标题和分区字段', () => {
+    const snapshot = normalize({ cmd: 'ROOM_CHANGE', data: {
+      title: '深夜直播', area_id: 371, area_name: '虚拟日常', parent_area_id: 9, parent_area_name: '虚拟主播',
+    } }, OPTS);
+    expect(snapshot).toMatchObject({
+      type: 'bilibili.room',
+      text: '[直播间] 房间资料更新，标题「深夜直播」，分区「虚拟日常」',
+      meta: {
+        sourceCommand: 'ROOM_CHANGE', title: '深夜直播', area: '虚拟日常', areaId: 371,
+        parentArea: '虚拟主播', parentAreaId: 9,
+      },
+    });
+    expect(normalize({ cmd: 'ROOM_CHANGE', data: { title: {}, area_name: '虚拟日常', area_id: -1 } }, OPTS)).toMatchObject({
+      type: 'bilibili.room',
+      text: '[直播间] 房间资料更新，分区「虚拟日常」',
+      meta: { sourceCommand: 'ROOM_CHANGE', area: '虚拟日常' },
+    });
+    expect(normalize({ cmd: 'ROOM_CHANGE' }, OPTS)).toMatchObject({
+      text: '[直播间] 平台报告房间资料有更新', meta: { sourceCommand: 'ROOM_CHANGE' },
+    });
+  });
+
+  it.each([
+    { mode: 'level', description: '按用户等级限制弹幕' },
+    { mode: 'medal', description: '按粉丝勋章等级限制弹幕' },
+    { mode: 'member', description: '已开启全员禁言' },
+  ])('按平台模式区分房间弹幕限制 $mode', ({ mode, description }) => {
+    const item = normalize({ cmd: 'ROOM_SILENT_ON', data: { type: mode, level: 2, second: 1_700_000_000 } }, OPTS);
+    expect(item).toMatchObject({
+      type: 'bilibili.room', trigger: 'flush', text: expect.stringContaining(description),
+      meta: { sourceCommand: 'ROOM_SILENT_ON', roomChatRestriction: { enabled: true, mode } },
+    });
+    const requirement = mode === 'member' ? { enabled: true, mode } : { enabled: true, mode, level: 2 };
+    expect(item).toHaveProperty('meta.roomChatRestriction', requirement);
+  });
+
+  it('未知或缺失规则不当成全员禁言，解除限制不带旧规则', () => {
+    for (const type of ['new-mode', 'off', undefined]) {
+      expect(normalize({ cmd: 'ROOM_SILENT_ON', data: { type, level: 7 } }, OPTS)).toMatchObject({
+        text: '[直播间] 已开启弹幕限制，平台未提供可识别的规则',
+        meta: { sourceCommand: 'ROOM_SILENT_ON', roomChatRestriction: { enabled: true } },
+      });
+    }
+    expect(normalize({ cmd: 'ROOM_SILENT_ON', data: { type: 'level', level: 2.5 } }, OPTS))
+      .toHaveProperty('meta.roomChatRestriction', { enabled: true, mode: 'level' });
+    expect(normalize({ cmd: 'ROOM_SILENT_OFF', data: [] }, OPTS)).toMatchObject({
+      type: 'bilibili.room', trigger: 'flush', text: '[直播间] 已解除房间弹幕限制',
+      meta: { sourceCommand: 'ROOM_SILENT_OFF', roomChatRestriction: { enabled: false } },
+    });
+  });
+
+  it('用户禁言尽量保留目标账号，目标与事件发送者分开', () => {
+    for (const frame of [{ uid: '42' }, { data: { uid: 42 } }, { uid: 42, data: { uid: '42' } }]) {
+      const item = normalize({ cmd: 'ROOM_BLOCK_MSG', uname: '阿明', ...frame }, OPTS);
+      expect(item).toMatchObject({
+        type: 'bilibili.block', trigger: 'debounce',
+        meta: { sourceCommand: 'ROOM_BLOCK_MSG', uname: '阿明', targetUid: 42 },
+      });
+      expect(item).not.toHaveProperty('senderKey');
+    }
+    for (const frame of [{}, { uid: 42, data: { uid: '43' } }, { uid: '9007199254740993' }]) {
+      const item = normalize({ cmd: 'ROOM_BLOCK_MSG', ...frame }, OPTS);
+      expect(item).toHaveProperty('type', 'bilibili.block');
+      expect(item).not.toHaveProperty('meta.targetUid');
+    }
   });
 
   it('人流类只给计数与读数', () => {
@@ -281,6 +354,9 @@ describe('归一化', () => {
       { cmd: 'ROOM_CHANGE', data: { title: msg } },
       { cmd: 'ROOM_SILENT_ON' },
       { cmd: 'ROOM_SILENT_OFF' },
+      { cmd: 'ROOM_BLOCK_MSG' },
+      { cmd: 'WARNING' },
+      { cmd: 'CUT_OFF' },
     ];
     for (const command of commands) {
       expect(normalize(command, OPTS)).toMatchObject({ kind: 'event' });

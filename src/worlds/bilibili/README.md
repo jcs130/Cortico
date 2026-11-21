@@ -182,10 +182,20 @@ WebUI 提供直播间事件诊断和独立 Overlay 编辑器入口。样式、�
 (`src/worlds/<x>/webui/client.ts` → `world:<x>`),而 WebUI 按 provider id `world:bilibili` 去取它。
 两边对不上时页面上出现的是"声明了面板,但没有构建出浏览器扩展"。
 
-## 字段待校
+## 直播间状态
 
-以下 cmd 尚未用实际接收帧验证，字段形状来自社区文档：
-`ROOM_BLOCK_MSG`(禁言)、`ROOM_SILENT_ON/OFF`、`WARNING`、`CUT_OFF`。
+| 指令 | 事件与字段 |
+| --- | --- |
+| `ROOM_CHANGE` | `bilibili.room` 保留回包提供的标题、分区与父分区资料。 |
+| `ROOM_SILENT_ON`、`ROOM_SILENT_OFF` | `bilibili.room` 的 `meta.roomChatRestriction` 提供限制开关。开启时可附带平台模式 `level`、`medal` 或 `member`，以及用户或勋章等级要求。 |
+| `ROOM_BLOCK_MSG` | `bilibili.block` 保留显示名称。回包中的账号一致或只有一个有效账号时，以 `meta.targetUid` 记录目标。 |
+| `WARNING`、`CUT_OFF` | `bilibili.warning` 通过 `meta.sourceCommand` 区分平台警告和切断通知。 |
+
+以上字段依据 [BiliLiveManager 的接收样本](https://github.com/TZFC/BiliLiveManager/wiki/All-non-standard-events)、
+[BilibiliTool 的禁言帧](https://github.com/echo094/BilibiliTool/blob/master/doc/danmu-cmd.md#room_silent_on)
+和 [blive-message-listener 的规则类型](https://github.com/ddiu8081/blive-message-listener#handleronroomsilent)。
+
+## 交互字段
 
 已用接收帧核对的 cmd 包括 `DANMU_MSG`、`USER_TOAST_MSG_V2`、`INTERACT_WORD_V2`、`LIKE_INFO_V3_*`、`WATCHED_CHANGE`、
 `ONLINE_RANK_COUNT`、`ROOM_REAL_TIME_MESSAGE_UPDATE`、`STOP_LIVE_ROOM_LIST`。
