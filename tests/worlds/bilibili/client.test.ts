@@ -205,6 +205,31 @@ describe('LiveClient 运行期 live_status 轮询', () => {
     await live.stop();
   });
 
+  it('reports replay, an unknown code and a confirmed offline observation separately', async () => {
+    vi.useFakeTimers();
+    const codes = [1, 2, 2, 8, 0];
+    stubFetch(() => ({ body: { code: 0, data: { live_status: codes.shift() ?? 0 } } }));
+    const observations: Array<{ state: LiveStatus['broadcastState']; living: boolean }> = [];
+    const live = new LiveClient({
+      roomId: 7734200,
+      sessdata: '',
+      onCmd: () => {},
+      onStatus: (status, update) => {
+        if (update === 'room') observations.push({ state: status.broadcastState, living: status.living });
+      },
+      log: nullLogger(),
+    });
+    await live.start();
+    await vi.advanceTimersByTimeAsync(ROOM_POLL_MS * 5 + 100);
+    expect(observations).toEqual([
+      { state: 'live', living: true },
+      { state: 'replay', living: false },
+      { state: 'unknown', living: false },
+      { state: 'offline', living: false },
+    ]);
+    await live.stop();
+  });
+
   it('412 风控:退避十分钟档,严禁热重试;stop 撤防后不再轮询', async () => {
     vi.useFakeTimers();
     let first = true;
@@ -258,8 +283,13 @@ describe('LiveClient 重连握手收口', () => {
   }
 
   /** 握手四步全给(spi / nav / get_info / getDanmuInfo),让 connect 走到 new WebSocket */
-  function stubHandshakeFetch(opts: { liveStatus?: number; hangSpi?: boolean } = {}): { calls: string[] } {
+  function stubHandshakeFetch(opts: {
+    liveStatus?: number;
+    hangSpi?: boolean;
+    pollAnswer?: Promise<Response>;
+  } = {}): { calls: string[] } {
     const calls: string[] = [];
+    let roomReads = 0;
     const json = (body: unknown): Response => new Response(JSON.stringify(body), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
@@ -284,6 +314,8 @@ describe('LiveClient 重连握手收口', () => {
         }));
       }
       if (u.includes('Room/get_info')) {
+        roomReads += 1;
+        if (roomReads === 2 && opts.pollAnswer) return opts.pollAnswer;
         return Promise.resolve(json({
           code: 0,
           data: { room_id: 1866954191, title: '测试间', live_status: opts.liveStatus ?? 1, live_time: '2026-09-01 20:00:00' },
@@ -304,6 +336,32 @@ describe('LiveClient 重连握手收口', () => {
     socket.open();
     socket.emit('message', encodePacket(OP.AUTH_REPLY, JSON.stringify({ code: 0 })));
   }
+
+  it('retains a newer WebSocket observation over an older poll and messages from the retired socket', async () => {
+    vi.useFakeTimers();
+    let completePoll!: (result: Response) => void;
+    const pollAnswer = new Promise<Response>((resolve) => { completePoll = resolve; });
+    const { calls } = stubHandshakeFetch({ liveStatus: 0, pollAnswer });
+    const commands: unknown[] = [];
+    const live = new LiveClient({ roomId: 7734200, sessdata: '',
+      onCmd: (message) => { commands.push(message.cmd); }, log: nullLogger() });
+    await live.start();
+    const socket = wsFake.sockets[0];
+    authenticate(socket);
+    await vi.advanceTimersByTimeAsync(ROOM_POLL_MS + 1);
+    expect(calls.filter((url) => url.includes('Room/get_info'))).toHaveLength(2);
+
+    socket.emit('message', encodePacket(OP.MESSAGE, JSON.stringify({ cmd: 'LIVE' })));
+    completePoll(new Response(JSON.stringify({ code: 0, data: { live_status: 0 } })));
+    await vi.advanceTimersByTimeAsync(1);
+    expect(live.current()).toMatchObject({ living: true, broadcastState: 'live' });
+
+    socket.drop(1006, 'remote gone');
+    socket.emit('message', encodePacket(OP.MESSAGE, JSON.stringify({ cmd: 'PREPARING' })));
+    expect(live.current()).toMatchObject({ living: true, broadcastState: 'live', phase: 'retrying' });
+    expect(commands).toEqual(['LIVE']);
+    await live.stop();
+  });
 
   it('new WebSocket 带 handshakeTimeout;握手超时(error+close)走 fail() 退避重连', async () => {
     vi.useFakeTimers();

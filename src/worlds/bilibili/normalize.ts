@@ -293,29 +293,65 @@ export function normalize(msg: Record<string, unknown>, opts: NormalizeOptions):
         meta: liveRoomStateMeta(false, 'websocket'),
       };
 
-    case 'ROOM_CHANGE':
+    case 'ROOM_CHANGE': {
+      const title = typeof data.title === 'string' ? data.title : undefined;
+      const area = typeof data.area_name === 'string' ? data.area_name : undefined;
+      const areaId = positiveInteger(data.area_id);
+      const parentArea = typeof data.parent_area_name === 'string' ? data.parent_area_name : undefined;
+      const parentAreaId = positiveInteger(data.parent_area_id);
+      const details = [
+        title === undefined ? undefined : `标题「${title}」`,
+        area === undefined ? undefined : `分区「${area}」`,
+      ].filter(Boolean);
       return {
         kind: 'event',
         type: 'bilibili.room',
         trigger: 'debounce',
-        text: `[直播间] 标题/分区变更为「${str(data.title)}」(${str(data.area_name)})`,
-        meta: { title: data.title, area: data.area_name },
+        text: details.length ? `[直播间] 房间资料更新，${details.join('，')}` : '[直播间] 平台报告房间资料有更新',
+        meta: {
+          sourceCommand: cmd,
+          ...(title !== undefined ? { title } : {}),
+          ...(area !== undefined ? { area } : {}),
+          ...(areaId !== undefined ? { areaId } : {}),
+          ...(parentArea !== undefined ? { parentArea } : {}),
+          ...(parentAreaId !== undefined ? { parentAreaId } : {}),
+        },
       };
+    }
 
-    case 'ROOM_SILENT_ON':
-      return { kind: 'event', type: 'bilibili.room', trigger: 'flush', text: '[直播间] 已开启全员禁言' };
+    case 'ROOM_SILENT_ON': {
+      const mode = data.type === 'level' || data.type === 'medal' || data.type === 'member' ? data.type : undefined;
+      const level = mode === 'level' || mode === 'medal' ? positiveInteger(data.level) : undefined;
+      const rule = mode === 'level' ? '按用户等级限制弹幕'
+        : mode === 'medal' ? '按粉丝勋章等级限制弹幕'
+          : mode === 'member' ? '已开启全员禁言' : '已开启弹幕限制，平台未提供可识别的规则';
+      return {
+        kind: 'event', type: 'bilibili.room', trigger: 'flush',
+        text: `[直播间] ${rule}${level === undefined ? '' : `，要求等级 ${level}`}`,
+        meta: { sourceCommand: cmd, roomChatRestriction: {
+          enabled: true, ...(mode === undefined ? {} : { mode }), ...(level === undefined ? {} : { level }),
+        } },
+      };
+    }
 
     case 'ROOM_SILENT_OFF':
-      return { kind: 'event', type: 'bilibili.room', trigger: 'flush', text: '[直播间] 已关闭全员禁言' };
+      return {
+        kind: 'event', type: 'bilibili.room', trigger: 'flush', text: '[直播间] 已解除房间弹幕限制',
+        meta: { sourceCommand: cmd, roomChatRestriction: { enabled: false } },
+      };
 
     case 'ROOM_BLOCK_MSG': {
       const uname = str(data.uname) || str(msg.uname) || '某位观众';
+      const nestedUid = blockTargetUid(data.uid);
+      const envelopeUid = blockTargetUid(msg.uid);
+      const conflict = nestedUid !== undefined && envelopeUid !== undefined && nestedUid !== envelopeUid;
+      const targetUid = conflict ? undefined : nestedUid ?? envelopeUid;
       return {
         kind: 'event',
         type: 'bilibili.block',
         trigger: 'debounce',
         text: `[房管] ${uname} 被禁言`,
-        meta: { uname },
+        meta: { sourceCommand: cmd, uname, ...(targetUid === undefined ? {} : { targetUid }) },
       };
     }
 
@@ -325,6 +361,7 @@ export function normalize(msg: Record<string, unknown>, opts: NormalizeOptions):
         type: 'bilibili.warning',
         trigger: 'flush',
         text: `[平台警告] ${str(msg.msg) || '直播间收到一条超管警告'}`,
+        meta: { sourceCommand: cmd },
       };
 
     case 'CUT_OFF':
@@ -333,6 +370,7 @@ export function normalize(msg: Record<string, unknown>, opts: NormalizeOptions):
         type: 'bilibili.warning',
         trigger: 'flush',
         text: `[直播被切断] ${str(msg.msg) || '直播已被平台切断'}`,
+        meta: { sourceCommand: cmd },
       };
 
     default:
@@ -439,6 +477,15 @@ function str(v: unknown): string {
 
 function num(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0;
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+/** ROOM_BLOCK_MSG 的 uid 有十进制字符串与数字两种平台形状。 */
+function blockTargetUid(value: unknown): number | undefined {
+  return positiveInteger(typeof value === 'string' && /^[1-9]\d*$/.test(value) ? Number(value) : value);
 }
 
 /** V2 field mapping: xfgryujk/blivedm, models/pb.py InteractWordV2 (not an official schema). */

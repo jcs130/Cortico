@@ -100,13 +100,13 @@ export const BILIBILI: WorldDefinition<BilibiliConfigSection> = {
       {
         type: 'bilibili.room',
         description: {
-          zh: '开播、下播、标题或分区变更、全员禁言开关。开播和下播附带 meta.liveRoomState。',
-          en: 'The stream went live or offline, the title or category changed, or room-wide mute was switched. Going live or offline includes meta.liveRoomState.',
+          zh: '开播、下播、轮播、房间资料或弹幕限制更新。开播和下播附带 meta.liveRoomState，轮播附带 meta.broadcastState，弹幕限制附带 meta.roomChatRestriction。',
+          en: 'The stream went live, went offline or entered replay, or room details or chat restrictions changed. Live and offline use meta.liveRoomState, replay uses meta.broadcastState, and chat restrictions use meta.roomChatRestriction.',
         },
       },
       {
         type: 'bilibili.block',
-        description: { zh: '房管禁言了一位观众。', en: 'A moderator muted a viewer.' },
+        description: { zh: '一位观众被禁言，可核对时附带目标账号。', en: 'A viewer was muted, with the target account when available.' },
         trigger: 'debounce',
       },
       {

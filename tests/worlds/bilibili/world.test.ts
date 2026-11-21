@@ -200,7 +200,7 @@ interface Mounted {
   /** 把一条原始 cmd 喂进长连 */
   feed: (msg: Record<string, unknown>) => void;
   /** 把一份长连状态喂给 World(模拟轮询 patch 触发的 onStatus 回调) */
-  setStatus: (status: LiveStatus) => void;
+  setStatus: LiveHandlers['onStatus'];
 }
 
 /** 起一个接了假长连的 World */
@@ -226,7 +226,7 @@ async function mount(
     module,
     host,
     feed: (msg) => handlers?.onCmd(msg),
-    setStatus: (status) => handlers?.onStatus(status),
+    setStatus: (status, update) => handlers?.onStatus(status, update),
   };
 }
 
@@ -1403,6 +1403,34 @@ describe('BilibiliWorld', () => {
       expect(host.logs.filter((log) => log.level === 'error')).toHaveLength(1);
 
       expect(host.logs.some((log) => log.msg.includes('已过滤重复的直播状态通知'))).toBe(true);
+    });
+
+    it('delivers one replay signal and waits for an explicit offline observation to report stream end', async () => {
+      const { module, host, setStatus } = await mount();
+      setStatus({ ...STATUS, broadcastState: 'replay', living: false }, 'room');
+      expect(module.webUi().badges).toContainEqual(expect.objectContaining({ value: expect.stringContaining('轮播中') }));
+      setStatus({ ...STATUS, broadcastState: 'unknown', living: false }, 'room');
+      expect(module.webUi().lamps).toContainEqual(expect.objectContaining({ hint: '未知' }));
+      setStatus({ ...STATUS, broadcastState: 'replay', living: false }, 'room');
+      await vi.waitFor(() => expect(host.events.filter((e) => e.type === 'bilibili.room').map((e) => e.meta?.broadcastState)).toEqual(['replay']));
+      expect(host.events.some((e) => e.meta?.liveRoomState)).toBe(false);
+      setStatus({ ...STATUS, broadcastState: 'offline', living: false }, 'room');
+      await module.stop();
+      expect(host.events.filter((e) => e.type === 'bilibili.room').map((e) => e.meta)).toEqual([
+        expect.objectContaining({ broadcastState: 'replay', via: 'poll' }),
+        expect.objectContaining({ liveRoomState: { schemaVersion: 1, living: false, via: 'poll' } }),
+      ]);
+    });
+
+    it('keeps the WebSocket observation when a connection patch carries an older room snapshot', async () => {
+      const { module, host, feed, setStatus } = await mount();
+      feed({ cmd: 'PREPARING' });
+      setStatus({ ...STATUS, phase: 'retrying' }, 'connection');
+      setStatus({ ...STATUS, broadcastState: 'offline', living: false }, 'room');
+      await module.stop();
+      expect(host.events.filter((e) => e.type === 'bilibili.room').map((e) => e.meta?.liveRoomState)).toEqual([
+        { schemaVersion: 1, living: false, via: 'websocket' },
+      ]);
     });
 
     it('首个状态观察只定基线:开播中启动不冒充"刚开播"', async () => {
