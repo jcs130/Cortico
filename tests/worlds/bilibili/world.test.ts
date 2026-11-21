@@ -258,6 +258,108 @@ describe('BilibiliWorld', () => {
     await module.stop();
   });
 
+  it.each([
+    ['INTERACT_WORD', false],
+    ['INTERACT_WORD_V2', true],
+  ] as const)('coalesces %s with the matching effect and keeps both archived signals', async (cmd, reversed) => {
+    const host = new BatchCandidateHost();
+    const { module, feed } = await mount({}, host);
+    const timestamp = 1_700_000_000;
+    const triggerTime = timestamp * 1e9;
+    const effect = { cmd: 'ENTRY_EFFECT', data: { uid: 7, copy_writing: '欢迎 <%旧昵称%>', trigger_time: triggerTime } };
+    const interaction = cmd === 'INTERACT_WORD'
+      ? { cmd, data: { uid: 7, uname: 'Yuko', msg_type: 1, timestamp, trigger_time: triggerTime } }
+      : { cmd, data: { pb: Buffer.from([8, 7, 18, 4, 89, 117, 107, 111, 40, 1, 56, 128, 226, 207, 170, 6]).toString('base64') } };
+    for (const message of reversed ? [interaction, effect] : [effect, interaction]) feed(message);
+    await module.stop();
+    host.projectBatch();
+
+    expect(host.events).toHaveLength(1);
+    expect(host.events[0]).toMatchObject({
+      type: 'bilibili.enter',
+      senderKey: '7',
+      meta: { uname: 'Yuko', sourceCommand: cmd, sourceCursors: [1, 2] },
+    });
+    expect(host.events[0].meta?.arrivalSignalTypes)
+      .toEqual(expect.arrayContaining(['bilibili.enter', 'bilibili.enter-guard']));
+    expect(host.archivedEvents).toHaveLength(2);
+    expect(host.archivedEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'bilibili.enter-guard',
+        contextDelivery: 'archive-only',
+        text: '[进场] 欢迎 旧昵称',
+        meta: { uid: 7, sourceCommand: 'ENTRY_EFFECT', sourceTriggerTime: triggerTime },
+      }),
+      expect.objectContaining({
+        type: 'bilibili.enter',
+        contextDelivery: 'archive-only',
+        meta: expect.objectContaining({ uid: 7, sourceCommand: cmd, sourceTimestamp: timestamp }),
+      }),
+    ]));
+    expect(await host.deferred[0].spec.render()).toContain('1 人进场');
+  });
+
+  it('pairs arrival signals one to one and keeps repeated arrivals, follows and shares', async () => {
+    const host = new BatchCandidateHost();
+    const { module, feed } = await mount({}, host);
+    const effect = { cmd: 'ENTRY_EFFECT', data: { uid: 7, copy_writing: '<%Kai%> 来了' } };
+    const interaction = (msgType: number) => ({ cmd: 'INTERACT_WORD', data: { uid: 7, uname: 'Kai', msg_type: msgType } });
+    for (const message of [effect, effect, interaction(2), interaction(1), interaction(3), interaction(1), interaction(1)]) {
+      feed(message);
+    }
+    await module.stop();
+    host.projectBatch();
+
+    expect(host.events.map((event) => [event.type, event.meta?.sourceCursors])).toEqual([
+      ['bilibili.enter', [1, 4]],
+      ['bilibili.enter', [2, 6]],
+      ['bilibili.interaction', [3]],
+      ['bilibili.interaction', [5]],
+      ['bilibili.enter', [7]],
+    ]);
+    expect(host.archivedEvents).toHaveLength(7);
+    expect(await host.deferred[0].spec.render()).toContain('3 人进场');
+  });
+
+  it.each([
+    ['不同 UID', 7, 8, 0, 0, false],
+    ['无 UID', 0, 0, 0, 0, false],
+    ['无可靠 UID', Number.MAX_SAFE_INTEGER + 1, Number.MAX_SAFE_INTEGER + 1, 0, 0, false],
+    ['平台时间超窗', 7, 7, 0, 4, false],
+    ['接收时间超窗', 7, 7, 4000, 0, false],
+    ['平台预览特效', 7, 7, 0, 0, true],
+  ] as const)('进场信号各自投递 (%s)', async (_name, effectUid, entryUid, receiveMs, sourceSec, mockEffect) => {
+    vi.useFakeTimers();
+    const host = new BatchCandidateHost();
+    const { module, feed } = await mount({}, host);
+    const timestamp = 1_700_000_000;
+    feed({
+      cmd: 'ENTRY_EFFECT',
+      data: { uid: effectUid, copy_writing: '<%Kai%> 来了', trigger_time: timestamp * 1e9, mock_effect: Number(mockEffect) },
+    });
+    vi.setSystemTime(Date.now() + receiveMs);
+    feed({ cmd: 'INTERACT_WORD', data: { uid: entryUid, uname: 'Kai', msg_type: 1, timestamp: timestamp + sourceSec } });
+    await module.stop();
+    host.projectBatch();
+
+    expect(host.events.map((event) => [event.type, event.meta?.sourceCursors])).toEqual([
+      ['bilibili.enter-guard', [1]],
+      ['bilibili.enter', [2]],
+    ]);
+  });
+
+  it('keeps same-account arrivals in separate delivery batches independent', async () => {
+    const { module, host, feed } = await mount();
+    feed({ cmd: 'ENTRY_EFFECT', data: { uid: 7, copy_writing: '<%Kai%> 来了' } });
+    feed({ cmd: 'INTERACT_WORD', data: { uid: 7, uname: 'Kai', msg_type: 1 } });
+    await module.stop();
+
+    expect(host.events.map((event) => [event.type, event.meta?.sourceCursors])).toEqual([
+      ['bilibili.enter-guard', [1]],
+      ['bilibili.enter', [2]],
+    ]);
+  });
+
   it('只提供本机 Agent 公告与视频排队工具，不向 B 站账号写入', async () => {
     const { module } = await mount();
     const tools = module.tools();

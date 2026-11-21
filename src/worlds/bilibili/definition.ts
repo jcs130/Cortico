@@ -94,7 +94,7 @@ export const BILIBILI: WorldDefinition<BilibiliConfigSection> = {
       },
       {
         type: 'bilibili.enter-guard',
-        description: { zh: '舰长等大航海成员进入直播间。', en: 'A guard member entered the room.' },
+        description: { zh: '平台显示观众进场特效。', en: 'The platform showed a viewer entrance effect.' },
         trigger: 'debounce',
       },
       {

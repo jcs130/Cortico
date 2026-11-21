@@ -80,7 +80,7 @@ World 每 2 秒轮询登录状态，成功后取响应 `Set-Cookie` 里的 SESSD
 | `bilibili.danmaku` | debounce | 弹幕 |
 | `bilibili.enter` | debounce | 可识别的普通观众进场，保留昵称与可获得的 UID |
 | `bilibili.interaction` | debounce | 关注或分享，按平台类型区分 |
-| `bilibili.enter-guard` | debounce | 舰长进场特效 |
+| `bilibili.enter-guard` | debounce | 平台进场特效 |
 | `bilibili.block` | debounce | 观众被禁言 |
 | `bilibili.room` | flush / debounce | 开播、下播、全员禁言走 flush;标题变更 debounce |
 | `bilibili.feed` | flush / debounce | 弹幕接入中断超过 60 秒成文一次(flush),恢复时补一条带中断时长(debounce);60 秒内的抖动不推 |
@@ -187,6 +187,8 @@ WebUI 提供直播间事件诊断和独立 Overlay 编辑器入口。样式、�
 `ONLINE_RANK_COUNT`、`ROOM_REAL_TIME_MESSAGE_UPDATE`、`STOP_LIVE_ROOM_LIST`。
 
 `INTERACT_WORD` 与 `INTERACT_WORD_V2` 分别读取 JSON 和 protobuf，区分进场、关注及分享。V2 的 UID、昵称、交互类型和原时间字段依据 [blivedm 的 InteractWordV2](https://github.com/xfgryujk/blivedm/blob/master/blivedm/models/pb.py) 核对；未知类型或损坏帧不计作进场。无可识别身份的真实进场仍只计数，其他进场同时保留带身份的原事件。刷新和重连也可能产生进场信号，World 不据此判定首次到访或自动欢迎。
+
+同一投递批次内，同一有效 UID 的 `ENTRY_EFFECT` 与 `INTERACT_WORD(_V2)` 进场消息可以一对一合并。接收时间差最多三秒，两边都提供平台时间时，平台时间差也须在三秒内。投递采用进场消息，借助 `sourceCursors` 回查两条归档和各自的来源字段。预览特效、关注、分享以及跨批次信号各自处理。JSON 时间字段见 [BiliLiveManager 记录的原始接收帧](https://github.com/TZFC/BiliLiveManager/wiki/All-non-standard-events)。
 
 ## 接入限制
 
