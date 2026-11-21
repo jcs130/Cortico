@@ -100,8 +100,8 @@ export const BILIBILI: WorldDefinition<BilibiliConfigSection> = {
       {
         type: 'bilibili.room',
         description: {
-          zh: '开播、下播、标题或分区变更、全员禁言开关。',
-          en: 'The stream went live or offline, the title or category changed, or room-wide mute was switched.',
+          zh: '开播、下播、标题或分区变更、全员禁言开关。开播和下播附带 meta.liveRoomState。',
+          en: 'The stream went live or offline, the title or category changed, or room-wide mute was switched. Going live or offline includes meta.liveRoomState.',
         },
       },
       {
