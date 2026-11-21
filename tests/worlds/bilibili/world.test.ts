@@ -1328,6 +1328,12 @@ describe('BilibiliWorld', () => {
 
       const room = host.events.filter((e) => e.type === 'bilibili.room');
       expect(room).toHaveLength(1);
+      expect(room[0]).toMatchObject({
+        source: 'bilibili',
+        origin: 'external',
+        contextDelivery: 'deliver',
+        meta: { liveRoomState: { schemaVersion: 1, living: false, via: 'poll' } },
+      });
       expect(room[0].text).toContain('平台确认已下播');
       expect(room[0].text).toContain('live_status=0');
       expect(room[0].text).toContain('看不到直播画面');
@@ -1355,6 +1361,10 @@ describe('BilibiliWorld', () => {
         expect.stringContaining('平台确认已下播'),
         expect.stringContaining('平台确认已开播'),
       ]);
+      expect(room.map((e) => e.meta?.liveRoomState)).toEqual([
+        { schemaVersion: 1, living: false, via: 'poll' },
+        { schemaVersion: 1, living: true, via: 'poll' },
+      ]);
       expect(host.logs.filter((log) => log.level === 'error')).toHaveLength(1);
       expect(host.logs.some((log) => log.level === 'warn' && log.msg.includes('已开播'))).toBe(true);
     });
@@ -1367,6 +1377,12 @@ describe('BilibiliWorld', () => {
 
       const room = host.events.filter((e) => e.type === 'bilibili.room');
       expect(room).toHaveLength(1);
+      expect(room[0]).toMatchObject({
+        source: 'bilibili',
+        origin: 'external',
+        contextDelivery: 'deliver',
+        meta: { liveRoomState: { schemaVersion: 1, living: false, via: 'websocket' } },
+      });
 
       expect(room[0].text).toContain('平台已推送下播指令');
       expect(room[0].text).toContain('不代表直播还在');
@@ -1382,6 +1398,7 @@ describe('BilibiliWorld', () => {
 
       const room = host.events.filter((e) => e.type === 'bilibili.room');
       expect(room).toHaveLength(1);
+      expect(room[0].meta?.liveRoomState).toEqual({ schemaVersion: 1, living: false, via: 'poll' });
       expect(room[0].text).toContain('平台确认已下播');
       expect(host.logs.filter((log) => log.level === 'error')).toHaveLength(1);
 

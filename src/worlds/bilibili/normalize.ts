@@ -38,6 +38,11 @@ interface LiveGauge {
 
 export type Normalized = LiveEvent | LiveCount | LiveGauge;
 
+/** 开播和下播共用同一元数据契约。 */
+export function liveRoomStateMeta(living: boolean, via: 'websocket' | 'poll') {
+  return { liveRoomState: { schemaVersion: 1 as const, living, via } };
+}
+
 /** 1 元 = 1000 金瓜子 */
 const COIN_PER_YUAN = 1000;
 
@@ -275,6 +280,7 @@ export function normalize(msg: Record<string, unknown>, opts: NormalizeOptions):
         type: 'bilibili.room',
         trigger: 'flush',
         text: '[直播间] 平台已推送开播指令:直播画面已对观众可见',
+        meta: liveRoomStateMeta(true, 'websocket'),
       };
 
     case 'PREPARING':
@@ -284,6 +290,7 @@ export function normalize(msg: Record<string, unknown>, opts: NormalizeOptions):
         trigger: 'flush',
         text: '[直播间] 平台已推送下播指令:直播已结束,观众已经看不到直播画面;'
           + '此后的弹幕来自仍留在房间页的人,不代表直播还在进行',
+        meta: liveRoomStateMeta(false, 'websocket'),
       };
 
     case 'ROOM_CHANGE':

@@ -257,12 +257,14 @@ describe('归一化', () => {
       type: 'bilibili.room',
       trigger: 'flush',
       text: expect.stringContaining('平台已推送开播指令'),
+      meta: { liveRoomState: { schemaVersion: 1, living: true, via: 'websocket' } },
     });
     const preparing = normalize({ cmd: 'PREPARING' }, OPTS);
     expect(preparing).toMatchObject({
       kind: 'event',
       type: 'bilibili.room',
       trigger: 'flush',
+      meta: { liveRoomState: { schemaVersion: 1, living: false, via: 'websocket' } },
     });
     const text = (preparing as { text: string }).text;
     expect(text).toContain('平台已推送下播指令');
@@ -270,5 +272,19 @@ describe('归一化', () => {
     // 反向证据要提前说破:留场弹幕不代表还在播
     expect(text).toContain('不代表直播还在');
     expect(text).not.toMatch(/收尾|告别|停止|快去/);
+  });
+
+  it('弹幕、标题与禁言事件不携带开播或下播状态', () => {
+    const msg = '平台确认已下播';
+    const commands = [
+      danmakuMsg({ uid: 42, uname: '测试观众', text: msg }),
+      { cmd: 'ROOM_CHANGE', data: { title: msg } },
+      { cmd: 'ROOM_SILENT_ON' },
+      { cmd: 'ROOM_SILENT_OFF' },
+    ];
+    for (const command of commands) {
+      expect(normalize(command, OPTS)).toMatchObject({ kind: 'event' });
+      expect(normalize(command, OPTS)).not.toHaveProperty('meta.liveRoomState');
+    }
   });
 });

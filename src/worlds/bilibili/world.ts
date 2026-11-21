@@ -24,7 +24,7 @@ import { LiveClient, type LivePhase, type LiveStatus } from './client.ts';
 import { BrowserLogin } from './login.ts';
 import { CoalescingBuffer, type CoalescingGroup } from './coalescing-buffer.ts';
 import { giftFrameData } from './gift-frame.ts';
-import { normalize, type CountField, type GaugeField, type LiveEvent } from './normalize.ts';
+import { liveRoomStateMeta, normalize, type CountField, type GaugeField, type LiveEvent } from './normalize.ts';
 import { AgentAnnouncementStore } from './overlay/announcement.ts';
 import { OverlayAssetStore } from './overlay/assets.ts';
 import {
@@ -1267,20 +1267,16 @@ export class BilibiliWorld implements World {
 
   /** 投递轮询发现的状态变化；WS 状态事件由 normalize 生成。 */
   private announceRoomEdge(living: boolean): void {
-    this.pushNotice(living
-      ? {
-          kind: 'event',
-          type: 'bilibili.room',
-          trigger: 'flush',
-          text: '[直播间] 平台确认已开播(接口 live_status=1):直播画面已对观众可见',
-        }
-      : {
-          kind: 'event',
-          type: 'bilibili.room',
-          trigger: 'flush',
-          text: '[直播间] 平台确认已下播(接口 live_status=0):观众已经看不到直播画面;'
-            + '此后的弹幕来自仍留在房间页的人,不代表直播还在进行',
-        });
+    this.pushNotice({
+      kind: 'event',
+      type: 'bilibili.room',
+      trigger: 'flush',
+      text: living
+        ? '[直播间] 平台确认已开播(接口 live_status=1):直播画面已对观众可见'
+        : '[直播间] 平台确认已下播(接口 live_status=0):观众已经看不到直播画面;'
+          + '此后的弹幕来自仍留在房间页的人,不代表直播还在进行',
+      meta: liveRoomStateMeta(living, 'poll'),
+    });
   }
 
   /** 投递本 World 生成的通知前，先输出归并缓冲中的事件。 */
