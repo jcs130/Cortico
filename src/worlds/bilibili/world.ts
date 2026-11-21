@@ -86,6 +86,9 @@ const UNNAMED_GIFT_SAMPLE_CAP = 16;
 /** GUARD_BUY 始终投递；同 uid、等级不冲突的后续 TOAST 在窗口内去重。 */
 const GUARD_DEDUP_WINDOW_MS = 8_000;
 
+/** 进场特效和进场消息仅在同一批内短窗配对。 */
+const ARRIVAL_PAIR_WINDOW_MS = 3_000;
+
 /** WS 与轮询共用状态变化去重窗口；窗口长于轮询间隔。 */
 const ROOM_EDGE_DEDUP_MS = 180_000;
 
@@ -1153,15 +1156,15 @@ export class BilibiliWorld implements World {
 
   private readonly projectAudienceCandidates: CandidateProjector = (sourceCandidates) => {
     this.admission.updateTuning(this.audienceTuning());
-    const candidates: LiveAdmissionCandidate[] = sourceCandidates.map((source) => {
-      const value = source.value as LiveCandidateValue;
+    const groups = groupAudienceArrivals(sourceCandidates);
+    const candidates: LiveAdmissionCandidate[] = groups.map(({ item, indexes }) => {
       return {
-        stableKey: source.sourceEvents.map((event) => event.cursor).join(','),
-        text: value.item.text,
-        type: value.item.type,
-        senderKeys: audienceSenderKeys(value.item),
-        critical: criticalAudienceEvent(value.item),
-        meta: value,
+        stableKey: indexes.flatMap((index) => sourceCandidates[index].sourceEvents.map((event) => event.cursor)).join(','),
+        text: item.text,
+        type: item.type,
+        senderKeys: audienceSenderKeys(item),
+        critical: criticalAudienceEvent(item),
+        meta: { item },
       };
     });
     const projected = this.admission.project(candidates);
@@ -1179,15 +1182,17 @@ export class BilibiliWorld implements World {
     }
     return projected.selected.map((selection) => {
       const item = selection.candidate.meta!.item;
+      const { indexes, arrivalSignalTypes } = groups[selection.index];
       const importantParticipants = audienceParticipantDetails(item, selection.importantParticipants);
       return {
-        candidateIndexes: [selection.index],
+        candidateIndexes: indexes,
         event: {
           type: item.type,
           text: item.text,
           ...(item.senderKey ? { senderKey: item.senderKey } : {}),
           meta: {
             ...item.meta,
+            ...(arrivalSignalTypes ? { arrivalSignalTypes } : {}),
             audienceAdmission: {
               limitingActive: projected.metrics.limitingActive,
               lane: selection.lane,
@@ -1415,6 +1420,71 @@ export class BilibiliWorld implements World {
     if (this.identified.length === 0) return t.identityPending;
     return this.desensitized() ? t.identityMasked : t.identityOk;
   }
+}
+
+interface AudienceCandidateGroup {
+  item: LiveEvent;
+  indexes: number[];
+  arrivalSignalTypes?: [string, string];
+}
+
+interface PendingArrival {
+  group: AudienceCandidateGroup;
+  receivedAtMs: number;
+  sourceAtMs: number | undefined;
+}
+
+function groupAudienceArrivals(
+  candidates: Parameters<CandidateProjector>[0],
+): AudienceCandidateGroup[] {
+  const groups: AudienceCandidateGroup[] = [];
+  const unmatched = new Map<number, PendingArrival[]>();
+  for (const [index, candidate] of candidates.entries()) {
+    const { item } = candidate.value as LiveCandidateValue;
+    const uid = arrivalUid(item);
+    const group: AudienceCandidateGroup = { item, indexes: [index] };
+    if (uid === undefined) {
+      groups.push(group);
+      continue;
+    }
+    const receivedAtMs = Date.parse(candidate.sourceEvents[0]?.ts ?? '');
+    const sourceAtMs = arrivalSourceTime(item);
+    const previous = unmatched.get(uid) ?? [];
+    const matchIndex = previous.findIndex((entry) =>
+      entry.group.item.type !== item.type
+      && Math.abs(receivedAtMs - entry.receivedAtMs) <= ARRIVAL_PAIR_WINDOW_MS
+      && (sourceAtMs === undefined || entry.sourceAtMs === undefined
+        || Math.abs(sourceAtMs - entry.sourceAtMs) <= ARRIVAL_PAIR_WINDOW_MS));
+    if (matchIndex >= 0) {
+      const pair = previous.splice(matchIndex, 1)[0].group;
+      pair.indexes.push(index);
+      pair.arrivalSignalTypes = [pair.item.type, item.type];
+      if (item.type === 'bilibili.enter') pair.item = item;
+      continue;
+    }
+    groups.push(group);
+    previous.push({ group, receivedAtMs, sourceAtMs });
+    unmatched.set(uid, previous);
+  }
+  return groups;
+}
+
+function arrivalUid(item: LiveEvent): number | undefined {
+  const cmd = item.meta?.sourceCommand;
+  const effect = item.type === 'bilibili.enter-guard' && cmd === 'ENTRY_EFFECT' && !item.meta?.mockEffect;
+  const entry = item.type === 'bilibili.enter' && (cmd === 'INTERACT_WORD' || cmd === 'INTERACT_WORD_V2');
+  const uid = item.meta?.uid;
+  return (effect || entry) && typeof uid === 'number' && Number.isSafeInteger(uid) && uid > 0 ? uid : undefined;
+}
+
+function arrivalSourceTime(item: LiveEvent): number | undefined {
+  // trigger_time is nanoseconds. INTERACT_WORD(_V2) timestamp is seconds.
+  const triggerTime = item.meta?.sourceTriggerTime;
+  if (typeof triggerTime === 'number' && triggerTime >= 1e18) return triggerTime / 1e6;
+  const timestamp = item.meta?.sourceTimestamp;
+  return typeof timestamp === 'number' && Number.isSafeInteger(timestamp) && timestamp > 0
+    ? timestamp * 1000
+    : undefined;
 }
 
 function audienceSenderKeys(item: LiveEvent): string[] {

@@ -187,10 +187,20 @@ describe('归一化', () => {
     }, OPTS)).toMatchObject({ senderKey: '18', meta: { uid: 18 } });
   });
 
-  it('舰长进场剥掉 copy_writing 的标记', () => {
+  it('进场特效剥掉 copy_writing 标记并保留来源与触发时间', () => {
+    const triggerTime = 1_700_000_000_123_000_000;
     expect(
-      normalize({ cmd: 'ENTRY_EFFECT', data: { copy_writing: '欢迎舰长 <%阿明%> 进入直播间', uid: 7 } }, OPTS),
-    ).toMatchObject({ type: 'bilibili.enter-guard', trigger: 'debounce', text: '[进场] 欢迎舰长 阿明 进入直播间' });
+      normalize({
+        cmd: 'ENTRY_EFFECT',
+        data: { copy_writing: '欢迎舰长 <%阿明%> 进入直播间', uid: 7, trigger_time: triggerTime },
+      }, OPTS),
+    ).toMatchObject({
+      type: 'bilibili.enter-guard',
+      trigger: 'debounce',
+      text: '[进场] 欢迎舰长 阿明 进入直播间',
+      senderKey: '7',
+      meta: { uid: 7, sourceCommand: 'ENTRY_EFFECT', sourceTriggerTime: triggerTime },
+    });
   });
 
   it('平台执法插队,但只成事件——收不收嘴是她自己的事', () => {

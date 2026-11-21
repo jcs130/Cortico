@@ -227,16 +227,23 @@ export function normalize(msg: Record<string, unknown>, opts: NormalizeOptions):
     }
 
     case 'ENTRY_EFFECT': {
-      // 舰长进场特效。copy_writing 形如 "欢迎舰长 <%昵称%> 进入直播间"
+      // 进场特效的 copy_writing 形如 "欢迎舰长 <%昵称%> 进入直播间"
       const line = str(data.copy_writing).replace(/<%|%>/g, '').trim();
       if (!line) return null;
+      const uid = audienceUid(data);
+      const triggerTime = num(data.trigger_time);
       return {
         kind: 'event',
         type: 'bilibili.enter-guard',
         trigger: 'debounce',
         text: `[进场] ${line}`,
-        senderKey: senderKeyOf(audienceUid(data)),
-        meta: { uid: audienceUid(data) },
+        senderKey: senderKeyOf(uid),
+        meta: {
+          uid,
+          sourceCommand: cmd,
+          ...(triggerTime > 0 ? { sourceTriggerTime: triggerTime } : {}),
+          ...(bool(data.mock_effect) ? { mockEffect: true } : {}),
+        },
       };
     }
 
@@ -438,6 +445,7 @@ function interaction(cmd: string, data: Record<string, unknown>, opts: Normalize
   const uname = fields ? pbText(fields, 2) : str(data.uname);
   const msgType = fields ? pbInt(fields, 5) : num(data.msg_type);
   const timestamp = fields ? pbInt(fields, 7) : num(data.timestamp);
+  const triggerTime = !fields && msgType === 1 ? num(data.trigger_time) : 0;
   if (msgType !== 1 && msgType !== 2 && msgType !== 3) return null;
   if (msgType === 1 && !uname && !senderKeyOf(uid)) return { kind: 'count', field: 'enter', by: 1 };
   const label = msgType === 1 ? '进场' : msgType === 2 ? '关注' : '分享';
@@ -445,6 +453,7 @@ function interaction(cmd: string, data: Record<string, unknown>, opts: Normalize
   return { kind: 'event', type: msgType === 1 ? 'bilibili.enter' : 'bilibili.interaction', trigger: 'debounce',
     text: `[${label}|${uname || '某位观众'}] ${action}`, senderKey: senderKeyOf(uid),
     meta: { uid, uname, msgType, socialScope: 'live-room', sourceCommand: cmd,
+      ...(triggerTime > 0 ? { sourceTriggerTime: triggerTime } : {}),
       ...(timestamp ? { sourceTimestamp: timestamp } : {}) } };
 }
 
