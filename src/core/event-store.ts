@@ -257,7 +257,21 @@ export class JsonlEventStore implements EventStore {
     return this.query(() => this.scanRange(q));
   }
 
-  async rangeAsync(q: EventRangeQuery, signal?: AbortSignal): Promise<EventEnvelope[]> {
+  rangeAsync(q: EventRangeQuery, signal?: AbortSignal): Promise<EventEnvelope[]> {
+    return this.scanRangeAsync(q, { signal });
+  }
+
+  rangeFromStartAsync(
+    q: EventRangeQuery & { limit: number },
+    options?: { signal?: AbortSignal; excludeArchiveOnly?: boolean },
+  ): Promise<EventEnvelope[]> {
+    return this.scanRangeAsync(q, { ...options, fromStart: true });
+  }
+
+  private async scanRangeAsync(
+    q: EventRangeQuery,
+    { signal, fromStart, excludeArchiveOnly }: { signal?: AbortSignal; fromStart?: boolean; excludeArchiveOnly?: boolean },
+  ): Promise<EventEnvelope[]> {
     signal?.throwIfAborted();
     const limit = q.limit !== undefined && q.limit >= 0 ? Math.floor(q.limit) : undefined;
     if (limit === 0) return [];
@@ -265,29 +279,33 @@ export class JsonlEventStore implements EventStore {
     const { fromMs, toMs } = timeWindow(query, this.timezone);
     let matched: EventEnvelope[] = [];
     let visited = 0;
-    for (const segment of this.segmentsIn(query).reverse()) {
-      // 有限查询仅保留本分片末尾所需的条数，历史文件不进入同步查询缓存。
+    const segments = this.segmentsIn(query);
+    if (!fromStart) segments.reverse();
+    for (const segment of segments) {
+      // 有限查询仅保留所需条数，历史文件不进入同步查询缓存。
       const capacity = limit === undefined ? Infinity : limit - matched.length;
       const tail: EventEnvelope[] = [];
       let next = 0;
       let previous = 0;
-      const accept = (e: EventEnvelope | null): void => {
-        if (!e || e.cursor <= previous) return;
+      const accept = (e: EventEnvelope | null): boolean => {
+        if (!e || e.cursor <= previous) return false;
         previous = e.cursor;
         if (e.cursor > query.toCursor || (query.fromCursor !== undefined && e.cursor < query.fromCursor)
           || outside(e, query, fromMs, toMs)
           || (query.senderKey !== undefined && e.senderKey !== query.senderKey)
           || (query.source !== undefined && e.source !== query.source)
-          || (query.origin !== undefined && e.origin !== query.origin)) return;
+          || (query.origin !== undefined && e.origin !== query.origin)
+          || (excludeArchiveOnly && e.contextDelivery === 'archive-only')) return false;
         if (tail.length < capacity) tail.push(e);
         else { tail[next] = e; next = (next + 1) % capacity; }
+        return fromStart === true && tail.length >= capacity;
       };
       if (segment.events) {
         const events = segment.events;
         const end = events.length;
         for (let i = 0; i < end; i++) {
           if (++visited % 256 === 0) { await yieldEventLoop(); signal?.throwIfAborted(); }
-          accept(events[i]);
+          if (accept(events[i])) break;
         }
       } else {
         const stream = createReadStream(segment.file, { encoding: 'utf8', signal });
@@ -295,7 +313,7 @@ export class JsonlEventStore implements EventStore {
         try {
           for await (const line of lines) {
             if (++visited % 256 === 0) { await yieldEventLoop(); signal?.throwIfAborted(); }
-            accept(parseLine(line));
+            if (accept(parseLine(line))) break;
           }
         } catch (error) {
           signal?.throwIfAborted();
@@ -307,7 +325,7 @@ export class JsonlEventStore implements EventStore {
         }
       }
       signal?.throwIfAborted();
-      matched = tail.slice(next).concat(tail.slice(0, next), matched);
+      matched = fromStart ? matched.concat(tail) : tail.slice(next).concat(tail.slice(0, next), matched);
       if (limit !== undefined && matched.length >= limit) break;
     }
     return matched;
