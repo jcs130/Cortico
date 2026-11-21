@@ -51,6 +51,8 @@ const MIXIN_TAB = [
 ];
 
 export type LivePhase = 'stopped' | 'connecting' | 'connected' | 'retrying';
+export type RoomBroadcastState = 'live' | 'offline' | 'replay' | 'unknown';
+export type LiveStatusUpdate = 'connection' | 'room';
 
 export interface LiveStatus {
   phase: LivePhase;
@@ -61,6 +63,8 @@ export interface LiveStatus {
   title: string;
   /** 主播是否正在直播 */
   living: boolean;
+  /** 真实直播、未开播、轮播、尚未核实。旧的直播源可只提供 living。 */
+  broadcastState?: RoomBroadcastState;
   /** 平台报告的本场开播时刻 */
   liveStartedAt: number | null;
   /** 登录态的 uid;0 = 匿名 */
@@ -74,7 +78,7 @@ interface LiveClientOptions {
   sessdata: string;
   onCmd: (msg: Record<string, unknown>) => void;
   /** 状态变化(WebUI 徽标据此刷新) */
-  onStatus?: (status: LiveStatus) => void;
+  onStatus?: (status: LiveStatus, update: LiveStatusUpdate) => void;
   log: Logger;
 }
 
@@ -88,6 +92,7 @@ export class LiveClient {
   private backoff = BACKOFF_MIN_MS;
   private stopped = true;
   private status: LiveStatus;
+  private roomStatusRevision = 0;
   /** 当前 phase 的进入时刻;看门狗据此算 connecting 卡了多久 */
   private phaseSince = Date.now();
   /** 关机检查按请求语言成文。 */
@@ -101,6 +106,7 @@ export class LiveClient {
       realRoomId: null,
       title: '',
       living: false,
+      broadcastState: 'unknown',
       liveStartedAt: null,
       selfUid: 0,
       lastError: null,
@@ -182,7 +188,9 @@ export class LiveClient {
       }, HEARTBEAT_MS);
       this.heartbeat.unref?.();
     });
-    ws.on('message', (raw: WebSocket.RawData) => this.onFrame(toBuffer(raw)));
+    ws.on('message', (raw: WebSocket.RawData) => {
+      if (this.ws === ws) this.onFrame(toBuffer(raw));
+    });
     // 两个回调都只认当前 socket:fail()/stop() 已放弃的 socket 在 terminate/close
     // 之后还会补一个 error + close,不能让它再触发一次 fail()。
     ws.on('error', (err: Error) => {
@@ -212,6 +220,17 @@ export class LiveClient {
         }
       } else if (frame.kind === 'cmd') {
         try {
+          const cmd = String(frame.msg.cmd ?? '').split(':', 1)[0];
+          if (cmd === 'LIVE' || cmd === 'PREPARING') {
+            const living = cmd === 'LIVE';
+            this.roomStatusRevision += 1;
+            this.status = {
+              ...this.status,
+              living,
+              broadcastState: living ? 'live' : 'offline',
+              liveStartedAt: living && this.status.living ? this.status.liveStartedAt : null,
+            };
+          }
           this.opts.onCmd(frame.msg);
         } catch (e) {
           this.opts.log.warn('直播消息处理失败', { err: String(e) });
@@ -252,10 +271,11 @@ export class LiveClient {
     this.heartbeat = null;
   }
 
-  private patch(part: Partial<LiveStatus>): void {
+  private patch(part: Partial<LiveStatus>, update: LiveStatusUpdate = 'connection'): void {
     if (part.phase !== undefined && part.phase !== this.status.phase) this.phaseSince = Date.now();
+    if (update === 'room') this.roomStatusRevision += 1;
     this.status = { ...this.status, ...part };
-    this.opts.onStatus?.(this.current());
+    this.opts.onStatus?.(this.current(), update);
   }
 
   // ── 运行期 live_status 轮询 ──────────────────────────────────────────────
@@ -277,26 +297,28 @@ export class LiveClient {
    */
   private async pollRoomInfo(): Promise<void> {
     if (this.stopped) return;
+    const revision = this.roomStatusRevision;
     let nextMs = ROOM_POLL_MS;
     try {
       const info = await this.getJson(
         `https://api.live.bilibili.com/room/v1/Room/get_info?room_id=${this.status.realRoomId ?? this.opts.roomId}`,
         '',
       );
+      if (this.stopped) return;
       if (numOf(info.code) !== 0) {
         this.opts.log.warn('直播间状态轮询返回非零 code', { code: info.code, message: str(info.message) });
-      } else {
+      } else if (revision === this.roomStatusRevision) {
+        // 已有更新的 WebSocket 事件或房间快照时，丢弃此前发起的轮询。
         const room = obj(info.data);
         const rawLiveStatus = room.live_status;
-        if (typeof rawLiveStatus === 'number' && Number.isFinite(rawLiveStatus)) {
-          const living = rawLiveStatus === 1;
-          const liveStartedAt = liveTimestamp(room.live_time);
-          if (living !== this.status.living || liveStartedAt !== this.status.liveStartedAt) {
-            this.opts.log.info('轮询读到 live_status 变化', { liveStatus: rawLiveStatus, living });
-            this.patch({ living, liveStartedAt });
-          }
-        } else {
-          this.opts.log.warn('直播间状态轮询响应缺少有效 live_status');
+        const broadcastState = roomBroadcastState(rawLiveStatus);
+        const liveStartedAt = broadcastState === 'live' ? liveTimestamp(room.live_time) : null;
+        if (broadcastState !== this.status.broadcastState || liveStartedAt !== this.status.liveStartedAt) {
+          this.opts.log.info('轮询读到 live_status 变化', {
+            liveStatus: typeof rawLiveStatus === 'number' ? rawLiveStatus : null,
+            broadcastState,
+          });
+          this.patch({ living: broadcastState === 'live', broadcastState, liveStartedAt }, 'room');
         }
       }
     } catch (e) {
@@ -350,13 +372,15 @@ export class LiveClient {
     if (numOf(info.code) !== 0) throw new Error(`取直播间信息失败:${str(info.message)}`);
     const room = obj(info.data);
     const realRoomId = numOf(room.room_id);
+    const broadcastState = roomBroadcastState(room.live_status);
     this.patch({
       realRoomId,
       title: str(room.title),
-      living: numOf(room.live_status) === 1,
-      liveStartedAt: liveTimestamp(room.live_time),
+      living: broadcastState === 'live',
+      broadcastState,
+      liveStartedAt: broadcastState === 'live' ? liveTimestamp(room.live_time) : null,
       selfUid,
-    });
+    }, 'room');
 
     const dm = await this.getJson(
       `https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo?${wbiQuery({ id: realRoomId, type: 0 }, mixin)}`,
@@ -509,6 +533,15 @@ function wbiQuery(params: Record<string, string | number>, mixin: string, nowSec
 }
 
 // ── 小工具 ─────────────────────────────────────────────────────────────────
+
+function roomBroadcastState(value: unknown): RoomBroadcastState {
+  switch (value) {
+    case 0: return 'offline';
+    case 1: return 'live';
+    case 2: return 'replay';
+    default: return 'unknown';
+  }
+}
 
 function liveTimestamp(value: unknown): number | null {
   if (typeof value === 'number' && Number.isFinite(value) && value > 0) {

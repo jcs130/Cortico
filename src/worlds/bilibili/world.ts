@@ -20,7 +20,7 @@ import {
   type AudienceAdmissionTuning,
   type ImportantAudienceParticipant,
 } from './audience-admission.ts';
-import { LiveClient, type LivePhase, type LiveStatus } from './client.ts';
+import { LiveClient, type LivePhase, type LiveStatus, type LiveStatusUpdate, type RoomBroadcastState } from './client.ts';
 import { BrowserLogin } from './login.ts';
 import { CoalescingBuffer, type CoalescingGroup } from './coalescing-buffer.ts';
 import { giftFrameData } from './gift-frame.ts';
@@ -143,7 +143,7 @@ interface LiveSource {
 
 export interface LiveHandlers {
   onCmd(msg: Record<string, unknown>): void;
-  onStatus(status: LiveStatus): void;
+  onStatus(status: LiveStatus, update?: LiveStatusUpdate): void;
 }
 
 interface Aggregate {
@@ -298,8 +298,9 @@ export class BilibiliWorld implements World {
   private readonly recentGuard = new Map<string, { at: number; guardLevel?: number }>();
 
   private lastRoomEdge: { living: boolean; at: number } | null = null;
-  /** null 表示尚未取得有效房间状态。 */
+  /** 保留最近一次确认的开播或下播状态。 */
   private lastKnownLiving: boolean | null = null;
+  private lastKnownBroadcastState: Exclude<RoomBroadcastState, 'unknown'> | null = null;
   /** 中断开始的时间戳；null 表示已连接或未启动。 */
   private feedDownSince: number | null = null;
   private feedOutageTimer: ReturnType<typeof setTimeout> | null = null;
@@ -369,6 +370,14 @@ export class BilibiliWorld implements World {
     const t = text(language);
     const s = this.status;
     const phase = s?.phase ?? 'stopped';
+    const roomState = broadcastStateOf(s);
+    const roomId = s?.realRoomId ?? s?.roomId;
+    const roomLabel = roomId === undefined ? t.unknown : {
+      live: t.roomLive,
+      offline: t.roomOffline,
+      replay: t.roomReplay,
+      unknown: () => t.unknown,
+    }[roomState](roomId);
     const phaseLabel: Record<string, string> = {
       stopped: t.phaseStopped,
       connecting: t.phaseConnecting,
@@ -393,9 +402,8 @@ export class BilibiliWorld implements World {
         },
         {
           label: t.room,
-          ...(s?.living
-            ? { state: 'online' as const, hint: t.roomLive(s.realRoomId ?? s.roomId) }
-            : { state: 'offline' as const, hint: s?.realRoomId ? t.roomOffline(s.realRoomId) : t.unknown }),
+          state: roomState === 'unknown' ? 'loading' : roomState === 'offline' ? 'offline' : 'online',
+          hint: roomLabel,
         },
         {
           label: t.identity,
@@ -420,8 +428,8 @@ export class BilibiliWorld implements World {
         },
         {
           label: t.room,
-          value: s?.realRoomId ? (s.living ? t.roomLive(s.realRoomId) : t.roomOffline(s.realRoomId)) : '—',
-          tone: s?.living ? 'on' : 'plain',
+          value: roomLabel,
+          tone: roomState === 'live' ? 'on' : 'plain',
         },
         {
           label: t.identity,
@@ -514,6 +522,7 @@ export class BilibiliWorld implements World {
     this.recentGuard.clear();
     this.lastRoomEdge = null;
     this.lastKnownLiving = null;
+    this.lastKnownBroadcastState = null;
     this.clearFeedOutage();
     this.feedOutageReported = false;
     this.shutdownChecks = () => [];
@@ -692,15 +701,17 @@ export class BilibiliWorld implements World {
     if (!host) return;
     if (!item) return;
 
-    if (cmd === 'LIVE') {
-      this.admission.startStream({ roomId: this.status?.realRoomId ?? this.opts.roomId });
-      this.lastKnownLiving = true;
-
-      if (!this.markRoomEdge(true, '弹幕服务器 LIVE 指令')) return;
-    } else if (cmd === 'PREPARING') {
-      this.admission.endStream();
-      this.lastKnownLiving = false;
-      if (!this.markRoomEdge(false, '弹幕服务器 PREPARING 指令')) return;
+    if (cmd === 'LIVE' || cmd === 'PREPARING') {
+      const living = cmd === 'LIVE';
+      this.lastKnownLiving = living;
+      this.lastKnownBroadcastState = living ? 'live' : 'offline';
+      if (this.status) {
+        this.status = { ...this.status, living, broadcastState: this.lastKnownBroadcastState,
+          liveStartedAt: living && this.status.living ? this.status.liveStartedAt : null };
+      }
+      if (living) this.admission.startStream({ roomId: this.status?.realRoomId ?? this.opts.roomId });
+      else this.admission.endStream();
+      if (!this.markRoomEdge(living, `弹幕服务器 ${cmd} 指令`)) return;
     }
 
     if (item.kind === 'count') {
@@ -859,8 +870,8 @@ export class BilibiliWorld implements World {
       onCmd: (msg) => {
         if (generation === this.lifecycleGeneration) this.onCmd(msg);
       },
-      onStatus: (s) => {
-        if (generation === this.lifecycleGeneration) this.onLiveStatus(s);
+      onStatus: (s, update) => {
+        if (generation === this.lifecycleGeneration) this.onLiveStatus(s, update);
       },
     };
     return this.opts.source
@@ -1218,24 +1229,39 @@ export class BilibiliWorld implements World {
     });
   }
 
-  private onLiveStatus(status: LiveStatus): void {
-    this.status = status;
+  private onLiveStatus(status: LiveStatus, update: LiveStatusUpdate = 'room'): void {
+    this.status = update === 'connection' && this.status?.realRoomId === status.realRoomId
+      ? { ...this.status, phase: status.phase, lastError: status.lastError, selfUid: status.selfUid }
+      : status;
     this.checkAnonymousLogin(status);
     this.trackFeedPhase(status.phase);
-    const roomId = status.realRoomId ?? status.roomId;
+    if (update === 'connection' || status.realRoomId === null) return;
     // 首个有效房间状态仅建立基线；后续状态变化参与去重。
-
-    if (status.realRoomId !== null) {
-      const prev = this.lastKnownLiving;
-      this.lastKnownLiving = status.living;
-      if (prev !== null && prev !== status.living
-        && this.markRoomEdge(status.living, `接口 live_status=${status.living ? 1 : 0}`)) {
-        this.announceRoomEdge(status.living);
+    const broadcastState = broadcastStateOf(status);
+    if (broadcastState === 'unknown') return;
+    const previousBroadcastState = this.lastKnownBroadcastState;
+    this.lastKnownBroadcastState = broadcastState;
+    if (broadcastState === 'replay') {
+      if (previousBroadcastState !== null && previousBroadcastState !== 'replay') {
+        this.pushNotice({
+          kind: 'event',
+          type: 'bilibili.room',
+          trigger: 'debounce',
+          text: '[直播间] 平台确认正在轮播。',
+          meta: { broadcastState, via: 'poll' },
+        });
       }
+      return;
     }
-    if (status.living) {
-      this.admission.startStream({ roomId, liveStartedAt: status.liveStartedAt });
-    } else if (status.realRoomId !== null) {
+    const living = broadcastState === 'live';
+    const prev = this.lastKnownLiving;
+    this.lastKnownLiving = living;
+    if (prev !== null && prev !== living && this.markRoomEdge(living, `接口 live_status=${living ? 1 : 0}`)) {
+      this.announceRoomEdge(living);
+    }
+    if (living) {
+      this.admission.startStream({ roomId: status.realRoomId, liveStartedAt: status.liveStartedAt });
+    } else {
       this.admission.endStream();
     }
   }
@@ -1526,6 +1552,10 @@ function audienceParticipantDetails(
       reasons: participant.reasons,
     };
   });
+}
+
+function broadcastStateOf(status: LiveStatus | null): RoomBroadcastState {
+  return status?.broadcastState ?? (status?.living ? 'live' : status?.realRoomId ? 'offline' : 'unknown');
 }
 
 function criticalAudienceEvent(item: LiveEvent): boolean {

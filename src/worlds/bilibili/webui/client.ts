@@ -27,6 +27,7 @@ interface BilibiliLiveStatus {
   realRoomId: number | null;
   title: string | null;
   living: boolean;
+  broadcastState?: 'live' | 'offline' | 'replay' | 'unknown';
   /** 登录凭证对应的自己的 uid;匿名接入时为 0 */
   selfUid: number;
   lastError: string | null;
@@ -97,6 +98,7 @@ const logPanel: WebUiPanel = {
 
     const drawInfo = (st: BilibiliLogState): void => {
       const s = st.status;
+      const broadcastState = s?.broadcastState ?? (s?.living ? 'live' : s?.realRoomId ? 'offline' : 'unknown');
       const room = s?.realRoomId
         ? s.roomId && s.roomId !== s.realRoomId ? T.roomWithShort(s.realRoomId, s.roomId) : String(s.realRoomId)
         : s?.roomId
@@ -106,7 +108,7 @@ const logPanel: WebUiPanel = {
         { k: T.kFeed, v: T.phase[s?.phase ?? 'stopped'] ?? s?.phase ?? T.phase.stopped },
         { k: T.kRoom, v: room },
         { k: T.kTitle, v: s?.title || '—' },
-        { k: T.kLive, v: ui.pill(s?.living ? T.live : T.offline, s?.living ? 'on' : 'off') },
+        { k: T.kLive, v: ui.pill(T[broadcastState], broadcastState === 'live' ? 'on' : broadcastState === 'offline' ? 'off' : 'plain') },
         {
           k: T.kIdentity,
           v: st.desensitized
