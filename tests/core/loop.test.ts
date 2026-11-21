@@ -1,6 +1,6 @@
 import { FixtureHandoffResult as ContextHandoffResult } from './fixture-protocol.ts';
 import { createResponse, type StreamEvent, type FunctionCall } from '../../src/protocol/open-responses/index.ts';
-import { unknownMeters, type ProviderAttempt } from '../../src/core/generation.ts';
+import { GenerationError, unknownMeters, type GenerateOptions, type ProviderAttempt } from '../../src/core/generation.ts';
 import { FixtureStream, FixtureTap as OutputTap } from './fixture-protocol.ts';
 import type { ResponseClient } from '../../src/core/generation.ts';
 import type { Request } from '../../src/protocol/open-responses/index.ts';
@@ -57,7 +57,7 @@ interface RigOptions {
   /** 对模型隐藏但仍挂载运行的 World id。 */
   hiddenWorlds?: string[];
   /** 时机钩子,直接装到假Persona上 */
-  hooks?: Pick<Persona, 'onTurnEnded' | 'onIdle' | 'onStallsRecovered' | 'onDelivery'>;
+  hooks?: Pick<Persona, 'onTurnEnded' | 'onIdle' | 'onStallsRecovered' | 'onDelivery' | 'onToolGenerationRejected'>;
   /** 记录 schedule_wake 对 timers 原语的调用。 */
   onTimerSet?: (atIso: string, payload: Record<string, unknown>) => void;
   /** fork 工具的执行函数。 */
@@ -246,6 +246,73 @@ describe('MainLoop standard Response execution', () => {
     meters: { ...unknownMeters(), input: 10, output: 2, total: 12 },
   });
 
+  it('repairs a generated tool rejection once without replaying an earlier action or retaining the hint', async () => {
+    const act = vi.fn(() => 'original receipt');
+    const ended = vi.fn<NonNullable<Persona['onTurnEnded']>>();
+    const repair = vi.fn(() => 'Open the catalog entry for fixture_later.');
+    const requests: { input: Request['input']; context: GenerateOptions['context']; enabled: boolean }[] = [];
+    const rig = makeRig({ silent: true, worlds: [makeFakeIO('test', [makeTool('act', act)])],
+      hooks: { onTurnEnded: ended, onToolGenerationRejected: repair } });
+    rig.llm.respond = async (request, options) => {
+      const n = requests.push({ input: request.input, context: options?.context, enabled: options?.toolGenerationRecovery === true });
+      const response = createResponse(`response_${n}`, request);
+      if (n === 2 || n === 3) {
+        response.status = 'failed';
+        response.error = { code: 'server_error', message: 'Generated call was rejected. Tool diagnostics ' + JSON.stringify({
+          origin: 'generated_output', kind: 'undeclared', tool_name: 'fixture_later', request_id: 'upstream-only',
+        }) };
+        throw new GenerationError(response.error.message, [], response, origin);
+      }
+      response.status = 'completed';
+      if (n === 1) response.output = [{ type: 'function_call', id: 'item_act', call_id: 'call_act', name: 'act',
+        arguments: '{}', status: 'completed' }];
+      return { response, origin, attempts: [attempt(response.id)] };
+    };
+    try {
+      rig.start(); rig.pushEvent('carry out the request');
+      await until(() => ended.mock.calls.length === 1);
+      expect(ended.mock.calls[0]).toEqual([{ kind: 'failed' }]);
+      expect(requests).toHaveLength(3);
+      expect(act).toHaveBeenCalledTimes(1);
+      expect(repair.mock.calls).toEqual([[{ kind: 'undeclared', toolName: 'fixture_later' }]]);
+      expect(requests[2].context?.at(-1)).toMatchObject({
+        item: { role: 'developer' }, context: { ephemeral: true, toolGenerationRepair: true },
+      });
+      expect(JSON.stringify(requests[2].input)).toContain('Open the catalog entry');
+      expect(JSON.stringify(requests[2].input)).toContain('original receipt');
+      expect(JSON.stringify(requests[2].input)).not.toContain('upstream-only');
+      expect(requests.every(entry => entry.enabled)).toBe(true);
+      expect(JSON.stringify(rig.session.records)).not.toContain('Open the catalog entry');
+      rig.pushEvent('a different request');
+      await until(() => ended.mock.calls.length === 2);
+      expect(requests).toHaveLength(4);
+      expect(JSON.stringify(requests[3].input)).not.toContain('Open the catalog entry');
+    } finally { await rig.cleanup(); }
+  });
+
+  it.each(['generated_output', 'request_validation'])('resubmits an HTTP body only when recovery changes the request (%s)', async diagnosticOrigin => {
+    const ended = vi.fn<NonNullable<Persona['onTurnEnded']>>();
+    const rig = makeRig({ silent: true, hooks: { onTurnEnded: ended } });
+    let requests = 0;
+    rig.llm.respond = async request => {
+      const response = createResponse('fallback', request);
+      if (++requests === 1) {
+        const body = JSON.stringify({ error: { code: 'server_error', message: 'Tool diagnostics ' + JSON.stringify({
+          origin: diagnosticOrigin, kind: 'arguments_schema', tool_name: 'act',
+        }) } });
+        throw new GenerationError('rejected', [], null, origin, 500, body);
+      }
+      response.status = 'completed';
+      return { response, origin, attempts: [attempt(response.id)] };
+    };
+    try {
+      rig.start(); rig.pushEvent('go');
+      await until(() => ended.mock.calls.length === 1);
+      expect(requests).toBe(diagnosticOrigin === 'generated_output' ? 1 : 2);
+      expect(ended.mock.calls[0][0].kind).toBe(diagnosticOrigin === 'generated_output' ? 'failed' : 'completed');
+    } finally { await rig.cleanup(); }
+  });
+
   it.each([
     ['incomplete', 'max_output_tokens', true],
     ['incomplete', null, false],
@@ -268,14 +335,15 @@ describe('MainLoop standard Response execution', () => {
       rig.start(); rig.pushEvent('go');
       await until(() => ended.mock.calls.length === 1);
       expect(worldEnded.mock.calls).toEqual(ended.mock.calls);
-      const context = ended.mock.calls[0][0];
+      expect(ended.mock.calls[0]).toHaveLength(1);
+      const [context] = ended.mock.calls[0];
       const rounds = emitted.mock.calls.map(([, , event]) => event).filter(event => event?.event === 'round');
       expect(rounds).toHaveLength(1);
       expect(rounds[0]?.data).toMatchObject({ outcome: status });
       if (status === 'incomplete') {
         expect(context).toEqual({ kind: 'response-incomplete', responseId: 'r_without_calls', incompleteReason: reason });
       } else {
-        expect(context).toBeUndefined();
+        expect(context).toEqual({ kind: 'completed' });
       }
       if (partial) expect(rig.session.records.find(entry => entry.context.responseId === 'r_without_calls')?.context)
         .toMatchObject({ responseStatus: status, incompleteReason: reason });
@@ -304,7 +372,7 @@ describe('MainLoop standard Response execution', () => {
       expect(act).toHaveBeenCalledTimes(1);
       expect(rig.session.records.find(entry => entry.item.type === 'function_call_output' && entry.item.call_id === 'one_call')).toBeDefined();
       expect(rig.session.records.find(entry => entry.context.responseId === 'r_with_call')?.context.incompleteReason).toBe('max_output_tokens');
-      expect(ended.mock.calls[0][0]).toBeUndefined();
+      expect(ended.mock.calls[0]).toEqual([{ kind: 'completed' }]);
     } finally { await rig.cleanup(); }
   });
 
@@ -366,7 +434,9 @@ describe('MainLoop standard Response execution', () => {
   it('rejects late events and output after preempt while retaining the consumed attempt', async () => {
     const usage: UsageRecord[] = [];
     const seen: string[] = [];
-    const rig = makeRig({ silent: true, tracker: new SessionTracker('UTC', row => usage.push(row)), outputTap: { onDelta: delta => seen.push(delta.type) } });
+    const ended: TurnEndedContext[] = [];
+    const rig = makeRig({ silent: true, tracker: new SessionTracker('UTC', row => usage.push(row)),
+      outputTap: { onDelta: delta => seen.push(delta.type) }, hooks: { onTurnEnded: context => { ended.push(context); } } });
     let started = false;
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
@@ -390,6 +460,7 @@ describe('MainLoop standard Response execution', () => {
       expect(seen).toEqual([]);
       expect(rig.session.records.some(entry => entry.context.responseId === 'late')).toBe(false);
       expect(usage[0].attempt).toMatchObject({ outcome: 'discarded', meters: { input: 10, output: 2 } });
+      expect(ended).toEqual([{ kind: 'preempted' }]);
     } finally { release(); await rig.cleanup(); }
   });
 });
@@ -2049,7 +2120,9 @@ describe('MainLoop user事件协议', () => {
 
   it('上游拒绝"输入超过上下文":本批结束即交接,不等下一次计数', async () => {
     let handoffs = 0;
+    const ended: TurnEndedContext[] = [];
     rig = makeRig({
+      hooks: { onTurnEnded: context => { ended.push(context); } },
       context: { contextOverflow: (error) => error.status === 400 && /context length/.test(error.body) },
       onHandoff: async () => { handoffs++; return { tail: [] }; },
     });
@@ -2059,6 +2132,7 @@ describe('MainLoop user事件协议', () => {
       rig.llm.throwNext = new LLMError('LLM API 400', 400, "This model's maximum context length is 128000 tokens");
       rig.pushEvent('[10:05] 阿明: 在吗');
       await until(() => handoffs >= 1);
+      expect(ended.filter(context => context.kind === 'overflow')).toHaveLength(1);
       // 普通 400 不触发
       rig.llm.throwNext = new LLMError('LLM API 400', 400, 'Model Not Exist');
       rig.pushEvent('[10:06] 阿明: 还在吗');
@@ -2165,51 +2239,64 @@ describe('MainLoop user事件协议', () => {
     expect(ended).toBe(2);
   });
 
-  it('reports a hard cap after persisting the last receipts, without scheduling another wake', async () => {
+  it('lets a Persona read the last receipt on hard-cap and wake once without replaying the tool', async () => {
     const ended: TurnEndedContext[] = [];
     const visible: TurnEndedContext[] = [];
-    const world = makeFakeIO('qq', [makeTool('noop', 'ok')]);
-    world.onTurnEnded = (_, context) => { if (context) visible.push(context); };
-    rig = makeRig({ worlds: [world], cfgPatch: cfg => { cfg.loop.hardCap = 2; },
-      hooks: { onTurnEnded: (_, context) => { if (context) ended.push(context); } } });
-    rig.start(); await until(() => ended.length === 1);
-    expect(ended[0]).toMatchObject({ reason: 'completed', rounds: 1 });
-    rig.llm.script(toolReply([{ name: 'noop', id: 'cap-1' }]), toolReply([{ name: 'noop', id: 'cap-2' }]));
-    rig.pushEvent('Review the result.'); await until(() => ended.length === 2);
-    expect(ended[1]).toMatchObject({ sessionId: 'main', reason: 'hard-cap', round: 3, rounds: 2 });
+    const lookup = vi.fn(() => 'No matching entry');
+    const world = makeFakeIO('qq', [makeTool('lookup', lookup)]);
+    world.onTurnEnded = context => { visible.push(context); };
+    rig = makeRig({
+      silent: true, worlds: [world], cfgPatch: cfg => { cfg.loop.hardCap = 1; },
+      hooks: { onTurnEnded(context) {
+        ended.push(context);
+        if (context.kind === 'hard-cap') {
+          const receipt = rig.session.messages.at(-1);
+          if (receipt?.tool_call_id) rig.loop.injectInternal(`Review receipt ${receipt.tool_call_id}.`);
+        }
+      } },
+    });
+    rig.llm.script(toolReply([{ name: 'lookup', id: 'last-lookup' }]), textReply('Read the result.'));
+    rig.start(); rig.pushEvent('Look up the entry.');
+    await until(() => ended.length === 2);
+    expect(ended).toEqual([{ kind: 'hard-cap' }, { kind: 'completed' }]);
     expect(visible).toEqual(ended);
-    expect(rig.session.messages.at(-1)?.tool_call_id).toBe('cap-2');
-    await sleep(100); expect(rig.llm.calls).toHaveLength(3);
+    const followUp = rig.llm.calls[1].messages;
+    expect(followUp).toContainEqual(expect.objectContaining({ tool_call_id: 'last-lookup', content: 'No matching entry' }));
+    expect(JSON.stringify(followUp)).toContain('Review receipt last-lookup.');
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(rig.llm.calls).toHaveLength(2);
   });
 
   it('reports an explicit end-turn separately when it executes on the last budgeted round', async () => {
     const ended: TurnEndedContext[] = [];
     const endTool: ToolDef = { ...makeTool('finish', 'Done.'), endsTurn: true };
     rig = makeRig({ worlds: [makeFakeIO('qq', [endTool])], cfgPatch: cfg => { cfg.loop.hardCap = 1; },
-      hooks: { onTurnEnded: (_, context) => { if (context) ended.push(context); } } });
+      hooks: { onTurnEnded: context => { ended.push(context); } } });
     rig.start(); await until(() => ended.length === 1);
     rig.llm.script(toolReply([{ name: 'finish', id: 'explicit-end' }])); rig.pushEvent('Decide whether to stop.');
     await until(() => ended.length === 2);
-    expect(ended[1]).toMatchObject({ reason: 'ended', rounds: 1 });
+    expect(ended[1]).toEqual({ kind: 'ended' });
     await sleep(100); expect(rig.llm.calls).toHaveLength(2);
   });
 
   it('reports a model error separately when it exhausts the last round', async () => {
     const ended: TurnEndedContext[] = [];
     rig = makeRig({ cfgPatch: cfg => { cfg.loop.hardCap = 1; },
-      hooks: { onTurnEnded: (_, context) => { if (context) ended.push(context); } } });
+      hooks: { onTurnEnded: context => { ended.push(context); } } });
     rig.start(); await until(() => ended.length === 1);
     rig.llm.throwNext = new LLMError('fixture model failure', 503, 'Temporarily unavailable'); rig.pushEvent('New input.');
     await until(() => ended.length === 2);
-    expect(ended[1]).toMatchObject({ reason: 'model-error', rounds: 1 });
+    expect(ended[1]).toEqual({ kind: 'failed' });
   });
 
   it('clearSession只保留system，随后boot以user消息重开且仍可继续', async () => {
-    rig = makeRig();
+    const ended: TurnEndedContext[] = [];
+    rig = makeRig({ hooks: { onTurnEnded: context => { ended.push(context); } } });
     rig.start();
     await until(() => rig.llm.calls.length >= 1);
     expect(JSON.stringify(rig.session.messages)).toContain('Session started.');
     await rig.loop.clearSession();
+    expect(ended.filter(context => context.kind === 'cleared')).toHaveLength(1);
     // 清空后的开场随即作为 user 消息投递,这里只断言旧内容一条不剩。
     expect(rig.session.messages[0].role).toBe('system');
     expect(JSON.stringify(rig.session.messages)).not.toContain('Session started.');
@@ -2280,6 +2367,38 @@ describe('MainLoop user事件协议', () => {
       (message) => message.role === 'user' && message.content.includes('new event arrived'),
     )).toBe(true);
     assertPairing(rig.session.messages);
+  });
+
+  it('reports a failed queued prefix change and processes the next event with the previous tool set', async () => {
+    const tools = [makeTool('before_reload', 'done')];
+    rig = makeRig({ worlds: [makeFakeIO('probe', tools, 'old prefix')] });
+    rig.start();
+    await until(() => rig.llm.calls.length > 0);
+    const old = rig.session.records[0];
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const originalChat = rig.llm.chat.bind(rig.llm);
+    rig.llm.chat = async (...args) => {
+      enter();
+      await gate;
+      return originalChat(...args);
+    };
+    rig.pushEvent('hold this boundary');
+    await entered;
+    tools.push(makeTool('after_reload', 'done'));
+    vi.spyOn(rig.session, 'replaceSystemPrefix').mockRejectedValueOnce(new Error('disk full'));
+    const failed = expect(rig.loop.reloadSystemPrefix()).rejects.toThrow('disk full');
+    release();
+    await failed;
+    expect(rig.session.records[0]).toBe(old);
+    expect(rig.loop.getToolSchemas().map(t => t.name)).not.toContain('after_reload');
+    const count = rig.llm.calls.length;
+    rig.pushEvent('new event after failure');
+    await until(() => rig.llm.calls.length > count);
+    await rig.loop.reloadSystemPrefix();
+    expect(rig.loop.getToolSchemas().map(t => t.name)).toContain('after_reload');
   });
 
   it('推理中清空 session 会排队到自然回合边界,半轮的回答不会落进新 session', async () => {

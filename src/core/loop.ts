@@ -1,7 +1,7 @@
 import { message, record, functionCall, functionResult, responseRecords, withText, type ContextRecord, type Item } from '../protocol/open-responses/context.ts';
 import { hasRole, textOf, withoutPastReasoning, responseRequest, usageCounters } from '../protocol/open-responses/context-helpers.ts';
 import type { StreamEvent } from '../protocol/open-responses/index.ts';
-import { GenerationError, type ResponseClient, type TokenMeters } from './generation.ts';
+import { GenerationError, toolGenerationRejection, type ResponseClient, type TokenMeters } from './generation.ts';
 /**
  * MainLoop 执行 receivesEvents=true 的常驻 session。
  * 内部文本进入 user 消息；外部正文按 eventDelivery 进入合成工具回执（默认）
@@ -472,7 +472,7 @@ export class MainLoop {
    * World 之间、与 Persona 声明的自有工具及保留帧重名时，装配层拒绝挂载。
    * Persona 未声明自有工具名时，此处保留先注册项并告警。
    */
-  private assembleTools(hiddenToolNames: Set<string>): void {
+  private assembleTools(hiddenToolNames: Set<string>): ToolDef[] {
     const { decl, log } = this.d;
     const defs: ToolDef[] = [];
     const seen = new Set<string>();
@@ -494,7 +494,7 @@ export class MainLoop {
       seen.add(def.name);
       defs.push(def);
     }
-    this.toolDefs = defs;
+    return defs;
   }
 
   /** 空 tags 只报告一次。 */
@@ -504,7 +504,7 @@ export class MainLoop {
    * 按当前可见性重建工具表并记录所用 World 集合；重启恢复前缀时也执行。
    * 先逐个读取 World 的 `tools()`,抛错的经 onWorldFailed 移出挂载表,Persona 组工具表时已看不到它。
    */
-  private bindWorlds(): { visible: World[]; failed: boolean } {
+  private bindWorlds(install: (apply: () => void) => void = apply => apply()): { visible: World[]; failed: boolean } {
     const { worlds } = this.d;
     const toolNames = new Map<World, string[]>();
     let failed = false;
@@ -524,10 +524,15 @@ export class MainLoop {
         .filter((m) => !visibleIds.has(m.id))
         .flatMap((m) => toolNames.get(m) ?? []),
     );
-    this.assembleTools(hiddenToolNames);
-    this.appliedVisibleWorlds = visibleIds;
-    this.appliedWorldTools = new Map(visible.map((m) => [m.id, (toolNames.get(m) ?? []).join(',')]));
-    this.worldToolOwners = new Map(visible.flatMap((m) => (toolNames.get(m) ?? []).map((name) => [name, m.id] as const)));
+    const defs = this.assembleTools(hiddenToolNames);
+    const signatures = new Map(visible.map((m) => [m.id, (toolNames.get(m) ?? []).join(',')]));
+    const owners = new Map(visible.flatMap((m) => (toolNames.get(m) ?? []).map((name) => [name, m.id] as const)));
+    install(() => {
+      this.toolDefs = defs;
+      this.appliedVisibleWorlds = visibleIds;
+      this.appliedWorldTools = signatures;
+      this.worldToolOwners = owners;
+    });
     return { visible, failed };
   }
 
@@ -535,15 +540,15 @@ export class MainLoop {
    * 组装 system 前缀,并在同一时刻换成匹配的工具表。两者同属请求缓存前缀,
    * 必须同步更新。环境段读取失败的 World 移出挂载表后重组工具表。
    */
-  private async buildSystem(): Promise<ContextRecord> {
+  private async buildSystem(install?: (apply: () => void) => void): Promise<ContextRecord> {
     const { persona, cfg, dirs, worlds } = this.d;
     const now = new Date();
-    let { visible } = this.bindWorlds();
+    let { visible } = this.bindWorlds(install);
     const { contexts, failed } = await collectWorldContexts(visible, dirs);
     // 等待期间已被卸载的 World 不再报失败
     const stillMounted = failed.filter(({ world }) => worlds.all().includes(world));
     for (const { world, detail } of stillMounted) this.d.onWorldFailed(world, detail);
-    if (stillMounted.length > 0) ({ visible } = this.bindWorlds());
+    if (stillMounted.length > 0) ({ visible } = this.bindWorlds(install));
     const bound = new Set(visible.map((m) => m.id));
     const segments = await persona.systemSegments({
       now,
@@ -610,20 +615,17 @@ export class MainLoop {
   }
 
   /** 一轮结束时先通知 Persona，再通知可见 World。 */
-  private finishTurn(end: Exclude<TurnEndedContext['reason'], 'response-incomplete'> | IncompleteTurnContext): void {
+  private finishTurn(context: TurnEndedContext): void {
     if (!this.activeNow()) return;
     const { persona, worlds, log } = this.d;
-    const context: TurnEndedContext = { sessionId: this.d.decl.id, round: this.roundSeq, rounds: this.roundsLastBatch,
-      ...(typeof end === 'string' ? { reason: end } : { reason: end.kind, responseId: end.responseId, incompleteReason: end.incompleteReason }) };
-    const incomplete = typeof end === 'string' ? undefined : end;
     try {
-      persona.onTurnEnded?.(incomplete, context);
+      persona.onTurnEnded?.(context);
     } catch (e) {
       log.warn('onTurnEnded钩子异常', { err: e });
     }
     for (const m of worlds.visible()) {
       try {
-        m.onTurnEnded?.(incomplete, context);
+        m.onTurnEnded?.(context);
       } catch (e) {
         log.warn('World 回合收束钩子异常', { id: m.id, err: e });
       }
@@ -1145,7 +1147,7 @@ export class MainLoop {
   }
 
   private async roundsInScope(generation: number): Promise<void> {
-    const { llm, session, log, bus, decl } = this.d;
+    const { llm, session, log, bus, decl, persona } = this.d;
     const schemas = this.getToolSchemas();
     const caps = decl.rounds();
     this.roundsLastBatch = 0;
@@ -1154,6 +1156,8 @@ export class MainLoop {
     const resubmit = this.d.resubmit ?? DEFAULT_RESUBMIT;
     let consecutiveFailures = 0;
     let resubmits = 0;
+    let repairContext: ContextRecord | undefined;
+    const repairedTools = new Set<string>();
 
     for (let round = 1; ; round++) {
       if (!this.active(generation)) return;
@@ -1177,7 +1181,7 @@ export class MainLoop {
         const hard = this.exceededHardLimit();
         if (hard !== null) {
           log.warn('计数越过模型上下文上限,本批在轮边界收束,批末交接', { round, estTokens: this.estTokens(), hardTokens: hard });
-          this.finishTurn('context-limit');
+          this.finishTurn({ kind: 'overflow' });
           return;
         }
       }
@@ -1217,13 +1221,14 @@ export class MainLoop {
        * preempt 或 interrupt 取消模型轮后，在同一批内接收新事件并开始下一轮；被取消的轮计入轮数。
        * 没有就绪事件或已到硬上限时结束本次唤醒，就绪事件留给下一批。
        */
-      const resumeAfterCancel = async (arrivedEarly: EventEnvelope[]): Promise<boolean> => {
+      const resumeAfterCancel = async (kind: 'preempted' | 'interrupted', arrivedEarly: EventEnvelope[]): Promise<boolean> => {
+        noteRound(kind);
         flight.phase = 'done';
         const ready = round < caps.hard ? bus.takeIfReady() : null;
         const arrived: WakeItem[] = [...arrivedEarly.map((event) => ({ event })), ...(ready ?? [])];
         if (!ready) {
           for (const item of arrived) bus.push(item, { trigger: 'flush' });
-          this.finishTurn('interrupted');
+          this.finishTurn({ kind });
           return false;
         }
         await this.deliverBatch(arrived, generation, round);
@@ -1254,6 +1259,10 @@ export class MainLoop {
       let incomplete: IncompleteTurnContext | undefined;
       let meters: TokenMeters | null = null;
       const outbound = this.outboundMessages();
+      if (repairContext) {
+        outbound.push(repairContext);
+        repairContext = undefined;
+      }
       const prefixHash = prefixFingerprint(outbound);
       const requestRecords = session.records.length;
       const requestRevision = this.contextRevision;
@@ -1265,6 +1274,7 @@ export class MainLoop {
         try {
           res = await llm.respond(responseRequest(spec, outbound, schemas), {
             context: outbound, nativeSpec: spec, onEvent,
+            ...(persona.onToolGenerationRejected ? { toolGenerationRecovery: true } : {}),
             onInputEstimate: tokens => {
               if (!acceptingEstimate || !this.active(generation) || this.currentRound !== flight
                 || flight.controller.signal.aborted || this.contextRevision !== requestRevision
@@ -1292,21 +1302,18 @@ export class MainLoop {
             await this.recordAbortedStream(assistant, eager, generation, NOT_EXECUTED_INTERRUPTED);
             if (!this.active(generation)) return;
             this.tapAbort(tap, ABORT_INTERRUPTED);
-            noteRound('interrupted');
-            if (await resumeAfterCancel(queuedEvents)) continue;
+            if (await resumeAfterCancel('interrupted', queuedEvents)) continue;
             return;
           }
           // 关机、换代或抢占丢弃已成功返回的结果时，仍记录这次调用的实际用量。
           this.mainTrack?.recordAttempts(res.attempts, undefined, { outcome: 'discarded', prefixHash });
           if (this.active(generation) && flight.abortReason === 'preempt') {
             this.tapAbort(tap, ABORT_PREEMPTED);
-            noteRound('preempted');
-            if (await resumeAfterCancel([])) continue;
+            if (await resumeAfterCancel('preempted', [])) continue;
             return;
           }
           this.tapAbort(tap, ABORT_SHUTDOWN);
           noteRound('discarded');
-          this.finishTurn('shutdown');
           return;
         }
         meters = res.attempts[res.attempts.length - 1].meters;
@@ -1321,7 +1328,6 @@ export class MainLoop {
             this.tapAbort(tap, ABORT_SHUTDOWN);
             log.info('模型轮随关机终止');
             noteRound('shutdown');
-            this.finishTurn('shutdown');
             return;
           }
           const interrupted = flight.abortReason === 'interrupt';
@@ -1332,8 +1338,7 @@ export class MainLoop {
           }
           this.tapAbort(tap, interrupted ? ABORT_INTERRUPTED : ABORT_PREEMPTED);
           log.info(interrupted ? '模型轮被新事件打断,已外化的输出保留' : '尚未外化的模型轮已被新输入抢占');
-          noteRound(interrupted ? 'interrupted' : 'preempted');
-          if (await resumeAfterCancel(queuedEvents)) continue;
+          if (await resumeAfterCancel(interrupted ? 'interrupted' : 'preempted', queuedEvents)) continue;
           return;
         }
         this.recordFailedUsage(e, prefixHash);
@@ -1351,12 +1356,13 @@ export class MainLoop {
         for (const event of queuedEvents) {
           bus.push({ event }, { trigger: 'flush' });
         }
+        const rejection = e instanceof GenerationError ? toolGenerationRejection(e) : null;
         // 上游报告输入超限时，不记入连续失败，结束本批后交接。
-        if (e instanceof GenerationError && this.d.context.contextOverflow(e)) {
+        if (!rejection && e instanceof GenerationError && this.d.context.contextOverflow(e)) {
           log.warn('上游拒绝:输入超过模型上下文,本批结束即交接', { estTokens: this.estTokens(), hardTokens: this.d.context.hardTokens() });
           this.handoffRequested = true;
           noteRound('overflow');
-          this.finishTurn('context-limit');
+          this.finishTurn({ kind: 'overflow' });
           return;
         }
         consecutiveFailures++;
@@ -1365,12 +1371,34 @@ export class MainLoop {
           // 4xx 正文截断后记录；流内失败保留协议层提供的失败事件。
           ...(e instanceof GenerationError && e.body ? { body: e.body.slice(0, 500) } : {}),
           ...(e instanceof GenerationError ? { status: e.status } : {}),
+          ...(rejection ? { toolGenerationRejection: rejection } : {}),
           attempt: consecutiveFailures,
         };
         this.noteStalled(detail);
-        // 按 ResubmitPolicy 重试，沿用已保存的部分输出与工具回执。
-        const retryable = e instanceof GenerationError && (e.status === 0 || e.status === 429 || e.status >= 500);
-        if (retryable && consecutiveFailures <= resubmit.maxConsecutive && resubmits < resubmit.maxPerBatch && round < caps.hard) {
+        const canResubmit = consecutiveFailures <= resubmit.maxConsecutive && resubmits < resubmit.maxPerBatch && round < caps.hard;
+        if (rejection && canResubmit) {
+          const key = `${rejection.kind}:${rejection.toolName}`;
+          if (!repairedTools.has(key)) {
+            repairedTools.add(key);
+            try {
+              const hint = persona.onToolGenerationRejected?.(rejection)?.trim();
+              if (hint && hint.length <= 4096)
+                repairContext = message('developer', hint, { ephemeral: true, toolGenerationRepair: true });
+            } catch (error) {
+              log.warn('onToolGenerationRejected钩子异常', { err: error });
+            }
+          }
+          if (repairContext) {
+            resubmits++;
+            log.warn('生成工具被拒绝，携带纠正信息重试', { ...detail, resubmits });
+            noteRound('failed', { resubmit: true, repair: 'tool-generation' });
+            this.takeReadyBeforeRequest = true;
+            continue;
+          }
+        }
+        // 传输错误可退避重试；生成内容被拒绝只在本次请求带有纠正时重试。
+        const retryable = !rejection && e instanceof GenerationError && (e.status === 0 || e.status === 429 || e.status >= 500);
+        if (retryable && canResubmit) {
           resubmits++;
           const delayMs = resubmit.backoffMs[Math.min(consecutiveFailures, resubmit.backoffMs.length) - 1] ?? 0;
           log.warn('LLM 调用失败，退避后在本批内重试', { ...detail, resubmits, delayMs });
@@ -1388,7 +1416,7 @@ export class MainLoop {
         }
         log.error('LLM调用失败,本轮自然结束', detail);
         noteRound('failed', { resubmit: false });
-        this.finishTurn('model-error');
+        this.finishTurn({ kind: 'failed' });
         return;
       } finally {
         if (flight.phase === 'model') flight.phase = 'tools';
@@ -1410,13 +1438,9 @@ export class MainLoop {
       }
 
       if (calls.length === 0) {
-        if (incomplete) {
-          noteRound('incomplete', { responseId: incomplete.responseId, incompleteReason: incomplete.incompleteReason });
-          this.finishTurn(incomplete);
-          return;
-        }
-        noteRound('completed');
-        this.finishTurn('completed');
+        if (incomplete) noteRound('incomplete', { responseId: incomplete.responseId, incompleteReason: incomplete.incompleteReason });
+        else noteRound('completed');
+        this.finishTurn(incomplete ?? { kind: 'completed' });
         return;
       }
 
@@ -1518,13 +1542,13 @@ export class MainLoop {
       // endsTurn 与自然结束使用同一出口；事件已退回总线。
       if (turnEnded) {
         noteRound('ended', { toolCalls: calls.length, arrived: arrived.length });
-        this.finishTurn('ended');
+        this.finishTurn({ kind: 'ended' });
         return;
       }
       if (round >= caps.hard) {
         log.warn('硬上限强制结束本次唤醒', { round });
         noteRound('hard-cap', { toolCalls: calls.length, arrived: arrived.length });
-        this.finishTurn('hard-cap');
+        this.finishTurn({ kind: 'hard-cap' });
         return;
       }
       noteRound('continue', { toolCalls: calls.length, arrived: arrived.length });
@@ -1818,7 +1842,7 @@ export class MainLoop {
     if (!this.active(generation)) return;
     session.reset([sysMsg]);
     this.d.transcript?.boundary('clear', {});
-    this.finishTurn('cleared');
+    this.finishTurn({ kind: 'cleared' });
     this.pushOpening('cleared');
     log.emit('warn', 'session已清空重开', { event: 'session-cleared' });
   }
@@ -1856,20 +1880,28 @@ export class MainLoop {
   private async flushBoundaryMaintenance(): Promise<boolean> {
     if (this.releaseAtBoundary.length === 0) return false;
     this.releaseBoundary();
-    await Promise.all([this.prefixReloadPromise, this.clearSessionPromise]);
+    // The caller observes the failed refresh. Retained data and tool bindings can serve the next batch.
+    await Promise.all([this.prefixReloadPromise?.catch(error => {
+      this.d.log.error('系统前缀重载失败，保留当前前缀继续处理事件', { err: error });
+    }), this.clearSessionPromise]);
     return true;
   }
 
   private async performSystemPrefixReload(generation: number): Promise<void> {
     const { session, log } = this.d;
-    const sysMsg = await this.buildSystem();
+    const started = performance.now();
+    let applyTools: (() => void) | undefined;
+    const sysMsg = await this.buildSystem(apply => { applyTools = apply; });
+    const built = performance.now();
     if (!this.active(generation)) return;
-    const snapshot = [...session.records];
-    let tailStart = 0;
-    while (tailStart < snapshot.length && hasRole(snapshot[tailStart], 'system')) tailStart++;
-    session.reset([sysMsg, ...snapshot.slice(tailStart)]);
-    this.d.transcript?.boundary('prefix-reload', { keptMessages: snapshot.length - tailStart });
-    log.emit('warn', '当前session系统前缀已重载', { event: 'prefix-reload', data: { keptMessages: snapshot.length - tailStart } });
+    const keptMessages = await session.replaceSystemPrefix(sysMsg, () => this.active(generation), applyTools);
+    if (keptMessages === null || !this.active(generation)) return;
+    this.d.transcript?.boundary('prefix-reload', { keptMessages });
+    const ended = performance.now();
+    log.emit('warn', '当前session系统前缀已重载', { event: 'prefix-reload', data: {
+      keptMessages, buildSystemMs: Math.round(built - started),
+      persistAndNotifyMs: Math.round(ended - built), totalMs: Math.round(ended - started),
+    } });
   }
 
   /** 每次已发出的 HTTP 尝试均记账；未报告的 token 维度保留为未知。 */

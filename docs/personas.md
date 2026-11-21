@@ -23,21 +23,18 @@ Core 在生命周期节点调用 Persona 钩子。Persona 通过钩子返回值�
 
 可选时机钩子:`onOpening({ reason })`(session 开场)、`onDelivery({ events })`(一批唤醒项投递刻;
 可返回 Promise,Core 等它完成再投递，完成前 `injectInternal` 的项加入本批)、`onBatchEnd()`(一批处理结束,可执行上下文容量策略)、
-`onTurnEnded(context?)`(一轮因回复截断而结束时，带一个说明原因的参数 `IncompleteTurnContext`)、`onIdle()`、`onStallsRecovered()`(回一句措辞或 null)、
+`onTurnEnded(context)`(主循环结束本次唤醒，见[结束原因](../src/core/README.md#主循环))、`onIdle()`、`onStallsRecovered()`(回一句措辞或 null)、
 `onWorldLifecycle(event)`、`sessionHead()`(合成开头:置于 system 之后、持久历史之前的 item 列表,每次请求现取,不落盘)、
 `onHandoff(snapshot, { hardTokens })`(回 `{ tail, trim? }`)、`promptVarValues(ctx)`、
 `ownToolNames()`(自有工具名,装配层据此拒绝工具名冲突的 World,并在 `createBot()` 时对照 `BotDefinition.describe.tools`,
 不在其中的名字记一条 warn、在 Persona 页列出;未提供时仅告警并保留先注册的工具,也不做这项对照)、
 `cognition`(处理 World 的后台认知请求)、`webUi()`(Persona 页的声明;其中 `memory` 子声明是
 Memory 页的面板、模板与存储项)。
+遇到供应商报告工具生成被拒绝时，`onToolGenerationRejected(failure)` 可为下一次请求提供临时纠正文本。
+同一批内，相同的工具与拒绝类型只有一次纠正机会。纠正文本随该次请求发送，不进入会话历史。
 Persona 页的标题取 Persona 的类名;Memory 页的标题先取 `BotDefinition.memoryName`,
 没给就取 `Persona.memory` 的类名,两者都没有时是 `Memory`。
 钩子的异常处理方式见 [Core 文档](../src/core/README.md)。
-
-`onTurnEnded(context?, outcome?)` 的第二个可选参数 `TurnEndedContext` 给出 session id、循环内累计轮号、本批轮数及结束原因。
-`completed` 是无工具响应，`ended` 是已执行 `endsTurn` 工具，`hard-cap` 是工具回执写入后达到轮数上限；
-其余原因为 `context-limit`、`model-error`、`interrupted`、`shutdown`、`cleared`。
-钩子本身不安排新唤醒；Persona 可通过已有计时器和事件接口决定后续。旧宿主可能不传参数，无参数实现仍兼容。
 
 工具不在 Persona 上,在每个 `SessionDecl.tools()` 里;`end_turn`、`save_blob` 这类是 bot 侧的
 Persona 工具,Core 只认 `ToolDef.endsTurn`。仓内 bot 的 Persona 工具声明是模块常量(`CORMINI_TOOL_DECLS` 等),
