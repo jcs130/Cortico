@@ -82,7 +82,7 @@ World 每 2 秒轮询登录状态，成功后取响应 `Set-Cookie` 里的 SESSD
 | `bilibili.interaction` | debounce | 关注或分享，按平台类型区分 |
 | `bilibili.enter-guard` | debounce | 平台进场特效 |
 | `bilibili.block` | debounce | 观众被禁言 |
-| `bilibili.room` | flush / debounce | 开播、下播、全员禁言走 flush;标题变更 debounce |
+| `bilibili.room` | flush / debounce | 开播、下播和房间弹幕限制走 flush，轮播和房间资料更新走 debounce |
 | `bilibili.feed` | flush / debounce | 弹幕接入中断超过 60 秒成文一次(flush),恢复时补一条带中断时长(debounce);60 秒内的抖动不推 |
 | `bilibili.warning` | flush | 超管警告与切断；World 仅投递事件 |
 | `bilibili.superchat-del` | piggyback | |
@@ -91,6 +91,9 @@ World 每 2 秒轮询登录状态，成功后取响应 `Set-Cookie` 里的 SESSD
 开播和下播的 `bilibili.room` 事件携带 `meta.liveRoomState`，其中 `schemaVersion: 1`、
 `living` 为布尔值、`via` 为 `websocket` 或 `poll`。初次轮询仅建立基线。
 双来源重复通知归并后保留先投递事件的来源，标题、禁言和弹幕没有该字段。
+接入面板分别显示网络连接状态和房间的直播、未开播、轮播或未知状态。轮询的
+`live_status` 为 0、1 或 2 时分别表示未开播、直播和轮播。轮播通知使用
+`meta.broadcastState: 'replay'`，未知读数仅呈现在诊断状态中。
 
 进场、点赞和免费礼物累计次数；看过、在线、人气与粉丝数记录接收时的读数。它们在 World 内累积，经 `pushDeferred` 随下一批事件投递，并在渲染正文后清零。待投递期间不重复登记；超过 5 分钟未渲染时允许重新登记。
 

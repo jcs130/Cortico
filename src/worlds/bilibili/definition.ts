@@ -100,8 +100,8 @@ export const BILIBILI: WorldDefinition<BilibiliConfigSection> = {
       {
         type: 'bilibili.room',
         description: {
-          zh: '开播、下播、标题或分区更新、房间弹幕限制开关。开播和下播附带 meta.liveRoomState，弹幕限制附带 meta.roomChatRestriction。',
-          en: 'The stream went live or offline, room details were updated, or a room chat restriction changed. Live status uses meta.liveRoomState and chat restrictions use meta.roomChatRestriction.',
+          zh: '开播、下播、轮播、房间资料或弹幕限制更新。开播和下播附带 meta.liveRoomState，轮播附带 meta.broadcastState，弹幕限制附带 meta.roomChatRestriction。',
+          en: 'The stream went live, went offline or entered replay, or room details or chat restrictions changed. Live and offline use meta.liveRoomState, replay uses meta.broadcastState, and chat restrictions use meta.roomChatRestriction.',
         },
       },
       {
