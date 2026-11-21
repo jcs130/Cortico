@@ -21,4 +21,6 @@
 
 ## 旧主干迁移
 
+从旧版整包文档进入的部署，按[个人 fork 部署迁移](bundled-deployment.md)确认新版安装和数据衔接。
+
 旧主干还包含从仓库拆出去的千灯纪、演出和可视化代码，以及旧 Terminal World。独立扩展以各自仓库为准，旧 Terminal 的迁移见 [升级指南](upgrading.md)。仍随官方发版的内置 Bot 和 Minecraft World 逐项检查旧差异及当前消费者。默认分支迁移前，用保留双方历史的合并提交整合并验证。用 `git merge-base --is-ancestor` 确认旧主干和新基线均在提交历史中，用 `git diff <已验证候选> HEAD` 核对最终源码。
