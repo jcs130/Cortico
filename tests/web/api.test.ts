@@ -449,7 +449,7 @@ describe('/api/events on disk', () => {
     }
     const disk = new JsonlEventStore({ dataDir: dir, run: 'r-20260101-000100-bbbb' });
     const sync = vi.spyOn(disk, 'range');
-    const web = new WebApp({ store: disk, dataDir: dir, log: nullLogger(), getStatus: () => ({ run: 'ready' }) });
+    const web = new WebApp({ store: disk, dataDir: dir, memoryDir: dir, log: nullLogger(), getStatus: () => ({ run: 'ready' }) });
     const controller = new AbortController();
     try {
       const address = `http://127.0.0.1:${await web.start(0)}`;
@@ -463,24 +463,25 @@ describe('/api/events on disk', () => {
       expect(archiveTail.events.map((e: { cursor: number }) => e.cursor)).toEqual([6, 8]);
       expect(sync).not.toHaveBeenCalled();
 
-      const entered = Promise.withResolvers<void>();
-      const cancelled = Promise.withResolvers<void>();
+      let entered!: () => void, cancelled!: () => void;
+      const enteredScan = new Promise<void>(resolve => { entered = resolve; });
+      const cancelledScan = new Promise<void>(resolve => { cancelled = resolve; });
       vi.spyOn(disk, 'rangeAsync').mockImplementationOnce(async (_query, signal) => {
-        entered.resolve();
+        entered();
         return new Promise((_resolve, reject) => {
           signal?.addEventListener('abort', () => {
-            cancelled.resolve();
+            cancelled();
             reject(signal.reason);
           }, { once: true });
         });
       });
       const pending = fetch(address + '/api/events?source=terminal&archive=1&limit=2', { signal: controller.signal })
         .catch(error => error);
-      await entered.promise;
+      await enteredScan;
       expect(await getJson(address + '/api/status')).toMatchObject({ run: 'ready' });
       controller.abort();
       expect((await pending).name).toBe('AbortError');
-      await cancelled.promise;
+      await cancelledScan;
       expect((await getJson(address + '/api/events?limit=1')).events[0].cursor).toBe(9);
     } finally {
       controller.abort();
