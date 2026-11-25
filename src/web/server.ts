@@ -645,8 +645,8 @@ export interface WebAppConfigDeps {
  * 框架级 WebUI 契约。bot 专用的控制面由 WebUI 页(WebUI Page)提供。
  */
 export interface WebUiSurface {
-  /** 事件流(只读) */
-  store: EventStoreReader;
+  /** 事件流(只读)。rangeAsync 与 range 结果相同，读历史时让出事件循环。 */
+  store: EventStoreReader & { rangeAsync(q: EventRangeQuery): Promise<EventEnvelope[]> };
   /** persona/工作区绝对路径(工作区浏览) */
   memoryDir: string;
   /** data/目录绝对路径(runlog.jsonl / session-main.jsonl所在) */
@@ -1746,14 +1746,14 @@ export class WebApp {
           const visible = store.rangeFromStartAsync
             ? await store.rangeFromStartAsync({ ...q, limit: limit + 1 },
                 { signal: controller.signal, excludeArchiveOnly: !withArchive })
-            : withArchive ? store.range(q) : dropArchiveOnly(store.range(q));
+            : dropArchiveOnly(await store.rangeAsync(q, controller.signal)).slice(0, limit + 1);
           if (!controller.signal.aborted)
             res.json({ latest, events: visible.slice(0, limit), hasMore: visible.length > limit });
           return;
         }
         // 保持普通尾页多取一截再过滤的展示口径。
         q.limit = withArchive ? limit : clamp(limit * 2, 1, 2000);
-        const rows = store.rangeAsync ? await store.rangeAsync(q, controller.signal) : store.range(q);
+        const rows = await store.rangeAsync(q, controller.signal);
         if (!controller.signal.aborted)
           res.json({ latest, events: withArchive ? rows : dropArchiveOnly(rows).slice(-limit) });
       } catch (error) {

@@ -18,6 +18,7 @@ import {
 import type { LiveStatus } from '../../../src/worlds/bilibili/client.ts';
 import { cloneOverlayConfig } from '../../../src/worlds/bilibili/overlay/model.ts';
 import { PB_SMALL } from './gift-v2-frames.ts';
+import { ENTRY_INTERACTION_V2 } from './interaction-frames.ts';
 import { nullLogger } from '../../../src/core/util.ts';
 
 type DeferredPush = {
@@ -189,6 +190,8 @@ const STATUS: LiveStatus = {
   realRoomId: 7734200,
   title: '测试间',
   living: true,
+  broadcastState: 'live',
+  livingVia: 'room-info',
   liveStartedAt: null,
   selfUid: 1039523363,
   lastError: null,
@@ -207,6 +210,7 @@ interface Mounted {
 async function mount(
   opts: Partial<BilibiliWorldOptions> = {},
   host: FakeHost = new FakeHost(),
+  initial: LiveStatus = STATUS,
 ): Promise<Mounted> {
   let handlers: LiveHandlers | null = null;
   const module = new BilibiliWorld({
@@ -215,9 +219,9 @@ async function mount(
     source: (h) => {
       handlers = h;
       return {
-        start: async () => h.onStatus(STATUS),
+        start: async () => h.onStatus(initial),
         stop: async () => {},
-        current: () => STATUS,
+        current: () => initial,
       };
     },
   });
@@ -259,14 +263,19 @@ describe('BilibiliWorld', () => {
   });
 
   it.each([
-    ['INTERACT_WORD', false],
-    ['INTERACT_WORD_V2', true],
-  ] as const)('coalesces %s with the matching effect and keeps both archived signals', async (cmd, reversed) => {
+    { cmd: 'INTERACT_WORD', reversed: false, privilegeType: 0, effectType: 'bilibili.entry' },
+    { cmd: 'INTERACT_WORD', reversed: false, privilegeType: 3, effectType: 'bilibili.enter-guard' },
+    { cmd: 'INTERACT_WORD_V2', reversed: true, privilegeType: 0, effectType: 'bilibili.entry' },
+    { cmd: 'INTERACT_WORD_V2', reversed: true, privilegeType: 3, effectType: 'bilibili.enter-guard' },
+  ] as const)('coalesces $cmd with $effectType and keeps both archived signals', async ({ cmd, reversed, privilegeType, effectType }) => {
     const host = new BatchCandidateHost();
     const { module, feed } = await mount({}, host);
     const timestamp = 1_700_000_000;
     const triggerTime = timestamp * 1e9;
-    const effect = { cmd: 'ENTRY_EFFECT', data: { uid: 7, copy_writing: '欢迎 <%旧昵称%>', trigger_time: triggerTime } };
+    const effect = {
+      cmd: 'ENTRY_EFFECT',
+      data: { uid: 7, copy_writing: '欢迎 <%旧昵称%>', trigger_time: triggerTime, privilege_type: privilegeType },
+    };
     const interaction = cmd === 'INTERACT_WORD'
       ? { cmd, data: { uid: 7, uname: 'Yuko', msg_type: 1, timestamp, trigger_time: triggerTime } }
       : { cmd, data: { pb: Buffer.from([8, 7, 18, 4, 89, 117, 107, 111, 40, 1, 56, 128, 226, 207, 170, 6]).toString('base64') } };
@@ -281,14 +290,19 @@ describe('BilibiliWorld', () => {
       meta: { uname: 'Yuko', sourceCommand: cmd, sourceCursors: [1, 2] },
     });
     expect(host.events[0].meta?.arrivalSignalTypes)
-      .toEqual(expect.arrayContaining(['bilibili.enter', 'bilibili.enter-guard']));
+      .toEqual(expect.arrayContaining(['bilibili.enter', effectType]));
     expect(host.archivedEvents).toHaveLength(2);
     expect(host.archivedEvents).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        type: 'bilibili.enter-guard',
+        type: effectType,
         contextDelivery: 'archive-only',
         text: '[进场] 欢迎 旧昵称',
-        meta: { uid: 7, sourceCommand: 'ENTRY_EFFECT', sourceTriggerTime: triggerTime },
+        meta: {
+          uid: 7,
+          sourceCommand: 'ENTRY_EFFECT',
+          sourceTriggerTime: triggerTime,
+          ...(privilegeType > 0 ? { guardLevel: privilegeType } : {}),
+        },
       }),
       expect.objectContaining({
         type: 'bilibili.enter',
@@ -302,7 +316,7 @@ describe('BilibiliWorld', () => {
   it('pairs arrival signals one to one and keeps repeated arrivals, follows and shares', async () => {
     const host = new BatchCandidateHost();
     const { module, feed } = await mount({}, host);
-    const effect = { cmd: 'ENTRY_EFFECT', data: { uid: 7, copy_writing: '<%Kai%> 来了' } };
+    const effect = { cmd: 'ENTRY_EFFECT', data: { uid: 7, copy_writing: '<%Kai%> 来了', privilege_type: 3 } };
     const interaction = (msgType: number) => ({ cmd: 'INTERACT_WORD', data: { uid: 7, uname: 'Kai', msg_type: msgType } });
     for (const message of [effect, effect, interaction(2), interaction(1), interaction(3), interaction(1), interaction(1)]) {
       feed(message);
@@ -335,7 +349,13 @@ describe('BilibiliWorld', () => {
     const timestamp = 1_700_000_000;
     feed({
       cmd: 'ENTRY_EFFECT',
-      data: { uid: effectUid, copy_writing: '<%Kai%> 来了', trigger_time: timestamp * 1e9, mock_effect: Number(mockEffect) },
+      data: {
+        uid: effectUid,
+        copy_writing: '<%Kai%> 来了',
+        trigger_time: timestamp * 1e9,
+        privilege_type: 3,
+        mock_effect: Number(mockEffect),
+      },
     });
     vi.setSystemTime(Date.now() + receiveMs);
     feed({ cmd: 'INTERACT_WORD', data: { uid: entryUid, uname: 'Kai', msg_type: 1, timestamp: timestamp + sourceSec } });
@@ -350,12 +370,12 @@ describe('BilibiliWorld', () => {
 
   it('keeps same-account arrivals in separate delivery batches independent', async () => {
     const { module, host, feed } = await mount();
-    feed({ cmd: 'ENTRY_EFFECT', data: { uid: 7, copy_writing: '<%Kai%> 来了' } });
+    feed({ cmd: 'ENTRY_EFFECT', data: { uid: 7, copy_writing: '<%Kai%> 来了', privilege_type: 0 } });
     feed({ cmd: 'INTERACT_WORD', data: { uid: 7, uname: 'Kai', msg_type: 1 } });
     await module.stop();
 
     expect(host.events.map((event) => [event.type, event.meta?.sourceCursors])).toEqual([
-      ['bilibili.enter-guard', [1]],
+      ['bilibili.entry', [1]],
       ['bilibili.enter', [2]],
     ]);
   });
@@ -823,7 +843,7 @@ describe('BilibiliWorld', () => {
   it('人流读数不成事件:布置一条待成文的,发车刻才渲染,而且只布置一条', async () => {
     const { module, host, feed } = await mount();
     feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
-    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
+    feed(ENTRY_INTERACTION_V2);
     feed({ cmd: 'WATCHED_CHANGE', data: { num: 288429 } });
     feed({ cmd: 'LIKE_INFO_V3_CLICK', data: {} });
 
@@ -842,7 +862,7 @@ describe('BilibiliWorld', () => {
     expect(await host.deferred[0].spec.render()).toBeNull();
 
     // 清空后新来的读数会重新布置一条
-    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
+    feed(ENTRY_INTERACTION_V2);
     expect(host.deferred).toHaveLength(2);
     await module.stop();
   });
@@ -852,7 +872,7 @@ describe('BilibiliWorld', () => {
     vi.setSystemTime(new Date('2026-08-22T15:37:00+08:00'));
     const { module, host, feed } = await mount();
 
-    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
+    feed(ENTRY_INTERACTION_V2);
     expect(host.deferred).toHaveLength(1);
 
     // WebUI「清空待投递」把挂单抽走了,render 一次都没跑 —— 复位点随之消失
@@ -860,7 +880,7 @@ describe('BilibiliWorld', () => {
 
     // 窗口内不重挂:安静期不该堆一叠陈旧观察
     vi.setSystemTime(Date.now() + 299_000);
-    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
+    feed(ENTRY_INTERACTION_V2);
     expect(host.deferred).toHaveLength(0);
 
     // 过了陈旧窗口视为失踪,允许重挂 —— 这一条在布尔闩版本里永远拿不到
@@ -879,9 +899,9 @@ describe('BilibiliWorld', () => {
     vi.setSystemTime(new Date('2026-08-22T15:37:00+08:00'));
     const { module, host, feed } = await mount();
 
-    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
+    feed(ENTRY_INTERACTION_V2);
     vi.setSystemTime(Date.now() + 301_000); // 一直没发车,窗口到期
-    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
+    feed(ENTRY_INTERACTION_V2);
     expect(host.deferred).toHaveLength(2);
 
     // 第一条把攒下的读数整个带走,第二条渲染出空正文 → 整条蒸发
@@ -895,10 +915,10 @@ describe('BilibiliWorld', () => {
     vi.setSystemTime(new Date('2026-08-22T15:37:00+08:00'));
     const { module, host, feed } = await mount();
 
-    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
+    feed(ENTRY_INTERACTION_V2);
     await host.deferred[0].spec.render();
 
-    feed({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } });
+    feed(ENTRY_INTERACTION_V2);
     expect(host.deferred).toHaveLength(2);
     await module.stop();
   });
@@ -1320,10 +1340,10 @@ describe('BilibiliWorld', () => {
     });
   });
 
-  describe('直播状态沿:转沿成文与双源去重', () => {
+  describe('直播状态沿:只按 LiveStatus.living 的变化成文', () => {
     it('轮询状态变为下播时投递事件并记录 error', async () => {
       const { module, host, setStatus } = await mount();
-      setStatus({ ...STATUS, living: false });
+      setStatus({ ...STATUS, living: false, broadcastState: 'offline' });
       await module.stop();
 
       const room = host.events.filter((e) => e.type === 'bilibili.room');
@@ -1349,10 +1369,7 @@ describe('BilibiliWorld', () => {
 
     it('关播后轮询读到 living false→true:成文再开播事件,不再是 error', async () => {
       const { module, host, setStatus } = await mount();
-      setStatus({ ...STATUS, living: false });
-      // 让去重窗过期,模拟真实的隔窗再开播
-      const edge = (module as unknown as { lastRoomEdge: { living: boolean; at: number } | null }).lastRoomEdge;
-      if (edge) edge.at -= 200_000;
+      setStatus({ ...STATUS, living: false, broadcastState: 'offline' });
       setStatus({ ...STATUS, living: true });
       await module.stop();
 
@@ -1369,10 +1386,12 @@ describe('BilibiliWorld', () => {
       expect(host.logs.some((log) => log.level === 'warn' && log.msg.includes('已开播'))).toBe(true);
     });
 
-    it('WS PREPARING 先到:轮询随后的同状态沿在短窗内不双报', async () => {
+    it('下播指令由状态带来:只成文一次,正文陈述指令与后果', async () => {
       const { module, host, feed, setStatus } = await mount();
       feed({ cmd: 'PREPARING' });
-      setStatus({ ...STATUS, living: false });
+      expect(host.events.filter((e) => e.type === 'bilibili.room')).toHaveLength(0);
+      setStatus({ ...STATUS, living: false, broadcastState: 'offline', livingVia: 'command' });
+      setStatus({ ...STATUS, living: false, broadcastState: 'offline', livingVia: 'room-info' });
       await module.stop();
 
       const room = host.events.filter((e) => e.type === 'bilibili.room');
@@ -1383,26 +1402,31 @@ describe('BilibiliWorld', () => {
         contextDelivery: 'deliver',
         meta: { liveRoomState: { schemaVersion: 1, living: false, via: 'websocket' } },
       });
-
       expect(room[0].text).toContain('平台已推送下播指令');
+      expect(room[0].text).toContain('看不到直播画面');
+      // 留场弹幕的反向证据要提前说破
       expect(room[0].text).toContain('不代表直播还在');
-
-      expect(host.logs.filter((log) => log.level === 'error' && log.msg.includes('直播间未开播'))).toHaveLength(1);
+      expect(room[0].text).not.toMatch(/收尾|告别|停止|快去/);
+      expect(host.logs.filter((log) => log.level === 'error' && log.msg.includes('弹幕服务器 PREPARING 指令'))).toHaveLength(1);
     });
 
-    it('轮询先发现:WS 迟到的 PREPARING 在短窗内同样被吞', async () => {
-      const { module, host, feed, setStatus } = await mount();
-      setStatus({ ...STATUS, living: false });
-      feed({ cmd: 'PREPARING' });
+    it('开播后马上重连:状态带来的开播只投一条,断线与重读房间不再成文', async () => {
+      const offline: LiveStatus = { ...STATUS, living: false, broadcastState: 'offline' };
+      const { module, host, feed, setStatus } = await mount({}, new FakeHost(), offline);
+      feed({ cmd: 'LIVE' });
+      expect(host.events.filter((e) => e.type === 'bilibili.room')).toHaveLength(0);
+      setStatus({ ...offline, living: true, broadcastState: 'live', livingVia: 'command' });
+      setStatus({ ...offline, phase: 'retrying', lastError: '长连断开', living: true, broadcastState: 'live', livingVia: 'command' }, 'connection');
+      setStatus({ ...offline, phase: 'connecting', living: true, broadcastState: 'live', livingVia: 'command' }, 'connection');
+      setStatus({ ...offline, living: true, broadcastState: 'live', livingVia: 'room-info' });
       await module.stop();
 
       const room = host.events.filter((e) => e.type === 'bilibili.room');
-      expect(room).toHaveLength(1);
-      expect(room[0].meta?.liveRoomState).toEqual({ schemaVersion: 1, living: false, via: 'poll' });
-      expect(room[0].text).toContain('平台确认已下播');
-      expect(host.logs.filter((log) => log.level === 'error')).toHaveLength(1);
-
-      expect(host.logs.some((log) => log.msg.includes('已过滤重复的直播状态通知'))).toBe(true);
+      expect(room.map((e) => e.text)).toEqual([
+        expect.stringContaining('平台已推送开播指令'),
+      ]);
+      expect(room[0].meta?.liveRoomState).toEqual({ schemaVersion: 1, living: true, via: 'websocket' });
+      expect(host.logs.filter((log) => log.level === 'error')).toHaveLength(0);
     });
 
     it('delivers one replay signal and waits for an explicit offline observation to report stream end', async () => {
@@ -1425,12 +1449,39 @@ describe('BilibiliWorld', () => {
     it('keeps the WebSocket observation when a connection patch carries an older room snapshot', async () => {
       const { module, host, feed, setStatus } = await mount();
       feed({ cmd: 'PREPARING' });
+      expect(host.events.filter((e) => e.type === 'bilibili.room')).toHaveLength(0);
+      const offline: LiveStatus = {
+        ...STATUS,
+        living: false,
+        broadcastState: 'offline',
+        livingVia: 'command',
+      };
+      setStatus(offline, 'room');
       setStatus({ ...STATUS, phase: 'retrying' }, 'connection');
-      setStatus({ ...STATUS, broadcastState: 'offline', living: false }, 'room');
+      setStatus({ ...offline, livingVia: 'room-info' }, 'room');
       await module.stop();
       expect(host.events.filter((e) => e.type === 'bilibili.room').map((e) => e.meta?.liveRoomState)).toEqual([
         { schemaVersion: 1, living: false, via: 'websocket' },
       ]);
+    });
+
+    it('markRoomEdge 过滤 180 秒内重复状态而不压掉快速真实翻转', async () => {
+      vi.useFakeTimers();
+      const { module, host } = await mount();
+      const lifecycle = module as unknown as {
+        lastRoomEdge: { living: boolean; at: number } | null;
+        markRoomEdge(living: boolean, via: string): boolean;
+      };
+      expect(lifecycle.lastRoomEdge).toBeNull();
+      expect(lifecycle.markRoomEdge(false, 'test')).toBe(true);
+      expect(lifecycle.markRoomEdge(true, 'test')).toBe(true);
+      expect(lifecycle.markRoomEdge(false, 'test')).toBe(true);
+      expect(lifecycle.markRoomEdge(false, 'test')).toBe(false);
+      expect(host.logs.filter((log) => log.msg.includes('已过滤重复的直播状态通知'))).toHaveLength(1);
+
+      vi.setSystemTime(lifecycle.lastRoomEdge!.at + 180_001);
+      expect(lifecycle.markRoomEdge(false, 'test')).toBe(true);
+      await module.stop();
     });
 
     it('首个状态观察只定基线:开播中启动不冒充"刚开播"', async () => {

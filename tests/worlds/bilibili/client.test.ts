@@ -8,6 +8,7 @@ import {
   ROOM_POLL_RISK_HOLD_MS,
   SHUTDOWN_VERIFY_TIMEOUT_MS,
   type LiveStatus,
+  type LiveStatusUpdate,
 } from '../../../src/worlds/bilibili/client.ts';
 import { encodePacket, OP } from '../../../src/worlds/bilibili/wire.ts';
 import type { Logger } from '../../../src/core/types.ts';
@@ -176,6 +177,14 @@ describe('LiveClient 运行期 live_status 轮询', () => {
     return { infoCalls: () => infoCalls };
   }
 
+  it('构造函数同时初始化 broadcastState 与 livingVia', () => {
+    expect(client().current()).toMatchObject({
+      living: false,
+      broadcastState: 'unknown',
+      livingVia: 'room-info',
+    });
+  });
+
   it('轮询读到 live_status 翻转时 patch 状态;读数没变就不空转 onStatus', async () => {
     vi.useFakeTimers();
     const livingSeen: boolean[] = [];
@@ -209,23 +218,23 @@ describe('LiveClient 运行期 live_status 轮询', () => {
     vi.useFakeTimers();
     const codes = [1, 2, 2, 8, 0];
     stubFetch(() => ({ body: { code: 0, data: { live_status: codes.shift() ?? 0 } } }));
-    const observations: Array<{ state: LiveStatus['broadcastState']; living: boolean }> = [];
+    const observations: Array<{ state: LiveStatus['broadcastState']; living: boolean; via: LiveStatus['livingVia'] }> = [];
     const live = new LiveClient({
       roomId: 7734200,
       sessdata: '',
       onCmd: () => {},
       onStatus: (status, update) => {
-        if (update === 'room') observations.push({ state: status.broadcastState, living: status.living });
+        if (update === 'room') observations.push({ state: status.broadcastState, living: status.living, via: status.livingVia });
       },
       log: nullLogger(),
     });
     await live.start();
     await vi.advanceTimersByTimeAsync(ROOM_POLL_MS * 5 + 100);
     expect(observations).toEqual([
-      { state: 'live', living: true },
-      { state: 'replay', living: false },
-      { state: 'unknown', living: false },
-      { state: 'offline', living: false },
+      { state: 'live', living: true, via: 'room-info' },
+      { state: 'replay', living: false, via: 'room-info' },
+      { state: 'unknown', living: false, via: 'room-info' },
+      { state: 'offline', living: false, via: 'room-info' },
     ]);
     await live.stop();
   });
@@ -354,13 +363,189 @@ describe('LiveClient 重连握手收口', () => {
     socket.emit('message', encodePacket(OP.MESSAGE, JSON.stringify({ cmd: 'LIVE' })));
     completePoll(new Response(JSON.stringify({ code: 0, data: { live_status: 0 } })));
     await vi.advanceTimersByTimeAsync(1);
-    expect(live.current()).toMatchObject({ living: true, broadcastState: 'live' });
+    expect(live.current()).toMatchObject({
+      living: true,
+      broadcastState: 'live',
+      livingVia: 'command',
+    });
 
     socket.drop(1006, 'remote gone');
     socket.emit('message', encodePacket(OP.MESSAGE, JSON.stringify({ cmd: 'PREPARING' })));
-    expect(live.current()).toMatchObject({ living: true, broadcastState: 'live', phase: 'retrying' });
+    expect(live.current()).toMatchObject({
+      living: true,
+      broadcastState: 'live',
+      livingVia: 'command',
+      phase: 'retrying',
+    });
     expect(commands).toEqual(['LIVE']);
     await live.stop();
+  });
+
+  it('keeps the WebSocket live state in status updates during a retry', async () => {
+    vi.useFakeTimers();
+    const { calls } = stubHandshakeFetch({ liveStatus: 0 });
+    const events: Array<string | LiveStatus> = [];
+    const live = new LiveClient({
+      roomId: 7734200,
+      sessdata: '',
+      onCmd: (message) => events.push(String(message.cmd)),
+      onStatus: (status) => events.push(status),
+      log: nullLogger(),
+    });
+    await live.start();
+    try {
+      const socket = wsFake.sockets[0];
+      authenticate(socket);
+      const initial = live.current();
+      expect(initial).toMatchObject({ phase: 'connected', living: false, broadcastState: 'offline' });
+      events.length = 0;
+      const fetched = calls.length;
+
+      socket.emit('message', encodePacket(OP.MESSAGE, JSON.stringify({ cmd: 'LIVE' })));
+      socket.drop(1006, 'remote gone');
+
+      expect(calls).toHaveLength(fetched);
+      expect(events).toEqual([
+        'LIVE',
+        { ...initial, living: true, broadcastState: 'live', livingVia: 'command', liveStartedAt: null },
+        { ...initial, phase: 'retrying', lastError: '长连断开', living: true, broadcastState: 'live', livingVia: 'command', liveStartedAt: null },
+      ]);
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(calls.slice(fetched).some((url) => url.includes('Room/get_info'))).toBe(true);
+      expect(live.current()).toMatchObject({ living: false });
+    } finally {
+      await live.stop();
+    }
+  });
+
+  it('clears the live state and start time when WebSocket reports PREPARING', async () => {
+    vi.useFakeTimers();
+    stubHandshakeFetch({ liveStatus: 1 });
+    const live = client();
+    await live.start();
+    try {
+      const socket = wsFake.sockets[0];
+      authenticate(socket);
+      expect(live.current()).toMatchObject({ living: true, liveStartedAt: expect.any(Number) });
+
+      socket.emit('message', encodePacket(OP.MESSAGE, JSON.stringify({ cmd: 'PREPARING' })));
+
+      expect(live.current()).toMatchObject({
+        living: false,
+        broadcastState: 'offline',
+        livingVia: 'command',
+        liveStartedAt: null,
+      });
+    } finally {
+      await live.stop();
+    }
+  });
+
+  it.each([
+    { first: 'command', via: 'command' },
+    { first: 'poll', via: 'room-info' },
+  ] as const)('指令和轮询先后到达($first 先):living 只改一次,记下先到的读数', async ({ first, via }) => {
+    vi.useFakeTimers();
+    const room = { liveStatus: 1 };
+    stubHandshakeFetch(room);
+    const seen: LiveStatus[] = [];
+    const live = new LiveClient({
+      roomId: 7734200,
+      sessdata: '',
+      onCmd: () => {},
+      onStatus: (status) => seen.push(status),
+      log: nullLogger(),
+    });
+    await live.start();
+    try {
+      const socket = wsFake.sockets[0];
+      authenticate(socket);
+      expect(live.current()).toMatchObject({ living: true });
+      seen.length = 0;
+      room.liveStatus = 0;
+      const preparing = (): void => {
+        socket.emit('message', encodePacket(OP.MESSAGE, JSON.stringify({ cmd: 'PREPARING' })));
+      };
+      if (first === 'command') preparing();
+      await vi.advanceTimersByTimeAsync(ROOM_POLL_MS + 100);
+      if (first === 'poll') preparing();
+
+      const changes = seen.filter((status, i) => status.living !== (seen[i - 1]?.living ?? true));
+      expect(changes).toEqual([expect.objectContaining({
+        living: false,
+        broadcastState: 'offline',
+        livingVia: via,
+      })]);
+      expect(live.current().living).toBe(false);
+    } finally {
+      await live.stop();
+    }
+  });
+
+  it('bootstrap 以 room 更新发布直播状态、广播状态、来源和开播时刻', async () => {
+    vi.useFakeTimers();
+    stubHandshakeFetch({ liveStatus: 1 });
+    const updates: Array<{ status: LiveStatus; update: LiveStatusUpdate }> = [];
+    const live = new LiveClient({
+      roomId: 7734200,
+      sessdata: '',
+      onCmd: () => {},
+      onStatus: (status, update) => updates.push({ status, update }),
+      log: nullLogger(),
+    });
+    await live.start();
+    try {
+      const bootstrap = updates.find(({ status, update }) => update === 'room' && status.realRoomId !== null);
+      expect(bootstrap).toMatchObject({
+        update: 'room',
+        status: {
+          living: true,
+          broadcastState: 'live',
+          livingVia: 'room-info',
+          liveStartedAt: expect.any(Number),
+        },
+      });
+    } finally {
+      await live.stop();
+    }
+  });
+
+  it('duplicate command 不 patch 但仍作废此前发起的轮询', async () => {
+    vi.useFakeTimers();
+    let completePoll!: (result: Response) => void;
+    const pollAnswer = new Promise<Response>((resolve) => { completePoll = resolve; });
+    stubHandshakeFetch({ liveStatus: 0, pollAnswer });
+    const updates: Array<{ status: LiveStatus; update: LiveStatusUpdate }> = [];
+    const live = new LiveClient({
+      roomId: 7734200,
+      sessdata: '',
+      onCmd: () => {},
+      onStatus: (status, update) => updates.push({ status, update }),
+      log: nullLogger(),
+    });
+    await live.start();
+    try {
+      const socket = wsFake.sockets[0];
+      authenticate(socket);
+      await vi.advanceTimersByTimeAsync(ROOM_POLL_MS + 1);
+      updates.length = 0;
+
+      socket.emit('message', encodePacket(OP.MESSAGE, JSON.stringify({ cmd: 'PREPARING' })));
+      expect(updates).toEqual([]);
+      completePoll(new Response(JSON.stringify({ code: 0, data: { live_status: 1 } })));
+      await vi.advanceTimersByTimeAsync(1);
+      expect(live.current()).toMatchObject({ living: false, broadcastState: 'offline' });
+      expect(updates).toEqual([]);
+
+      socket.emit('message', encodePacket(OP.MESSAGE, JSON.stringify({ cmd: 'LIVE' })));
+      expect(updates.at(-1)).toMatchObject({
+        update: 'room',
+        status: { living: true, broadcastState: 'live', livingVia: 'command' },
+      });
+    } finally {
+      await live.stop();
+    }
   });
 
   it('new WebSocket 带 handshakeTimeout;握手超时(error+close)走 fail() 退避重连', async () => {

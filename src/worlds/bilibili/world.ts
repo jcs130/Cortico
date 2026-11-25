@@ -298,7 +298,7 @@ export class BilibiliWorld implements World {
   private readonly recentGuard = new Map<string, { at: number; guardLevel?: number }>();
 
   private lastRoomEdge: { living: boolean; at: number } | null = null;
-  /** 保留最近一次确认的开播或下播状态。 */
+  /** null 表示尚未取得有效房间状态。 */
   private lastKnownLiving: boolean | null = null;
   private lastKnownBroadcastState: Exclude<RoomBroadcastState, 'unknown'> | null = null;
   /** 中断开始的时间戳；null 表示已连接或未启动。 */
@@ -700,19 +700,6 @@ export class BilibiliWorld implements World {
     const host = this.host;
     if (!host) return;
     if (!item) return;
-
-    if (cmd === 'LIVE' || cmd === 'PREPARING') {
-      const living = cmd === 'LIVE';
-      this.lastKnownLiving = living;
-      this.lastKnownBroadcastState = living ? 'live' : 'offline';
-      if (this.status) {
-        this.status = { ...this.status, living, broadcastState: this.lastKnownBroadcastState,
-          liveStartedAt: living && this.status.living ? this.status.liveStartedAt : null };
-      }
-      if (living) this.admission.startStream({ roomId: this.status?.realRoomId ?? this.opts.roomId });
-      else this.admission.endStream();
-      if (!this.markRoomEdge(living, `弹幕服务器 ${cmd} 指令`)) return;
-    }
 
     if (item.kind === 'count') {
       if (item.field === 'freeGift') this.coalescing.breakRun('bilibili.gift');
@@ -1256,14 +1243,42 @@ export class BilibiliWorld implements World {
     const living = broadcastState === 'live';
     const prev = this.lastKnownLiving;
     this.lastKnownLiving = living;
-    if (prev !== null && prev !== living && this.markRoomEdge(living, `接口 live_status=${living ? 1 : 0}`)) {
-      this.announceRoomEdge(living);
+    const via = status.livingVia === 'command'
+      ? `弹幕服务器 ${living ? 'LIVE' : 'PREPARING'} 指令`
+      : `接口 live_status=${living ? 1 : 0}`;
+    if (prev !== null && prev !== living && this.markRoomEdge(living, via)) {
+      this.announceRoomEdge(status);
     }
     if (living) {
       this.admission.startStream({ roomId: status.realRoomId, liveStartedAt: status.liveStartedAt });
     } else {
       this.admission.endStream();
     }
+  }
+
+  /** `living` 变化时写日志并投递一条 flush 事件，正文与元数据保留状态来源。 */
+  private announceRoomEdge({ living, livingVia }: LiveStatus): void {
+    const via = livingVia === 'command'
+      ? `弹幕服务器 ${living ? 'LIVE' : 'PREPARING'} 指令`
+      : `接口 live_status=${living ? 1 : 0}`;
+    const roomId = this.status?.realRoomId ?? this.opts.roomId;
+    if (living) this.host?.log.warn(`平台侧直播间已开播(${via})`, { roomId });
+    else this.host?.log.error(`平台侧直播间未开播(${via})`, { roomId });
+    const lingering = '此后的弹幕来自仍留在房间页的人,不代表直播还在进行';
+    const text = livingVia === 'command'
+      ? (living
+          ? '[直播间] 平台已推送开播指令:直播画面已对观众可见'
+          : `[直播间] 平台已推送下播指令:直播已结束,观众已经看不到直播画面;${lingering}`)
+      : (living
+          ? '[直播间] 平台确认已开播(接口 live_status=1):直播画面已对观众可见'
+          : `[直播间] 平台确认已下播(接口 live_status=0):观众已经看不到直播画面;${lingering}`);
+    this.pushNotice({
+      kind: 'event',
+      type: 'bilibili.room',
+      trigger: 'flush',
+      text,
+      meta: liveRoomStateMeta(living, livingVia === 'command' ? 'websocket' : 'poll'),
+    });
   }
 
   /** 记录状态变化并去重；新变化写日志并返回 true。 */
@@ -1279,30 +1294,7 @@ export class BilibiliWorld implements World {
       });
       return false;
     }
-    const roomId = this.status?.realRoomId ?? this.opts.roomId;
-    if (living) {
-      this.host?.log.warn(`平台侧直播间已开播(${via})`, { roomId });
-    } else {
-      this.host?.log.error(
-        `平台侧直播间未开播(${via})`,
-        { roomId },
-      );
-    }
     return true;
-  }
-
-  /** 投递轮询发现的状态变化；WS 状态事件由 normalize 生成。 */
-  private announceRoomEdge(living: boolean): void {
-    this.pushNotice({
-      kind: 'event',
-      type: 'bilibili.room',
-      trigger: 'flush',
-      text: living
-        ? '[直播间] 平台确认已开播(接口 live_status=1):直播画面已对观众可见'
-        : '[直播间] 平台确认已下播(接口 live_status=0):观众已经看不到直播画面;'
-          + '此后的弹幕来自仍留在房间页的人,不代表直播还在进行',
-      meta: liveRoomStateMeta(living, 'poll'),
-    });
   }
 
   /** 投递本 World 生成的通知前，先输出归并缓冲中的事件。 */
@@ -1493,7 +1485,8 @@ function groupAudienceArrivals(
 
 function arrivalUid(item: LiveEvent): number | undefined {
   const cmd = item.meta?.sourceCommand;
-  const effect = item.type === 'bilibili.enter-guard' && cmd === 'ENTRY_EFFECT' && !item.meta?.mockEffect;
+  const effect = (item.type === 'bilibili.enter-guard' || item.type === 'bilibili.entry')
+    && cmd === 'ENTRY_EFFECT' && !item.meta?.mockEffect;
   const entry = item.type === 'bilibili.enter' && (cmd === 'INTERACT_WORD' || cmd === 'INTERACT_WORD_V2');
   const uid = item.meta?.uid;
   return (effect || entry) && typeof uid === 'number' && Number.isSafeInteger(uid) && uid > 0 ? uid : undefined;

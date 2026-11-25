@@ -61,10 +61,12 @@ export interface LiveStatus {
   /** 换算出的真实房间号 */
   realRoomId: number | null;
   title: string;
-  /** 主播是否正在直播 */
+  /** 主播是否正在直播;弹幕服务器的开播、下播指令,连接时和轮询读到的 live_status 都写这里 */
   living: boolean;
   /** 真实直播、未开播、轮播、尚未核实。旧的直播源可只提供 living。 */
   broadcastState?: RoomBroadcastState;
+  /** 最近一次写入 `living` 的读数:`command` 是弹幕服务器指令,`room-info` 是 Room/get_info */
+  livingVia: 'command' | 'room-info';
   /** 平台报告的本场开播时刻 */
   liveStartedAt: number | null;
   /** 登录态的 uid;0 = 匿名 */
@@ -107,6 +109,7 @@ export class LiveClient {
       title: '',
       living: false,
       broadcastState: 'unknown',
+      livingVia: 'room-info',
       liveStartedAt: null,
       selfUid: 0,
       lastError: null,
@@ -220,23 +223,31 @@ export class LiveClient {
         }
       } else if (frame.kind === 'cmd') {
         try {
-          const cmd = String(frame.msg.cmd ?? '').split(':', 1)[0];
-          if (cmd === 'LIVE' || cmd === 'PREPARING') {
-            const living = cmd === 'LIVE';
-            this.roomStatusRevision += 1;
-            this.status = {
-              ...this.status,
-              living,
-              broadcastState: living ? 'live' : 'offline',
-              liveStartedAt: living && this.status.living ? this.status.liveStartedAt : null,
-            };
-          }
           this.opts.onCmd(frame.msg);
         } catch (e) {
           this.opts.log.warn('直播消息处理失败', { err: String(e) });
         }
+        this.applyRoomCommand(frame.msg);
       }
     }
+  }
+
+  /** LIVE / PREPARING 改写房间状态；重复指令也作废此前发起的轮询。 */
+  private applyRoomCommand(msg: Record<string, unknown>): void {
+    const cmd = String(msg.cmd ?? '').split(':')[0];
+    if (cmd !== 'LIVE' && cmd !== 'PREPARING') return;
+    const living = cmd === 'LIVE';
+    const broadcastState = living ? 'live' : 'offline';
+    if (living === this.status.living && broadcastState === this.status.broadcastState) {
+      this.roomStatusRevision += 1;
+      return;
+    }
+    this.patch({
+      living,
+      broadcastState,
+      livingVia: 'command',
+      liveStartedAt: living && this.status.living ? this.status.liveStartedAt : null,
+    }, 'room');
   }
 
   /**
@@ -311,14 +322,20 @@ export class LiveClient {
         // 已有更新的 WebSocket 事件或房间快照时，丢弃此前发起的轮询。
         const room = obj(info.data);
         const rawLiveStatus = room.live_status;
-        const broadcastState = roomBroadcastState(rawLiveStatus);
-        const liveStartedAt = broadcastState === 'live' ? liveTimestamp(room.live_time) : null;
-        if (broadcastState !== this.status.broadcastState || liveStartedAt !== this.status.liveStartedAt) {
-          this.opts.log.info('轮询读到 live_status 变化', {
-            liveStatus: typeof rawLiveStatus === 'number' ? rawLiveStatus : null,
-            broadcastState,
-          });
-          this.patch({ living: broadcastState === 'live', broadcastState, liveStartedAt }, 'room');
+        if (typeof rawLiveStatus === 'number' && Number.isFinite(rawLiveStatus)) {
+          const broadcastState = roomBroadcastState(rawLiveStatus);
+          const liveStartedAt = broadcastState === 'live' ? liveTimestamp(room.live_time) : null;
+          if (broadcastState !== this.status.broadcastState || liveStartedAt !== this.status.liveStartedAt) {
+            this.opts.log.info('轮询读到 live_status 变化', { liveStatus: rawLiveStatus, broadcastState });
+            this.patch({
+              living: broadcastState === 'live',
+              broadcastState,
+              livingVia: 'room-info',
+              liveStartedAt,
+            }, 'room');
+          }
+        } else {
+          this.opts.log.warn('直播间状态轮询响应缺少有效 live_status');
         }
       }
     } catch (e) {
@@ -378,6 +395,7 @@ export class LiveClient {
       title: str(room.title),
       living: broadcastState === 'live',
       broadcastState,
+      livingVia: 'room-info',
       liveStartedAt: broadcastState === 'live' ? liveTimestamp(room.live_time) : null,
       selfUid,
     }, 'room');

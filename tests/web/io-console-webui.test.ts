@@ -174,6 +174,7 @@ describe('ConsoleWorld 的流式通道', () => {
     const sock = new FakeStream();
     mod.stream('chat', sock);
     sock.feed(JSON.stringify({ type: 'hello', name: '小北' }));
+    await settle();
 
     const send = mod.tools().find((t) => t.name === 'console_send')!;
     const result = await send.handler({ text: '我在。' }, toolCtx);
@@ -205,6 +206,7 @@ describe('ConsoleWorld 的流式通道', () => {
     const sock = new FakeStream();
     mod.stream('chat', sock);
     sock.feed(JSON.stringify({ type: 'hello', name: '小北' }));
+    await settle();
     const withPeer = String(await send.handler({ text: '我在。' }, toolCtx));
     expect(withPeer).toContain('1 connection online');
     expect(withPeer).toContain('小北');
@@ -255,6 +257,7 @@ describe('ConsoleWorld 的流式通道', () => {
     const sock = new FakeStream();
     mod.stream('chat', sock);
     sock.feed(JSON.stringify({ type: 'hello', name: '阿明' }));
+    await settle();
     expect(sock.frames().some((f) => f.history === true && f.text === '昨天那事')).toBe(true);
 
     await mod.stop();

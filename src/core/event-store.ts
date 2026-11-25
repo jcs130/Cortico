@@ -254,7 +254,13 @@ export class JsonlEventStore implements EventStore {
   }
 
   range(q: EventRangeQuery): EventEnvelope[] {
-    return this.query(() => this.scanRange(q));
+    return this.query(() => {
+      const steps = this.scanRange(q);
+      for (;;) {
+        const step = steps.next();
+        if (step.done) return step.value;
+      }
+    });
   }
 
   rangeAsync(q: EventRangeQuery, signal?: AbortSignal): Promise<EventEnvelope[]> {
@@ -324,6 +330,7 @@ export class JsonlEventStore implements EventStore {
           stream.destroy();
         }
       }
+      await yieldEventLoop();
       signal?.throwIfAborted();
       matched = fromStart ? matched.concat(tail) : tail.slice(next).concat(tail.slice(0, next), matched);
       if (limit !== undefined && matched.length >= limit) break;
@@ -331,7 +338,8 @@ export class JsonlEventStore implements EventStore {
     return matched;
   }
 
-  private scanRange(q: EventRangeQuery): EventEnvelope[] {
+  /** 与 range 共用一次扫描，每读完一个分片让出一次事件循环。 */
+  private *scanRange(q: EventRangeQuery): Generator<void, EventEnvelope[]> {
     const limit = q.limit !== undefined && q.limit >= 0 ? q.limit : undefined;
     const { fromMs, toMs } = timeWindow(q, this.timezone);
     // 无起点区间的 limit 查询只要最近的几条:从尾部分片倒着凑,不触碰更早的历史
@@ -350,6 +358,7 @@ export class JsonlEventStore implements EventStore {
           matched.push(e);
           if (matched.length >= limit) { matched.reverse(); return matched; }
         }
+        yield;
       }
       matched.reverse();
       return matched;
@@ -367,6 +376,7 @@ export class JsonlEventStore implements EventStore {
         if (q.origin !== undefined && e.origin !== q.origin) continue;
         matched.push(e);
       }
+      yield;
     }
     // limit从区间尾部取(最近优先),返回仍按游标升序
     if (limit !== undefined && matched.length > limit) {

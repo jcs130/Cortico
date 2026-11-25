@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { normalize } from '../../../src/worlds/bilibili/normalize.ts';
+import { ENTRY_INTERACTION_V2, interactionV2 } from './interaction-frames.ts';
 
 const OPTS = { giftFlushYuan: 1 };
 
@@ -187,20 +188,39 @@ describe('归一化', () => {
     }, OPTS)).toMatchObject({ senderKey: '18', meta: { uid: 18 } });
   });
 
-  it('进场特效剥掉 copy_writing 标记并保留来源与触发时间', () => {
+  it('大航海进场特效带等级并保留来源与触发时间', () => {
     const triggerTime = 1_700_000_000_123_000_000;
     expect(
       normalize({
         cmd: 'ENTRY_EFFECT',
-        data: { copy_writing: '欢迎舰长 <%阿明%> 进入直播间', uid: 7, trigger_time: triggerTime },
+        data: { copy_writing: '欢迎舰长 <%阿明%> 进入直播间', uid: 7, privilege_type: 3, trigger_time: triggerTime },
       }, OPTS),
     ).toMatchObject({
       type: 'bilibili.enter-guard',
       trigger: 'debounce',
       text: '[进场] 欢迎舰长 阿明 进入直播间',
       senderKey: '7',
-      meta: { uid: 7, sourceCommand: 'ENTRY_EFFECT', sourceTriggerTime: triggerTime },
+      meta: {
+        uid: 7,
+        guardLevel: 3,
+        sourceCommand: 'ENTRY_EFFECT',
+        sourceTriggerTime: triggerTime,
+      },
     });
+  });
+
+  it('非大航海进场特效归入 entry 并保留预览标记', () => {
+    const plain = normalize({
+      cmd: 'ENTRY_EFFECT',
+      data: { copy_writing: '<%阿乙%> 来了', uid: 8, privilege_type: 0, mock_effect: 1 },
+    }, OPTS);
+    expect(plain).toMatchObject({
+      type: 'bilibili.entry',
+      trigger: 'debounce',
+      text: '[进场] 阿乙 来了',
+      meta: { uid: 8, sourceCommand: 'ENTRY_EFFECT', mockEffect: true },
+    });
+    expect(plain).not.toHaveProperty('meta.guardLevel');
   });
 
   it('区分平台警告和切断通知，并保留原指令', () => {
@@ -286,6 +306,7 @@ describe('归一化', () => {
 
   it('人流类只给计数与读数', () => {
     expect(normalize({ cmd: 'INTERACT_WORD', data: { msg_type: 1 } }, OPTS)).toEqual({ kind: 'count', field: 'enter', by: 1 });
+    expect(normalize(ENTRY_INTERACTION_V2, OPTS)).toEqual({ kind: 'count', field: 'enter', by: 1 });
     expect(normalize({ cmd: 'LIKE_INFO_V3_CLICK', data: {} }, OPTS)).toEqual({ kind: 'count', field: 'like', by: 1 });
     expect(normalize({ cmd: 'WATCHED_CHANGE', data: { num: 288429 } }, OPTS)).toEqual({
       kind: 'gauge',
@@ -306,15 +327,41 @@ describe('归一化', () => {
       const v2 = normalize({ cmd:'INTERACT_WORD_V2', data:{ pb } }, OPTS);
       const expected = { kind:'event', trigger:'debounce', senderKey:'7', meta:{uid:7,uname:'Yuko',msgType},
         type:msgType===1?'bilibili.enter':'bilibili.interaction' };
-      expect(v1).toMatchObject(expected);expect(v2).toMatchObject(expected);
-      if(msgType!==1)expect(v2?.kind==='event'&&v2.text).not.toContain('进场');
+      expect(v1).toMatchObject(expected);
+      expect(v2).toMatchObject(expected);
+      if (msgType !== 1) {
+        expect(v1?.kind).toBe('event');
+        expect(v2?.kind).toBe('event');
+        expect(v1?.kind === 'event' && v1.text).not.toContain('进场');
+        expect(v2?.kind === 'event' && v2.text).not.toContain('进场');
+      }
     }
   });
+
+  it.each([2, 3])('互动类型 %i 只成关注或分享事件,不计进场', (msgType) => {
+    for (const item of [
+      normalize({ cmd: 'INTERACT_WORD', data: { msg_type: msgType } }, OPTS),
+      normalize(interactionV2(msgType), OPTS),
+    ]) {
+      expect(item).toMatchObject({ kind: 'event', type: 'bilibili.interaction', meta: { msgType } });
+    }
+  });
+
   it('does not invent entries or stable identities from malformed, anonymous or unknown interaction frames', () => {
-    for (const data of [{}, {pb:'!!!'}, {pb:Buffer.from([18,20,65]).toString('base64')}, {pb:Buffer.from([40,99]).toString('base64')}])
-      expect(normalize({cmd:'INTERACT_WORD_V2',data},OPTS)).toBeNull();
-    expect(normalize({cmd:'INTERACT_WORD',data:{uid:0,uname:'某***',msg_type:1}},OPTS)).toMatchObject({type:'bilibili.enter',senderKey:undefined});
-    expect(normalize({cmd:'INTERACT_WORD',data:{msg_type:3}},OPTS)).toMatchObject({type:'bilibili.interaction'});
+    for (const data of [
+      {},
+      { pb: '!!!' },
+      { pb: Buffer.from([18, 20, 65]).toString('base64') },
+      { pb: Buffer.from([40, 99]).toString('base64') },
+      { pb: 'KA==' },
+    ]) {
+      expect(normalize({ cmd: 'INTERACT_WORD_V2', data }, OPTS)).toBeNull();
+    }
+    expect(normalize({ cmd: 'INTERACT_WORD', data: {} }, OPTS)).toBeNull();
+    expect(normalize({ cmd: 'INTERACT_WORD', data: { uid: 0, uname: '某***', msg_type: 1 } }, OPTS))
+      .toMatchObject({ type: 'bilibili.enter', senderKey: undefined });
+    expect(normalize({ cmd: 'INTERACT_WORD', data: { msg_type: 3 } }, OPTS))
+      .toMatchObject({ type: 'bilibili.interaction' });
   });
 
   it('运营挂件与她自己的语音转写不推;没见过的 cmd 也不推', () => {
@@ -323,28 +370,9 @@ describe('归一化', () => {
     }
   });
 
-  // 开播与下播事件陈述平台侧状态及其后果，只报告事实。
-  it('开播/下播指令:flush 成事件,措辞陈述平台状态与后果', () => {
-    expect(normalize({ cmd: 'LIVE' }, OPTS)).toMatchObject({
-      kind: 'event',
-      type: 'bilibili.room',
-      trigger: 'flush',
-      text: expect.stringContaining('平台已推送开播指令'),
-      meta: { liveRoomState: { schemaVersion: 1, living: true, via: 'websocket' } },
-    });
-    const preparing = normalize({ cmd: 'PREPARING' }, OPTS);
-    expect(preparing).toMatchObject({
-      kind: 'event',
-      type: 'bilibili.room',
-      trigger: 'flush',
-      meta: { liveRoomState: { schemaVersion: 1, living: false, via: 'websocket' } },
-    });
-    const text = (preparing as { text: string }).text;
-    expect(text).toContain('平台已推送下播指令');
-    expect(text).toContain('看不到直播画面');
-    // 反向证据要提前说破:留场弹幕不代表还在播
-    expect(text).toContain('不代表直播还在');
-    expect(text).not.toMatch(/收尾|告别|停止|快去/);
+  it('开播和下播指令只更新 LiveStatus,不归一化成事件', () => {
+    expect(normalize({ cmd: 'LIVE' }, OPTS)).toBeNull();
+    expect(normalize({ cmd: 'PREPARING' }, OPTS)).toBeNull();
   });
 
   it('弹幕、标题与禁言事件不携带开播或下播状态', () => {

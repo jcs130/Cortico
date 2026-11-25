@@ -232,20 +232,22 @@ export function normalize(msg: Record<string, unknown>, opts: NormalizeOptions):
     }
 
     case 'ENTRY_EFFECT': {
-      // 进场特效的 copy_writing 形如 "欢迎舰长 <%昵称%> 进入直播间"
+      // privilege_type 是大航海等级(1 总督、2 提督、3 舰长,0 不是)。
       const line = str(data.copy_writing).replace(/<%|%>/g, '').trim();
       if (!line) return null;
+      const guardLevel = num(data.privilege_type);
       const uid = audienceUid(data);
       const triggerTime = num(data.trigger_time);
       return {
         kind: 'event',
-        type: 'bilibili.enter-guard',
+        type: guardLevel > 0 ? 'bilibili.enter-guard' : 'bilibili.entry',
         trigger: 'debounce',
         text: `[进场] ${line}`,
         senderKey: senderKeyOf(uid),
         meta: {
           uid,
           sourceCommand: cmd,
+          ...(guardLevel > 0 ? { guardLevel } : {}),
           ...(triggerTime > 0 ? { sourceTriggerTime: triggerTime } : {}),
           ...(bool(data.mock_effect) ? { mockEffect: true } : {}),
         },
@@ -273,25 +275,6 @@ export function normalize(msg: Record<string, unknown>, opts: NormalizeOptions):
 
     case 'ROOM_REAL_TIME_MESSAGE_UPDATE':
       return { kind: 'gauge', field: 'fans', value: num(data.fans) };
-
-    case 'LIVE':
-      return {
-        kind: 'event',
-        type: 'bilibili.room',
-        trigger: 'flush',
-        text: '[直播间] 平台已推送开播指令:直播画面已对观众可见',
-        meta: liveRoomStateMeta(true, 'websocket'),
-      };
-
-    case 'PREPARING':
-      return {
-        kind: 'event',
-        type: 'bilibili.room',
-        trigger: 'flush',
-        text: '[直播间] 平台已推送下播指令:直播已结束,观众已经看不到直播画面;'
-          + '此后的弹幕来自仍留在房间页的人,不代表直播还在进行',
-        meta: liveRoomStateMeta(false, 'websocket'),
-      };
 
     case 'ROOM_CHANGE': {
       const title = typeof data.title === 'string' ? data.title : undefined;
