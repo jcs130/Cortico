@@ -1,6 +1,6 @@
 import { FixtureHandoffResult as ContextHandoffResult } from './fixture-protocol.ts';
 import { createResponse, type StreamEvent, type FunctionCall } from '../../src/protocol/open-responses/index.ts';
-import { GenerationError, unknownMeters, type GenerateOptions, type ProviderAttempt } from '../../src/core/generation.ts';
+import { unknownMeters, type ProviderAttempt } from '../../src/core/generation.ts';
 import { FixtureStream, FixtureTap as OutputTap } from './fixture-protocol.ts';
 import type { ResponseClient } from '../../src/core/generation.ts';
 import type { Request } from '../../src/protocol/open-responses/index.ts';
@@ -8,7 +8,7 @@ import { ResponsesProvider } from '../../src/providers/openai-responses-compat/n
 import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MainLoop, MAIN_CONTEXT_WINDOW_RECORDS, type ContextFacts, type ResubmitPolicy } from '../../src/core/loop.ts';
+import { MainLoop, type ContextFacts, type ResubmitPolicy } from '../../src/core/loop.ts';
 import { Core } from "./fixture-core.ts";
 import { WakeBus } from '../../src/core/bus.ts';
 import { SessionLog } from "./fixture-session.ts";
@@ -20,9 +20,9 @@ import { Transcript } from '../../src/core/transcript.ts';
 import { LLMError, LLMStreamAborted } from './fixture-errors.ts';
 import { SessionTracker } from '../../src/core/sessions.ts';
 import { ABORT_PREEMPTED, ABORT_SHUTDOWN, INTERRUPTED_WHILE_RUNNING, NOT_EXECUTED_BARRIER, NOT_EXECUTED_INTERRUPTED, SHUTDOWN_INTERRUPTED, streamedPastBarrier } from '../../src/core/markers.ts';
-import type { UsageRecord, Persona, TurnEndedContext } from '../../src/core/types.ts';
+import type { UsageRecord, Persona } from '../../src/core/types.ts';
 import type { ChatMessage, LLMDelta } from './fixture-types.ts';
-import { functionCall, functionResult, message, type ContextRecord } from '../../src/protocol/open-responses/context.ts';
+import { functionCall, functionResult, type ContextRecord } from '../../src/protocol/open-responses/context.ts';
 import type { Logger, CandidateProjector, EventEnvelope, RunPhase, World, WorldHost, ToolDef } from '../../src/core/types.ts';
 import type { BotConfig } from '../../bots/corti-soulmate/assemble.ts';
 import {
@@ -57,7 +57,7 @@ interface RigOptions {
   /** 对模型隐藏但仍挂载运行的 World id。 */
   hiddenWorlds?: string[];
   /** 时机钩子,直接装到假Persona上 */
-  hooks?: Pick<Persona, 'onTurnEnded' | 'onIdle' | 'onStallsRecovered' | 'onDelivery' | 'onToolGenerationRejected'>;
+  hooks?: Pick<Persona, 'onTurnEnded' | 'onIdle' | 'onStallsRecovered' | 'onDelivery'>;
   /** 记录 schedule_wake 对 timers 原语的调用。 */
   onTimerSet?: (atIso: string, payload: Record<string, unknown>) => void;
   /** fork 工具的执行函数。 */
@@ -249,100 +249,6 @@ describe('MainLoop standard Response execution', () => {
     meters: { ...unknownMeters(), input: 10, output: 2, total: 12 },
   });
 
-  it('bounds the main request window while keeping the complete session addressable', () => {
-    const rig = makeRig({ silent: true });
-    try {
-      for (let index = 0; index <= MAIN_CONTEXT_WINDOW_RECORDS; index++) rig.session.append(message('user', 'row-' + index));
-      const outbound = rig.loop.outboundMessages();
-      expect(rig.session.records).toHaveLength(MAIN_CONTEXT_WINDOW_RECORDS + 1);
-      expect(outbound).toHaveLength(MAIN_CONTEXT_WINDOW_RECORDS);
-      expect(outbound[0]).toBe(rig.session.records[1]);
-      expect(outbound.at(-1)).toBe(rig.session.records.at(-1));
-    } finally { rig.tmp.cleanup(); }
-  });
-
-  it('bounds large recent records by tokens before sending a request', () => {
-    const rig = makeRig({ silent: true, context: { hardTokens: () => 100_000 } });
-    try {
-      for (let index = 0; index <= MAIN_CONTEXT_WINDOW_RECORDS; index++) rig.session.append(message('user', 'row-' + index));
-      for (let index = 0; index < 64; index++) rig.session.append(message('user', 'x'.repeat(32 * 1024)));
-      const outbound = rig.loop.outboundMessages();
-      const hardTokens = rig.loop.contextGauge().hardTokens;
-      expect(hardTokens).not.toBeNull();
-      expect(outbound.length).toBeGreaterThan(0);
-      expect(outbound.length).toBeLessThan(MAIN_CONTEXT_WINDOW_RECORDS + 65);
-      expect(rig.loop.estTokens()).toBeLessThanOrEqual(hardTokens!);
-      expect(rig.session.records).toHaveLength(MAIN_CONTEXT_WINDOW_RECORDS + 65);
-    } finally { rig.tmp.cleanup(); }
-  });
-
-  it('repairs a generated tool rejection once without replaying an earlier action or retaining the hint', async () => {
-    const act = vi.fn(() => 'original receipt');
-    const ended = vi.fn<NonNullable<Persona['onTurnEnded']>>();
-    const repair = vi.fn(() => 'Open the catalog entry for fixture_later.');
-    const requests: { input: Request['input']; context: GenerateOptions['context']; enabled: boolean }[] = [];
-    const rig = makeRig({ silent: true, worlds: [makeFakeIO('test', [makeTool('act', act)])],
-      hooks: { onTurnEnded: ended, onToolGenerationRejected: repair } });
-    rig.llm.respond = async (request, options) => {
-      const n = requests.push({ input: request.input, context: options?.context, enabled: options?.toolGenerationRecovery === true });
-      const response = createResponse(`response_${n}`, request);
-      if (n === 2 || n === 3) {
-        response.status = 'failed';
-        response.error = { code: 'server_error', message: 'Generated call was rejected. Tool diagnostics ' + JSON.stringify({
-          origin: 'generated_output', kind: 'undeclared', tool_name: 'fixture_later', request_id: 'upstream-only',
-        }) };
-        throw new GenerationError(response.error.message, [], response, origin);
-      }
-      response.status = 'completed';
-      if (n === 1) response.output = [{ type: 'function_call', id: 'item_act', call_id: 'call_act', name: 'act',
-        arguments: '{}', status: 'completed' }];
-      return { response, origin, attempts: [attempt(response.id)] };
-    };
-    try {
-      rig.start(); rig.pushEvent('carry out the request');
-      await until(() => ended.mock.calls.length === 1);
-      expect(ended.mock.calls[0]).toEqual([{ kind: 'failed' }]);
-      expect(requests).toHaveLength(3);
-      expect(act).toHaveBeenCalledTimes(1);
-      expect(repair.mock.calls).toEqual([[{ kind: 'undeclared', toolName: 'fixture_later' }]]);
-      expect(requests[2].context?.at(-1)).toMatchObject({
-        item: { role: 'developer' }, context: { ephemeral: true, toolGenerationRepair: true },
-      });
-      expect(JSON.stringify(requests[2].input)).toContain('Open the catalog entry');
-      expect(JSON.stringify(requests[2].input)).toContain('original receipt');
-      expect(JSON.stringify(requests[2].input)).not.toContain('upstream-only');
-      expect(requests.every(entry => entry.enabled)).toBe(true);
-      expect(JSON.stringify(rig.session.records)).not.toContain('Open the catalog entry');
-      rig.pushEvent('a different request');
-      await until(() => ended.mock.calls.length === 2);
-      expect(requests).toHaveLength(4);
-      expect(JSON.stringify(requests[3].input)).not.toContain('Open the catalog entry');
-    } finally { await rig.cleanup(); }
-  });
-
-  it.each(['generated_output', 'request_validation'])('resubmits an HTTP body only when recovery changes the request (%s)', async diagnosticOrigin => {
-    const ended = vi.fn<NonNullable<Persona['onTurnEnded']>>();
-    const rig = makeRig({ silent: true, hooks: { onTurnEnded: ended } });
-    let requests = 0;
-    rig.llm.respond = async request => {
-      const response = createResponse('fallback', request);
-      if (++requests === 1) {
-        const body = JSON.stringify({ error: { code: 'server_error', message: 'Tool diagnostics ' + JSON.stringify({
-          origin: diagnosticOrigin, kind: 'arguments_schema', tool_name: 'act',
-        }) } });
-        throw new GenerationError('rejected', [], null, origin, 500, body);
-      }
-      response.status = 'completed';
-      return { response, origin, attempts: [attempt(response.id)] };
-    };
-    try {
-      rig.start(); rig.pushEvent('go');
-      await until(() => ended.mock.calls.length === 1);
-      expect(requests).toBe(diagnosticOrigin === 'generated_output' ? 1 : 2);
-      expect(ended.mock.calls[0][0].kind).toBe(diagnosticOrigin === 'generated_output' ? 'failed' : 'completed');
-    } finally { await rig.cleanup(); }
-  });
-
   it.each([
     ['incomplete', 'max_output_tokens', true],
     ['incomplete', null, false],
@@ -365,15 +271,14 @@ describe('MainLoop standard Response execution', () => {
       rig.start(); rig.pushEvent('go');
       await until(() => ended.mock.calls.length === 1);
       expect(worldEnded.mock.calls).toEqual(ended.mock.calls);
-      expect(ended.mock.calls[0]).toHaveLength(1);
-      const [context] = ended.mock.calls[0];
+      const context = ended.mock.calls[0][0];
       const rounds = emitted.mock.calls.map(([, , event]) => event).filter(event => event?.event === 'round');
       expect(rounds).toHaveLength(1);
       expect(rounds[0]?.data).toMatchObject({ outcome: status });
       if (status === 'incomplete') {
         expect(context).toEqual({ kind: 'response-incomplete', responseId: 'r_without_calls', incompleteReason: reason });
       } else {
-        expect(context).toEqual({ kind: 'completed' });
+        expect(context).toBeUndefined();
       }
       if (partial) expect(rig.session.records.find(entry => entry.context.responseId === 'r_without_calls')?.context)
         .toMatchObject({ responseStatus: status, incompleteReason: reason });
@@ -402,7 +307,7 @@ describe('MainLoop standard Response execution', () => {
       expect(act).toHaveBeenCalledTimes(1);
       expect(rig.session.records.find(entry => entry.item.type === 'function_call_output' && entry.item.call_id === 'one_call')).toBeDefined();
       expect(rig.session.records.find(entry => entry.context.responseId === 'r_with_call')?.context.incompleteReason).toBe('max_output_tokens');
-      expect(ended.mock.calls[0]).toEqual([{ kind: 'completed' }]);
+      expect(ended.mock.calls[0][0]).toBeUndefined();
     } finally { await rig.cleanup(); }
   });
 
@@ -464,9 +369,7 @@ describe('MainLoop standard Response execution', () => {
   it('rejects late events and output after preempt while retaining the consumed attempt', async () => {
     const usage: UsageRecord[] = [];
     const seen: string[] = [];
-    const ended: TurnEndedContext[] = [];
-    const rig = makeRig({ silent: true, tracker: new SessionTracker('UTC', row => usage.push(row)),
-      outputTap: { onDelta: delta => seen.push(delta.type) }, hooks: { onTurnEnded: context => { ended.push(context); } } });
+    const rig = makeRig({ silent: true, tracker: new SessionTracker('UTC', row => usage.push(row)), outputTap: { onDelta: delta => seen.push(delta.type) } });
     let started = false;
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
@@ -490,7 +393,6 @@ describe('MainLoop standard Response execution', () => {
       expect(seen).toEqual([]);
       expect(rig.session.records.some(entry => entry.context.responseId === 'late')).toBe(false);
       expect(usage[0].attempt).toMatchObject({ outcome: 'discarded', meters: { input: 10, output: 2 } });
-      expect(ended).toEqual([{ kind: 'preempted' }]);
     } finally { release(); await rig.cleanup(); }
   });
 });
@@ -1796,67 +1698,6 @@ describe('MainLoop user事件协议', () => {
     }
   });
 
-  it.each([
-    ['普通派发', false],
-    ['提前派发', true],
-  ] as const)('%s将结构化工具失败送入下一次请求，工具日志保留原回执', async (_name, eager) => {
-    const logTmp = makeTmpDir();
-    const toolFile = join(logTmp.dir, 'reported-failure-tools.jsonl');
-    const failure = '此次未完成';
-    const marked = '[tool failed] 缺少前提';
-    const ordinary = '已存档原文本：[tool failed]';
-    const tools: ToolDef[] = [
-      { ...makeTool('refused', ''), handler: async () => ({ text: failure, failed: true }) },
-      { ...makeTool('marked', ''), handler: async () => ({ text: marked, failed: true }) },
-      makeTool('archive', ordinary),
-    ];
-    const native = new FakeLLM();
-    const inputs: Request['input'][] = [];
-    rig = makeRig({
-      worlds: [makeFakeIO('ext', tools)],
-      toolLog: new ToolCallLog(toolFile),
-      llm: { respond: (request, options) => {
-        inputs.push(request.input);
-        return native.respond(request, options);
-      } },
-      ...(eager ? { outputTap: { onDelta: () => {} } } : {}),
-    });
-    try {
-      rig.start();
-      await until(() => native.calls.length >= 1);
-      const before = native.calls.length;
-      native.script(toolReply([
-        { name: 'refused', id: 'refused1' },
-        { name: 'marked', id: 'marked1' },
-        { name: 'archive', id: 'archive1' },
-      ]), textReply('收到回执'));
-      rig.pushEvent('触发');
-
-      await until(() => inputs.length >= before + 2);
-      const request = inputs[before + 1];
-      const expected = new Map([
-        ['refused1', '[tool failed] ' + failure],
-        ['marked1', marked],
-        ['archive1', ordinary],
-      ]);
-      for (const [callId, receipt] of expected) {
-        expect(request).toContainEqual(expect.objectContaining({
-          type: 'function_call_output', call_id: callId, output: receipt,
-        }));
-        expect(rig.session.messages.find((message) => message.tool_call_id === callId)?.content).toBe(receipt);
-      }
-      assertPairing(rig.session.messages);
-      const rows = readFileSync(toolFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
-      expect(rows.map(({ call, receipt, failed }) => [call, receipt, failed])).toEqual([
-        ['refused1', failure, true],
-        ['marked1', marked, true],
-        ['archive1', ordinary, undefined],
-      ]);
-    } finally {
-      logTmp.cleanup();
-    }
-  });
-
   it('核心动作经Persona的handler接到core；schedule_wake支持绝对与相对时间', async () => {
     const forkCalls: Array<{ mode: string; task: string }> = [];
     const timerSets: Array<{ at: string; payload: Record<string, unknown> }> = [];
@@ -2114,108 +1955,6 @@ describe('MainLoop user事件协议', () => {
     }
   });
 
-  it('uses prepared input after a failed projected request without counting the retained archive as context', async () => {
-    const native = new FakeLLM();
-    native.throwNext = new LLMError('Invalid tool output', 0, 'Undeclared tool');
-    let attempts = 0;
-    let handoffs = 0;
-    const archive = 'Retained archive outside the request. '.repeat(3000);
-    rig = makeRig({
-      preSession: [{ role: 'user', content: archive }],
-      context: { hardTokens: () => 3000 },
-      onHandoff: async () => { handoffs++; return { tail: [] }; },
-      llm: { respond: async (request, options) => {
-        options?.onInputEstimate?.(100);
-        attempts++;
-        return native.respond(request, options);
-      } },
-    });
-    try {
-      rig.start();
-      await until(() => native.calls.length >= 2 || handoffs > 0);
-      expect(handoffs).toBe(0);
-      await until(() => rig.loop.getStatus().phase.state === 'idle');
-      expect(attempts).toBe(2);
-      expect(rig.session.messages.some(m => m.content === archive)).toBe(true);
-      expect(rig.loop.getStatus().context.countedTokens).toBe(0);
-      expect(rig.loop.estTokens()).toBeLessThan(3000);
-      const before = rig.loop.estTokens();
-      rig.session.append({ role: 'user', content: 'An actually new message. '.repeat(20) });
-      expect(rig.loop.estTokens()).toBeGreaterThan(before);
-      native.usage = { promptTokens: 800, completionTokens: 100, cacheHitTokens: 0, cacheMissTokens: 800 };
-      rig.pushEvent('Continue from the confirmed result.');
-      await until(() => rig.loop.getStatus().context.countedTokens === 900);
-      expect(rig.loop.estTokens()).toBe(900);
-    } finally { await rig.cleanup(); }
-  });
-
-  it('ignores input estimates after the request finishes or the session is reset', async () => {
-    const native = new FakeLLM();
-    let report: ((tokens: number) => void) | undefined;
-    rig = makeRig({ llm: { respond: async (request, options) => {
-      report = options?.onInputEstimate;
-      report?.(100);
-      return native.respond(request, options);
-    } } });
-    try {
-      rig.start();
-      await until(() => native.calls.length === 1);
-      await until(() => rig.loop.getStatus().phase.state === 'idle');
-      const estimate = rig.loop.estTokens();
-      const oldReport = report;
-      oldReport?.(1000000);
-      expect(rig.loop.estTokens()).toBe(estimate);
-      await rig.loop.handoffContext();
-      const reset = rig.loop.estTokens();
-      oldReport?.(2000000);
-      expect(rig.loop.estTokens()).toBe(reset);
-      expect(rig.loop.getStatus().context.countedTokens).toBe(0);
-    } finally { await rig.cleanup(); }
-  });
-
-  it('retains genuine provider overflow handling after a prepared input estimate', async () => {
-    let handoffs = 0;
-    const native = new FakeLLM();
-    native.throwNext = new LLMError('Input exceeds context length', 400, 'context length exceeded');
-    rig = makeRig({
-      context: { contextOverflow: error => error.status === 400 && /context length/.test(error.body) },
-      onHandoff: async () => { handoffs++; return { tail: [] }; },
-      llm: { respond: async (request, options) => {
-        options?.onInputEstimate?.(100);
-        return native.respond(request, options);
-      } },
-    });
-    try {
-      rig.start();
-      await until(() => handoffs === 1);
-      expect(handoffs).toBe(1);
-    } finally { await rig.cleanup(); }
-  });
-
-  it('rejects invalid estimates and cannot restore an anchor reset during dispatch', async () => {
-    const native = new FakeLLM();
-    let report: ((tokens: number) => void) | undefined;
-    let release!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    rig = makeRig({ llm: { respond: async (request, options) => {
-      report = options?.onInputEstimate;
-      report?.(100);
-      for (const invalid of [-1, 1.5, NaN, Infinity]) report?.(invalid);
-      await gate;
-      return native.respond(request, options);
-    } } });
-    try {
-      rig.start();
-      await until(() => report !== undefined);
-      expect(rig.loop.estTokens()).toBe(100);
-      rig.session.reset([{ role: 'user', content: 'New context after reset.' }]);
-      const reset = rig.loop.estTokens();
-      report?.(1000000);
-      expect(rig.loop.estTokens()).toBe(reset);
-      expect(rig.loop.getStatus().context.countedTokens).toBe(0);
-    } finally { release(); await rig.cleanup(); }
-  });
-
   it('丢弃历史思维链时,锚点那一发的推理量从下一发输入里扣掉', async () => {
     rig = makeRig({ cfgPatch: (cfg) => { cfg.context = { ...cfg.context, keepPastThinking: false }; } });
     try {
@@ -2230,9 +1969,7 @@ describe('MainLoop user事件协议', () => {
 
   it('上游拒绝"输入超过上下文":本批结束即交接,不等下一次计数', async () => {
     let handoffs = 0;
-    const ended: TurnEndedContext[] = [];
     rig = makeRig({
-      hooks: { onTurnEnded: context => { ended.push(context); } },
       context: { contextOverflow: (error) => error.status === 400 && /context length/.test(error.body) },
       onHandoff: async () => { handoffs++; return { tail: [] }; },
     });
@@ -2242,7 +1979,6 @@ describe('MainLoop user事件协议', () => {
       rig.llm.throwNext = new LLMError('LLM API 400', 400, "This model's maximum context length is 128000 tokens");
       rig.pushEvent('[10:05] 阿明: 在吗');
       await until(() => handoffs >= 1);
-      expect(ended.filter(context => context.kind === 'overflow')).toHaveLength(1);
       // 普通 400 不触发
       rig.llm.throwNext = new LLMError('LLM API 400', 400, 'Model Not Exist');
       rig.pushEvent('[10:06] 阿明: 还在吗');
@@ -2349,64 +2085,12 @@ describe('MainLoop user事件协议', () => {
     expect(ended).toBe(2);
   });
 
-  it('lets a Persona read the last receipt on hard-cap and wake once without replaying the tool', async () => {
-    const ended: TurnEndedContext[] = [];
-    const visible: TurnEndedContext[] = [];
-    const lookup = vi.fn(() => 'No matching entry');
-    const world = makeFakeIO('qq', [makeTool('lookup', lookup)]);
-    world.onTurnEnded = context => { visible.push(context); };
-    rig = makeRig({
-      silent: true, worlds: [world], cfgPatch: cfg => { cfg.loop.hardCap = 1; },
-      hooks: { onTurnEnded(context) {
-        ended.push(context);
-        if (context.kind === 'hard-cap') {
-          const receipt = rig.session.messages.at(-1);
-          if (receipt?.tool_call_id) rig.loop.injectInternal(`Review receipt ${receipt.tool_call_id}.`);
-        }
-      } },
-    });
-    rig.llm.script(toolReply([{ name: 'lookup', id: 'last-lookup' }]), textReply('Read the result.'));
-    rig.start(); rig.pushEvent('Look up the entry.');
-    await until(() => ended.length === 2);
-    expect(ended).toEqual([{ kind: 'hard-cap' }, { kind: 'completed' }]);
-    expect(visible).toEqual(ended);
-    const followUp = rig.llm.calls[1].messages;
-    expect(followUp).toContainEqual(expect.objectContaining({ tool_call_id: 'last-lookup', content: 'No matching entry' }));
-    expect(JSON.stringify(followUp)).toContain('Review receipt last-lookup.');
-    expect(lookup).toHaveBeenCalledTimes(1);
-    expect(rig.llm.calls).toHaveLength(2);
-  });
-
-  it('reports an explicit end-turn separately when it executes on the last budgeted round', async () => {
-    const ended: TurnEndedContext[] = [];
-    const endTool: ToolDef = { ...makeTool('finish', 'Done.'), endsTurn: true };
-    rig = makeRig({ worlds: [makeFakeIO('qq', [endTool])], cfgPatch: cfg => { cfg.loop.hardCap = 1; },
-      hooks: { onTurnEnded: context => { ended.push(context); } } });
-    rig.start(); await until(() => ended.length === 1);
-    rig.llm.script(toolReply([{ name: 'finish', id: 'explicit-end' }])); rig.pushEvent('Decide whether to stop.');
-    await until(() => ended.length === 2);
-    expect(ended[1]).toEqual({ kind: 'ended' });
-    await sleep(100); expect(rig.llm.calls).toHaveLength(2);
-  });
-
-  it('reports a model error separately when it exhausts the last round', async () => {
-    const ended: TurnEndedContext[] = [];
-    rig = makeRig({ cfgPatch: cfg => { cfg.loop.hardCap = 1; },
-      hooks: { onTurnEnded: context => { ended.push(context); } } });
-    rig.start(); await until(() => ended.length === 1);
-    rig.llm.throwNext = new LLMError('fixture model failure', 503, 'Temporarily unavailable'); rig.pushEvent('New input.');
-    await until(() => ended.length === 2);
-    expect(ended[1]).toEqual({ kind: 'failed' });
-  });
-
   it('clearSession只保留system，随后boot以user消息重开且仍可继续', async () => {
-    const ended: TurnEndedContext[] = [];
-    rig = makeRig({ hooks: { onTurnEnded: context => { ended.push(context); } } });
+    rig = makeRig();
     rig.start();
     await until(() => rig.llm.calls.length >= 1);
     expect(JSON.stringify(rig.session.messages)).toContain('Session started.');
     await rig.loop.clearSession();
-    expect(ended.filter(context => context.kind === 'cleared')).toHaveLength(1);
     // 清空后的开场随即作为 user 消息投递,这里只断言旧内容一条不剩。
     expect(rig.session.messages[0].role).toBe('system');
     expect(JSON.stringify(rig.session.messages)).not.toContain('Session started.');
@@ -2477,38 +2161,6 @@ describe('MainLoop user事件协议', () => {
       (message) => message.role === 'user' && message.content.includes('new event arrived'),
     )).toBe(true);
     assertPairing(rig.session.messages);
-  });
-
-  it('reports a failed queued prefix change and processes the next event with the previous tool set', async () => {
-    const tools = [makeTool('before_reload', 'done')];
-    rig = makeRig({ worlds: [makeFakeIO('probe', tools, 'old prefix')] });
-    rig.start();
-    await until(() => rig.llm.calls.length > 0);
-    const old = rig.session.records[0];
-    let enter!: () => void;
-    let release!: () => void;
-    const entered = new Promise<void>(resolve => { enter = resolve; });
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    const originalChat = rig.llm.chat.bind(rig.llm);
-    rig.llm.chat = async (...args) => {
-      enter();
-      await gate;
-      return originalChat(...args);
-    };
-    rig.pushEvent('hold this boundary');
-    await entered;
-    tools.push(makeTool('after_reload', 'done'));
-    vi.spyOn(rig.session, 'replaceSystemPrefix').mockRejectedValueOnce(new Error('disk full'));
-    const failed = expect(rig.loop.reloadSystemPrefix()).rejects.toThrow('disk full');
-    release();
-    await failed;
-    expect(rig.session.records[0]).toBe(old);
-    expect(rig.loop.getToolSchemas().map(t => t.name)).not.toContain('after_reload');
-    const count = rig.llm.calls.length;
-    rig.pushEvent('new event after failure');
-    await until(() => rig.llm.calls.length > count);
-    await rig.loop.reloadSystemPrefix();
-    expect(rig.loop.getToolSchemas().map(t => t.name)).toContain('after_reload');
   });
 
   it('推理中清空 session 会排队到自然回合边界,半轮的回答不会落进新 session', async () => {
@@ -4130,27 +3782,6 @@ describe("MainLoop 重新请求、轮次边界与统计", () => {
     assertPairing(rig.session.messages);
   });
 
-  it('does not resubmit a terminal provider rejection carried by HTTP 200', async () => {
-    let requests = 0;
-    const response = { id: 'rejected-request', model: 'test', status: 'failed', output: [],
-      error: { code: 'server_error', message: '<400> InternalError.Algo.DataInspectionFailed: Input text data may contain inappropriate content.' }, usage: null };
-    vi.stubGlobal('fetch', async () => {
-      requests++;
-      return new Response('data: ' + JSON.stringify({ type: 'response.created', sequence_number: 0, response: { ...response, status: 'in_progress', error: null } }) + '\n\n'
-        + 'data: ' + JSON.stringify({ type: 'response.failed', sequence_number: 1, response }) + '\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } });
-    });
-    try {
-      let ended = false;
-      const provider = new ResponsesProvider({ baseUrl: 'https://fixture.test/v1', apiKey: 'fixture' });
-      rig = makeRig({ llm: { respond: (request, options) => provider.respond(request, { ...options, diagnostic: true }) },
-        hooks: { onTurnEnded: () => { ended = true; } } });
-      rig.start();
-      await until(() => ended);
-      expect(requests).toBe(1);
-      expect(rig.session.messages.some(m => m.role === 'tool')).toBe(false);
-    } finally { vi.unstubAllGlobals(); }
-  });
-
   it("重新请求前投递退避期间已就绪的事件", async () => {
     rig = makeRig({ resubmit: { maxConsecutive: 2, maxPerBatch: 4, backoffMs: [120] } });
     rig.start();
@@ -4343,30 +3974,6 @@ describe('MainLoop 异步 onDelivery', () => {
   let rig: ReturnType<typeof makeRig>;
   afterEach(async () => {
     if (rig) await rig.cleanup();
-  });
-
-  it.each(['user', 'tool'] as const)('%s delivery indexes hook injections and duplicate text by real cursor', async (eventDelivery) => {
-    rig = makeRig({ eventDelivery, hooks: { onDelivery: async ({ events }) => {
-      if (!events.some(e => e.origin === 'external')) return;
-      rig.loop.injectInternal('same text\nsecond line', 'state.one');
-      await Promise.resolve();
-      rig.loop.injectInternal('same text\nsecond line', 'state.two');
-    } } });
-    rig.start();
-    await until(() => rig.llm.calls.length >= 1);
-    rig.pushEvent('external message');
-    await until(() => rig.session.messages.some(m => m.frame?.events.some(e => e.type === 'state.two')));
-    const messages = rig.session.messages.filter(m => m.frame?.events.some(e => ['state.one', 'state.two'].includes(e.type)));
-    expect(messages).toHaveLength(1);
-    const refs = messages[0].frame!.events;
-    for (const ref of refs) {
-      const archived = rig.store.get(ref.cursor)!;
-      expect(messages[0].content.slice(ref.start, ref.start + ref.chars)).toBe(archived.text);
-      expect(ref).toMatchObject({ source: archived.source, ts: archived.ts, type: archived.type });
-    }
-    expect(refs.filter(e => e.source === 'persona').map(e => e.type)).toEqual(['state.one', 'state.two']);
-    expect(new Set(refs.map(e => e.cursor)).size).toBe(refs.length);
-    assertPairing(rig.session.messages);
   });
 
   /** 钩子开始等待时置位；调用 release() 后钩子继续。 */

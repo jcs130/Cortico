@@ -10,20 +10,16 @@ export function textOf(entry: ContextRecord): string { return itemText(entry.ite
 export function withoutPastReasoning(entries: readonly ContextRecord[]): ContextRecord[] {
   return entries.filter(entry => entry.item.type !== 'reasoning' || entry.context.head);
 }
-export function responseRequest(spec: ModelSpec, context: readonly ContextRecord[], tools: readonly ToolSchema[] = [], options: { deferInput?: boolean } = {}): Request {
-  const input = () => context.map(inputItem);
-  const request = {
-    model: spec.model,
+export function responseRequest(spec: ModelSpec, context: readonly ContextRecord[], tools: readonly ToolSchema[] = []): Request {
+  return {
+    model: spec.model, input: context.map(inputItem),
     // 只有协议声明的成员进线;运行时传进来的对象还带着分类标签,它归 WebUI 与工具装配。
     tools: tools.map(({ name, description, parameters }) => ({ type: 'function' as const, name, description, parameters })),
     // effort 词表归端点(见 ModelSpec.reasoningEffort);协议枚举只覆盖 OpenAI 自己的取值。
     reasoning: spec.thinking ? { ...(spec.reasoningEffort ? { effort: spec.reasoningEffort as Schemas['ReasoningEffortEnum'] } : {}) } : { effort: 'none' },
     ...(spec.temperature !== undefined ? { temperature: spec.temperature } : {}),
     ...(spec.maxTokens !== undefined ? { max_output_tokens: spec.maxTokens } : {}),
-  } as Request;
-  if (!options.deferInput) request.input = input();
-  else Object.defineProperty(request, 'input', { enumerable: false, configurable: true, get: input });
-  return request;
+  };
 }
 
 /** Legacy numeric dashboard totals sum only known measurements; billing retains nullable meters. */

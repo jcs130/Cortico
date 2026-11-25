@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebApp } from '../../src/web/server.ts';
 import { UsageLog } from '../../src/core/usage-log.ts';
+import { aggregateUsage } from '../../src/core/cost.ts';
 import { nullLogger } from '../../src/core/util.ts';
 import type { UsageRecord } from '../../src/core/types.ts';
 import type { BotConfig } from '../../bots/corti-soulmate/assemble.ts';
@@ -53,7 +54,7 @@ beforeAll(async () => {
     memoryDir,
     dataDir,
     getStatus: () => ({}),
-    usage: { aggregate: (opts) => usage.aggregate(opts) },
+    usage: { aggregate: async (opts) => aggregateUsage(await usage.readAll(), opts) },
     config: {
       groups: () => configGroups.map((group) => ({ group, values: readGroupValues(cfg, group) })),
       set: (groupId, values) => {

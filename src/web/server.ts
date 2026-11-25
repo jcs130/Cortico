@@ -1,6 +1,5 @@
 import type { ProviderHubApi as ProviderHub } from '../providers/hub-api.ts';
 import type { ContextRecord } from '../protocol/open-responses/context.ts';
-import type { SessionPrefixChange } from '../core/session.ts';
 import type { EnvPromptOrigin } from '../core/prefix.ts';
 /**
  * WebApp 是独立于 agent 的 WebUI 服务。Express、HTTP 与
@@ -74,7 +73,7 @@ export interface WebAppDebugDeps {
   /** 当前的合成开头；为空时返回空数组，不写入 session 记录。省略时时间线不标注开头。 */
   sessionHead?(): ContextRecord[];
   onSessionAppend(cb: (msg: ContextRecord, index: number) => void): void;
-  onSessionReset(cb: (messages: ContextRecord[], prefix?: SessionPrefixChange) => void): void;
+  onSessionReset(cb: (messages: ContextRecord[]) => void): void;
   onEvent(cb: (e: EventEnvelope) => void): void;
   onRunlog(cb: (entry: LogRecord) => void): void;
   /** 主循环的 RunPhase 变化;缺席时状态帧里的 loop.phase 只随其他帧更新。 */
@@ -1023,7 +1022,7 @@ export class WebApp {
   private server: Server | null = null;
   private wss: WebSocketServer | null = null;
   /** /ws/debug 已连接客户端(广播目标) */
-  private readonly debugClients = new Map<WebSocket, 'full' | 'prefix' | 'none'>();
+  private readonly debugClients = new Set<WebSocket>();
   /** /ws/sessions 已连接客户端(session统计广播;chat页轻量订阅用) */
   private readonly sessionClients = new Set<WebSocket>();
 
@@ -1047,21 +1046,17 @@ export class WebApp {
     const dbg = deps.debug;
     if (dbg) {
       dbg.onSessionAppend((message, index) => {
-        if (!this.debugClients.size) return;
-        this.debugBroadcast({ t: 'session.append', index, message }, mode => mode !== 'none');
+        this.debugBroadcast({ t: 'session.append', index, message });
         // status顺带推一份(不定时轮询,append即代表状态变化)
         this.debugBroadcast({ t: 'status', status: this.safeStatus() });
       });
       // reset 顺带带上合成开头与工具表现值:前缀重载/交接都走 reset,两者与新前缀同一代
-      dbg.onSessionReset((messages, prefix) => {
-        if (![...this.debugClients.values()].some(mode => mode !== 'none')) return;
-        const metadata = { head: dbg.sessionHead?.() ?? [], toolSchemas: dbg.toolSchemas() };
-        if (prefix) {
-          this.debugBroadcast({ t: 'session.prefix', ...prefix, ...metadata }, mode => mode === 'prefix');
-        }
-        this.debugBroadcast({ t: 'session.reset', messages, ...metadata }, mode =>
-          mode === 'full' || (mode === 'prefix' && !prefix));
-      });
+      dbg.onSessionReset((messages) => this.debugBroadcast({
+        t: 'session.reset',
+        messages,
+        head: dbg.sessionHead?.() ?? [],
+        toolSchemas: dbg.toolSchemas(),
+      }));
       dbg.onEvent((envelope) => this.debugBroadcast({ t: 'event', envelope }));
       dbg.onRunlog((entry) => this.debugBroadcast({ t: 'runlog', entry }));
       // 工具每次开始与结束都会变,单独成帧:status 帧要估算 token、扫描投递积压,不随它重算。
@@ -1368,12 +1363,11 @@ export class WebApp {
     }
   }
 
-  private debugBroadcast(payload: unknown, accepts?: (mode: 'full' | 'prefix' | 'none') => boolean): void {
-    let raw: string | undefined;
-    for (const [ws, mode] of this.debugClients) {
-      if (accepts && !accepts(mode)) continue;
+  private debugBroadcast(payload: unknown): void {
+    if (this.debugClients.size === 0) return;
+    const raw = JSON.stringify(payload);
+    for (const ws of [...this.debugClients]) {
       if (ws.readyState === 1 /* OPEN */) {
-        raw ??= JSON.stringify(payload);
         try { ws.send(raw); } catch { this.debugClients.delete(ws); }
       } else if (ws.readyState > 1) {
         this.debugClients.delete(ws);
@@ -1382,15 +1376,14 @@ export class WebApp {
   }
 
   /** /ws/debug 新连接:发hello全量快照,之后实时帧由构造时注册的监听器广播 */
-  private handleDebugConnection(ws: WebSocket, language: Language, requestedMode: string | null): void {
+  private handleDebugConnection(ws: WebSocket, language: Language): void {
     const dbg = this.deps.debug;
     if (!dbg) {
       try { ws.send(JSON.stringify({ t: 'sys', text: serverText(language).debugUnavailable })); } catch { /* ignore */ }
       ws.close(1013, 'debug deps not mounted');
       return;
     }
-    const mode = requestedMode === 'prefix' || requestedMode === 'none' ? requestedMode : 'full';
-    this.debugClients.set(ws, mode);
+    this.debugClients.add(ws);
     ws.on('close', () => this.debugClients.delete(ws));
     ws.on('error', () => {
       this.debugClients.delete(ws);
@@ -1399,9 +1392,9 @@ export class WebApp {
     try {
       ws.send(JSON.stringify({
         t: 'hello',
-        ...(mode === 'none' ? {} : {
-          session: dbg.sessionMessages(), head: dbg.sessionHead?.() ?? [], toolSchemas: dbg.toolSchemas(),
-        }),
+        session: dbg.sessionMessages(),
+        head: dbg.sessionHead?.() ?? [],
+        toolSchemas: dbg.toolSchemas(),
         status: this.safeStatus(),
         sessions: this.safeSessionList(),
       }));
@@ -1458,7 +1451,7 @@ export class WebApp {
             return;
           }
           if (pathname === '/ws/debug') {
-            this.handleDebugConnection(ws, language, new URL(req.url!, 'http://localhost').searchParams.get('session'));
+            this.handleDebugConnection(ws, language);
             return;
           }
           this.handleSessionsConnection(ws, language);
@@ -1722,7 +1715,7 @@ export class WebApp {
       res.json({ capabilities: this.frameworkCapabilities() });
     }));
 
-    // 事件流按 from/to 游标区间查询，默认最近 100 条，to 用于向前翻页。
+    // 事件流按 store.range 的 from/to 游标区间查询，默认最近 100 条，to 用于向前翻页。
     // 默认隐藏 archive-only，避免原始归档与投影重复展示；不修改原始归档，archive=1 可查看全部记录。
     app.get('/api/events', wrap(async (req, res) => {
       const q: EventRangeQuery = {};
@@ -1734,33 +1727,24 @@ export class WebApp {
       const source = strParam(req.query.source);
       if (source) q.source = source;
       const withArchive = strParam(req.query.archive) === '1';
-      const store = this.deps.store;
-      const latest = store.latestCursor();
-      q.toCursor = Math.min(q.toCursor ?? latest, latest);
-      const controller = new AbortController();
-      const abort = () => controller.abort();
-      res.once('close', abort);
-      try {
-        // 只给 from 是追新:从区间头部取 limit+1 条，额外一条用于判断 hasMore。
-        if (from !== undefined && to === undefined) {
-          const visible = store.rangeFromStartAsync
-            ? await store.rangeFromStartAsync({ ...q, limit: limit + 1 },
-                { signal: controller.signal, excludeArchiveOnly: !withArchive })
-            : dropArchiveOnly(await store.rangeAsync(q, controller.signal)).slice(0, limit + 1);
-          if (!controller.signal.aborted)
-            res.json({ latest, events: visible.slice(0, limit), hasMore: visible.length > limit });
-          return;
-        }
-        // 保持普通尾页多取一截再过滤的展示口径。
-        q.limit = withArchive ? limit : clamp(limit * 2, 1, 2000);
-        const rows = await store.rangeAsync(q, controller.signal);
-        if (!controller.signal.aborted)
-          res.json({ latest, events: withArchive ? rows : dropArchiveOnly(rows).slice(-limit) });
-      } catch (error) {
-        if (!controller.signal.aborted) throw error;
-      } finally {
-        res.off('close', abort);
+      // 只给 from 是追新:从区间头部取最早的 limit 条,hasMore 表示后面还有没返回的记录。
+      if (from !== undefined && to === undefined) {
+        const latest = this.deps.store.latestCursor();
+        const all = await this.deps.store.rangeAsync({ ...q, toCursor: latest });
+        const visible = withArchive ? all : dropArchiveOnly(all);
+        res.json({ latest, events: visible.slice(0, limit), hasMore: visible.length > limit });
+        return;
       }
+      if (withArchive) {
+        q.limit = limit;
+        const events = await this.deps.store.rangeAsync(q);
+        res.json({ latest: this.deps.store.latestCursor(), events });
+        return;
+      }
+      // 过滤会吃掉配额,所以多取一截再截尾——否则"最近 100 条"实际只剩一半。
+      q.limit = clamp(limit * 2, 1, 2000);
+      const events = dropArchiveOnly(await this.deps.store.rangeAsync(q)).slice(-limit);
+      res.json({ latest: this.deps.store.latestCursor(), events });
     }));
 
     // 运行日志:服务端按级别/区域/小类/轮次/关键词过滤,从文件尾部向前扫到够数为止。

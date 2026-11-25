@@ -1,7 +1,7 @@
 import type { PriceDefinition } from '../providers/pricebook.ts';
 import type { ContextRecord, Item } from '../protocol/open-responses/context.ts';
 import type { StreamEvent } from '../protocol/open-responses/index.ts';
-import type { ResponseClient, ProviderAttempt, ToolGenerationRejection } from './generation.ts';
+import type { ResponseClient, ProviderAttempt } from './generation.ts';
 import type { ConfigGroup } from './config-schema.ts';
 import type { Language } from './language.ts';
 
@@ -171,13 +171,6 @@ export interface EventStoreReader {
   get(cursor: number): EventEnvelope | undefined;
   latestCursor(): number;
   range(q: EventRangeQuery): EventEnvelope[];
-  /** 异步读取历史，保持 range 的排序与筛选；查询开始后的事件留给下一次查询。 */
-  rangeAsync?(q: EventRangeQuery, signal?: AbortSignal): Promise<EventEnvelope[]>;
-  /** 从区间开头读取有限条记录，供游标追新使用。 */
-  rangeFromStartAsync?(
-    q: EventRangeQuery & { limit: number },
-    options?: { signal?: AbortSignal; excludeArchiveOnly?: boolean },
-  ): Promise<EventEnvelope[]>;
   /** 返回前 before 条、自身及后 after 条事件。 */
   around(cursor: number, before: number, after: number): EventEnvelope[];
   grep(q: EventGrepQuery): EventGrepHit[];
@@ -263,7 +256,7 @@ export interface ToolCallContext {
 export interface ToolOutcome {
   text: string;
   blobs?: BlobInput[];
-  /** 执行失败。工具调用记录标记 failed，模型回执带 `[tool failed]`。 */
+  /** 执行失败；工具调用记录据此标记 failed。 */
   failed?: true;
 }
 
@@ -651,10 +644,6 @@ export interface PushOptions {
 export interface CognitionRequest {
   /** 任务说明；不指定身份、模型或执行预算。 */
   brief: string;
-  /** Optional cumulative public answer text. A new attempt may reset it to empty.
-   * Persona may omit updates; the final result remains authoritative. Never includes reasoning.
-   * Consumers validate complete records before external effects and must not replay an emitted prefix. */
-  onText?: (text: string) => void;
   /**
    * 仅可引用请求方 World.tools() 中的工具；越界请求以 error 返回，不交给 Persona。
    * 缺省为空；Persona 仍可自行提供 Memory 等自有工具。
@@ -928,11 +917,6 @@ export interface IncompleteTurnContext {
   incompleteReason: string | null;
 }
 
-/** 主循环结束当前唤醒或清空 session 时的通知。 */
-export type TurnEndedContext = IncompleteTurnContext | {
-  kind: 'completed' | 'ended' | 'hard-cap' | 'overflow' | 'failed' | 'preempted' | 'interrupted' | 'cleared';
-};
-
 /** World 的环境描述、事件和工具契约。 */
 export interface World {
   id: string;
@@ -962,8 +946,11 @@ export interface World {
    * 此时推送的事件进入新 session 的第一批；隐藏 World 不接收通知。
    */
   onHandoffEnded?(): void;
-  /** 一轮收束或 session 清空时通知可见 World，用于清理暂态。 */
-  onTurnEnded?(context: TurnEndedContext): void;
+  /**
+   * assistant 自然结束、LLM 失败或轮数达到硬上限时调用，用于清理本轮暂态;因回复截断而结束时带
+   * `context`。隐藏 World 不接收通知。
+   */
+  onTurnEnded?(context?: IncompleteTurnContext): void;
   /**
    * 本 World 产生的事件离开队列时调用：delivered 表示已写入主 session，discarded 表示被操作者
    * 清空队列丢弃。经 withdrawPending 撤回的事件不通知；drainPendingEvents 取走的事件只在
@@ -1048,14 +1035,12 @@ export interface Persona {
    * Core 在超过 hardTokens 时强制交接。
    */
   onBatchEnd?(): void;
-  /** 一轮收束或 session 清空时调用；达到轮数上限时，末轮的工具回执已写入 session。 */
-  onTurnEnded?(context: TurnEndedContext): void;
+  /** assistant 自然结束、LLM 失败或轮数达到硬上限时调用;因回复截断而结束时带 `context`。 */
+  onTurnEnded?(context?: IncompleteTurnContext): void;
   /** 一批处理结束且总线没有非 piggyback 的即时事件或候选时调用。 */
   onIdle?(): void | Promise<void>;
   /** 连续模型调用失败后恢复时调用；返回待注入文本，null 表示不注入。 */
   onStallsRecovered?(info: { count: number; quietMs: number }): string | null;
-  /** Supplies one request-only correction for a provider's generated tool rejection. */
-  onToolGenerationRejected?(failure: ToolGenerationRejection): string | null;
   /** World 被激活、停用、重启、可见性改变,启动期 `start()` 抛错或运行中被卸载时调用；启动期初始挂载不通知。 */
   onWorldLifecycle?(event: WorldLifecycleEvent): void;
   /**

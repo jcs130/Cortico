@@ -18,7 +18,7 @@ World 不直接访问 Memory 或调用 Persona 的工具。
 | `start(host)` / `stop()` | 启动与停止;运行中挂载时先调用 `start`,成功后加入挂载表 |
 | `webUi?()` | WebUI 页声明(见 [webui.md](webui.md)) |
 | `outputTap?()` | 主 session 输出流的接收器(演出、字幕);这一刻没有接收器时返回 `undefined` |
-| `onHandoffEnded?()`、`onTurnEnded?(context)` | 交接结束与主循环收束时通知可见 World；`context.kind` 给出[结束原因](../src/core/README.md#主循环) |
+| `onHandoffEnded?()`、`onTurnEnded?(context?)` | 交接结束与主循环一轮结束的通知;一轮因回复截断而结束时，`onTurnEnded` 带一个说明原因的参数(`IncompleteTurnContext`);隐藏的 World 不接收 |
 | `onEventsSettled?(events, outcome)` | 本 World 的事件写入主 session(`delivered`)或被操作者清空队列丢弃(`discarded`) |
 | `onRunPhase?(phase)` | 主循环的 `RunPhase`(`idle`、`delivering`、`model`、`tools`、`backoff`、`handoff`,轮序号,执行中的工具名)改变时同步调用;隐藏的 World 不接收 |
 | `shutdownVerification?(language)` | 关机前要核对的外部状态,同步只读快照;文案按 `language` 给 |
@@ -62,8 +62,7 @@ World 应通过事件报告服务器起停、存档切换、连接变化等状�
 系统生成的判断只陈述可确认的事实。`origin: 'internal'` 只用于来源可验证的内部通知;
 外部消息使用 `origin: 'external'`。
 
-工具回执为 `ToolOutcome { text, blobs?, failed? }`。handler 抛错，或返回值既不是字符串也不是带字符串 text 的对象，Core 都转成失败回执。
-当 handler 返回 `failed: true` 时，模型回执以 `[tool failed]` 开头，工具调用日志保存原文。
+工具回执 `ToolOutcome { text, blobs?, failed? }`;handler 抛错,或返回值既不是字符串也不是带字符串 text 的对象,Core 都转成失败回执。
 `interruptible` 的工具在 `interrupt` 到达时停止并返回已完成部分的回执,Core 等它返回;
 未声明的工具执行到结束。
 `endsTurn` 让一个工具结束本轮,`barrierAfter` 让流式提前派发在它之后停下,同一条输出里排在它后面的调用不执行、
@@ -194,5 +193,3 @@ Minecraft 的 `PwsrTables` 管理目标、路标及蓝图的 realm 视图,空间
 `webui/client.ts`;有环境描述就加 `ENV_PROMPT.md`。测试用 `tests/helpers/fake-host.ts` 的
 `FakeHost` 记录推送。放进仓库的在 `src/worlds/index.ts` 的 id 表里登记 id 与定义的导出名;放进仓库还是做成扩展,判据在
 [CONTRIBUTING.md](../CONTRIBUTING.md)。
-
-`CognitionRequest.onText` is an optional callback receiving cumulative public answer text from a supporting Persona; a new provider attempt may reset the text to empty. It excludes reasoning. Core fences updates after completion or World deactivation. Consumers must validate complete records before external effects, retain emitted-prefix identity across resets, and support Personas/transports that provide only the final result. This hook does not supply a model, context, output format or speech policy.

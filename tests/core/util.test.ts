@@ -49,7 +49,7 @@ describe('readTextFile', () => {
     expect(readTextFile(file)).toBe('{ "bot": "cormini" }');
   });
 
-  it('仓里读文本文件都走 readTextFile,只有 Core 按字节偏移截断或分段读的追加日志例外', () => {
+  it('仓里读文本文件都走 readTextFile,只有 Core 按字节偏移截断或分段读的两份追加日志例外', () => {
     const repo = join(import.meta.dirname, '../..');
     const offenders: string[] = [];
     for (const top of ['src', 'bin', 'bots', 'scripts', 'templates']) {
@@ -59,7 +59,7 @@ describe('readTextFile', () => {
         if (/readFile(Sync)?\([^;]*?['"]utf-?8['"]/.test(readFileSync(join(repo, path), 'utf8'))) offenders.push(path);
       }
     }
-    expect(offenders.sort()).toEqual(['src/core/event-store.ts']);
+    expect(offenders.sort()).toEqual(['src/core/event-store.ts', 'src/protocol/open-responses/context-log.ts']);
   });
 });
 

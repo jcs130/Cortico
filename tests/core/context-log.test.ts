@@ -90,57 +90,6 @@ describe('Standard Item context storage', () => {
     } finally { tmp.cleanup(); }
   });
 
-  it('keeps a bounded recent cache while preserving indexed access to the full file', () => {
-    const tmp = makeTmpDir();
-    try {
-      const file = join(tmp.dir, 'session-main.jsonl');
-      const log = new ContextLog(file, undefined, 2);
-      const rows = Array.from({ length: 6 }, (_, index) => message('user', 'row-' + index));
-      for (const row of rows) log.append(row);
-      expect(log.records.length).toBe(6);
-      expect((log as unknown as { cache: Map<number, unknown> }).cache.size).toBe(2);
-      expect(log.records.map(entry => entry.item)).toEqual(rows.map(entry => entry.item));
-      expect(log.records[0].item).toEqual(rows[0].item);
-      expect((log as unknown as { cache: Map<number, unknown> }).cache.size).toBe(2);
-      const restored = new ContextLog(file, undefined, 1); restored.load();
-      expect(restored.records.slice(1, 5).map(entry => entry.item)).toEqual(rows.slice(1, 5).map(entry => entry.item));
-      expect(restored.records[5].item).toEqual(rows[5].item);
-      expect((restored as unknown as { cache: Map<number, unknown> }).cache.size).toBe(1);
-    } finally { tmp.cleanup(); }
-  });
-
-  it('keeps absolute offsets when a record spans scan chunks', () => {
-    const tmp = makeTmpDir();
-    try {
-      const file = join(tmp.dir, 'session-main.jsonl');
-      const log = new ContextLog(file, undefined, 1);
-      const rows = [message('user', 'x'.repeat(70 * 1024)), message('user', 'after-boundary')];
-      for (const row of rows) log.append(row);
-      const restored = new ContextLog(file, undefined, 1); restored.load();
-      expect(restored.records[0].item).toEqual(rows[0].item);
-      expect(restored.records[1].item).toEqual(rows[1].item);
-      const appended = message('user', 'appended-after-load');
-      restored.append(appended);
-      expect(restored.records[2].item).toEqual(appended.item);
-    } finally { tmp.cleanup(); }
-  });
-
-  it('streams predicate rewrites without retaining the removed history', () => {
-    const tmp = makeTmpDir();
-    try {
-      const file = join(tmp.dir, 'session-main.jsonl');
-      const log = new ContextLog(file, undefined, 2);
-      const rows = Array.from({ length: 6 }, (_, index) => message('user', 'row-' + index,
-        index === 1 || index === 4 ? { ephemeral: true } : {}));
-      for (const row of rows) log.append(row);
-      expect(log.retainWhere(entry => !entry.context.ephemeral)).toBe(2);
-      expect(log.records.map(entry => entry.item)).toEqual(rows.filter(row => !row.context.ephemeral).map(row => row.item));
-      expect((log as unknown as { cache: Map<number, unknown> }).cache.size).toBe(2);
-      const restored = new ContextLog(file, undefined, 1); restored.load();
-      expect(restored.records.map(entry => entry.item)).toEqual(log.records.map(entry => entry.item));
-    } finally { tmp.cleanup(); }
-  });
-
   it('rejects damaged input without replacing the session', () => {
     const tmp = makeTmpDir();
     try {

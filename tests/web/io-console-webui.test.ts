@@ -9,8 +9,6 @@ import type { WebUiStream } from '../../src/web/shared/webui-protocol.ts';
 import type { ToolCallContext } from '../../src/core/types.ts';
 import { nullLogger } from '../../src/core/util.ts';
 import { FakeHost, type PushedRecord } from './fakes.ts';
-import { JsonlEventStore } from '../../src/core/event-store.ts';
-import { makeTmpDir } from '../core/helpers.ts';
 
 const toolCtx: ToolCallContext = { role: 'main', log: nullLogger() };
 /** 回显在 pushEvent 落库之后才广播(句柄那时才有);让微任务与一个宏任务跑完 */
@@ -99,45 +97,6 @@ const SCRIPT = [
 // ── 1. 流式通道 ────────────────────────────────────────────────────────
 
 describe('ConsoleWorld 的流式通道', () => {
-  it('loads history asynchronously while accepting new messages, then preserves display order', async () => {
-    const tmp = makeTmpDir();
-    const host = new FakeHost(), store = new JsonlEventStore({ dataDir: tmp.dir, run: 'r-20260101-000000-aaaa' });
-    Object.defineProperty(host, 'store', { value: store });
-    for (let i = 0; i < 600; i++) store.append({ type: 'console.message', source: 'console', origin: 'internal',
-      text: `old ${i}`, ts: '2026-01-01T00:00:00Z', meta: { from: 'operator', body: `old ${i}` } });
-    const mod = new ConsoleWorld(), sock = new FakeStream();
-    try {
-      await mod.start(host); mod.stream('chat', sock);
-      sock.feed(JSON.stringify({ type: 'hello', name: 'operator' }));
-      sock.feed(JSON.stringify({ type: 'msg', text: 'new message' }));
-      const result = await mod.tools()[0].handler({ text: 'new response' }, toolCtx);
-      expect(String(result)).toContain('[queued]');
-      expect(String(result)).toContain('delivery is not confirmed');
-      expect(host.pushed.some(p => p.e.type === 'console.message' && p.e.text.includes('new message'))).toBe(true);
-      for (let i = 0; i < 30 && !sock.frames().some(f => f.text === 'new response'); i++) await settle();
-      const frames = sock.frames().filter(f => f.type === 'msg');
-      expect(frames.filter(f => f.history)).toHaveLength(30);
-      expect(frames.slice(0, 30).every(f => f.history)).toBe(true);
-      expect(frames.filter(f => !f.history).map(f => f.text).sort()).toEqual(['new message', 'new response']);
-    } finally { await mod.stop(); tmp.cleanup(); }
-  });
-
-  it('disconnecting during history loading cancels the query and drops queued frames', async () => {
-    const tmp = makeTmpDir();
-    const host = new FakeHost(), store = new JsonlEventStore({ dataDir: tmp.dir, run: 'r-20260101-000000-aaaa' });
-    Object.defineProperty(host, 'store', { value: store });
-    for (let i = 0; i < 600; i++) store.append({ type: 'other.event', source: 'other', origin: 'external', text: 'x', ts: '2026-01-01T00:00:00Z' });
-    const mod = new ConsoleWorld(), sock = new FakeStream();
-    try {
-      await mod.start(host); mod.stream('chat', sock);
-      sock.feed(JSON.stringify({ type: 'hello', name: 'operator' }));
-      await mod.tools()[0].handler({ text: 'queued response' }, toolCtx);
-      sock.hangup(); const count = sock.sent.length;
-      await settle(); await settle();
-      expect(sock.sent).toHaveLength(count);
-      expect(mod.onlineCount()).toBe(0);
-    } finally { await mod.stop(); tmp.cleanup(); }
-  });
   it('连上就有开场白,hello+msg 走通:事件落库 + 回显推回', async () => {
     const host = new FakeHost();
     const mod = new ConsoleWorld({ timezone: 'Asia/Shanghai' });
@@ -174,7 +133,6 @@ describe('ConsoleWorld 的流式通道', () => {
     const sock = new FakeStream();
     mod.stream('chat', sock);
     sock.feed(JSON.stringify({ type: 'hello', name: '小北' }));
-    await settle();
 
     const send = mod.tools().find((t) => t.name === 'console_send')!;
     const result = await send.handler({ text: '我在。' }, toolCtx);
@@ -206,7 +164,6 @@ describe('ConsoleWorld 的流式通道', () => {
     const sock = new FakeStream();
     mod.stream('chat', sock);
     sock.feed(JSON.stringify({ type: 'hello', name: '小北' }));
-    await settle();
     const withPeer = String(await send.handler({ text: '我在。' }, toolCtx));
     expect(withPeer).toContain('1 connection online');
     expect(withPeer).toContain('小北');
@@ -257,7 +214,6 @@ describe('ConsoleWorld 的流式通道', () => {
     const sock = new FakeStream();
     mod.stream('chat', sock);
     sock.feed(JSON.stringify({ type: 'hello', name: '阿明' }));
-    await settle();
     expect(sock.frames().some((f) => f.history === true && f.text === '昨天那事')).toBe(true);
 
     await mod.stop();

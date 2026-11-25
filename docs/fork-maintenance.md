@@ -1,11 +1,12 @@
 # Cortico fork 维护
 
-新的宿主修复以 [官方 Cortico](https://github.com/Pal-AI-Lab/Cortico) 为基线。可米当前维护分支为 [deploy/cortico-v0.2.17](https://github.com/jcs130/Cortico/tree/deploy/cortico-v0.2.17)，源自官方 v0.2.17 的 `cba606f6`。旧 fork 主干 v0.1.8 的 `8c00fbb0` 保存在 [legacy/fork-main-0.1.8](https://github.com/jcs130/Cortico/tree/legacy/fork-main-0.1.8)。
+Host 以 [官方 Cortico](https://github.com/Pal-AI-Lab/Cortico) 的 `main` 为唯一核心基线。`src/core`、协议、Provider、Web 服务与 Console 保持官方实现，不在 fork 中改动基本循环、会话、回放或事件存储逻辑。旧 fork 主干 v0.1.8 的 `8c00fbb0` 保存在 [legacy/fork-main-0.1.8](https://github.com/jcs130/Cortico/tree/legacy/fork-main-0.1.8)。
 
 | 改动 | 源码归属 |
 | --- | --- |
-| 宿主生命周期、事件投递、会话及 WebUI | Cortico fork，通用修复提交给官方 |
-| Bilibili、Console 的内置接入 | Cortico 的对应 World，沿用官方事件和扩展契约 |
+| 宿主生命周期、事件投递、会话、Provider 与 WebUI | 官方 Cortico，原样跟进 |
+| Bilibili 内置 World 适配 | 本 fork 的 World 层补丁，沿用官方事件和扩展契约 |
+| Console 内置接入 | 官方 Cortico，不在 fork 中修改 |
 | 通用 Minecraft 感知、动作、脚本和学习 | [minecraft-ai-friend](https://github.com/jcs130/minecraft-ai-friend) 的 `packages/agent-mc-world` |
 | 千灯纪协议与宿主适配 | [cortico-world-qiandengji](https://github.com/jcs130/cortico-world-qiandengji) |
 | 观战渲染 | [mc-visual-console](https://github.com/jcs130/mc-visual-console) |
@@ -15,7 +16,7 @@
 
 1. 读取官方 `main`、正式标签、发行说明和 fork 维护分支。从经确认的官方提交建立独立工作树。
 2. 用 `git log --first-parent <官方提交>..<维护分支>` 盘点本地补丁。用 `git show` 核对官方是否已覆盖行为。按依赖顺序重放仍缺的补丁，并逐项记录来源、实际消费者和回归用例。
-3. 旧代码按行为迁移。Bilibili 的普通进场与进场特效在候选投递时归并，原始事件照常归档。官方主循环会调用 Bot 提供的模型适配器，可米现用的思考档位通过该接口投递。旧 `beforeDecision` 控制台快速提示在现用配置中停用。
+3. 核心代码直接采用官方提交，不重放旧 fork 的 Core、协议、Provider、Web 服务或 Console 修改。只在官方 World 扩展契约内保留 Bilibili 适配补丁；普通进场与进场特效在候选投递时归并，原始事件照常归档。Bot、Minecraft 与演出扩展在各自仓库验收。
 4. 运行宿主类型检查、相关测试、WebUI 构建和成品打包。在独立目录对实际扩展逐个检查，覆盖公开 SDK、插件生命周期和关键回执。记录官方基线、本地补丁、测试结果、包哈希和回退入口。
 5. 候选通过后合并到维护分支。需要加载时通过启动器切换已验证成品，记录实际进程、宿主提交、扩展版本和游戏终态。
 

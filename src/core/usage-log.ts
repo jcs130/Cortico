@@ -1,8 +1,6 @@
 /** Append-only usage ledger. Failed writes remain queued and are reported to the operator. */
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { UsageAggregate, UsageAggregateOptions } from './cost.ts';
-import { queryUsage } from './usage-query.ts';
 import type { UsageRecord } from './types.ts';
 
 /** The ledger is read in chunks so its size is not bounded by V8's maximum string length. */
@@ -42,9 +40,6 @@ export class UsageLog {
   private counting: Promise<void> | null = null;
   /** Incremented by clear(); a scan that began before it does not set diskCount. */
   private cleared = 0;
-  private queryAbort = new AbortController();
-  private queryQueue: Promise<unknown> = Promise.resolve();
-  private queries = new Map<string, Promise<UsageAggregate>>();
   constructor(private readonly file: string, private readonly report: (message: string) => void = console.error) {}
 
   append(rec: UsageRecord): void {
@@ -103,7 +98,7 @@ export class UsageLog {
    * only whole lines at every turn and the scan ends having read every record then on disk.
    * Resolves false when the file could not be read.
    */
-  private async scan(each: (record: UsageRecord) => void = () => {}, strict = false): Promise<boolean> {
+  private async scan(each: (record: UsageRecord) => void = () => {}): Promise<boolean> {
     const cleared = this.cleared;
     let count = 0;
     try {
@@ -113,13 +108,13 @@ export class UsageLog {
       }
       if (cleared === this.cleared) this.diskCount = count;
       return true;
-    } catch (error) { this.note(error); if (strict) throw error; return false; }
+    } catch (error) { this.note(error); return false; }
   }
 
   /** Records on disk and still pending; with `keep`, only those it accepts are held. */
-  async readAll(keep: (record: UsageRecord) => boolean = () => true, strict = false): Promise<UsageRecord[]> {
+  async readAll(keep: (record: UsageRecord) => boolean = () => true): Promise<UsageRecord[]> {
     const records: UsageRecord[] = [];
-    if (!await this.scan(record => { if (keep(record)) records.push(record); }, strict)) records.length = 0;
+    if (!await this.scan(record => { if (keep(record)) records.push(record); })) records.length = 0;
     if (!this.pending.length) return records;
     const ids = new Set(records.map(record => record.recordId ?? record.attempt?.id));
     return [...records, ...this.pending.filter(record => keep(record) && !ids.has(record.recordId))];
@@ -131,30 +126,6 @@ export class UsageLog {
     this.counting ??= this.scan().then(() => { this.counting = null; });
     return null;
   }
-
-  /** Concurrent identical queries share one scan; different queries scan serially. */
-  aggregate(options: UsageAggregateOptions): Promise<UsageAggregate> {
-    const key = JSON.stringify(options);
-    const existing = this.queries.get(key);
-    if (existing) return existing;
-    const query = this.queryQueue.then(async () => {
-      const result = await queryUsage({ file: this.file, pending: structuredClone(this.pending), options }, this.queryAbort.signal);
-      if (result.error) {
-        if (result.error !== this.error) this.report(result.error);
-        this.error = result.error;
-      }
-      return result.aggregate;
-    }).catch(error => {
-      if (!this.queryAbort.signal.aborted) this.note(error);
-      throw error;
-    });
-    this.queries.set(key, query);
-    this.queryQueue = query.then(() => { this.queries.delete(key); }, () => { this.queries.delete(key); });
-    return query;
-  }
-
-  /** Pending WebUI scans must not delay engine shutdown. The ledger remains intact. */
-  stopQueries(): void { this.queryAbort.abort(new Error('Usage queries stopped')); }
 
   async clear(): Promise<number> {
     const count = (await this.readAll()).length;
