@@ -8,7 +8,7 @@ import { ResponsesProvider } from '../../src/providers/openai-responses-compat/n
 import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MainLoop, type ContextFacts, type ResubmitPolicy } from '../../src/core/loop.ts';
+import { MainLoop, MAIN_CONTEXT_WINDOW_RECORDS, type ContextFacts, type ResubmitPolicy } from '../../src/core/loop.ts';
 import { Core } from "./fixture-core.ts";
 import { WakeBus } from '../../src/core/bus.ts';
 import { SessionLog } from "./fixture-session.ts";
@@ -22,7 +22,7 @@ import { SessionTracker } from '../../src/core/sessions.ts';
 import { ABORT_PREEMPTED, ABORT_SHUTDOWN, INTERRUPTED_WHILE_RUNNING, NOT_EXECUTED_BARRIER, NOT_EXECUTED_INTERRUPTED, SHUTDOWN_INTERRUPTED, streamedPastBarrier } from '../../src/core/markers.ts';
 import type { UsageRecord, Persona, TurnEndedContext } from '../../src/core/types.ts';
 import type { ChatMessage, LLMDelta } from './fixture-types.ts';
-import { functionCall, functionResult, type ContextRecord } from '../../src/protocol/open-responses/context.ts';
+import { functionCall, functionResult, message, type ContextRecord } from '../../src/protocol/open-responses/context.ts';
 import type { Logger, CandidateProjector, EventEnvelope, RunPhase, World, WorldHost, ToolDef } from '../../src/core/types.ts';
 import type { BotConfig } from '../../bots/corti-soulmate/assemble.ts';
 import {
@@ -247,6 +247,33 @@ describe('MainLoop standard Response execution', () => {
     startedAt: new Date().toISOString(), elapsedMs: 10, requestId: null, responseId,
     outcome: 'completed', status: 200, serviceTier: 'default', charges: [],
     meters: { ...unknownMeters(), input: 10, output: 2, total: 12 },
+  });
+
+  it('bounds the main request window while keeping the complete session addressable', () => {
+    const rig = makeRig({ silent: true });
+    try {
+      for (let index = 0; index <= MAIN_CONTEXT_WINDOW_RECORDS; index++) rig.session.append(message('user', 'row-' + index));
+      const outbound = rig.loop.outboundMessages();
+      expect(rig.session.records).toHaveLength(MAIN_CONTEXT_WINDOW_RECORDS + 1);
+      expect(outbound).toHaveLength(MAIN_CONTEXT_WINDOW_RECORDS);
+      expect(outbound[0]).toBe(rig.session.records[1]);
+      expect(outbound.at(-1)).toBe(rig.session.records.at(-1));
+    } finally { rig.tmp.cleanup(); }
+  });
+
+  it('bounds large recent records by tokens before sending a request', () => {
+    const rig = makeRig({ silent: true, context: { hardTokens: () => 100_000 } });
+    try {
+      for (let index = 0; index <= MAIN_CONTEXT_WINDOW_RECORDS; index++) rig.session.append(message('user', 'row-' + index));
+      for (let index = 0; index < 64; index++) rig.session.append(message('user', 'x'.repeat(32 * 1024)));
+      const outbound = rig.loop.outboundMessages();
+      const hardTokens = rig.loop.contextGauge().hardTokens;
+      expect(hardTokens).not.toBeNull();
+      expect(outbound.length).toBeGreaterThan(0);
+      expect(outbound.length).toBeLessThan(MAIN_CONTEXT_WINDOW_RECORDS + 65);
+      expect(rig.loop.estTokens()).toBeLessThanOrEqual(hardTokens!);
+      expect(rig.session.records).toHaveLength(MAIN_CONTEXT_WINDOW_RECORDS + 65);
+    } finally { rig.tmp.cleanup(); }
   });
 
   it('repairs a generated tool rejection once without replaying an earlier action or retaining the hint', async () => {

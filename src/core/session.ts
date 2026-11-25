@@ -55,6 +55,12 @@ export class SessionLog {
     this.notifyReset();
   }
 
+  retainWhere(predicate: (entry: ContextRecord, index: number) => boolean): number {
+    const dropped = this.context.retainWhere(predicate);
+    if (dropped > 0) this.notifyReset();
+    return dropped;
+  }
+
   /** Replace all leading system items and publish the matching tool schema generation to observers. */
   async replaceSystemPrefix(entry: ContextRecord, active: () => boolean = () => true, applyTools?: () => void): Promise<number | null> {
     if (!hasRole(entry, 'system')) throw new Error('Expected a system prefix');
@@ -82,7 +88,7 @@ export class SessionLog {
   private notifyReset(prefix?: SessionPrefixChange): void {
     const snapshot = this.records;
     for (const cb of this.resetListeners) {
-      try { cb([...snapshot], prefix); } catch { /* 观察者异常不影响主流程 */ }
+      try { cb(snapshot as ContextRecord[], prefix); } catch { /* 观察者异常不影响主流程 */ }
     }
   }
 

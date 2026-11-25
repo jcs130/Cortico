@@ -164,6 +164,8 @@ export const DEFAULT_RESUBMIT: ResubmitPolicy = { maxConsecutive: 2, maxPerBatch
 const LARGE_RESULT_WARN_CHARS = 8_000;
 /** 删去孤儿回执时日志里保留的正文长度；整条原文在 transcript 里。 */
 const ORPHAN_PREVIEW_CHARS = 200;
+export const MAIN_CONTEXT_WINDOW_RECORDS = 8192;
+const MAIN_CONTEXT_WINDOW_HEADROOM_TOKENS = 8_192;
 
 export interface LoopStatus {
   running: boolean;
@@ -568,10 +570,22 @@ export class MainLoop {
   outboundMessages(): ContextRecord[] {
     const msgs = this.d.session.records;
     const head = this.sessionHead();
-    if (head.length === 0) return [...msgs];
-    let at = 0;
-    while (at < msgs.length && hasRole(msgs[at], 'system')) at++;
-    return [...msgs.slice(0, at), ...head, ...msgs.slice(at)];
+    let systemEnd = 0;
+    while (systemEnd < msgs.length && hasRole(msgs[systemEnd], 'system')) systemEnd++;
+    const prefix = [...msgs.slice(0, systemEnd), ...head];
+    if (msgs.length <= MAIN_CONTEXT_WINDOW_RECORDS) return [...prefix, ...msgs.slice(systemEnd)];
+    const maxTokens = Math.max(1, (this.d.context.hardTokens() ?? Number.MAX_SAFE_INTEGER) - MAIN_CONTEXT_WINDOW_HEADROOM_TOKENS);
+    let tokens = this.estimateOutbound(prefix);
+    const tail: ContextRecord[] = [];
+    for (let index = msgs.length - 1; index >= systemEnd && tail.length < MAIN_CONTEXT_WINDOW_RECORDS; index--) {
+      const entry = msgs[index]!;
+      const cost = this.estimateOutbound([entry]);
+      if (tail.length > 0 && tokens + cost > maxTokens) break;
+      tail.push(entry); tokens += cost;
+      if (tokens >= maxTokens) break;
+    }
+    tail.reverse();
+    return [...prefix, ...tail];
   }
 
   /**
@@ -815,9 +829,7 @@ export class MainLoop {
   private dropEphemeral(): void {
     const { session } = this.d;
     if (!session.records.some((m) => m.context.ephemeral)) return;
-    const kept = session.records.filter((m) => !m.context.ephemeral);
-    const dropped = session.records.length - kept.length;
-    session.reset(kept);
+    const dropped = session.retainWhere((m) => !m.context.ephemeral);
     this.d.transcript?.boundary('ephemeral-drop', { dropped });
   }
 
@@ -1275,7 +1287,7 @@ export class MainLoop {
         let res: Awaited<ReturnType<typeof llm.respond>>;
         let acceptingEstimate = true;
         try {
-          res = await llm.respond(responseRequest(spec, outbound, schemas), {
+          res = await llm.respond(responseRequest(spec, outbound, schemas, { deferInput: true }), {
             context: outbound, nativeSpec: spec, onEvent,
             ...(persona.onToolGenerationRejected ? { toolGenerationRecovery: true } : {}),
             onInputEstimate: tokens => {
