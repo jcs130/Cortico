@@ -15,6 +15,7 @@ import type { Language } from '../../core/language.ts';
 import type { Logger, ShutdownExternalCheck } from '../../core/types.ts';
 import { text, type BilibiliText } from './strings.ts';
 import { encodePacket, OP, parseFrame } from './wire.ts';
+import { readLiveRoomDetails, type LiveRoomDetails } from './room-details.ts';
 
 export const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
@@ -61,6 +62,7 @@ export interface LiveStatus {
   /** 换算出的真实房间号 */
   realRoomId: number | null;
   title: string;
+  details?: LiveRoomDetails | null;
   /** 主播是否正在直播;弹幕服务器的开播、下播指令,连接时和轮询读到的 live_status 都写这里 */
   living: boolean;
   /** 真实直播、未开播、轮播、尚未核实。旧的直播源可只提供 living。 */
@@ -325,13 +327,17 @@ export class LiveClient {
         if (typeof rawLiveStatus === 'number' && Number.isFinite(rawLiveStatus)) {
           const broadcastState = roomBroadcastState(rawLiveStatus);
           const liveStartedAt = broadcastState === 'live' ? liveTimestamp(room.live_time) : null;
+          const details = readLiveRoomDetails(room);
           if (broadcastState !== this.status.broadcastState || liveStartedAt !== this.status.liveStartedAt) {
             this.opts.log.info('轮询读到 live_status 变化', { liveStatus: rawLiveStatus, broadcastState });
+          }
+          if (details || broadcastState !== this.status.broadcastState || liveStartedAt !== this.status.liveStartedAt) {
             this.patch({
               living: broadcastState === 'live',
               broadcastState,
               livingVia: 'room-info',
               liveStartedAt,
+              ...(details ? { details, title: details.title ?? '' } : {}),
             }, 'room');
           }
         } else {
@@ -393,6 +399,7 @@ export class LiveClient {
     this.patch({
       realRoomId,
       title: str(room.title),
+      details: readLiveRoomDetails(room),
       living: broadcastState === 'live',
       broadcastState,
       livingVia: 'room-info',

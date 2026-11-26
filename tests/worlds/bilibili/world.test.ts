@@ -380,12 +380,28 @@ describe('BilibiliWorld', () => {
     ]);
   });
 
-  it('只提供本机 Agent 公告与视频排队工具，不向 B 站账号写入', async () => {
+  it('提供本机公告、视频排队和房间资料读取', async () => {
     const { module } = await mount();
     const tools = module.tools();
-    expect(tools.map((tool) => tool.name)).toEqual(['bilibili_set_announcement', 'bilibili_update_video_queue']);
+    expect(tools.map((tool) => tool.name)).toEqual(['bilibili_set_announcement', 'bilibili_update_video_queue', 'bilibili_room_info']);
     expect(tools[0].tags).toEqual(['speak']);
     expect((tools[0].parameters.properties as Record<string, { maxLength: number }>).text.maxLength).toBe(200);
+    await module.stop();
+  });
+
+  it('房间公开资料只在内容变化时投递，查询使用最近观测时间', async () => {
+    const { module, host, setStatus } = await mount();
+    const details = { title: '去朋友服务器串门', description: '今晚探索', category: '我的世界', observedAt: '2026-11-26T12:00:00Z' };
+    setStatus({ ...STATUS, details });
+    setStatus({ ...STATUS, details: { ...details, observedAt: '2026-11-26T12:01:00Z' } });
+    const topic = () => host.events.filter(event => event.type === 'bilibili.room_topic');
+    expect(topic()).toHaveLength(1);
+    expect(topic()[0]!.meta).toMatchObject({ roomTopic: details });
+    expect(host.pushOpts[host.events.indexOf(topic()[0]!)]?.trigger).toBe('piggyback');
+    const tool = module.tools().find(tool => tool.name === 'bilibili_room_info')!;
+    expect(await tool.handler({}, {} as never)).toContain('2026-11-26T12:01:00Z');
+    setStatus({ ...STATUS, details: { ...details, title: '准备回营地' } });
+    expect(topic()).toHaveLength(2);
     await module.stop();
   });
 

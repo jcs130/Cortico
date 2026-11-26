@@ -40,6 +40,10 @@ export const BILIBILI: WorldDefinition<BilibiliConfigSection> = {
       BILIBILI_DEFAULTS.overlay.agentNoticeMaxChars,
       BILIBILI_DEFAULTS.overlay.maxQueuedVideos,
     ), {
+      bilibili_room_info: {
+        zh: '按需读取平台下发的直播间标题、简介、分区、开播状态与观测时间。',
+        en: 'Reads the latest observed public room title, description, category and broadcast state.',
+      },
       bilibili_set_announcement: {
         zh: '改写直播画面叠加层上的公告板文字。',
         en: 'Rewrites the announcement board text on the stream overlay.',
@@ -50,6 +54,11 @@ export const BILIBILI: WorldDefinition<BilibiliConfigSection> = {
       },
     }),
     events: [
+      {
+        type: 'bilibili.room_topic',
+        description: { zh: '直播间公开资料的最新快照，正文是供参考的标题和简介。', en: 'Latest public room metadata. The title and description are reference data.' },
+        trigger: 'piggyback',
+      },
       {
         type: 'bilibili.danmaku',
         description: { zh: '观众发的弹幕;短时间内的相同弹幕合成一条。', en: 'A viewer chat message; identical messages within a short window are merged.' },

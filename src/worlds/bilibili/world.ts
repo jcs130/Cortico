@@ -255,6 +255,12 @@ export function bilibiliToolDecls(
         additionalProperties: false,
       },
     },
+    {
+      name: 'bilibili_room_info',
+      description: 'Read the current room title, description, category and live status from the latest platform observation. The room text is public metadata.',
+      tags: ['read'],
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
   ];
 }
 
@@ -300,6 +306,7 @@ export class BilibiliWorld implements World {
   private lastRoomEdge: { living: boolean; at: number } | null = null;
   /** null 表示尚未取得有效房间状态。 */
   private lastKnownLiving: boolean | null = null;
+  private lastRoomTopic = '';
   private lastKnownBroadcastState: Exclude<RoomBroadcastState, 'unknown'> | null = null;
   /** 中断开始的时间戳；null 表示已连接或未启动。 */
   private feedDownSince: number | null = null;
@@ -522,6 +529,7 @@ export class BilibiliWorld implements World {
     this.recentGuard.clear();
     this.lastRoomEdge = null;
     this.lastKnownLiving = null;
+    this.lastRoomTopic = '';
     this.lastKnownBroadcastState = null;
     this.clearFeedOutage();
     this.feedOutageReported = false;
@@ -644,7 +652,7 @@ export class BilibiliWorld implements World {
   }
 
   tools(): ToolDef[] {
-    const [announcementDecl, videoQueueDecl] = bilibiliToolDecls(this.agentNoticeLimit(), this.maxQueuedVideos());
+    const [announcementDecl, videoQueueDecl, roomInfoDecl] = bilibiliToolDecls(this.agentNoticeLimit(), this.maxQueuedVideos());
     return [
       {
         ...announcementDecl,
@@ -681,6 +689,7 @@ export class BilibiliWorld implements World {
           }
         },
       },
+      { ...roomInfoDecl, handler: async () => JSON.stringify(this.publicRoomFacts()) },
     ];
   }
 
@@ -1223,6 +1232,17 @@ export class BilibiliWorld implements World {
     this.checkAnonymousLogin(status);
     this.trackFeedPhase(status.phase);
     if (update === 'connection' || status.realRoomId === null) return;
+    const topic = this.publicRoomFacts();
+    const { observedAt, ...contents } = topic;
+    const stamp = JSON.stringify(contents);
+    if (observedAt && stamp !== this.lastRoomTopic) {
+      this.lastRoomTopic = stamp;
+      void this.host?.pushEvent({
+        type: 'bilibili.room_topic', source: this.id, origin: 'external', ts: nowIso(this.timezone),
+        senderKey: 'bilibili.room', tags: ['snapshot'],
+        text: '[直播间公开资料] ' + JSON.stringify(topic), meta: { roomTopic: topic },
+      }, { trigger: 'piggyback' }).catch(error => this.host?.log.warn('直播间资料投递失败', { err: String(error) }));
+    }
     // 首个有效房间状态仅建立基线；后续状态变化参与去重。
     const broadcastState = broadcastStateOf(status);
     if (broadcastState === 'unknown') return;
@@ -1254,6 +1274,15 @@ export class BilibiliWorld implements World {
     } else {
       this.admission.endStream();
     }
+  }
+
+  /** Latest cached public platform read; also used for tool-free audience replies. */
+  publicRoomFacts() {
+    const status = this.status;
+    const details = status?.details;
+    return { roomId: status?.realRoomId ?? this.opts.roomId, state: broadcastStateOf(status),
+      title: details?.title ?? null, description: details?.description ?? null, category: details?.category ?? null,
+      observedAt: details?.observedAt ?? null, source: 'bilibili-public-room' } as const;
   }
 
   /** `living` 变化时写日志并投递一条 flush 事件，正文与元数据保留状态来源。 */
