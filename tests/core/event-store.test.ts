@@ -132,6 +132,23 @@ describe('JsonlEventStore', () => {
     }
   });
 
+  it('streams sparse source history with long UTF-8 lines, malformed rows and a pinned cutoff', async () => {
+    const old = open(RUN_A);
+    seed(old, 12);
+    const large = { ...old.get(12)!, text: '旧消息'.repeat(40000), cursor: 13 };
+    appendFileSync(fileOf(RUN_A), JSON.stringify(large) + '\n{broken}\n' + JSON.stringify(large) + '\n');
+    appendFileSync(fileOf(RUN_A), JSON.stringify({ ...large, text: 'edge', cursor: 14 }) + '\n');
+    const current = open(RUN_B);
+    fsHooks.reads.length = 0;
+    const pending = current.rangeAsync({ source: 'qq', senderKey: 'alice', limit: 3, toCursor: 13 });
+    const fresh = current.append({ ...large, text: 'new' });
+    expect(fresh.cursor).toBeGreaterThan(13);
+    const result = await pending;
+    expect(result.map(e => e.cursor)).toEqual([6, 12, 13]);
+    expect(result.at(-1)?.text).toBe(large.text);
+    expect(fsHooks.reads).not.toContain(fileOf(RUN_A));
+  });
+
   it('历史分片只缓存最近一次查询读到的:同批分片上的连续查询各分片只读一次磁盘', () => {
     const a = open(RUN_A); seed(a, 6);      // 1..6
     const b = open(RUN_B); seed(b, 6, 6);   // 7..12

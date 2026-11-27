@@ -6,6 +6,9 @@
  */
 import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { createReadStream } from 'node:fs';
+import { createInterface } from 'node:readline';
+import { setImmediate as yieldToLoop } from 'node:timers/promises';
 import type {
   EventEnvelope,
   EventGrepHit,
@@ -265,11 +268,17 @@ export class JsonlEventStore implements EventStore {
    * 与 range 共用一次扫描，每读完一个分片让出一次事件循环。让出期间追加的事件，所在分片还没读到时会进结果；
    * 要固定上界就给 toCursor。
    */
-  async rangeAsync(q: EventRangeQuery): Promise<EventEnvelope[]> {
+  async rangeAsync(q: EventRangeQuery, signal?: AbortSignal): Promise<EventEnvelope[]> {
+    signal?.throwIfAborted();
+    if (q.source !== undefined && Number.isSafeInteger(q.limit) && q.limit! >= 0
+      && q.fromCursor === undefined && q.fromTs === undefined) {
+      return this.recentFromSource(q, q.limit!, signal);
+    }
     this.touched.clear();
     try {
       const steps = this.scanRange(q);
       for (;;) {
+        signal?.throwIfAborted();
         const step = steps.next();
         if (step.done) return step.value;
         await new Promise<void>((resolve) => setImmediate(resolve));
@@ -277,6 +286,61 @@ export class JsonlEventStore implements EventStore {
     } finally {
       this.releaseUntouched();
     }
+  }
+
+  /** Keep only the requested tail. Reading old game traffic for a sparse source
+   * must neither block live events nor populate the synchronous shard cache. */
+  private async recentFromSource(q: EventRangeQuery, limit: number, signal?: AbortSignal): Promise<EventEnvelope[]> {
+    if (limit === 0) return [];
+    const { fromMs, toMs } = timeWindow(q, this.timezone);
+    const matches = (e: EventEnvelope) => e.source === q.source
+      && (q.toCursor === undefined || e.cursor <= q.toCursor)
+      && (q.senderKey === undefined || e.senderKey === q.senderKey)
+      && (q.origin === undefined || e.origin === q.origin)
+      && !outside(e, q, fromMs, toMs);
+    const newestFirst: EventEnvelope[] = [];
+    for (const segment of this.segmentsIn(q).reverse()) {
+      await yieldToLoop();
+      signal?.throwIfAborted();
+      const cached = segment.events;
+      if (cached) {
+        for (let i = cached.length - 1; i >= 0; i--) {
+          if (matches(cached[i])) newestFirst.push(cached[i]);
+          if (newestFirst.length === limit) return newestFirst.reverse();
+          if (i % 512 === 0) {
+            await yieldToLoop();
+            signal?.throwIfAborted();
+          }
+        }
+        continue;
+      }
+      const remaining = limit - newestFirst.length;
+      const ring: EventEnvelope[] = [];
+      let count = 0, previous = 0, skipped = 0;
+      const input = createReadStream(segment.file, { encoding: 'utf8', highWaterMark: 64 * 1024 });
+      const lines = createInterface({ input, crlfDelay: Infinity });
+      try {
+        for await (const line of lines) {
+          signal?.throwIfAborted();
+          if (!line.trim()) continue;
+          const event = parseLine(line);
+          if (!event || event.cursor <= previous) { skipped++; continue; }
+          previous = event.cursor;
+          if (matches(event)) ring[count++ % remaining] = event;
+        }
+      } catch (err) {
+        signal?.throwIfAborted();
+        this.log.warn('事件分片读取失败', { run: segment.run, err });
+        continue;
+      } finally {
+        lines.close();
+        input.destroy();
+      }
+      if (skipped) this.log.warn('事件分片有损坏或乱序行,已跳过', { run: segment.run, skipped });
+      for (let i = 1; i <= ring.length; i++) newestFirst.push(ring[(count - i) % remaining]);
+      if (newestFirst.length === limit) break;
+    }
+    return newestFirst.reverse();
   }
 
   /** 每读完一个分片 yield 一次。 */
