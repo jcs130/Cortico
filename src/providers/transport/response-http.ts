@@ -1,7 +1,7 @@
 import type { Logger } from '../../core/types.ts';
 import type { Request, Response, StreamEvent } from '../../protocol/open-responses/index.ts';
 import type { ItemOrigin } from '../../protocol/open-responses/context.ts';
-import { GenerationError, priceUsage, unknownMeters, type GenerateOptions, type Generation, type ProviderAttempt, type PriceSnapshot, type TokenMeters } from '../../core/generation.ts';
+import { GenerationError, toolGenerationRejection, priceUsage, unknownMeters, type GenerateOptions, type Generation, type ProviderAttempt, type PriceSnapshot, type TokenMeters } from '../../core/generation.ts';
 import { ResponseProtocolError } from '../../protocol/open-responses/stream.ts';
 import { LLMError, StreamErrorEvent, abortError, parseRetryAfter, retryDelay, reqIdSuffix, upstreamText } from './errors.ts';
 import type { ResponseAssembly } from './response-assembly.ts';
@@ -216,6 +216,7 @@ export async function generate(request: Request, options: GenerateOptions, origi
       }
       lastError = error;
       if (!sent || committed || runaway || error instanceof StreamErrorEvent || (!streaming && error instanceof ResponseProtocolError)) break;
+      if (options.toolGenerationRecovery && toolGenerationRejection(fail(error))) break;
       const status = error instanceof LLMError ? error.status : 0;
       if (status !== 0 && status !== 408 && status !== 429 && status < 500) break;
       if (!options.diagnostic && observed && Date.now() - started >= 20000 && !await transport.failure({
