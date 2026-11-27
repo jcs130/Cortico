@@ -70,6 +70,8 @@ export interface GenerateOptions {
    * pass it; the comparison request a transport sends while diagnosing a failure omits it.
    */
   onEvent?: (event: StreamEvent) => void;
+  /** The caller owns one contextual correction of rejected tool output. */
+  toolGenerationRecovery?: true;
   role?: string;
   sessionId?: string;
   /** Local context retains output reasoning and media references alongside the request Items. */
@@ -97,6 +99,36 @@ export class GenerationError extends Error {
     this.name = 'GenerationError';
   }
 }
+export interface ToolGenerationRejection {
+  kind: 'undeclared' | 'arguments_schema';
+  toolName: string;
+  field?: string;
+}
+
+/** Read the compatibility gateway's structured output diagnostic without forwarding its text. */
+export function toolGenerationRejection(error: GenerationError): ToolGenerationRejection | null {
+  if (error.partial && error.partial.status !== 'failed') return null;
+  try {
+    const body = !error.partial?.error && error.body.length <= 16_384 && error.body
+      ? JSON.parse(error.body) : null;
+    const upstream = error.partial?.error ?? body?.error ?? body;
+    const marker = 'Tool diagnostics ';
+    const detail: unknown = upstream?.message;
+    if (typeof detail !== 'string' || detail.length > 16_384) return null;
+    const offset = detail.indexOf(marker);
+    if (offset === -1) return null;
+    const fields = JSON.parse(detail.slice(offset + marker.length));
+    const { origin, kind, tool_name: toolName } = fields ?? {};
+    if (origin === 'generated_output' && (kind === 'undeclared' || kind === 'arguments_schema')
+      && typeof toolName === 'string' && /^[\w.-]{1,128}$/.test(toolName)) {
+      const field = fields.instance_path;
+      return { kind, toolName, ...(kind === 'arguments_schema' && Array.isArray(field) && field.length === 1
+        && typeof field[0] === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(field[0]) ? { field: field[0] } : {}) };
+    }
+  } catch { /* An unstructured error leaves the retry policy unchanged. */ }
+  return null;
+}
+
 export function unknownMeters(): TokenMeters {
   return { input: null, output: null, total: null, cachedInput: null, uncachedInput: null, reasoning: null, native: null };
 }

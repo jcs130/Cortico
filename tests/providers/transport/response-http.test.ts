@@ -22,6 +22,21 @@ class Fixture extends OpenAIHttpClient {
 }
 const ok = () => new Response(JSON.stringify({ id: 'r1', model: 'test', choices: [{ index: 0, message: { content: 'ready' }, finish_reason: 'stop' }], usage: { prompt_tokens: 3, completion_tokens: 2 } }));
 
+it('retains a failed streamed tool diagnostic for the caller after one wire attempt', async () => {
+  const message = 'Tool diagnostics ' + JSON.stringify({origin:'generated_output',kind:'arguments_schema',tool_name:'act',instance_path:['requiresBody']});
+  const response = {id:'r-bad',object:'response',model:'test',status:'failed',output:[],error:{code:'server_error',message}};
+  const events = [{type:'response.created',sequence_number:0,response:{...response,status:'in_progress',error:null}},
+    {type:'response.failed',sequence_number:1,response}];
+  const fetcher = vi.fn(async () => new Response(events.map(event=>'data: ' + JSON.stringify(event) + '\n\n').join('') + 'data: [DONE]\n\n'));
+  vi.stubGlobal('fetch', fetcher);
+  const provider = new ResponsesProvider({baseUrl:'https://fixture.test/v1',apiKey:'fixture'});
+  const error = await provider.respond({model:'test',input:'test'}, {onEvent:()=>{},toolGenerationRecovery:true}).catch(e=>e);
+  expect(error).toBeInstanceOf(GenerationError);
+  expect(error.message).toContain('arguments_schema');
+  expect(error.attempts).toHaveLength(1);
+  expect(fetcher).toHaveBeenCalledTimes(1);
+});
+
 describe('request body', () => {
   it('a lone surrogate in the context goes out as U+FFFD; whole pairs are kept', async () => {
     let sent = '';
