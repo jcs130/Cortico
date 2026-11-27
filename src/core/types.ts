@@ -171,6 +171,8 @@ export interface EventStoreReader {
   get(cursor: number): EventEnvelope | undefined;
   latestCursor(): number;
   range(q: EventRangeQuery): EventEnvelope[];
+  /** Cooperative history read for interactive consumers. Older readers may provide range only. */
+  rangeAsync?(q: EventRangeQuery, signal?: AbortSignal): Promise<EventEnvelope[]>;
   /** 返回前 before 条、自身及后 after 条事件。 */
   around(cursor: number, before: number, after: number): EventEnvelope[];
   grep(q: EventGrepQuery): EventGrepHit[];

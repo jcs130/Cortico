@@ -146,6 +146,7 @@ interface ChatPeer {
 
 interface ChatClient {
   peer: ChatPeer;
+  replay?: AbortController;
   /** hello 完成前为 null,完成后为客户端声明的名称。 */
   name: string | null;
   /** 这条连接握手时的界面语言;流上给它的系统提示按此取。 */
@@ -295,6 +296,7 @@ export class ConsoleWorld implements World {
     // 关闭连接前清除 host，禁止 close 回调继续投递 presence 事件。
     this.host = null;
     for (const c of [...this.clients]) {
+      c.replay?.abort();
       try { c.peer.close(text(c.language).botOffline); } catch { /* ignore */ }
     }
     this.clients.clear();
@@ -393,6 +395,7 @@ export class ConsoleWorld implements World {
 
   /** 连接结束:出名单、给还在场的人一句提示。进出不打扰bot。 */
   private detach(client: ChatClient): void {
+    client.replay?.abort();
     this.clients.delete(client);
     if (client.name === null || !this.host) return;
     const name = client.name;
@@ -442,7 +445,13 @@ export class ConsoleWorld implements World {
       const firstHello = client.name === null;
       client.name = name;
       this.sendJson(client.peer, { type: 'sys', text: t.hello(name) });
-      if (firstHello) this.replayHistory(client);
+      if (firstHello && msg.history !== false) {
+        const replay = new AbortController();
+        client.replay = replay;
+        void this.replayHistory(client, replay.signal).catch((err) => {
+          if (!replay.signal.aborted) this.host?.log.warn('对话历史回放失败', { err });
+        });
+      }
       // 给其他在场客户端一条提示;进出不打扰bot
       if (firstHello) this.broadcastSys((tt) => tt.joined(name), client);
       return;
@@ -524,18 +533,21 @@ export class ConsoleWorld implements World {
       const label = typeof msg.label === 'string' ? msg.label.replace(/\s+/g, ' ').trim().slice(0, LABEL_MAX) : '';
       if (!label) return;
       const host = this.host;
-      host.pushEvent(
-        {
+      const from = client.name;
+      const ts = nowIso(this.timezone);
+      const time = shortTime(this.timezone);
+      void this.spokenBefore(host).then((spoken) => {
+        if (this.host !== host) return;
+        return host.pushEvent({
           type: 'console.invite',
-          ts: nowIso(this.timezone),
+          ts,
           source: this.id,
           origin: 'internal',
-          text: MODEL_TEXT.inviteLine(shortTime(this.timezone), client.name, label, this.spokenBefore()),
-          senderKey: client.name,
-          meta: { from: client.name, label },
-        },
-        { trigger: 'flush' },
-      ).catch((e) => {
+          text: MODEL_TEXT.inviteLine(time, from, label, spoken),
+          senderKey: from,
+          meta: { from, label },
+        }, { trigger: 'flush' });
+      }).catch((e) => {
         host.log.warn('按钮事件投递失败', { err: String(e) });
         this.reject(client, t.deliveryFailed(String(e)));
       });
@@ -546,13 +558,13 @@ export class ConsoleWorld implements World {
   }
 
   /** 已保存的控制台事件里有没有人说过话;从最新往前逐页读,读到一条发言即止。 */
-  private spokenBefore(): boolean {
-    if (!this.host) return false;
-    const store = this.host.store;
+  private async spokenBefore(host: WorldHost): Promise<boolean> {
+    const store = host.store;
     // 每页条数只决定往前读几次,不影响结果
     const pageSize = 100;
     for (let toCursor = store.latestCursor(); ;) {
-      const page = store.range({ source: this.id, toCursor, limit: pageSize });
+      const q = { source: this.id, toCursor, limit: pageSize };
+      const page = store.rangeAsync ? await store.rangeAsync(q) : store.range(q);
       if (page.some((e) => e.type === 'console.message' || e.type === 'console.self')) return true;
       if (page.length < pageSize) return false;
       toCursor = page[0].cursor - 1;
@@ -560,10 +572,14 @@ export class ConsoleWorld implements World {
   }
 
   /** hello 后回放最近的对话历史;发言人与正文读本 World 落库时写下的 meta.from/body。 */
-  private replayHistory(client: ChatClient): void {
-    if (!this.host) return;
-    const events = this.host.store
-      .range({ source: this.id, limit: 60 })
+  private async replayHistory(client: ChatClient, signal: AbortSignal): Promise<void> {
+    const host = this.host;
+    if (!host) return;
+    const store = host.store;
+    const q = { source: this.id, toCursor: store.latestCursor(), limit: 60 };
+    const page = store.rangeAsync ? await store.rangeAsync(q, signal) : store.range(q);
+    if (this.host !== host || !this.clients.has(client) || !client.peer.open) return;
+    const events = page
       .filter((e) => e.type === 'console.message' || e.type === 'console.self')
       .slice(-30);
     for (const e of events) {

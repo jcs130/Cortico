@@ -214,8 +214,37 @@ describe('ConsoleWorld 的流式通道', () => {
     const sock = new FakeStream();
     mod.stream('chat', sock);
     sock.feed(JSON.stringify({ type: 'hello', name: '阿明' }));
+    await settle();
     expect(sock.frames().some((f) => f.history === true && f.text === '昨天那事')).toBe(true);
 
+    await mod.stop();
+  });
+
+  it('accepts input while replay is pending and pins history before the live message', async () => {
+    const host = new FakeHost();
+    const mod = new ConsoleWorld({ timezone: 'Asia/Shanghai' });
+    await mod.start(host);
+    let finish!: () => void;
+    const waiting = new Promise<void>(resolve => { finish = resolve; });
+    let reads = 0;
+    host.store.rangeAsync = async (q) => {
+      reads++;
+      await waiting;
+      return host.store.range(q);
+    };
+    const sock = new FakeStream();
+    mod.stream('chat', sock);
+    sock.feed(JSON.stringify({ type: 'hello', name: 'A' }));
+    sock.feed(JSON.stringify({ type: 'msg', text: 'live' }));
+    await settle();
+    expect(host.pushed.at(-1)?.e.meta?.body).toBe('live');
+    const liveOnly = new FakeStream();
+    mod.stream('chat', liveOnly);
+    liveOnly.feed(JSON.stringify({ type: 'hello', name: 'B', history: false }));
+    expect(reads).toBe(1);
+    finish();
+    await settle();
+    expect(sock.frames().filter(f => f.text === 'live')).toHaveLength(1);
     await mod.stop();
   });
 });
@@ -311,6 +340,7 @@ describe('控制台消息附图', () => {
       blobs: [{ handle, mime: 'image/png', name: 'a.png', fallbackText: '阿明 发来的图片 1/1' }],
     });
     const { mod, sock } = await connect(host);
+    await settle();
     const replay = sock.frames().find((f) => f.history === true)!;
     expect(replay.text).toBe('昨天那张');
     expect(replay.images).toEqual([{ ref: handle, mime: 'image/png', name: 'a.png' }]);

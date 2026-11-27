@@ -295,7 +295,7 @@ function mountLive(ctx: FeatureContext, env: SocketEnv): Disposable | void {
     }
   };
 
-  const hello = JSON.stringify({ type: 'hello', name: '控制台' });
+  const hello = JSON.stringify({ type: 'hello', name: '控制台', history: false });
   let chatStream: WebUiStreamHandle | null = null;
 
   // ── fork 视图 ─────────────────────────────────────────────────────
