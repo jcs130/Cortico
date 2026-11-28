@@ -19,6 +19,12 @@ for (const key of config.environmentKeys) {
   if (!values[key]) throw new Error(`Configured credential variable is missing: ${key}`);
   process.env[key] = values[key];
 }
+if (config.localVoiceRecognizer) {
+  import('./local-voice-recognizer.mjs')
+    .then(({ensureLocalRecognizer}) => ensureLocalRecognizer(config.localVoiceRecognizer))
+    .then(status => console.info('[bootstrap] Local voice recognition: ' + status))
+    .catch(() => console.warn('[bootstrap] Local voice recognition unavailable'));
+}
 // Preserve the CLI's ordinary main-module guard and all application arguments.
 if (config.refreshPrefixOnStartup) {
   const { refreshStartupPrefix } = await import('./startup-prefix.mjs');
